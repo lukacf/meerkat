@@ -2382,6 +2382,8 @@ struct MobSpawnHelperOptions {
     #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
+    model_override: Option<String>,
+    #[serde(default)]
     auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
@@ -2397,6 +2399,8 @@ struct MobForkHelperOptions {
     agent_identity: Option<String>,
     #[serde(default)]
     role_name: Option<String>,
+    #[serde(default)]
+    model_override: Option<String>,
     #[serde(default)]
     auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
     #[serde(default)]
@@ -2549,6 +2553,7 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
+    options.model_override = request.model_override;
     if let Some(auth_binding) = request.auth_binding {
         options.auth_binding = Some(auth_binding.into());
     }
@@ -2587,6 +2592,7 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
+    options.model_override = request.model_override;
     if let Some(auth_binding) = request.auth_binding {
         options.auth_binding = Some(auth_binding.into());
     }
@@ -2945,9 +2951,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{Credentials, build_bootstrap_config, extract_verify_and_parse_mobpack};
     use super::{
-        StreamRef, SubscriptionInner, close_subscription, merge_runtime_system_context_state,
-        parse_js_tool_result, parse_mob_event_cursor, parse_mob_lifecycle_action_arg,
-        parse_mobpack, parse_prompt_content_input, poll_subscription, serialize_subscription_item,
+        MobForkHelperOptions, MobSpawnHelperOptions, StreamRef, SubscriptionInner,
+        close_subscription, merge_runtime_system_context_state, parse_js_tool_result,
+        parse_mob_event_cursor, parse_mob_lifecycle_action_arg, parse_mobpack,
+        parse_prompt_content_input, poll_subscription, serialize_subscription_item,
         session_error_envelope, stream_lagged_envelope,
     };
     #[cfg(target_arch = "wasm32")]
@@ -3497,6 +3504,26 @@ capabilities = [{capability_values}]
             err.to_string().contains("unknown variant"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn helper_request_options_deserialize_canonical_model_override() {
+        let spawn: MobSpawnHelperOptions = serde_json::from_value(json!({
+            "prompt": "help",
+            "agent_identity": "helper-1",
+            "model_override": "gpt-5.6-sol"
+        }))
+        .expect("spawn helper request");
+        assert_eq!(spawn.model_override.as_deref(), Some("gpt-5.6-sol"));
+
+        let fork: MobForkHelperOptions = serde_json::from_value(json!({
+            "source_member_id": "source-1",
+            "prompt": "review",
+            "agent_identity": "fork-1",
+            "model_override": "claude-opus-4-8"
+        }))
+        .expect("fork helper request");
+        assert_eq!(fork.model_override.as_deref(), Some("claude-opus-4-8"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

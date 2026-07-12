@@ -100,6 +100,46 @@ impl PersistentRuntimeDriver {
         &self.runtime_id
     }
 
+    pub(crate) async fn load_pending_compaction_projections(
+        &self,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeDriverError> {
+        self.store
+            .load_pending_compaction_projections(&self.runtime_id)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to load compaction projection outbox: {error}"
+                ))
+            })
+    }
+
+    pub(crate) async fn mark_compaction_projection_finalized(
+        &self,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.store
+            .mark_compaction_projection_finalized(&self.runtime_id, projection)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to finalize compaction projection outbox: {error}"
+                ))
+            })
+    }
+
+    pub(crate) async fn load_compaction_checkpoint_snapshot(
+        &self,
+    ) -> Result<Option<Vec<u8>>, RuntimeDriverError> {
+        self.store
+            .load_session_snapshot(&self.runtime_id)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to load authoritative compaction checkpoint snapshot: {error}"
+                ))
+            })
+    }
+
     pub fn silent_comms_intents(&self) -> Vec<String> {
         self.inner.silent_comms_intents()
     }
@@ -135,21 +175,48 @@ impl PersistentRuntimeDriver {
         &self,
         supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
     ) -> Result<MachineLifecycleCommit, RuntimeDriverError> {
-        Ok(MachineLifecycleCommit::new_with_binding(
-            Self::runtime_state_for_persistence_from_inner(&self.inner)?,
-            self.inner.machine_lifecycle_binding_facts(),
-            supervisor_authority,
-        ))
+        Ok(
+            MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                Self::runtime_state_for_persistence_from_inner(&self.inner)?,
+                self.inner.machine_lifecycle_binding_facts(),
+                supervisor_authority,
+                Self::unregister_progress_for_persistence_from_inner(&self.inner),
+            ),
+        )
     }
 
     fn lifecycle_commit_for_persistence_from_inner(
         inner: &EphemeralRuntimeDriver,
     ) -> Result<MachineLifecycleCommit, RuntimeDriverError> {
-        Ok(MachineLifecycleCommit::new_with_binding(
-            Self::runtime_state_for_persistence_from_inner(inner)?,
-            inner.machine_lifecycle_binding_facts(),
-            inner.supervisor_authority_snapshot(),
-        ))
+        Ok(
+            MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                Self::runtime_state_for_persistence_from_inner(inner)?,
+                inner.machine_lifecycle_binding_facts(),
+                inner.supervisor_authority_snapshot(),
+                Self::unregister_progress_for_persistence_from_inner(inner),
+            ),
+        )
+    }
+
+    fn unregister_progress_for_persistence_from_inner(
+        inner: &EphemeralRuntimeDriver,
+    ) -> Option<crate::store::MachineUnregisterProgressSnapshot> {
+        let authority = inner.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        (state.registration_phase == crate::meerkat_machine::dsl::RegistrationPhase::Draining).then(
+            || {
+                crate::store::MachineUnregisterProgressSnapshot::new(
+                    state.unregister_runtime_loop_drain_pending,
+                    state.unregister_comms_drain_exit_pending,
+                    state.unregister_completion_waiter_drain_pending,
+                    state.unregister_runtime_loop_forced_abort,
+                    state.unregister_comms_drain_forced_abort,
+                )
+            },
+        )
     }
 
     /// Snapshot + classify the lifecycle persistence payload, restoring the
@@ -290,6 +357,30 @@ impl PersistentRuntimeDriver {
             .await
             .map_err(|err| {
                 RuntimeDriverError::Internal(format!("{context} lifecycle persist failed: {err}"))
+            })
+    }
+
+    pub(crate) async fn commit_unregister_finalization(
+        &mut self,
+        context: &str,
+        retired_ops_epoch: &meerkat_core::RuntimeEpochId,
+    ) -> Result<(), RuntimeDriverError> {
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
+        let commit = self
+            .lifecycle_commit_for_persistence()?
+            .for_unregister_finalization(retired_ops_epoch.clone());
+        self.store
+            .commit_unregister_finalization(&self.runtime_id, commit, &input_states)
+            .await
+            .map_err(|err| match err {
+                crate::store::RuntimeStoreError::UnregisterFinalizationOutcomeUnknown(reason) => {
+                    RuntimeDriverError::UnregisterFinalizationOutcomeUnknown {
+                        reason: format!("{context} lifecycle+ops finalization: {reason}"),
+                    }
+                }
+                err => RuntimeDriverError::Internal(format!(
+                    "{context} lifecycle+ops finalization failed: {err}"
+                )),
             })
     }
 

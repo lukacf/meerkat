@@ -207,8 +207,16 @@ mod context {
             ) {
                 Ok(recovered) => recovered,
                 Err(error) => {
-                    if !runtime_was_registered {
-                        self.runtime_adapter.unregister_session(session_id).await;
+                    if !runtime_was_registered
+                        && let Err(cleanup_error) =
+                            self.runtime_adapter.unregister_session(session_id).await
+                    {
+                        return Err(RecoveryError::BindingPreparation {
+                            session_id: session_id.clone(),
+                            message: format!(
+                                "{error}; additionally failed to unregister newly recovered runtime binding: {cleanup_error}"
+                            ),
+                        });
                     }
                     return Err(RecoveryError::Recovery(error));
                 }

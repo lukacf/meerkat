@@ -1209,7 +1209,7 @@ impl RuntimeTurnMetadata {
             other.peer_response_terminal_apply_intent,
             "peer_response_terminal_apply_intent",
         )?;
-        merge_transcript_identity(&mut self.transcript_identity, other.transcript_identity);
+        merge_transcript_identity(&mut self.transcript_identity, other.transcript_identity)?;
 
         // Collections: accumulate.
         if let Some(extra) = other.skill_references {
@@ -1226,17 +1226,24 @@ impl RuntimeTurnMetadata {
     }
 }
 
-fn merge_transcript_identity(lhs: &mut TranscriptMessageIdentity, rhs: TranscriptMessageIdentity) {
+fn merge_transcript_identity(
+    lhs: &mut TranscriptMessageIdentity,
+    rhs: TranscriptMessageIdentity,
+) -> Result<(), TurnMetadataMergeConflict> {
     if rhs.is_empty() {
-        return;
+        return Ok(());
     }
     if lhs.is_empty() {
         *lhs = rhs;
-        return;
+        return Ok(());
     }
     if *lhs != rhs {
-        *lhs = TranscriptMessageIdentity::default();
+        return Err(TurnMetadataMergeConflict {
+            field: "transcript_identity",
+            reason: "distinct transcript identities require batch-level field consensus",
+        });
     }
+    Ok(())
 }
 
 fn merge_scalar<T: PartialEq>(

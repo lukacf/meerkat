@@ -6333,6 +6333,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// Reconcile/finalize compaction memory stages strictly from the exact
+    /// RuntimeStore atomic outbox supplied by the runtime loop.
+    pub async fn reconcile_runtime_compaction_projections(
+        &self,
+        id: &SessionId,
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    /// Abort the live invisible compaction stage after a rejected runtime
+    /// atomic boundary with an authoritatively empty outbox.
+    pub async fn abort_uncommitted_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .abort_uncommitted_compaction_projections(id)
+            .await
+    }
+
     async fn create_session_with_admission(
         &self,
         mut req: CreateSessionRequest,
@@ -6662,6 +6685,21 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             "runtime-backed direct start_turn must route through the MeerkatMachine service-turn commit protocol"
                 .to_string(),
         ))
+    }
+
+    async fn reconcile_runtime_compaction_projections(
+        &self,
+        id: &SessionId,
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    ) -> Result<(), SessionError> {
+        PersistentSessionService::reconcile_runtime_compaction_projections(self, id, intents).await
+    }
+
+    async fn abort_uncommitted_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        PersistentSessionService::abort_uncommitted_compaction_projections(self, id).await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -8751,6 +8789,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RuntimeStore for GatedSnapshotRuntimeStore {
+        fn supports_compaction_projection_outbox(&self) -> bool {
+            self.inner.supports_compaction_projection_outbox()
+        }
+
         async fn commit_session_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -8877,6 +8919,28 @@ mod tests {
                 return Ok(Some(snapshot));
             }
             self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn load_pending_compaction_projections(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Vec<meerkat_core::CompactionProjectionIntent>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_pending_compaction_projections(runtime_id)
+                .await
+        }
+
+        async fn mark_compaction_projection_finalized(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            projection: &meerkat_core::CompactionProjectionId,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .mark_compaction_projection_finalized(runtime_id, projection)
+                .await
         }
 
         async fn clear_session_snapshot(
@@ -9031,6 +9095,22 @@ mod tests {
             }
             self.inner
                 .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+
+        async fn commit_unregister_finalization(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            if self.fail_machine_lifecycle_commits.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::store::RuntimeStoreError::WriteFailed(
+                    "synthetic machine lifecycle commit failure".to_string(),
+                ));
+            }
+            self.inner
+                .commit_unregister_finalization(runtime_id, commit, input_states)
                 .await
         }
 

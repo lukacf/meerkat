@@ -1115,6 +1115,23 @@ pub(super) struct PendingSpawn {
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
 
+/// Incarnation-scoped MobMachine verdict for the pending-spawn mechanics of a
+/// public retire request. This is a local mirror of exactly one generated
+/// structural effect; it carries no independently derived roster truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetirePendingSpawnVerdict {
+    CancelCommittedIncarnation {
+        agent_runtime_id: mob_dsl::AgentRuntimeId,
+        generation: mob_dsl::Generation,
+        pending_spawn_session_id: mob_dsl::SessionId,
+    },
+    CommittedIncarnationWithoutPendingSpawn {
+        agent_runtime_id: mob_dsl::AgentRuntimeId,
+        generation: mob_dsl::Generation,
+    },
+    PreservePendingSpawnForAbsentIdentity,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PendingSpawnProgress {
     pub(super) bridge_session_id: Option<meerkat_core::types::SessionId>,
@@ -6279,6 +6296,68 @@ impl MobActor {
         }
     }
 
+    /// Ask MobMachine whether a public stable-identity retire may cancel an
+    /// exact pending spawn incarnation. The generated classifier reads the
+    /// canonical committed-runtime, generation, and pending-session maps; the
+    /// actor only validates and mirrors its single structural verdict.
+    fn classify_retire_pending_spawn_disposition(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<RetirePendingSpawnVerdict, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let prepared = self.prepare_dsl_input(
+            mob_dsl::MobMachineInput::ClassifyRetirePendingSpawnDisposition {
+                agent_identity: dsl_identity.clone(),
+            },
+            "classify_retire_pending_spawn_disposition",
+        )?;
+        let mut verdict = None;
+        for effect in &prepared.effects {
+            let candidate = match effect {
+                mob_dsl::MobMachineEffect::RetirePendingSpawnCancellationAuthorized {
+                    agent_identity: effect_identity,
+                    agent_runtime_id,
+                    generation,
+                    pending_spawn_session_id,
+                } if effect_identity == &dsl_identity => Some(
+                    RetirePendingSpawnVerdict::CancelCommittedIncarnation {
+                        agent_runtime_id: agent_runtime_id.clone(),
+                        generation: *generation,
+                        pending_spawn_session_id: pending_spawn_session_id.clone(),
+                    },
+                ),
+                mob_dsl::MobMachineEffect::RetireCommittedIncarnationWithoutPendingSpawnResolved {
+                    agent_identity: effect_identity,
+                    agent_runtime_id,
+                    generation,
+                } if effect_identity == &dsl_identity => Some(
+                    RetirePendingSpawnVerdict::CommittedIncarnationWithoutPendingSpawn {
+                        agent_runtime_id: agent_runtime_id.clone(),
+                        generation: *generation,
+                    },
+                ),
+                mob_dsl::MobMachineEffect::RetireAbsentPendingSpawnPreservationResolved {
+                    agent_identity: effect_identity,
+                } if effect_identity == &dsl_identity => {
+                    Some(RetirePendingSpawnVerdict::PreservePendingSpawnForAbsentIdentity)
+                }
+                _ => None,
+            };
+            if let Some(candidate) = candidate
+                && verdict.replace(candidate).is_some()
+            {
+                return Err(MobError::Internal(format!(
+                    "MobMachine emitted multiple retire pending-spawn verdicts for '{agent_identity}'"
+                )));
+            }
+        }
+        verdict.ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine emitted no retire pending-spawn verdict for '{agent_identity}'"
+            ))
+        })
+    }
+
     fn drain_completed_peer_delivery_tasks(&mut self) {
         while let Some(result) = self.peer_delivery_tasks.try_join_next() {
             match result {
@@ -7654,7 +7733,7 @@ impl MobActor {
         Ok(())
     }
 
-    async fn teardown_session_runtime_bindings_from_machine(&self) {
+    async fn teardown_session_runtime_bindings_from_machine(&self) -> Result<(), MobError> {
         #[cfg(feature = "runtime-adapter")]
         if let Some(adapter) = &self.runtime_adapter {
             let session_ids = self
@@ -7664,14 +7743,23 @@ impl MobActor {
                 .values()
                 .filter_map(|session_id| SessionId::parse(&session_id.0).ok())
                 .collect::<Vec<_>>();
+            let mut failures = Vec::new();
             for session_id in session_ids {
                 // `unregister_session` now runs the two-phase drain internally
                 // (0.7.2 D1): it aborts the comms drain task *and* awaits its
                 // quiescence before committing teardown, so a separate
                 // pre-unregister `abort_comms_drain` here is redundant.
-                adapter.unregister_session(&session_id).await;
+                if let Err(error) = adapter.unregister_session(&session_id).await {
+                    failures.push(format!(
+                        "failed to unregister runtime session {session_id} during mob teardown: {error}"
+                    ));
+                }
+            }
+            if !failures.is_empty() {
+                return Err(MobError::Internal(failures.join("; ")));
             }
         }
+        Ok(())
     }
 
     async fn ensure_autonomous_dispatch_capability_for_provisioner(
@@ -8147,39 +8235,61 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    // A retire with no roster incarnation is an idempotent
-                    // RetireAbsent observation. It must not cancel an
-                    // unrelated, later provision for the same stable
-                    // identity: that provision is a new incarnation and the
-                    // absent retire carries no runtime/fence authority over
-                    // it. This is the causal fence that makes
-                    // retire-then-resume sequencing safe.
-                    let roster_incarnation_exists = {
-                        let roster = self.roster.read().await;
-                        roster.get(&agent_identity).is_some()
-                    };
-                    let result = if roster_incarnation_exists {
-                        match self
-                            .cancel_pending_spawns_for_member(
+                    // MobMachine owns the cancel-vs-preserve decision from its
+                    // canonical committed incarnation and pending-session
+                    // maps. The actor realizes cancellation only when the
+                    // verdict names the exact pending session; an absent
+                    // retire mechanically preserves a later incarnation.
+                    let result = match self
+                        .classify_retire_pending_spawn_disposition(&agent_identity)
+                    {
+                        Ok(RetirePendingSpawnVerdict::CancelCommittedIncarnation {
+                            agent_runtime_id,
+                            generation,
+                            pending_spawn_session_id,
+                        }) => match self
+                            .cancel_pending_spawn_for_retire_incarnation(
                                 &agent_identity,
+                                &pending_spawn_session_id,
                                 "retire command received",
                             )
                             .await
                         {
                             Ok(canceled) => {
-                                if canceled > 0 {
-                                    tracing::info!(
-                                        agent_identity = %agent_identity,
-                                        canceled,
-                                        "retire canceled pending spawn lineage before roster retirement"
-                                    );
-                                }
+                                tracing::info!(
+                                    agent_identity = %agent_identity,
+                                    agent_runtime_id = %agent_runtime_id.0,
+                                    generation = generation.0,
+                                    pending_spawn_session_id = %pending_spawn_session_id.0,
+                                    canceled,
+                                    "MobMachine-authorized retire canceled exact pending spawn incarnation"
+                                );
                                 self.handle_retire(agent_identity).await
                             }
                             Err(error) => Err(error),
+                        },
+                        Ok(
+                            RetirePendingSpawnVerdict::CommittedIncarnationWithoutPendingSpawn {
+                                agent_runtime_id,
+                                generation,
+                            },
+                        ) => {
+                            tracing::debug!(
+                                agent_identity = %agent_identity,
+                                agent_runtime_id = %agent_runtime_id.0,
+                                generation = generation.0,
+                                "MobMachine resolved retire against committed incarnation without pending spawn"
+                            );
+                            self.handle_retire(agent_identity).await
                         }
-                    } else {
-                        self.handle_retire(agent_identity).await
+                        Ok(RetirePendingSpawnVerdict::PreservePendingSpawnForAbsentIdentity) => {
+                            tracing::debug!(
+                                agent_identity = %agent_identity,
+                                "MobMachine resolved absent retire and preserved any pending later incarnation"
+                            );
+                            self.handle_retire(agent_identity).await
+                        }
+                        Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
@@ -9021,7 +9131,20 @@ impl MobActor {
                             result = Err(error);
                         }
                     }
-                    self.teardown_session_runtime_bindings_from_machine().await;
+                    if let Err(error) = self.teardown_session_runtime_bindings_from_machine().await
+                    {
+                        tracing::warn!(error = %error, "shutdown runtime binding teardown encountered errors");
+                        if result.is_ok() {
+                            result = Err(error);
+                        }
+                    }
+                    if result.is_err() {
+                        // Required teardown retains this actor as the retry
+                        // owner. Never publish Stopped or exit while a runtime
+                        // binding is unresolved.
+                        let _ = reply_tx.send(result);
+                        continue;
+                    }
                     self.supervisor_bridge.shutdown().await;
                     // Cancel remaining lifecycle notification tasks.
                     // abort_all is non-blocking; join_next drains the abort results.
@@ -9037,7 +9160,11 @@ impl MobActor {
                             result = Err(error);
                         }
                     }
-                    let _ = reply_tx.send(result);
+                    if result.is_err() {
+                        let _ = reply_tx.send(result);
+                        continue;
+                    }
+                    let _ = reply_tx.send(Ok(()));
                     break;
                 }
             }
@@ -9559,6 +9686,41 @@ impl MobActor {
     ) -> Result<usize, MobError> {
         self.drain_pending_spawn_cleanup_anchors(reason).await?;
         let slots = self.pending_spawns.take_for_member(agent_identity);
+        self.cancel_pending_spawn_slots(agent_identity, slots, reason)
+            .await
+    }
+
+    async fn cancel_pending_spawn_for_retire_incarnation(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        pending_spawn_session_id: &mob_dsl::SessionId,
+        reason: &str,
+    ) -> Result<usize, MobError> {
+        self.drain_pending_spawn_cleanup_anchors(reason).await?;
+        let domain_session_id = SessionId::parse(&pending_spawn_session_id.0).map_err(|error| {
+            MobError::Internal(format!(
+                "MobMachine authorized retire cancellation with invalid pending session '{}': {error}",
+                pending_spawn_session_id.0
+            ))
+        })?;
+        let slots = self
+            .pending_spawns
+            .take_for_member_session(agent_identity, &domain_session_id);
+        if slots.is_empty() {
+            return Err(MobError::Internal(format!(
+                "MobMachine authorized retire cancellation for '{agent_identity}' pending session '{domain_session_id}', but no matching shell capability exists"
+            )));
+        }
+        self.cancel_pending_spawn_slots(agent_identity, slots, reason)
+            .await
+    }
+
+    async fn cancel_pending_spawn_slots(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        slots: Vec<super::pending_spawn_lineage::PendingSpawnSlot>,
+        reason: &str,
+    ) -> Result<usize, MobError> {
         if slots.is_empty() {
             if let Some(message) = self.pending_spawn_alignment_violation() {
                 tracing::error!(
@@ -9585,7 +9747,7 @@ impl MobActor {
                 mob_dsl::MobMachineInput::CancelPendingSpawn {
                     agent_identity: dsl_identity,
                 },
-                "cancel_pending_spawns_for_member",
+                "cancel_pending_spawn_slots",
             ) {
                 cleanup_errors.push(format!("{agent_identity} ticket {spawn_ticket}: {error}"));
             } else {

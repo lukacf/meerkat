@@ -1227,12 +1227,10 @@ struct MockSessionService {
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     runtime_adapter: Mutex<Option<Arc<meerkat_runtime::MeerkatMachine>>>,
-    /// Regression observation for the idle-member retire/archive ordering fix:
-    /// records whether the runtime adapter still contained the session at the
-    /// moment `discard_live_session` was invoked. `Some(false)` proves the
-    /// cleanup callback unregistered from the adapter BEFORE discarding the
-    /// live session (the fix); `Some(true)` would mean the buggy reverse order
-    /// that races a concurrent retire->archive to a spurious NotFound.
+    /// Records whether the runtime adapter still contained the session when
+    /// `discard_live_session` ran. Lifecycle owners may intentionally observe
+    /// `false` after prior machine removal; executor cleanup must observe
+    /// `true` because its hook is external-only.
     discard_adapter_session_present: Mutex<Option<bool>>,
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
@@ -1280,6 +1278,7 @@ struct MockSessionService {
     create_identity_already_active_no_live_sessions: RwLock<HashSet<SessionId>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     fail_inject: std::sync::atomic::AtomicBool,
+    discard_failures_remaining: AtomicU64,
     disable_interaction_event_injector: std::sync::atomic::AtomicBool,
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
@@ -1364,6 +1363,7 @@ impl MockSessionService {
             create_identity_already_active_no_live_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             fail_inject: std::sync::atomic::AtomicBool::new(false),
+            discard_failures_remaining: AtomicU64::new(0),
             disable_interaction_event_injector: std::sync::atomic::AtomicBool::new(false),
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
@@ -1477,9 +1477,8 @@ impl MockSessionService {
         *self.runtime_adapter.lock().expect("runtime_adapter mutex") = Some(adapter);
     }
 
-    /// See `discard_adapter_session_present`. `None` => discard was never
-    /// called; `Some(false)` => the adapter had already unregistered the
-    /// session by discard time (the retire/archive ordering fix holds).
+    /// See `discard_adapter_session_present`. `None` means discard was never
+    /// called; the boolean is the exact adapter-presence observation.
     fn discard_observed_adapter_session_present(&self) -> Option<bool> {
         *self
             .discard_adapter_session_present
@@ -1490,6 +1489,10 @@ impl MockSessionService {
     fn disable_interaction_event_injector(&self) {
         self.disable_interaction_event_injector
             .store(true, Ordering::Relaxed);
+    }
+
+    fn fail_next_discard_live_session(&self) {
+        self.discard_failures_remaining.store(1, Ordering::SeqCst);
     }
 
     /// Get recorded prompts for inspection in tests.
@@ -2893,11 +2896,23 @@ impl MobSessionService for MockSessionService {
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        // Regression observation: capture whether the runtime adapter still
-        // holds this session at discard time. The cleanup callback must
-        // unregister from the adapter BEFORE discarding the live session, so a
-        // concurrent retire->archive never observes gone-from-service /
-        // still-in-adapter (which surfaces as a spurious archive NotFound).
+        if self
+            .discard_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                if remaining > 0 {
+                    Some(remaining - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(SessionError::Unsupported(
+                "synthetic fail-once mob live-session discard".to_string(),
+            ));
+        }
+        // Capture exact adapter presence at discard time. Tests distinguish
+        // machine-owned lifecycle cleanup from executor external-only cleanup.
         let observed_adapter = self
             .runtime_adapter
             .lock()
@@ -9008,7 +9023,10 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
         .cloned()
         .expect("session-backed worker");
 
-    adapter.unregister_session(&bridge_session_id).await;
+    adapter
+        .unregister_session(&bridge_session_id)
+        .await
+        .expect("bridge session should unregister cleanly");
 
     let err = handle
         .destroy()
@@ -25941,25 +25959,12 @@ async fn test_retire_session_owned_member_completes_disposal_on_archive_authorit
     );
 }
 
-// Regression: meerkat 0.7.6 (#790, "machine-driven execution control") made an
-// idle member eagerly stop its runtime executor, firing the CoreExecutor
-// callback `cleanup_after_runtime_stop_terminalized`. That callback discarded
-// the live session from the session-service BEFORE unregistering it from the
-// runtime adapter. Running concurrently with the mob actor's retire -> archive
-// (which reads the session-service first), this exposed a "gone-from-service /
-// still-in-adapter" window: the archive read missed (NotFound) while the
-// provisioner guard still saw contains_session() == true, raising a spurious
-// InternalError on every retire / respawn / console-reset of an idle member.
-//
-// The fix reorders the callback to unregister from the adapter first, so the
-// only observable split-state is "gone-from-adapter / still-in-session-service",
-// which the archive read tolerates. This test pins that ordering deterministically:
-// by the time discard_live_session runs, the adapter must already have
-// unregistered the session. If the order is ever reverted, the observation flips
-// to Some(true) and this test fails.
+// Registration removal and executor-owned cleanup are separate obligations.
+// This test pins the cleanup hook as external-only; the machine saga remains
+// the sole owner of runtime unregister and invokes this hook before removal.
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
-async fn cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_session() {
+async fn cleanup_after_runtime_stop_leaves_unregister_to_machine_saga() {
     use meerkat_core::lifecycle::CoreExecutor;
 
     let service = Arc::new(MockSessionService::new());
@@ -26016,20 +26021,50 @@ async fn cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_s
         state.clone(),
         runtime_sessions.clone(),
     );
+    service.fail_next_discard_live_session();
+    let error = executor
+        .cleanup_after_runtime_stop_terminalized()
+        .await
+        .expect_err("failed live-session discard must retain external retry anchors");
+    assert!(
+        error
+            .to_string()
+            .contains("synthetic fail-once mob live-session discard")
+    );
+    assert!(adapter.contains_session(&session_id).await);
+    assert!(
+        service
+            .has_live_session(&session_id)
+            .await
+            .expect("read live service state after failed cleanup")
+    );
+    assert!(
+        runtime_sessions
+            .read()
+            .await
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &state)),
+        "failed discard must not erase the provisioner retry anchor"
+    );
+
     executor
         .cleanup_after_runtime_stop_terminalized()
         .await
         .expect("cleanup after runtime stop should succeed");
 
-    // The defensive invariant: at discard time the adapter had already
-    // unregistered the session (Some(false)). A reverted order would record
-    // Some(true).
+    // External cleanup is deliberately not registration authority. The
+    // machine-owned unregister saga invokes this hook and removes the adapter
+    // entry only after the hook returns.
     assert_eq!(
         service.discard_observed_adapter_session_present(),
-        Some(false),
-        "cleanup must unregister from the runtime adapter BEFORE discarding the \
-         live session, so a concurrent retire->archive never races to NotFound"
+        Some(true),
+        "executor cleanup must not recursively unregister its machine-owned runtime"
     );
+    assert!(adapter.contains_session(&session_id).await);
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("machine-owned unregister should remove the cleaned runtime");
 
     // End state: torn down on both sides and out of the runtime_sessions map.
     assert!(
@@ -27796,11 +27831,30 @@ async fn test_retire_absent_does_not_cancel_later_pending_spawn_incarnation() {
         })
     };
     let _session_id = wait_for_session_id_for_comms_name(&service, &comms_name).await;
+    let before_retire = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("pending spawn machine snapshot before absent retire");
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from(agent_identity.as_str());
+    let pending_session_before = before_retire
+        .pending_spawn_sessions
+        .get(&dsl_identity)
+        .cloned()
+        .expect("MobMachine should own the pending spawn session incarnation");
 
     handle
         .retire(AgentIdentity::from(agent_identity.as_str()))
         .await
         .expect("RetireAbsent is an inert idempotent success");
+    let after_retire = handle
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("pending spawn machine snapshot after absent retire");
+    assert_eq!(
+        after_retire.pending_spawn_sessions.get(&dsl_identity),
+        Some(&pending_session_before),
+        "machine-owned absent-retire verdict must preserve the exact pending session incarnation"
+    );
     pending_spawn
         .await
         .expect("spawn join")
@@ -38771,7 +38825,10 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
         .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
         .await
         .expect("session-backed");
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("bridge session should unregister cleanly");
 
     let refusal = handle
         .retire(AgentIdentity::from("w-1"))
@@ -41304,7 +41361,10 @@ async fn test_resume_reconciliation_runs_spawn_customizer_for_missing_session_re
     // ingress and unregisters its runtime. The machine's transport-swap guard
     // rightly rejects re-attaching a different comms runtime to a stale
     // pre-teardown ingress, so the simulation must not leave one behind.
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("bridge session should unregister cleanly");
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,

@@ -435,6 +435,40 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) async fn load_pending_compaction_projections(
+        &self,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(Vec::new()),
+            DriverEntry::Persistent(driver) => driver.load_pending_compaction_projections().await,
+        }
+    }
+
+    pub(crate) async fn mark_compaction_projection_finalized(
+        &self,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Err(RuntimeDriverError::Internal(
+                "ephemeral runtime cannot finalize a durable compaction outbox".to_string(),
+            )),
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .mark_compaction_projection_finalized(projection)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn load_compaction_checkpoint_snapshot(
+        &self,
+    ) -> Result<Option<Vec<u8>>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(None),
+            DriverEntry::Persistent(driver) => driver.load_compaction_checkpoint_snapshot().await,
+        }
+    }
+
     pub(crate) fn as_driver(&self) -> &dyn RuntimeDriver {
         match self {
             DriverEntry::Ephemeral(d) => d,
@@ -750,6 +784,21 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(_) => Ok(()),
             DriverEntry::Persistent(d) => d.persist_current_machine_lifecycle(context).await,
+        }
+    }
+
+    pub(crate) async fn commit_unregister_finalization(
+        &mut self,
+        context: &str,
+        retired_ops_epoch: &meerkat_core::RuntimeEpochId,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(()),
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .commit_unregister_finalization(context, retired_ops_epoch)
+                    .await
+            }
         }
     }
 

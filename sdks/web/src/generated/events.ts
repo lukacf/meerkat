@@ -117,6 +117,11 @@ export type CompactionFailureReason = {
   message: string;
 };
 
+export interface CompactionRewriteRange {
+  end: number;
+  start: number;
+}
+
 export type ContentBlock = {
   text: string;
   type: "text";
@@ -388,6 +393,11 @@ export type ToolConfigChangedPayload = {
 
 export type ToolName = string;
 
+export interface TranscriptEditRewriteRange {
+  end: number;
+  start: number;
+}
+
 export type TranscriptRevisionBody = {
   created_at: SystemTime;
   messages: unknown[];
@@ -419,11 +429,17 @@ export interface TranscriptRewriteRecord {
   revision_body: TranscriptRevisionBody;
 }
 
-export interface TranscriptRewriteSelection {
+export type TranscriptRewriteSelection = {
   end: number;
   start: number;
   type: "message_range";
-}
+} | {
+  range: TranscriptEditRewriteRange;
+  type: "edit_message_range";
+} | {
+  range: CompactionRewriteRange;
+  type: "compaction_message_range";
+};
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 

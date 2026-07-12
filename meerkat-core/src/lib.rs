@@ -92,8 +92,9 @@ pub use agent::{
     AgentSessionStore, AgentToolDispatcher, BindOutcome, CancelAfterBoundaryCommand,
     CancelAfterBoundarySender, CommsCapabilityError, CommsRuntime, CurrentTurnContent,
     CurrentTurnImageRef, DefaultSystemPromptPolicy, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError, SystemContextStateError,
-    ToolDispatchContext, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
+    FilteredToolDispatcher, LlmStreamResult, SnapshotProjectionError,
+    StickyModelFallbackActivationProof, SystemContextStateError, ToolDispatchContext,
+    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
@@ -126,19 +127,23 @@ pub use comms::{
     SendError, SendReceipt, SendTaintOverride, SenderContentTaint, StreamError, StreamScope,
 };
 pub use compact::{
-    CompactionConfig, CompactionContext, CompactionCurator, CompactionCuratorError,
-    CompactionResult, CompactionWindow, Compactor, CuratedCompactionSummary,
+    COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext, CompactionCurator,
+    CompactionCuratorError, CompactionDiscard, CompactionResult, CompactionRetained,
+    CompactionSummary, CompactionWindow, Compactor, CuratedCompactionSummary,
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 pub use memory::{
-    EmbeddingModel, HnswParams, MemoryEnumerationPage, MemoryEnumerationRequest, MemoryIndexBatch,
-    MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryOwner,
-    MemoryRankingPolicy, MemoryRecord, MemoryResult, MemoryScopeDropReceipt, MemorySearchScope,
-    MemorySource, MemoryStore, MemoryStoreError, MessageRange,
+    CompactionCommitCoordinationError, CompactionCommitCoordinator, CompactionProjectionId,
+    CompactionProjectionIntent, CompactionProjectionPersistence, CompactionStageReceipt,
+    CompactionStageReconcileReceipt, EmbeddingModel, HnswParams, MemoryEnumerationPage,
+    MemoryEnumerationRequest, MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest,
+    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryRecord, MemoryResult,
+    MemoryScopeDropReceipt, MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError,
+    MessageRange, SESSION_COMPACTION_PROJECTION_INTENTS_KEY,
 };
 pub use model_profile::{ModelCatalog, ModelProfile};
 pub use model_registry::{
-    ModelCapability, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
+    ModelCapability, ModelProfileWitness, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
     UnsupportedModelCapabilityEvidence, UnsupportedModelCapabilityReason,
 };
 pub use peer_correlation::{
@@ -233,9 +238,9 @@ pub use lifecycle::run_primitive::{
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
     CoreApplyFailureCauseKind, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
-    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle, CoreRenderable,
-    InputId, RunApplyBoundary, RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId,
-    RunPrimitive, StagedRunInput,
+    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
+    CoreExecutorTeardownReason, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
+    RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use model_defaults::ModelOperationalDefaultsResolver;
@@ -288,7 +293,7 @@ pub use service::{
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsRequest,
     StageToolResultsResult, StartTurnRequest, TranscriptEditError, TranscriptEditRunningBehavior,
     TranscriptReplacement, TranscriptRewriteCommit, TranscriptRewriteReason,
-    TranscriptRewriteSelection, TurnToolOverlay,
+    TranscriptRewriteSelection, TranscriptRewriteSemantic, TurnToolOverlay,
 };
 pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,

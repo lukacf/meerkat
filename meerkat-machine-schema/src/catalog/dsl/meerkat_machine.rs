@@ -3400,6 +3400,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                 current_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
                 current_capability_base_filter: ToolFilter,
             },
+            CommitStickyModelFallback {
+                previous_identity: SessionLlmIdentity,
+                previous_visibility_state: SessionToolVisibilityState,
+                target_identity: SessionLlmIdentity,
+                target_model: String,
+                target_profile_provider: Option<Provider>,
+                target_profile_model: Option<String>,
+                target_capability_surface: Option<SessionLlmCapabilitySurface>,
+                target_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+                target_capability_base_filter: ToolFilter,
+                target_realtime_capable: bool,
+                view_image_tool_available: bool,
+                previous_view_image_visible: bool,
+                next_view_image_visible: bool,
+                previous_active_visibility_revision: u64,
+                previous_staged_visibility_revision: u64,
+                next_visibility_state: SessionToolVisibilityState,
+                next_active_visibility_revision: u64,
+                tool_visibility_delta: SessionToolVisibilityDelta,
+                retry_attempt: u64,
+            },
             ReconfigureSessionLlmIdentity {
                 previous_identity: SessionLlmIdentity,
                 previous_visibility_state: SessionToolVisibilityState,
@@ -5572,6 +5593,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        helper meerkat_session_llm_profile_provenance_matches(
+            target_identity: SessionLlmIdentity,
+            target_profile_provider: Option<Provider>,
+            target_profile_model: Option<String>,
+            target_capability_surface_status: SessionLlmCapabilitySurfaceStatus
+        ) -> bool {
+            if target_capability_surface_status == SessionLlmCapabilitySurfaceStatus::Resolved {
+                target_profile_provider != None
+                && target_profile_model != None
+                && target_profile_provider.get("value") == target_identity.provider
+                && target_profile_model.get("value") == target_identity.model
+            } else {
+                target_profile_provider == None
+                && target_profile_model == None
+            }
+        }
+
         helper meerkat_session_llm_capability_base_filter_replacement_matches(
             current_capability_surface: Option<SessionLlmCapabilitySurface>,
             current_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
@@ -5624,6 +5662,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        helper meerkat_session_llm_expected_next_staged_visibility_revision(
+            committed_visible_set_changed: bool,
+            previous_active_visibility_revision: u64,
+            previous_staged_visibility_revision: u64,
+            next_active_visibility_revision: u64
+        ) -> u64 {
+            if committed_visible_set_changed {
+                if previous_staged_visibility_revision > previous_active_visibility_revision {
+                    next_active_visibility_revision + 1
+                } else {
+                    next_active_visibility_revision
+                }
+            } else {
+                previous_staged_visibility_revision
+            }
+        }
+
         helper meerkat_session_llm_visibility_shape_matches(
             previous_visibility_state: SessionToolVisibilityState,
             next_visibility_state: SessionToolVisibilityState,
@@ -5640,7 +5695,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             && previous_visibility_state.staged_filter == next_visibility_state.staged_filter
             && previous_visibility_state.active_requested_deferred_names == next_visibility_state.active_requested_deferred_names
             && previous_visibility_state.staged_requested_deferred_names == next_visibility_state.staged_requested_deferred_names
-            && previous_visibility_state.staged_revision == next_visibility_state.staged_revision
             && previous_visibility_state.requested_witnesses == next_visibility_state.requested_witnesses
             && previous_visibility_state.filter_witnesses == next_visibility_state.filter_witnesses
             && previous_visibility_state.active_revision == previous_active_visibility_revision
@@ -5686,6 +5740,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_view_image_visible != next_view_image_visible,
                 previous_active_visibility_revision,
                 previous_staged_visibility_revision)
+            && next_active_visibility_revision >= previous_active_visibility_revision
+            && next_visibility_state.staged_revision ==
+                meerkat_session_llm_expected_next_staged_visibility_revision(
+                    previous_view_image_visible != next_view_image_visible,
+                    previous_active_visibility_revision,
+                    previous_staged_visibility_revision,
+                    next_active_visibility_revision)
             && meerkat_session_llm_visibility_delta_matches(
                 tool_visibility_delta, previous_capability_base_filter,
                 next_capability_base_filter,
@@ -6900,6 +6961,93 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_session_capability_base_filter = current_capability_base_filter;
             }
             to Retired
+        }
+
+        // A sticky fallback is a machine-owned identity/routing commit, not a
+        // client-local retry detail. The generated recovery transition must
+        // already have admitted this exact retry attempt before the fallback
+        // can replace the session identity, capability truth, and routing
+        // baseline atomically.
+        transition CommitStickyModelFallbackRunning {
+            on input CommitStickyModelFallback {
+                previous_identity, previous_visibility_state,
+                target_identity, target_model,
+                target_profile_provider, target_profile_model,
+                target_capability_surface, target_capability_surface_status,
+                target_capability_base_filter, target_realtime_capable,
+                view_image_tool_available, previous_view_image_visible,
+                next_view_image_visible, previous_active_visibility_revision,
+                previous_staged_visibility_revision, next_visibility_state,
+                next_active_visibility_revision, tool_visibility_delta,
+                retry_attempt
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "turn_error_recovery" { self.turn_phase == TurnPhase::ErrorRecovery }
+            guard "retry_attempt_matches" { retry_attempt == self.llm_retry_attempt }
+            guard "previous_identity_matches_current" {
+                self.current_session_llm_identity == Some(previous_identity)
+            }
+            guard "previous_visibility_matches_current" {
+                previous_visibility_state.capability_base_filter == self.current_session_capability_base_filter
+                && previous_visibility_state.inherited_base_filter == self.inherited_base_filter
+                && previous_visibility_state.active_filter == self.active_filter
+                && previous_visibility_state.staged_filter == self.staged_filter
+                && previous_visibility_state.active_requested_deferred_names == self.active_deferred_names
+                && previous_visibility_state.staged_requested_deferred_names == self.staged_deferred_names
+                && previous_visibility_state.active_revision == self.active_visibility_revision
+                && previous_visibility_state.staged_revision == self.staged_visibility_revision
+                && previous_visibility_state.requested_witnesses == self.requested_visibility_witnesses
+                && previous_visibility_state.filter_witnesses == self.filter_visibility_witnesses
+            }
+            guard "target_model_matches_identity" { target_identity.model == target_model }
+            guard "target_profile_provenance_matches_identity" {
+                meerkat_session_llm_profile_provenance_matches(
+                    target_identity, target_profile_provider, target_profile_model,
+                    target_capability_surface_status) == true
+            }
+            guard "target_capability_base_filter_matches_surface" {
+                meerkat_session_llm_hydrated_capability_base_filter_matches(
+                    target_capability_surface,
+                    target_capability_surface_status,
+                    target_capability_base_filter) == true
+            }
+            guard "visibility_fallback_plan_matches" {
+                meerkat_session_llm_visibility_reconfigure_plan_matches(
+                    previous_visibility_state, next_visibility_state,
+                    previous_visibility_state.capability_base_filter,
+                    target_capability_base_filter,
+                    view_image_tool_available, previous_view_image_visible,
+                    next_view_image_visible, previous_active_visibility_revision,
+                    previous_staged_visibility_revision,
+                    next_active_visibility_revision, tool_visibility_delta) == true
+            }
+            update {
+                self.current_session_llm_identity = Some(target_identity);
+                self.current_session_capability_surface = target_capability_surface;
+                self.current_session_capability_surface_status =
+                    target_capability_surface_status;
+                self.current_session_capability_base_filter = target_capability_base_filter;
+                self.model_routing_baseline_model = Some(target_model);
+                self.model_routing_baseline_realtime = Some(target_realtime_capable);
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
+                self.inherited_base_filter = next_visibility_state.inherited_base_filter;
+                self.active_filter = next_visibility_state.active_filter;
+                self.staged_filter = next_visibility_state.staged_filter;
+                self.active_deferred_names = next_visibility_state.active_requested_deferred_names;
+                self.staged_deferred_names = next_visibility_state.staged_requested_deferred_names;
+                self.requested_visibility_witnesses = next_visibility_state.requested_witnesses;
+                self.filter_visibility_witnesses = next_visibility_state.filter_witnesses;
+                self.active_visibility_revision = next_active_visibility_revision;
+                self.staged_visibility_revision = next_visibility_state.staged_revision;
+                if next_active_visibility_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = next_active_visibility_revision;
+                }
+                if next_visibility_state.staged_revision > self.next_staged_visibility_revision {
+                    self.next_staged_visibility_revision = next_visibility_state.staged_revision;
+                }
+            }
+            to Running
         }
 
         transition ReconfigureSessionLlmIdentityAttached {
@@ -19694,6 +19842,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input CommitVisibilityFilter { filter, revision }
             guard "filter_matches_machine_staged_filter" { filter == self.staged_filter }
             guard "revision_matches_machine_staged_revision" { revision == self.staged_visibility_revision }
+            guard "active_visibility_revision_never_decreases" {
+                revision >= self.active_visibility_revision
+            }
             guard "staged_filter_witnesses_match_machine_catalog" {
                 meerkat_tool_visibility_filter_witnesses_are_catalog_backed(
                     self.filter_visibility_witnesses, self.filter_visibility_authority_catalog)

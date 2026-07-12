@@ -162,7 +162,7 @@ impl From<u64> for FenceToken {
 }
 
 /// Bridging type for generation counter. Maps to `crate::ids::Generation`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Generation(pub u64);
 
 impl From<u64> for Generation {

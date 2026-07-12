@@ -828,10 +828,11 @@ mod orchestrator {
             &self,
             session_id: &SessionId,
             runtime_was_registered: bool,
-        ) {
-            if !runtime_was_registered {
-                let _ = self.archive_runtime_cleanup.run(session_id).await;
+        ) -> Result<(), SessionError> {
+            if runtime_was_registered {
+                return Ok(());
             }
+            self.archive_runtime_cleanup.run(session_id).await
         }
 
         /// Promote a staged (deferred) session into the live service map
@@ -1017,9 +1018,16 @@ mod orchestrator {
                 .create_session_with_reserved_admission(recovered.request, admission)
                 .await
             {
-                self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
-                    .await;
-                return Err(error);
+                return match self
+                    .cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(cleanup_error) => Err(combine_recovery_materialization_cleanup_errors(
+                        error,
+                        cleanup_error,
+                    )),
+                };
             }
 
             Ok(())
@@ -1747,6 +1755,37 @@ mod orchestrator {
                 meerkat_core::error::AgentError::InternalError(error.to_string()),
             ),
             RecoveryError::Session(session_error) => session_error,
+        }
+    }
+
+    fn combine_recovery_materialization_cleanup_errors(
+        primary_error: SessionError,
+        cleanup_error: SessionError,
+    ) -> SessionError {
+        SessionError::Agent(AgentError::InternalError(format!(
+            "{primary_error}; additionally failed to clean up newly recovered runtime: {cleanup_error}"
+        )))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::combine_recovery_materialization_cleanup_errors;
+        use meerkat_core::error::AgentError;
+        use meerkat_core::service::SessionError;
+
+        #[test]
+        fn recovery_materialization_error_retains_cleanup_failure() {
+            let combined = combine_recovery_materialization_cleanup_errors(
+                SessionError::Agent(AgentError::InternalError(
+                    "synthetic materialization failure".to_string(),
+                )),
+                SessionError::Agent(AgentError::InternalError(
+                    "synthetic unregister failure".to_string(),
+                )),
+            );
+            let rendered = combined.to_string();
+            assert!(rendered.contains("synthetic materialization failure"));
+            assert!(rendered.contains("synthetic unregister failure"));
         }
     }
 }

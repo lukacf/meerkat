@@ -37,6 +37,33 @@ use tokio::sync::mpsc;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
+pub(crate) struct StagedAuthLeaseRotation {
+    handle: Option<crate::handles::GeneratedAuthLeaseHandle>,
+    snapshots: Vec<crate::handles::AuthLeaseRestoreSnapshot>,
+}
+
+impl StagedAuthLeaseRotation {
+    pub(crate) fn rollback(self) -> Result<(), AgentError> {
+        let Some(handle) = self.handle else {
+            return Ok(());
+        };
+        let mut failures = Vec::new();
+        for snapshot in self.snapshots.into_iter().rev() {
+            if let Err(error) = handle.restore_auth_lifecycle_snapshot(&snapshot) {
+                failures.push(format!("{}: {error}", snapshot.lease_key()));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AgentError::ConfigError(format!(
+                "failed to restore staged auth lease rotation: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+}
+
 fn user_message_from_operator_renderable(
     content: CoreRenderable,
 ) -> Result<crate::types::UserMessage, AgentError> {
@@ -515,39 +542,180 @@ where
         self.apply_llm_request_policy(policy);
     }
 
+    /// Atomically apply an explicit live LLM identity hot-swap.
+    ///
+    /// Every fallible target-dependent step completes before the live agent is
+    /// mutated: the exact provider/model profile is resolved through this
+    /// agent's captured effective registry, the next durable session value is
+    /// serialized through the session metadata authority, and auth rotation is
+    /// staged. The final client, request policy, durable identity, and active
+    /// profile publication is therefore an infallible in-memory commit.
+    pub fn hot_swap_llm_identity(
+        &mut self,
+        client: Arc<C>,
+        identity: crate::SessionLlmIdentity,
+        request_policy: crate::SessionLlmRequestPolicy,
+    ) -> Result<(), AgentError> {
+        if request_policy.model != identity.model {
+            return Err(AgentError::ConfigError(format!(
+                "live LLM hot-swap target model '{}' does not match request policy model '{}'",
+                identity.model, request_policy.model
+            )));
+        }
+        if request_policy.provider_params != identity.provider_params {
+            return Err(AgentError::ConfigError(
+                "live LLM hot-swap request policy provider params do not match the durable target identity"
+                    .to_string(),
+            ));
+        }
+
+        let target_profile = self
+            .effective_model_registry
+            .as_deref()
+            .ok_or_else(|| {
+                AgentError::ConfigError(
+                    "live LLM hot-swap requires the agent's captured effective model registry"
+                        .to_string(),
+                )
+            })?
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                AgentError::ConfigError(format!(
+                    "live LLM hot-swap target '{}:{}' is absent from the agent's effective model registry",
+                    identity.provider.as_str(),
+                    identity.model
+                ))
+            })?;
+
+        let current_metadata = self
+            .session
+            .try_session_metadata()
+            .map_err(|error| {
+                AgentError::ConfigError(format!(
+                    "failed to restore current session metadata before live LLM hot-swap: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                AgentError::ConfigError(
+                    "live LLM hot-swap requires durable session metadata".to_string(),
+                )
+            })?;
+        let previous_identity = current_metadata.llm_identity();
+
+        let mut next_metadata = current_metadata;
+        next_metadata.apply_llm_identity(&identity);
+        let mut next_session = self.session.clone();
+        next_session
+            .set_session_metadata(next_metadata)
+            .map_err(|error| {
+                AgentError::ConfigError(format!(
+                    "failed to prepare hot-swapped durable LLM identity: {error}"
+                ))
+            })?;
+
+        let next_model = request_policy.model;
+        let next_provider_params = crate::lifecycle::run_primitive::ProviderParamsCarrier {
+            params: request_policy.provider_params.unwrap_or_default(),
+            tool_defaults: request_policy.provider_tool_defaults,
+        };
+
+        let _auth_rotation = self.stage_auth_lease_auth_binding(
+            previous_identity.auth_binding.as_ref(),
+            identity.auth_binding.as_ref(),
+        )?;
+
+        // Infallible publication boundary: no validation, serialization, auth
+        // transition, or other result-bearing operation may follow the first
+        // field mutation in this block.
+        self.client = client;
+        self.config.model = next_model;
+        self.config.provider_params = next_provider_params;
+        self.session = next_session;
+        self.active_model_profile = Some(target_profile);
+        Ok(())
+    }
+
     /// Rotate runtime auth-lease tracking alongside a live LLM identity swap.
     pub fn rotate_auth_lease_auth_binding(
         &self,
         previous: Option<&crate::AuthBindingRef>,
         target: Option<&crate::AuthBindingRef>,
     ) -> Result<(), AgentError> {
-        let Some(handle) = self.auth_lease_handle.as_deref() else {
-            return Ok(());
+        self.stage_auth_lease_auth_binding(previous, target)
+            .map(|_| ())
+    }
+
+    /// Stage an auth-binding rotation and retain exact generated lifecycle
+    /// snapshots so a later model-routing rejection can restore both bindings.
+    pub(crate) fn stage_auth_lease_auth_binding(
+        &self,
+        previous: Option<&crate::AuthBindingRef>,
+        target: Option<&crate::AuthBindingRef>,
+    ) -> Result<StagedAuthLeaseRotation, AgentError> {
+        let Some(generated_handle) = self.auth_lease_handle.as_ref() else {
+            return Ok(StagedAuthLeaseRotation {
+                handle: None,
+                snapshots: Vec::new(),
+            });
         };
+        let handle = generated_handle.as_handle();
         if previous == target {
-            return Ok(());
+            return Ok(StagedAuthLeaseRotation {
+                handle: None,
+                snapshots: Vec::new(),
+            });
         }
-        if let Some(previous) = previous {
-            let previous_key = crate::handles::LeaseKey::from_auth_binding(previous);
-            handle.release_lease(&previous_key).map_err(|err| {
-                AgentError::ConfigError(format!(
-                    "failed to release previous auth lease {previous_key} during rotation: {err}"
-                ))
-            })?;
+        let previous_key = previous.map(crate::handles::LeaseKey::from_auth_binding);
+        let target_key = target.map(crate::handles::LeaseKey::from_auth_binding);
+        let mut snapshots = Vec::new();
+        if let Some(target_key) = target_key.as_ref() {
+            snapshots.push(handle.capture_auth_lifecycle_restore_snapshot(target_key));
         }
-        if let Some(target) = target {
-            let target_key = crate::handles::LeaseKey::from_auth_binding(target);
+        if let Some(previous_key) = previous_key.as_ref()
+            && target_key.as_ref() != Some(previous_key)
+        {
+            snapshots.push(handle.capture_auth_lifecycle_restore_snapshot(previous_key));
+        }
+        let staged = StagedAuthLeaseRotation {
+            handle: Some(generated_handle.clone()),
+            snapshots,
+        };
+
+        if let Some(target_binding) = target {
+            let target_key = crate::handles::LeaseKey::from_auth_binding(target_binding);
             let target_snapshot = handle.snapshot(&target_key);
-            if target_snapshot.credential_present && target_snapshot.phase.is_some() {
-                return Ok(());
+            if !(target_snapshot.credential_present && target_snapshot.phase.is_some())
+                && let Err(error) = handle.acquire_lease(&target_key, u64::MAX)
+            {
+                let rollback = staged.rollback();
+                return Err(match rollback {
+                    Ok(()) => AgentError::ConfigError(format!(
+                        "failed to rotate auth lease to auth_binding {target_key}: {error}"
+                    )),
+                    Err(rollback_error) => AgentError::ConfigError(format!(
+                        "failed to rotate auth lease to auth_binding {target_key}: {error}; \
+                         additionally failed to restore staged auth state: {rollback_error}"
+                    )),
+                });
             }
-            handle.acquire_lease(&target_key, u64::MAX).map_err(|err| {
-                AgentError::ConfigError(format!(
-                    "failed to rotate auth lease to auth_binding {target_key}: {err}"
-                ))
-            })?;
         }
-        Ok(())
+        if let Some(previous_binding) = previous {
+            let previous_key = crate::handles::LeaseKey::from_auth_binding(previous_binding);
+            if let Err(error) = handle.release_lease(&previous_key) {
+                let rollback = staged.rollback();
+                return Err(AgentError::ConfigError(match rollback {
+                    Err(rollback_error) => format!(
+                        "failed to release previous auth lease {previous_key} during rotation: \
+                         {error}; additionally failed to release newly acquired target lease: \
+                         {rollback_error}"
+                    ),
+                    Ok(()) => format!(
+                        "failed to release previous auth lease {previous_key} during rotation: {error}"
+                    ),
+                }));
+            }
+        }
+        Ok(staged)
     }
 
     /// Cloneable producer handle for boundary-only cancellation requests.
@@ -748,24 +916,14 @@ where
 
     /// Snapshot the agent's live tool-scope state for diagnostics and mapping.
     pub fn tool_scope_snapshot(&self) -> Option<crate::ToolScopeSnapshot> {
-        let mut snapshot = self.tool_scope.snapshot()?;
-        let capability_filter =
-            crate::ToolScope::compose(&[self.client.active_capability_base_filter()]);
-        snapshot
-            .visible_names
-            .retain(|name| capability_filter.allows(name.as_str()));
-        snapshot.capability_base_filter = self.client.active_capability_base_filter();
-        Some(snapshot)
+        self.tool_scope.snapshot()
     }
 
     /// Snapshot the provider-visible tool definitions for the active LLM model.
     pub fn visible_tool_defs(&self) -> Vec<crate::ToolDef> {
-        let capability_filter =
-            crate::ToolScope::compose(&[self.client.active_capability_base_filter()]);
         self.tool_scope
             .visible_tools()
             .iter()
-            .filter(|tool| capability_filter.allows(tool.name.as_str()))
             .map(|tool| tool.as_ref().clone())
             .collect()
     }
@@ -1075,6 +1233,61 @@ where
         self.emit_run_failed_event(error, event_tx).await;
     }
 
+    /// Settle a run error against any live compaction transaction. Callback
+    /// pending is a commit-worthy external-continuation boundary: the session
+    /// layer serializes that live mutation for RuntimeStore::atomic_apply, so
+    /// its rewrite+projection intent must remain intact. Every actual failed
+    /// boundary rolls the pre-compaction transcript/control parent back and
+    /// aborts its invisible memory stages while retaining real provider usage
+    /// and failed-attempt cadence.
+    async fn settle_compaction_after_run_error(&mut self, error: AgentError) -> AgentError {
+        if matches!(error, AgentError::CallbackPending { .. }) {
+            return error;
+        }
+        match self.abort_uncommitted_compaction_projections().await {
+            Ok(()) => error,
+            Err(abort) => error
+                .with_ancillary_failure("failed to abort uncommitted compaction projection", abort),
+        }
+    }
+
+    /// Fence new transcript work behind the typed compaction transaction.
+    ///
+    /// Awaiting runtime commit and runtime-committed transactions are owned by
+    /// the runtime outbox and cannot be crossed by another turn. Abort cleanup
+    /// is different: it is retried at ingress and the turn may proceed only
+    /// after every exact invisible stage has drained.
+    async fn prepare_compaction_ingress(&mut self) -> Result<(), AgentError> {
+        let phase = self
+            .compaction_transaction
+            .as_ref()
+            .map(|transaction| &transaction.phase);
+        match phase {
+            Some(crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(_)) => {
+                return Err(AgentError::InternalError(
+                    "cannot start a new run while compaction awaits runtime commit".to_string(),
+                ));
+            }
+            Some(crate::agent::CompactionTransactionPhase::RuntimeCommitted { .. }) => {
+                return Err(AgentError::InternalError(
+                    "cannot start a new run while runtime-committed compaction finalization is pending"
+                        .to_string(),
+                ));
+            }
+            Some(crate::agent::CompactionTransactionPhase::AbortPending { .. }) | None => {}
+        }
+
+        if self.compaction_transaction.is_some() || self.in_flight_compaction_stage.is_some() {
+            self.abort_uncommitted_compaction_projections().await?;
+        }
+        if self.compaction_transaction.is_some() || self.in_flight_compaction_stage.is_some() {
+            return Err(AgentError::InternalError(
+                "compaction abort cleanup remained pending at run ingress".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn run_failed_hooks(
         &self,
         error: &AgentError,
@@ -1265,6 +1478,10 @@ where
         transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
+        if let Err(error) = self.prepare_compaction_ingress().await {
+            self.clear_runtime_execution_kind();
+            return Err(error);
+        }
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
         self.set_active_transcript_identity(transcript_identity);
 
@@ -1400,6 +1617,7 @@ where
                         .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    let err = self.settle_compaction_after_run_error(err).await;
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
@@ -1410,6 +1628,7 @@ where
                 }
                 if let Err(err) = self.checkpoint_current_session().await {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    let err = self.settle_compaction_after_run_error(err).await;
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
@@ -1418,6 +1637,7 @@ where
             }
             Err(err) => {
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
+                let err = self.settle_compaction_after_run_error(err).await;
                 self.clear_runtime_execution_kind();
                 Err(err)
             }
@@ -1435,6 +1655,10 @@ where
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
+        if let Err(error) = self.prepare_compaction_ingress().await {
+            self.clear_runtime_execution_kind();
+            return Err(error);
+        }
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
         let session_tail = observe_session_tail(self.session.messages());
@@ -1526,6 +1750,7 @@ where
                         .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    let err = self.settle_compaction_after_run_error(err).await;
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
@@ -1536,6 +1761,7 @@ where
                 }
                 if let Err(err) = self.checkpoint_current_session().await {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    let err = self.settle_compaction_after_run_error(err).await;
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
@@ -1544,6 +1770,7 @@ where
             }
             Err(err) => {
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
+                let err = self.settle_compaction_after_run_error(err).await;
                 self.clear_runtime_execution_kind();
                 Err(err)
             }

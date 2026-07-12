@@ -90,23 +90,107 @@ pub const SESSION_TRANSCRIPT_HISTORY_STATE_KEY: &str = "session_transcript_histo
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptRewriteSelection {
-    /// Replace messages in `[start, end)`.
+    /// Pre-semantic-marker range retained for source/API compatibility and
+    /// decoding prior durable records. New commits canonicalize this input to
+    /// [`TranscriptRewriteSelection::EditMessageRange`] before persistence.
     MessageRange { start: usize, end: usize },
+    /// Current typed ordinary-edit semantic.
+    EditMessageRange { range: TranscriptEditRewriteRange },
+    /// Replace a full transcript from a core-validated compaction rebuild.
+    ///
+    /// The range payload has no public constructor. New values are minted only
+    /// by the validated compaction path; deserialization exists solely for the
+    /// durable transcript graph and is revalidated against its retained bodies.
+    CompactionMessageRange { range: CompactionRewriteRange },
+}
+
+/// Opaque current-format range carried by an ordinary transcript edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TranscriptEditRewriteRange {
+    start: usize,
+    end: usize,
+}
+
+/// Opaque range carried by the typed compaction rewrite semantic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CompactionRewriteRange {
+    start: usize,
+    end: usize,
+}
+
+/// Canonical semantic class of a transcript rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptRewriteSemantic {
+    /// Ordinary same-session edit.
+    Edit,
+    /// Core-validated context compaction.
+    Compaction,
 }
 
 impl TranscriptRewriteSelection {
-    fn bounds(&self) -> (usize, usize) {
+    /// Return the selected half-open message range without exposing the
+    /// authority-bearing representation used to classify the rewrite.
+    pub fn bounds(&self) -> (usize, usize) {
         match self {
             Self::MessageRange { start, end } => (*start, *end),
+            Self::EditMessageRange { range } => (range.start, range.end),
+            Self::CompactionMessageRange { range } => (range.start, range.end),
+        }
+    }
+
+    pub fn semantic(&self) -> TranscriptRewriteSemantic {
+        match self {
+            Self::MessageRange { .. } | Self::EditMessageRange { .. } => {
+                TranscriptRewriteSemantic::Edit
+            }
+            Self::CompactionMessageRange { .. } => TranscriptRewriteSemantic::Compaction,
+        }
+    }
+
+    fn into_current_edit_semantic(self) -> Self {
+        match self {
+            Self::MessageRange { start, end } => Self::EditMessageRange {
+                range: TranscriptEditRewriteRange { start, end },
+            },
+            current => current,
+        }
+    }
+
+    fn is_legacy_untyped(&self) -> bool {
+        matches!(self, Self::MessageRange { .. })
+    }
+
+    fn validated_compaction(
+        start: usize,
+        end: usize,
+        _authority: &crate::agent::compact::ValidatedCompactionRewrite,
+    ) -> Self {
+        Self::CompactionMessageRange {
+            range: CompactionRewriteRange { start, end },
+        }
+    }
+
+    fn migrated_legacy_compaction(start: usize, end: usize) -> Self {
+        Self::CompactionMessageRange {
+            range: CompactionRewriteRange { start, end },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn typed_compaction_for_test(start: usize, end: usize) -> Self {
+        Self::CompactionMessageRange {
+            range: CompactionRewriteRange { start, end },
         }
     }
 }
 
 /// Audit annotation carried with a transcript rewrite commit.
 ///
-/// The free-form kind is for review, debugging, and provenance. It is not a
-/// second policy authority; rewrite admission is enforced by the typed
-/// selection, digest, parent-revision, and store-guard contracts.
+/// The free-form kind is for review, debugging, and provenance only. It never
+/// classifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that
+/// semantic through its opaque typed compaction range.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -148,7 +232,8 @@ pub enum ResumedSystemPromptReconciliation {
 
 impl std::fmt::Display for TranscriptRewriteReason {
     /// Human-facing projection consumed by revision-list reads. The typed
-    /// `{kind, note}` pair stays the owner; this rendering is derived only.
+    /// `{kind, note}` audit value is retained; this rendering is derived only
+    /// and never supplies rewrite semantic authority.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.note {
             Some(note) => write!(f, "{}: {note}", self.kind),
@@ -226,6 +311,7 @@ impl<'de> Deserialize<'de> for TranscriptRewriteRecord {
         let mut commits = vec![wire.commit];
         heal_legacy_revision_strings(&mut revisions, &mut commits, None)
             .map_err(serde::de::Error::custom)?;
+        heal_legacy_compaction_rewrite_semantics(&mut commits, &revisions);
         let mut revisions = revisions.into_iter();
         let parent_body = revisions
             .next()
@@ -314,6 +400,7 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
             heal_legacy_revision_strings(revisions, commits, Some(head))
                 .map_err(serde::de::Error::custom)?;
         }
+        heal_legacy_compaction_rewrite_semantics(&mut state.commits, &state.revisions);
         Ok(state)
     }
 }
@@ -418,6 +505,59 @@ fn heal_legacy_commit_span_digests(
         commit.replacement_digest = transcript_messages_digest(replacement_span)?;
     }
     Ok(())
+}
+
+/// Upgrade pre-semantic-field compaction records from retained typed transcript
+/// evidence, never from the free-form audit reason.
+///
+/// Old compaction commits used the generic `message_range` selection, but their
+/// revision body already carries the runtime-minted `CompactionSummary` role.
+/// A full-transcript, shrinking rewrite with exactly one such summary is the
+/// complete legacy witness. Other edits remain ordinary edits even when their
+/// display reason happens to say "compaction".
+fn heal_legacy_compaction_rewrite_semantics(
+    commits: &mut [TranscriptRewriteCommit],
+    revisions: &[TranscriptRevisionBody],
+) {
+    for commit in commits {
+        if !commit.selection.is_legacy_untyped() {
+            continue;
+        }
+        let (start, end) = commit.selection.bounds();
+        if start != 0
+            || end != commit.messages_before
+            || commit.messages_after >= commit.messages_before
+        {
+            continue;
+        }
+        let Some(parent) = revisions
+            .iter()
+            .find(|body| body.revision == commit.parent_revision)
+        else {
+            continue;
+        };
+        let Some(revision) = revisions
+            .iter()
+            .find(|body| body.revision == commit.revision)
+        else {
+            continue;
+        };
+        if parent.messages.len() != commit.messages_before
+            || revision.messages.len() != commit.messages_after
+        {
+            continue;
+        }
+        let summary_count = revision
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
+            })
+            .count();
+        if summary_count == 1 {
+            commit.selection = TranscriptRewriteSelection::migrated_legacy_compaction(start, end);
+        }
+    }
 }
 
 impl TranscriptHistoryState {
@@ -799,6 +939,24 @@ fn validate_transcript_rewrite_record(
             end: replacement_end,
             message_count: revision_body.messages.len(),
         });
+    }
+    if commit.selection.semantic() == TranscriptRewriteSemantic::Compaction {
+        let summary_count = revision_body.messages[start..replacement_end]
+            .iter()
+            .filter(|message| {
+                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
+            })
+            .count();
+        if start != 0
+            || end != commit.messages_before
+            || commit.messages_after >= commit.messages_before
+            || summary_count != 1
+        {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "typed compaction rewrite must shrink the full transcript and carry exactly one CompactionSummary"
+                    .to_string(),
+            ));
+        }
     }
     let parent_prefix_digest = transcript_messages_digest(&parent_body.messages[..start])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
@@ -1745,6 +1903,20 @@ pub struct SessionToolVisibilityState {
     pub requested_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub filter_witnesses: BTreeMap<ToolName, ToolVisibilityWitness>,
+}
+
+impl SessionToolVisibilityState {
+    /// Deterministic projection of the generated CallingLlm visibility
+    /// boundary. This is a comparison witness only: semantic promotion still
+    /// belongs to the generated visibility owner.
+    #[cfg(test)]
+    pub(crate) fn projected_boundary_applied(&self) -> Self {
+        let mut projected = self.clone();
+        projected.active_filter = self.staged_filter.clone();
+        projected.active_requested_deferred_names = self.staged_requested_deferred_names.clone();
+        projected.active_revision = self.staged_revision;
+        projected
+    }
 }
 
 /// Generated-authority-approved durable tool visibility projection.
@@ -3048,6 +3220,51 @@ impl Session {
         Ok(Some(commit))
     }
 
+    /// Replace the full transcript under the opaque authority minted by the
+    /// validated compaction rebuild path.
+    pub(crate) fn replace_messages_for_compaction_internal(
+        &mut self,
+        messages: Vec<Message>,
+        authority: &crate::agent::compact::ValidatedCompactionRewrite,
+    ) -> Result<Option<TranscriptRewriteCommit>, TranscriptEditError> {
+        if transcript_messages_digest(self.messages()).ok()
+            == transcript_messages_digest(&messages).ok()
+        {
+            return Ok(None);
+        }
+        if !authority
+            .authorizes(self.messages(), &messages)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?
+        {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "validated compaction witness does not authorize this exact transcript rebuild"
+                    .to_string(),
+            ));
+        }
+        let summary_count = messages
+            .iter()
+            .filter(|message| {
+                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
+            })
+            .count();
+        if messages.len() >= self.messages.len() || summary_count != 1 {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "validated compaction rewrite must shrink the transcript and carry exactly one CompactionSummary"
+                    .to_string(),
+            ));
+        }
+        let selection =
+            TranscriptRewriteSelection::validated_compaction(0, self.messages.len(), authority);
+        let commit = self.commit_transcript_rewrite_authorized(
+            selection,
+            messages,
+            TranscriptRewriteReason::new("compaction"),
+            Some("meerkat-core".to_string()),
+            None,
+        )?;
+        Ok(Some(commit))
+    }
+
     /// Retain messages for core-owned synthetic-notice projection cleanup.
     pub(crate) fn retain_messages_internal<F>(
         &mut self,
@@ -4208,6 +4425,140 @@ impl Session {
             .transpose()
     }
 
+    /// Load exact compaction projection intents carried to the runtime's
+    /// atomic-apply outbox by this session snapshot.
+    pub fn compaction_projection_intents(
+        &self,
+    ) -> Result<Vec<crate::memory::CompactionProjectionIntent>, serde_json::Error> {
+        self.metadata
+            .get(crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY)
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    /// Load persisted compaction intents only after proving that every
+    /// already-carried projection ID is backed by this session's validated
+    /// transcript graph.
+    ///
+    /// This is deliberately a validation boundary, not an ID constructor:
+    /// durable typed rewrite tags and legacy records can confirm an existing
+    /// identity during recovery but cannot mint a new identity.
+    pub fn validated_compaction_projection_intents(
+        &self,
+    ) -> Result<Vec<crate::memory::CompactionProjectionIntent>, serde_json::Error> {
+        self.validate_transcript_history_state()
+            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?;
+        let intents = self.compaction_projection_intents()?;
+        let history = self.transcript_history_state()?;
+        let commits = history
+            .as_ref()
+            .map(|history| history.commits.as_slice())
+            .unwrap_or_default();
+        let mut unique = std::collections::HashSet::new();
+        for intent in &intents {
+            if intent.projection.session_id() != self.id() {
+                return Err(<serde_json::Error as serde::ser::Error>::custom(
+                    "compaction projection outbox intent has a foreign session id",
+                ));
+            }
+            if !unique.insert(intent.projection.clone()) {
+                return Err(<serde_json::Error as serde::ser::Error>::custom(
+                    "compaction projection outbox contains a duplicate rewrite identity",
+                ));
+            }
+            let backed = commits.iter().any(|commit| {
+                intent
+                    .projection
+                    .matches_transcript_rewrite(self.id(), commit)
+            });
+            if !backed {
+                return Err(<serde_json::Error as serde::ser::Error>::custom(format!(
+                    "compaction projection outbox intent {} has no matching TranscriptRewriteCommit",
+                    intent.projection.revision()
+                )));
+            }
+        }
+        Ok(intents)
+    }
+
+    /// Record one invisible staged-memory intent only after its exact
+    /// TranscriptRewriteCommit is present in the session graph.
+    pub fn add_compaction_projection_intent(
+        &mut self,
+        intent: crate::memory::CompactionProjectionIntent,
+    ) -> Result<(), serde_json::Error> {
+        if intent.projection.session_id() != self.id() {
+            return Err(<serde_json::Error as serde::ser::Error>::custom(
+                "compaction projection intent session does not match snapshot session",
+            ));
+        }
+        self.validate_transcript_history_state()
+            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?;
+        let history = self.transcript_history_state()?.ok_or_else(|| {
+            <serde_json::Error as serde::ser::Error>::custom(
+                "compaction projection intent requires transcript history state",
+            )
+        })?;
+        let owns_commit = history.commits.iter().any(|commit| {
+            commit.parent_revision == intent.projection.parent_revision()
+                && commit.revision == intent.projection.revision()
+                && intent
+                    .projection
+                    .matches_transcript_rewrite(self.id(), commit)
+        });
+        if !owns_commit {
+            return Err(<serde_json::Error as serde::ser::Error>::custom(
+                "compaction projection intent is not backed by the session transcript graph",
+            ));
+        }
+        let mut intents = self.validated_compaction_projection_intents()?;
+        if let Some(existing) = intents
+            .iter()
+            .find(|existing| existing.projection == intent.projection)
+        {
+            if existing == &intent {
+                return Ok(());
+            }
+            return Err(<serde_json::Error as serde::ser::Error>::custom(
+                "compaction projection intent conflicts with an existing rewrite identity",
+            ));
+        }
+        intents.push(intent);
+        self.set_metadata_unchecked(
+            crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY,
+            serde_json::to_value(intents)?,
+        );
+        Ok(())
+    }
+
+    /// Remove an intent after the runtime outbox has finalized its staged
+    /// memory batch. Idempotent for repeated recovery finalization.
+    pub fn complete_compaction_projection_intent(
+        &mut self,
+        projection: &crate::memory::CompactionProjectionId,
+    ) -> Result<Option<crate::memory::CompactionProjectionIntent>, serde_json::Error> {
+        let mut intents = self.compaction_projection_intents()?;
+        let Some(position) = intents
+            .iter()
+            .position(|intent| &intent.projection == projection)
+        else {
+            return Ok(None);
+        };
+        let completed = intents.remove(position);
+        if intents.is_empty() {
+            self.remove_metadata_unchecked(
+                crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY,
+            );
+        } else {
+            self.set_metadata_unchecked(
+                crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY,
+                serde_json::to_value(intents)?,
+            );
+        }
+        Ok(Some(completed))
+    }
+
     /// Validate the retained transcript revision graph, when present.
     pub fn validate_transcript_history_state(&self) -> Result<(), TranscriptEditError> {
         let Some(state) = self
@@ -4335,6 +4686,29 @@ impl Session {
 
     /// Commit a same-session transcript rewrite and advance the transcript head.
     pub fn commit_transcript_rewrite(
+        &mut self,
+        selection: TranscriptRewriteSelection,
+        replacement: Vec<Message>,
+        reason: TranscriptRewriteReason,
+        actor: Option<String>,
+        expected_parent_revision: Option<String>,
+    ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
+        let selection = selection.into_current_edit_semantic();
+        if selection.semantic() == TranscriptRewriteSemantic::Compaction {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "typed compaction rewrites require a core-validated compaction witness".to_string(),
+            ));
+        }
+        self.commit_transcript_rewrite_authorized(
+            selection,
+            replacement,
+            reason,
+            actor,
+            expected_parent_revision,
+        )
+    }
+
+    fn commit_transcript_rewrite_authorized(
         &mut self,
         selection: TranscriptRewriteSelection,
         replacement: Vec<Message>,
@@ -5283,6 +5657,108 @@ mod tests {
             transcript_messages_digest(&stamped).expect("digest"),
             transcript_messages_digest(&content_changed).expect("digest"),
             "content changes must fork the transcript revision"
+        );
+    }
+
+    #[test]
+    fn public_generic_rewrite_api_rejects_typed_compaction_semantic() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("old context")));
+        let error = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::typed_compaction_for_test(0, 1),
+                vec![Message::User(UserMessage::compaction_summary("summary"))],
+                TranscriptRewriteReason::new("anything"),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TranscriptEditError::InvalidTranscriptShape(_)
+        ));
+        assert_eq!(session.messages().len(), 1);
+    }
+
+    #[test]
+    fn compaction_witness_authorizes_only_the_exact_validated_rebuild() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("old context one")));
+        session.push(Message::User(UserMessage::text("old context two")));
+        let validated = vec![Message::User(UserMessage::compaction_summary(
+            "validated summary",
+        ))];
+        let authority = crate::agent::compact::ValidatedCompactionRewrite::for_test(
+            session.messages(),
+            &validated,
+        )
+        .unwrap();
+        let error = session
+            .replace_messages_for_compaction_internal(
+                vec![Message::User(UserMessage::compaction_summary(
+                    "substituted summary",
+                ))],
+                &authority,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TranscriptEditError::InvalidTranscriptShape(_)
+        ));
+        assert_eq!(session.messages().len(), 2);
+    }
+
+    #[test]
+    fn semantic_marker_prevents_new_generic_compaction_forgery_and_heals_prior_data() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("old context one")));
+        session.push(Message::User(UserMessage::text("old context two")));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![Message::User(UserMessage::compaction_summary("summary"))],
+                TranscriptRewriteReason::new("compaction"),
+                None,
+                None,
+            )
+            .unwrap();
+        let session: Session =
+            serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        let history = session.transcript_history_state().unwrap().unwrap();
+        assert_eq!(
+            history.commits[0].selection.semantic(),
+            TranscriptRewriteSemantic::Edit,
+            "new generic rewrites retain an explicit typed edit marker after roundtrip"
+        );
+        assert_eq!(history.commits[0].reason.kind, "compaction");
+
+        let mut legacy = history;
+        legacy.commits[0].selection = TranscriptRewriteSelection::MessageRange { start: 0, end: 2 };
+        let legacy: TranscriptHistoryState =
+            serde_json::from_value(serde_json::to_value(legacy).unwrap()).unwrap();
+        assert_eq!(
+            legacy.commits[0].selection.semantic(),
+            TranscriptRewriteSemantic::Compaction,
+            "marker-absent prior data derives compaction from typed transcript evidence"
+        );
+
+        let mut ordinary = Session::new();
+        ordinary.push(Message::User(UserMessage::text("ordinary old one")));
+        ordinary.push(Message::User(UserMessage::text("ordinary old two")));
+        ordinary
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![Message::User(UserMessage::text("ordinary replacement"))],
+                TranscriptRewriteReason::new("compaction"),
+                None,
+                None,
+            )
+            .unwrap();
+        let history = ordinary.transcript_history_state().unwrap().unwrap();
+        assert_eq!(
+            history.commits[0].selection.semantic(),
+            TranscriptRewriteSemantic::Edit,
+            "free-form reason must not upgrade an ordinary edit"
         );
     }
 
@@ -8035,6 +8511,10 @@ mod tests {
             role: RealtimeTranscriptRole::User,
             response_id: None,
         });
+        session.metadata.insert(
+            crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY.to_string(),
+            serde_json::json!([{"sealed_projection": "must-not-fork"}]),
+        );
         assert!(
             session
                 .metadata()
@@ -8082,6 +8562,12 @@ mod tests {
                     .metadata()
                     .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
                 "forked sessions must not raw-copy realtime transcript authority state"
+            );
+            assert!(
+                !forked
+                    .metadata()
+                    .contains_key(crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY),
+                "forked sessions must not raw-copy compaction outbox authority"
             );
         }
     }
@@ -8249,6 +8735,34 @@ mod tests {
                 .try_set_metadata(SESSION_BUILD_STATE_KEY, serde_json::json!({}))
                 .is_err()
         );
+        let compaction_intents_key = crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY;
+        let sealed_compaction_intents =
+            serde_json::json!([{"sealed_projection": "typed-owner-only"}]);
+        session.metadata.insert(
+            compaction_intents_key.to_string(),
+            sealed_compaction_intents.clone(),
+        );
+        assert!(
+            session
+                .try_set_metadata(compaction_intents_key, serde_json::json!([]))
+                .is_err(),
+            "raw metadata must not overwrite compaction outbox authority"
+        );
+        session.remove_metadata(compaction_intents_key);
+        assert_eq!(
+            session.metadata().get(compaction_intents_key),
+            Some(&sealed_compaction_intents),
+            "raw metadata removal must not erase compaction outbox authority"
+        );
+        let mut absent = Session::new();
+        assert!(
+            !absent.backfill_metadata_if_absent(
+                compaction_intents_key,
+                serde_json::json!([{"forged_projection": true}])
+            ),
+            "compatibility backfill must not fabricate compaction outbox authority"
+        );
+        assert!(!absent.metadata().contains_key(compaction_intents_key));
         session
             .set_session_metadata(SessionMetadata {
                 schema_version: SESSION_METADATA_SCHEMA_VERSION,

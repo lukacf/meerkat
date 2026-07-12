@@ -1220,7 +1220,18 @@ impl MethodRouter {
             .await
             .map_err(|error| RpcResponse::from_error(None, error))?;
         if archived && !self.runtime.pending_session_exists(session_id).await {
-            self.runtime_adapter.unregister_session(session_id).await;
+            self.runtime_adapter
+                .unregister_session(session_id)
+                .await
+                .map_err(|unregister_error| {
+                    RpcResponse::error(
+                        None,
+                        error::INTERNAL_ERROR,
+                        format!(
+                            "failed to unregister archived runtime session {session_id}: {unregister_error}"
+                        ),
+                    )
+                })?;
             return Err(RpcResponse::error(
                 None,
                 error::SESSION_NOT_FOUND,
@@ -2736,7 +2747,15 @@ impl MethodRouter {
                     {
                         return mob_destroy_cleanup_error_response(id, error);
                     }
-                    self.runtime_adapter.unregister_session(&session_id).await;
+                    if let Err(error) = self.runtime_adapter.unregister_session(&session_id).await {
+                        return RpcResponse::error(
+                            id,
+                            error::INTERNAL_ERROR,
+                            format!(
+                                "session archived but runtime unregister failed for {session_id}: {error}"
+                            ),
+                        );
+                    }
                     RpcResponse::success(id, json!({"archived": true}))
                 }
                 Err(rpc_err) => {
@@ -8797,7 +8816,8 @@ mod tests {
         router
             .runtime_adapter()
             .unregister_session(&target_session_id)
-            .await;
+            .await
+            .expect("target session should unregister cleanly");
         assert!(
             !router
                 .runtime_adapter()

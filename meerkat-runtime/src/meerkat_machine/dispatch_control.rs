@@ -586,6 +586,15 @@ impl MeerkatMachine {
                     Some(ref g) => Some(g.lock().await),
                     None => None,
                 };
+                let mutation_blocked = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .get(&session_id)
+                        .and_then(|entry| entry.dsl_mutation_blocked_by_unregister(&session_id))
+                };
+                if let Some(error) = mutation_blocked {
+                    return Err(RuntimeControlPlaneError::Internal(error.to_string()));
+                }
 
                 let destroy_input = crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),

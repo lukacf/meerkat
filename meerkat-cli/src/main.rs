@@ -8253,6 +8253,33 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         )
     }
 
+    async fn reconcile_committed_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::Internal(
+                    error.to_string(),
+                )
+            })
+    }
+
+    async fn abort_uncommitted_compaction_projections(
+        &mut self,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .abort_uncommitted_compaction_projections(&self.session_id)
+            .await
+            .map_err(|error| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::Internal(
+                    error.to_string(),
+                )
+            })
+    }
+
     async fn cancel_after_boundary(
         &mut self,
         _reason: String,
@@ -8294,11 +8321,17 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         // Discard live session state via concrete type (not on SessionService trait).
         #[cfg(feature = "session-store")]
         if let Some(ref persistent) = self.persistent_service {
-            let _ = persistent.discard_live_session(&self.session_id).await;
+            match persistent.discard_live_session(&self.session_id).await {
+                Ok(()) | Err(meerkat_core::SessionError::NotFound { .. }) => {}
+                Err(error) => {
+                    return Err(
+                        meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                            error.to_string(),
+                        ),
+                    );
+                }
+            }
         }
-        self.runtime_adapter
-            .unregister_session(&self.session_id)
-            .await;
         Ok(())
     }
 }
@@ -8384,6 +8417,25 @@ impl SessionService for RunMobSessionService {
             ),
         }
         out
+    }
+
+    async fn reconcile_runtime_compaction_projections(
+        &self,
+        id: &SessionId,
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    async fn abort_uncommitted_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .abort_uncommitted_compaction_projections(id)
+            .await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
@@ -9572,7 +9624,7 @@ async fn run_agent(
                 // Unregister the runtime-backed executor before awaiting stream tasks.
                 // The adapter owns the boxed executor, and the executor now holds the
                 // caller stream sender for runtime-backed turns.
-                runtime_adapter.unregister_session(&session_id).await;
+                runtime_adapter.unregister_session(&session_id).await?;
                 service.shutdown().await;
                 shutdown_mcp(&mcp_adapter).await;
                 Ok(())
@@ -10234,7 +10286,7 @@ async fn resume_session_with_llm_override(
                 log_stage("service.create_session(done)");
 
                 // Shutdown the session service and MCP connections gracefully.
-                resume_adapter.unregister_session(&session_id).await;
+                resume_adapter.unregister_session(&session_id).await?;
                 log_stage("service.shutdown");
                 service.shutdown().await;
                 log_stage("shutdown_mcp");
@@ -11146,6 +11198,25 @@ impl SessionService for MobCliSessionService {
         req: meerkat_core::service::StartTurnRequest,
     ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
         self.inner.start_turn(id, req).await
+    }
+
+    async fn reconcile_runtime_compaction_projections(
+        &self,
+        id: &SessionId,
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    async fn abort_uncommitted_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .abort_uncommitted_compaction_projections(id)
+            .await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
@@ -16330,7 +16401,7 @@ default_model = "gemma"
         Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
             pipeline.shutdown_after(async {
-                runtime_adapter.unregister_session(&session_id).await;
+                runtime_adapter.unregister_session(&session_id).await?;
                 Ok(())
             }),
         ))
@@ -16400,7 +16471,7 @@ default_model = "gemma"
                 pipeline,
                 Err::<(), _>(anyhow::anyhow!("turn abandoned: synthetic failure")),
                 async {
-                    runtime_adapter.unregister_session(&session_id).await;
+                    runtime_adapter.unregister_session(&session_id).await?;
                     Ok(())
                 },
             ),
@@ -21428,7 +21499,8 @@ capabilities = ["rpc"]
             .expect("runtime state should persist");
         runtime_adapter
             .unregister_session(&created.session_id)
-            .await;
+            .await
+            .expect("session should unregister cleanly");
 
         assert_eq!(
             service

@@ -953,6 +953,23 @@ async fn authoritative_dsl_apply_preserves_committed_state_when_effect_dispatch_
 }
 
 #[tokio::test]
+async fn unregister_teardown_emits_no_routed_seam_signal() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    install_rejecting_meerkat_signal_dispatcher(&machine);
+
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister teardown must not invoke the rejecting seam dispatcher");
+    assert!(!machine.contains_session(&session_id).await);
+}
+
+#[tokio::test]
 async fn control_plane_runtime_id_is_not_raw_session_uuid_alias() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
@@ -1389,7 +1406,7 @@ async fn machine_terminal_failure_without_generated_state_fails_closed_through_r
         .expect("input should be accepted");
     assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
 
-    let completion = tokio::time::timeout(
+    let completion_error = tokio::time::timeout(
         Duration::from_secs(1),
         completion_handle
             .expect("accepted input should register a completion waiter")
@@ -1397,13 +1414,16 @@ async fn machine_terminal_failure_without_generated_state_fails_closed_through_r
     )
     .await
     .expect("completion waiter should resolve")
-    .expect("runtime stop authority should resolve the waiter");
-    match completion {
-        CompletionOutcome::RuntimeTerminated { reason, .. } => {
-            assert_eq!(reason, "runtime stopped");
-        }
-        other => panic!("expected runtime-terminated completion, got {other:?}"),
-    }
+    .expect_err("missing generated terminal authority must fail the waiter closed");
+    assert!(
+        matches!(
+            completion_error,
+            crate::completion::CompletionWaitError::AuthorityUnavailable(ref reason)
+                if reason.contains("runtime failure snapshot failed")
+                    && reason.contains("guard rejected transition")
+        ),
+        "unexpected fail-closed completion error: {completion_error}"
+    );
 
     let (
         terminal_outcome,
@@ -1478,7 +1498,7 @@ async fn machine_terminal_failure_without_generated_outcome_does_not_mint_termin
         .expect("input should be accepted");
     assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
 
-    let completion = tokio::time::timeout(
+    let completion_error = tokio::time::timeout(
         Duration::from_secs(1),
         completion_handle
             .expect("accepted input should register a completion waiter")
@@ -1486,11 +1506,16 @@ async fn machine_terminal_failure_without_generated_outcome_does_not_mint_termin
     )
     .await
     .expect("completion waiter should resolve")
-    .expect("runtime stop authority should resolve the waiter");
-    assert!(matches!(
-        completion,
-        CompletionOutcome::RuntimeTerminated { reason, .. } if reason == "runtime stopped"
-    ));
+    .expect_err("missing generated terminal outcome must fail the waiter closed");
+    assert!(
+        matches!(
+            completion_error,
+            crate::completion::CompletionWaitError::AuthorityUnavailable(ref reason)
+                if reason.contains("runtime failure snapshot failed")
+                    && reason.contains("guard rejected transition")
+        ),
+        "unexpected fail-closed completion error: {completion_error}"
+    );
 
     let (terminal_outcome, terminal_cause_kind) = {
         let sessions = adapter.sessions.read().await;
@@ -2526,7 +2551,10 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
     );
     assert!(handle_present(&adapter, &session_id).await);
 
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("session should unregister cleanly");
 
     // Wave-c C-H2: the drain slot is now owned by RuntimeSessionEntry,
     // so "slot removed" is structurally equivalent to "session removed".
@@ -2581,7 +2609,10 @@ async fn unregister_session_quiesces_supervisor_rotation_carrier_before_removal(
             .await
     );
 
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("session should unregister cleanly");
 
     assert!(
         dropped.load(Ordering::SeqCst),
@@ -2674,7 +2705,10 @@ async fn peer_ingress_runtime_refresh_quiesces_carrier_and_fences_stale_runtime(
         "replacement runtime must own both generated and mechanical authority"
     );
 
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("session should unregister cleanly");
 }
 
 /// Regression (0.7.2): `unregister_session` must BOUND its comms-drain await.
@@ -2738,7 +2772,8 @@ async fn unregister_session_bounds_an_unquiescing_comms_drain() {
         adapter.unregister_session(&session_id),
     )
     .await
-    .expect("unregister_session must not hang on an unquiescing comms drain");
+    .expect("unregister_session must not hang on an unquiescing comms drain")
+    .expect("unregister_session should complete after bounding the drain");
 
     // Release the modelled-stuck worker so the test does not leak it.
     let _ = release_tx.send(());
@@ -2767,7 +2802,10 @@ async fn unregister_session_deletes_persisted_ops_lifecycle_epoch() {
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister should delete the persisted ops lifecycle epoch");
 
     assert!(
         crate::store::RuntimeStore::load_ops_lifecycle(store.as_ref(), &runtime_id)
@@ -2819,7 +2857,16 @@ async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    adapter.unregister_session(&session_id).await;
+    let first_error = adapter
+        .unregister_session(&session_id)
+        .await
+        .expect_err("the injected delete failure must be returned to the caller");
+    assert!(
+        first_error
+            .to_string()
+            .contains("synthetic delete_ops_lifecycle failure"),
+        "the surfaced unregister error must retain the store failure: {first_error}"
+    );
 
     assert!(
         adapter.contains_session(&session_id).await,
@@ -2831,6 +2878,13 @@ async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot
             .expect("store should load")
             .is_some(),
         "failed DeleteSnapshot teardown must not hide the stale durable snapshot"
+    );
+    assert_eq!(
+        crate::store::load_runtime_state(inner.as_ref(), &runtime_id)
+            .await
+            .expect("store should load lifecycle"),
+        Some(RuntimeState::Idle),
+        "an atomic finalization failure must not publish terminal lifecycle beside stale ops"
     );
     let post_failure_accept = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
         &adapter,
@@ -2869,7 +2923,10 @@ async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot
         ),
     }
 
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("retry should succeed after the one-shot delete failure");
     assert!(
         !adapter.contains_session(&session_id).await,
         "second unregister should remove the entry after delete succeeds"
@@ -2884,7 +2941,559 @@ async fn unregister_session_delete_failure_retains_live_entry_and_stale_snapshot
 }
 
 #[tokio::test]
-async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_drain_finishes() {
+async fn unregister_session_unsupported_atomic_finalization_fails_closed() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(
+        RuntimeCommitAtomicityStore::unsupported_unregister_finalization(Arc::clone(&inner)),
+    );
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+        .capture_persistence_snapshot(
+            meerkat_core::RuntimeEpochId::new(),
+            &meerkat_core::EpochCursorState::new(),
+        )
+        .unwrap();
+    let stale_snapshot_bytes = serde_json::to_vec(&stale_snapshot).unwrap();
+
+    crate::store::RuntimeStore::persist_ops_lifecycle(inner.as_ref(), &runtime_id, &stale_snapshot)
+        .await
+        .unwrap();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let lifecycle_before = crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+        .await
+        .unwrap();
+
+    let error = adapter
+        .unregister_session(&session_id)
+        .await
+        .expect_err("a store without atomic unregister support must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported store operation: commit_unregister_finalization"),
+        "the required atomic store contract must surface directly: {error}"
+    );
+    assert!(adapter.contains_session(&session_id).await);
+    assert_eq!(
+        store.delete_ops_lifecycle_calls(),
+        0,
+        "unregister must never fall back to the legacy independent delete hook"
+    );
+    assert_eq!(
+        crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        lifecycle_before,
+        "unsupported atomic finalization must leave lifecycle authority unchanged"
+    );
+    let persisted_ops = crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
+        .await
+        .unwrap()
+        .expect("unsupported atomic finalization must retain the old ops epoch");
+    assert_eq!(
+        serde_json::to_vec(&persisted_ops).unwrap(),
+        stale_snapshot_bytes,
+        "unsupported atomic finalization must leave exact ops bytes unchanged"
+    );
+}
+
+#[tokio::test]
+async fn unregister_session_unknown_commit_outcome_retries_without_durable_rollback() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::commit_then_report_unknown(
+        Arc::clone(&inner),
+    ));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    let stale_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+        .capture_persistence_snapshot(
+            meerkat_core::RuntimeEpochId::new(),
+            &meerkat_core::EpochCursorState::new(),
+        )
+        .unwrap();
+    crate::store::RuntimeStore::persist_ops_lifecycle(inner.as_ref(), &runtime_id, &stale_snapshot)
+        .await
+        .unwrap();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let finalizations_before = store.unregister_finalization_calls();
+
+    let error = adapter
+        .unregister_session(&session_id)
+        .await
+        .expect_err("synthetic lost acknowledgement must retain a retry anchor");
+    assert!(matches!(
+        error,
+        RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
+    ));
+    assert!(adapter.contains_session(&session_id).await);
+    let terminal_retry_anchor = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("ambiguous finalization must retain terminal generated authority");
+    assert_eq!(
+        terminal_retry_anchor.registration_phase,
+        mm_dsl::RegistrationPhase::Queuing
+    );
+    assert!(
+        terminal_retry_anchor.session_id.is_none(),
+        "ambiguous finalization must not restore the draining projection"
+    );
+    assert!(
+        adapter
+            .sessions
+            .read()
+            .await
+            .get(&session_id)
+            .is_some_and(|entry| entry.pending_unregister_finalization.is_some()),
+        "ambiguous finalization must retain its exact in-memory retry witness"
+    );
+    assert_eq!(
+        store.unregister_finalization_calls(),
+        finalizations_before + 1,
+        "the initial saga must issue exactly one atomic unregister finalization"
+    );
+    assert_eq!(
+        store
+            .successful_unregister_progress()
+            .iter()
+            .filter(|progress| **progress == Some((false, false, false)))
+            .count(),
+        1,
+        "an unknown atomic outcome must not emit a duplicate completed-drain rollback write"
+    );
+    assert_eq!(store.delete_ops_lifecycle_calls(), 0);
+    assert!(
+        crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the synthetic committed side of the ambiguous outcome retired the old ops epoch"
+    );
+    let lifecycle_after_unknown = crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+        .await
+        .unwrap();
+    let progress_writes_after_unknown = store.successful_unregister_progress().len();
+    let finalizations_after_unknown = store.unregister_finalization_calls();
+    let all_commit_calls_after_unknown = store.commit_machine_lifecycle_calls();
+
+    let register_error = adapter
+        .register_session(session_id.clone())
+        .await
+        .expect_err("registration must not revive an ambiguous terminal retry anchor");
+    assert!(register_error.to_string().contains("outcome is unknown"));
+    let bindings_error = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect_err("binding preparation must not revive an ambiguous terminal retry anchor");
+    assert!(bindings_error.to_string().contains("outcome is unknown"));
+    let attach_error = adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await
+        .expect_err("executor attachment must not revive an ambiguous terminal retry anchor");
+    assert!(matches!(
+        attach_error,
+        RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
+    ));
+    let retire_error =
+        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(adapter.as_ref(), &session_id)
+            .await
+            .expect_err("lifecycle controls must freeze behind an ambiguous finalization");
+    assert!(retire_error.to_string().contains("outcome is unknown"));
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("fenced operations must retain generated terminal authority"),
+        terminal_retry_anchor,
+        "fenced operations must not mutate the exact terminal retry anchor"
+    );
+    assert_eq!(
+        crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        lifecycle_after_unknown,
+        "fenced operations must not overwrite the possibly committed lifecycle snapshot"
+    );
+    assert_eq!(
+        store.commit_machine_lifecycle_calls(),
+        all_commit_calls_after_unknown,
+        "fenced operations must issue no ordinary or atomic lifecycle writes"
+    );
+    assert_eq!(
+        store.successful_unregister_progress().len(),
+        progress_writes_after_unknown,
+        "fenced operations must not append unregister progress"
+    );
+
+    store
+        .fail_unregister_finalization
+        .store(true, Ordering::SeqCst);
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect_err("a failed idempotent finalization retry must retain its witness");
+    assert!(adapter.contains_session(&session_id).await);
+    assert!(
+        adapter
+            .sessions
+            .read()
+            .await
+            .get(&session_id)
+            .is_some_and(|entry| entry.pending_unregister_finalization.is_some()),
+        "every failed exact retry must retain the pending finalization witness"
+    );
+    let anchor_after_failed_retry = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("failed retry must retain terminal generated authority");
+    assert_eq!(
+        anchor_after_failed_retry.registration_phase,
+        mm_dsl::RegistrationPhase::Queuing
+    );
+    assert!(anchor_after_failed_retry.session_id.is_none());
+    assert_eq!(
+        store.unregister_finalization_calls(),
+        finalizations_after_unknown + 1,
+        "retry must issue only the exact atomic unregister finalization"
+    );
+    assert_eq!(
+        store.successful_unregister_progress().len(),
+        progress_writes_after_unknown,
+        "retry must never emit an ordinary lifecycle progress write"
+    );
+
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("idempotent retry must converge after the lost acknowledgement");
+    assert!(!adapter.contains_session(&session_id).await);
+    assert_eq!(
+        crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        lifecycle_after_unknown,
+        "retry must preserve the exact committed final lifecycle"
+    );
+    assert_eq!(
+        store.unregister_finalization_calls(),
+        finalizations_after_unknown + 2,
+        "converging retry must issue only one more atomic finalization"
+    );
+    assert_eq!(
+        store.successful_unregister_progress().len(),
+        progress_writes_after_unknown,
+        "converging retry must not overwrite terminal truth through the ordinary lifecycle path"
+    );
+    assert!(
+        crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn unregister_session_finalization_persist_failure_restores_retry_anchor() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+        &inner,
+    )));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let finalizations_before_unregister = store.unregister_finalization_calls();
+    store
+        .fail_unregister_finalization
+        .store(true, Ordering::SeqCst);
+
+    let first_error = adapter
+        .unregister_session(&session_id)
+        .await
+        .expect_err("the injected finalization persist failure must be returned to the caller");
+    assert!(
+        first_error
+            .to_string()
+            .contains("synthetic unregister finalization failure"),
+        "the surfaced unregister error must retain the finalization persist failure: {first_error}"
+    );
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "failed lifecycle persistence must retain the live entry for retry"
+    );
+    let retry_anchor = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("failed unregister must retain generated retry authority");
+    assert_eq!(
+        retry_anchor.registration_phase,
+        mm_dsl::RegistrationPhase::Draining,
+        "rollback must restore the completed-drain state accepted by final-unregister retry"
+    );
+    assert!(!retry_anchor.unregister_runtime_loop_drain_pending);
+    assert!(!retry_anchor.unregister_comms_drain_exit_pending);
+    assert!(!retry_anchor.unregister_completion_waiter_drain_pending);
+    assert!(
+        adapter
+            .sessions
+            .read()
+            .await
+            .get(&session_id)
+            .is_some_and(|entry| entry.pending_unregister_finalization.is_none()),
+        "an ordinary rolled-back finalization failure must clear the ambiguous-outcome witness"
+    );
+    assert_eq!(
+        crate::store::load_runtime_state(inner.as_ref(), &runtime_id)
+            .await
+            .expect("load rolled-back lifecycle"),
+        Some(RuntimeState::Idle),
+        "rollback persistence must restore pre-unregister lifecycle truth"
+    );
+    assert_eq!(
+        store.unregister_finalization_calls(),
+        finalizations_before_unregister + 1,
+        "the first saga must attempt exactly one atomic finalization"
+    );
+    assert_eq!(
+        store
+            .successful_unregister_progress()
+            .iter()
+            .filter(|progress| **progress == Some((false, false, false)))
+            .count(),
+        2,
+        "the failed finalization must be followed by one exact completed-drain rollback persist"
+    );
+
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("retry should succeed after the one-shot finalization persist failure");
+    assert_eq!(
+        store.unregister_finalization_calls(),
+        finalizations_before_unregister + 2,
+        "retry must issue exactly one new atomic finalization"
+    );
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "second unregister should consume the retained retry anchor"
+    );
+}
+
+#[tokio::test]
+async fn unregister_retry_repersist_live_feedback_before_advancing_teardown() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+        &inner,
+    )));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+
+    let calls_before = store.commit_machine_lifecycle_calls();
+    let progress_before = store.successful_unregister_progress().len();
+    // BeginUnregister persists on the first call. Fail the immediately
+    // following write, after RuntimeLoopStoppedForUnregister has already
+    // changed live generated authority.
+    store.fail_commit_machine_lifecycle_on_call(calls_before + 2);
+    let error = adapter
+        .unregister_session(&session_id)
+        .await
+        .expect_err("the first live-feedback progress write should fail once");
+    assert!(
+        error
+            .to_string()
+            .contains("synthetic commit_machine_lifecycle failure"),
+        "unexpected progress-persist failure: {error}"
+    );
+
+    let live = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("failed saga must retain its live Draining retry anchor");
+    assert!(!live.unregister_runtime_loop_drain_pending);
+    assert!(live.unregister_comms_drain_exit_pending);
+    assert!(live.unregister_completion_waiter_drain_pending);
+    let durable = crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+        .await
+        .expect("load durable progress")
+        .expect("BeginUnregister progress must remain durable");
+    let durable_progress = durable
+        .unregister_progress()
+        .expect("Draining lifecycle must carry typed unregister progress");
+    assert!(durable_progress.runtime_loop_drain_pending());
+    assert!(durable_progress.comms_drain_exit_pending());
+    assert!(durable_progress.completion_waiter_drain_pending());
+    let persisted_after_failure = store.successful_unregister_progress();
+    assert_eq!(
+        &persisted_after_failure[progress_before..],
+        &[Some((true, true, true))],
+        "the failed feedback write must not masquerade as durable progress"
+    );
+
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("the next owned saga should re-persist live progress then finish");
+    let progress = store.successful_unregister_progress();
+    assert_eq!(
+        progress.get(progress_before + 1),
+        Some(&Some((false, true, true))),
+        "retry must first durably publish the already-live feedback prefix"
+    );
+    assert!(!adapter.contains_session(&session_id).await);
+}
+
+#[tokio::test]
+async fn cold_recovery_resumes_typed_v3_unregister_progress() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+        &inner,
+    )));
+    let first_machine = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+    first_machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session on first process");
+
+    let calls_before = store.commit_machine_lifecycle_calls();
+    // Persist Begin + runtime-loop disposition, then fail the comms
+    // disposition write after its live generated transition. This leaves a
+    // real typed partial prefix for a fresh process to recover.
+    store.fail_commit_machine_lifecycle_on_call(calls_before + 3);
+    first_machine
+        .unregister_session(&session_id)
+        .await
+        .expect_err("partial unregister progress should fail once before process loss");
+    let durable_partial = crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+        .await
+        .expect("load partial v3 record")
+        .expect("partial lifecycle record should exist");
+    let durable_partial = durable_partial
+        .unregister_progress()
+        .expect("Draining v3 record must carry unregister progress");
+    assert!(!durable_partial.runtime_loop_drain_pending());
+    assert!(durable_partial.comms_drain_exit_pending());
+    assert!(durable_partial.completion_waiter_drain_pending());
+    drop(first_machine);
+
+    let recovered_machine = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    recovered_machine
+        .register_session(session_id.clone())
+        .await
+        .expect("fresh process should recover the partial Draining epoch");
+    let recovered = recovered_machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("recovered generated unregister authority");
+    assert_eq!(
+        recovered.registration_phase,
+        mm_dsl::RegistrationPhase::Draining
+    );
+    assert!(!recovered.unregister_runtime_loop_drain_pending);
+    assert!(recovered.unregister_comms_drain_exit_pending);
+    assert!(recovered.unregister_completion_waiter_drain_pending);
+
+    recovered_machine
+        .unregister_session(&session_id)
+        .await
+        .expect("cold-recovered saga should close only its remaining obligations");
+    assert!(!recovered_machine.contains_session(&session_id).await);
+    let durable_final = crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+        .await
+        .expect("load final lifecycle")
+        .expect("final lifecycle record should remain queryable");
+    assert_eq!(durable_final.unregister_progress(), None);
+    assert_eq!(durable_final.binding().agent_runtime_id(), None);
+}
+
+#[tokio::test]
+async fn unregister_session_preserves_primary_when_rollback_persist_also_fails() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(inner));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    store
+        .fail_all_commit_machine_lifecycle
+        .store(true, Ordering::SeqCst);
+
+    let error = adapter
+        .unregister_session(&session_id)
+        .await
+        .expect_err("terminal and rollback lifecycle persists should both fail");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("unregister lifecycle+ops finalization failed"),
+        "combined error must retain the primary terminal-persist failure: {rendered}"
+    );
+    assert!(
+        rendered.contains("additionally failed to persist unregister rollback"),
+        "combined error must report rollback persistence separately: {rendered}"
+    );
+    assert!(
+        rendered.contains("unregister rollback lifecycle persist failed"),
+        "combined error must retain the rollback-persist cause: {rendered}"
+    );
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "even a failed rollback persist must retain the in-memory retry anchor"
+    );
+
+    store
+        .fail_all_commit_machine_lifecycle
+        .store(false, Ordering::SeqCst);
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("retry should consume the restored in-memory anchor once persistence recovers");
+}
+
+#[tokio::test]
+async fn concurrent_unregister_callers_join_original_drain_result() {
     struct BlockingExecutor {
         apply_started: Arc<Notify>,
         allow_finish: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -2975,10 +3584,19 @@ async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_dra
     .await
     .expect("first unregister should open the drain window");
 
-    adapter.unregister_session(&session_id).await;
+    let second_unregister = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        async move { adapter.unregister_session(&session_id).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !second_unregister.is_finished(),
+        "concurrent unregister must join rather than fabricate an early result"
+    );
     assert!(
         adapter.contains_session(&session_id).await,
-        "concurrent unregister retry must not fabricate drain feedback or remove the entry"
+        "concurrent unregister must not fabricate drain feedback or remove the entry"
     );
 
     allow_finish_tx
@@ -2986,7 +3604,12 @@ async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_dra
         .expect("blocking executor should still be awaiting release");
     first_unregister
         .await
-        .expect("first unregister task should not panic");
+        .expect("first unregister task should not panic")
+        .expect("first unregister should complete cleanly");
+    second_unregister
+        .await
+        .expect("second unregister task should not panic")
+        .expect("second unregister should receive the shared clean result");
     assert!(
         !adapter.contains_session(&session_id).await,
         "original unregister should remove the entry after the real drain finishes"
@@ -3017,7 +3640,10 @@ async fn unregister_session_retains_terminal_machine_lifecycle_snapshot() {
         Some(RuntimeState::Retired)
     );
 
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("session should unregister cleanly");
 
     assert!(!adapter.contains_session(&session_id).await);
     assert_eq!(
@@ -5421,6 +6047,10 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
 
     #[async_trait::async_trait]
     impl RuntimeStore for BlockingDestroyCommitStore {
+        fn supports_compaction_projection_outbox(&self) -> bool {
+            self.inner.supports_compaction_projection_outbox()
+        }
+
         async fn commit_session_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -5474,6 +6104,26 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
             self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn load_pending_compaction_projections(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .load_pending_compaction_projections(runtime_id)
+                .await
+        }
+
+        async fn mark_compaction_projection_finalized(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            projection: &meerkat_core::CompactionProjectionId,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .mark_compaction_projection_finalized(runtime_id, projection)
+                .await
         }
 
         async fn clear_session_snapshot(
@@ -5543,6 +6193,17 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
                 self.release_destroy_commit.notified().await;
             }
             Ok(())
+        }
+
+        async fn commit_unregister_finalization(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            commit: crate::store::MachineLifecycleCommit,
+            input_states: &[crate::input_state::InputStatePersistenceRecord],
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .commit_unregister_finalization(runtime_id, commit, input_states)
+                .await
         }
 
         async fn persist_ops_lifecycle(
@@ -7465,28 +8126,159 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
     );
 }
 
-/// Ask 21c defensive class tests (meerkat-studio P0): executor cleanup that
-/// re-enters the machine (the mob executor unregisters its session in
-/// `cleanup_after_runtime_stop_terminalized`) must never run while the
-/// runtime-loop task holds the session mutation gate — that is a
-/// single-task self-deadlock that parks the loop forever, leaves the
-/// session registered forever (the producer of the ask 20/21/21b strand
-/// family), and wedges every caller that later touches the gate (bricking
-/// whole mobs). Each test drives a DIFFERENT stop entry path with a
-/// machine-re-entrant executor under a hard timeout: a hang is a fail.
-mod stop_under_gate_deadlock_class {
+/// Cancellation, retry, and ownership pins for the machine-owned stop /
+/// unregister coordinator. Production cleanup hooks own external material
+/// only; recursive unregister is tested separately as a typed self-join error.
+mod stop_teardown_coordinator_class {
     use super::*;
 
-    struct ReentrantCleanupExecutor {
+    struct GatedCleanupExecutor {
         machine: Arc<MeerkatMachine>,
         session_id: SessionId,
+        cleanup_started: Arc<Notify>,
+        release_cleanup: Arc<Notify>,
+        unregister_during_cleanup: Arc<std::sync::atomic::AtomicBool>,
+        fail_cleanup_attempts: Arc<AtomicUsize>,
+        cleanup_calls: Arc<AtomicUsize>,
+        loop_task_id: Arc<std::sync::Mutex<Option<tokio::task::Id>>>,
+        cleanup_task_id: Arc<std::sync::Mutex<Option<tokio::task::Id>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedCleanupExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            *self
+                .loop_task_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokio::task::id());
+            Ok(())
+        }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), CoreExecutorError> {
+            *self
+                .cleanup_task_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokio::task::id());
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            self.cleanup_started.notify_one();
+            self.release_cleanup.notified().await;
+            if self
+                .fail_cleanup_attempts
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err(CoreExecutorError::control_failed_runtime(
+                    "synthetic retryable required-cleanup failure",
+                ));
+            }
+            if self.unregister_during_cleanup.load(Ordering::SeqCst) {
+                self.machine
+                    .unregister_session(&self.session_id)
+                    .await
+                    .map_err(|error| {
+                        CoreExecutorError::control_failed_runtime(error.to_string())
+                    })?;
+            }
+            Ok(())
+        }
+    }
+
+    struct ExternalCleanupExecutor {
         cleanup_ran: Arc<AtomicUsize>,
         block_apply: Option<(Arc<Notify>, Arc<Notify>)>,
         fail_checkpoint: bool,
     }
 
+    struct StopFailOnceExecutor {
+        stop_calls: Arc<AtomicUsize>,
+        cleanup_calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait::async_trait]
-    impl CoreExecutor for ReentrantCleanupExecutor {
+    impl CoreExecutor for StopFailOnceExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            if self.stop_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(CoreExecutorError::control_failed_runtime(
+                    "synthetic fail-once executor stop",
+                ));
+            }
+            Ok(())
+        }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), CoreExecutorError> {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for ExternalCleanupExecutor {
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -7542,13 +8334,327 @@ mod stop_under_gate_deadlock_class {
         async fn cleanup_after_runtime_stop_terminalized(
             &mut self,
         ) -> Result<(), CoreExecutorError> {
-            // The mob executor shape: post-stop cleanup re-enters the
-            // machine, whose first await is the SAME session mutation gate
-            // the loop task must therefore not be holding.
             self.cleanup_ran.fetch_add(1, Ordering::SeqCst);
-            self.machine.unregister_session(&self.session_id).await;
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_waits_for_exact_cleanup_ack_after_loop_exit() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        let loop_task_id = Arc::new(std::sync::Mutex::new(None));
+        let cleanup_task_id = Arc::new(std::sync::Mutex::new(None));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                    loop_task_id: Arc::clone(&loop_task_id),
+                    cleanup_task_id: Arc::clone(&cleanup_task_id),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let stop_task = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                machine
+                    .stop_runtime_executor(&session_id, "wait for exact cleanup ack")
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("external cleanup should start after loop exit");
+
+        assert_ne!(
+            *loop_task_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            *cleanup_task_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            "required cleanup must run on an external teardown task, never the runtime loop"
+        );
+        assert!(
+            !stop_task.is_finished(),
+            "stop must remain pending until this request's required-cleanup ack resolves"
+        );
+
+        release_cleanup.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), stop_task)
+            .await
+            .expect("stop should resolve after cleanup release")
+            .expect("stop task should not panic")
+            .expect("stop should return cleanup success");
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("test cleanup should remove the stopped session");
+    }
+
+    #[tokio::test]
+    async fn recursive_cleanup_unregister_fails_typed_without_self_join() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let release_cleanup = Arc::new(Notify::new());
+        let recursive_unregister = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        release_cleanup.notify_one();
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::new(Notify::new()),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::clone(&recursive_unregister),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            machine.stop_runtime_executor(&session_id, "recursive cleanup contract"),
+        )
+        .await
+        .expect("recursive cleanup must fail instead of self-joining")
+        .expect_err("cleanup-owned unregister is forbidden");
+        assert!(
+            error.to_string().contains("join its own coordinator task"),
+            "self-join rejection must remain typed and visible: {error}"
+        );
+        assert!(machine.contains_session(&session_id).await);
+        recursive_unregister.store(false, Ordering::SeqCst);
+        release_cleanup.notify_one();
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("retry with external-only cleanup must complete");
+        assert!(!machine.contains_session(&session_id).await);
+    }
+
+    #[tokio::test]
+    async fn cancelled_unregister_caller_does_not_cancel_owned_cleanup() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let caller = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.unregister_session(&session_id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("owned cleanup should reach the deterministic gate");
+        caller.abort();
+        let _ = caller.await;
+        assert!(machine.contains_session(&session_id).await);
+
+        release_cleanup.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while machine.contains_session(&session_id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned unregister must finish after its caller is cancelled");
+    }
+
+    #[tokio::test]
+    async fn concurrent_stop_and_unregister_join_one_cleanup_result() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let stop = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                machine
+                    .stop_runtime_executor(&session_id, "concurrent stop")
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("stop should reach shared cleanup");
+        let unregister = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.unregister_session(&session_id).await })
+        };
+        assert!(!stop.is_finished());
+        assert!(!unregister.is_finished());
+        release_cleanup.notify_one();
+        stop.await
+            .expect("stop task should not panic")
+            .expect("stop should receive shared success");
+        unregister
+            .await
+            .expect("unregister task should not panic")
+            .expect("unregister should receive shared success");
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_stop_hook_retains_exact_executor_for_unregister_retry() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(StopFailOnceExecutor {
+                    stop_calls: Arc::clone(&stop_calls),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let error = machine
+            .stop_runtime_executor(&session_id, "fail once then retry exact stop")
+            .await
+            .expect_err("the first executor stop hook must fail visibly");
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic fail-once executor stop"),
+            "the exact hook failure must reach the stop caller: {error}"
+        );
+        let retained_loop_result = {
+            let sessions = machine.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .and_then(|entry| entry.runtime_loop_teardown.as_ref())
+                .and_then(|slot| slot.last_unregister_result())
+                .expect("loop handoff must retain the failed coordinator result")
+        };
+        assert!(
+            retained_loop_result
+                .expect_err("retained first result must remain a failure")
+                .to_string()
+                .contains("synthetic fail-once executor stop")
+        );
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            0,
+            "external cleanup must not run before canonical executor stop succeeds"
+        );
+        assert!(machine.contains_session(&session_id).await);
+        let retry_anchor = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("failed stop must retain generated unregister authority");
+        assert_eq!(
+            retry_anchor.registration_phase,
+            crate::meerkat_machine::dsl::RegistrationPhase::Draining
+        );
+
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("retry must call the retained exact executor stop hook again");
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(!machine.contains_session(&session_id).await);
+    }
+
+    #[tokio::test]
+    async fn failed_result_clears_coordinator_before_immediate_retry() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(StopFailOnceExecutor {
+                    stop_calls: Arc::clone(&stop_calls),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        machine
+            .stop_runtime_executor(&session_id, "publish failure after coordinator clear")
+            .await
+            .expect_err("first stop hook should fail");
+        let coordinator_cleared = {
+            let sessions = machine.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .is_some_and(|entry| entry.unregister_coordinator.is_none())
+        };
+        assert!(
+            coordinator_cleared,
+            "a typed failure must not wake callers while its completed coordinator is installed"
+        );
+
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("the very next explicit call must start the retained retry");
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(!machine.contains_session(&session_id).await);
     }
 
     async fn register(
@@ -7561,9 +8667,7 @@ mod stop_under_gate_deadlock_class {
         machine
             .register_session_with_executor(
                 session_id.clone(),
-                Box::new(ReentrantCleanupExecutor {
-                    machine: Arc::clone(machine),
-                    session_id: session_id.clone(),
+                Box::new(ExternalCleanupExecutor {
                     cleanup_ran: Arc::clone(cleanup_ran),
                     block_apply,
                     fail_checkpoint,
@@ -7576,7 +8680,7 @@ mod stop_under_gate_deadlock_class {
     /// Path 1: explicit stop on an idle attached loop (stop effect via the
     /// select! direct-effect arm).
     #[tokio::test]
-    async fn explicit_stop_with_reentrant_cleanup_completes() {
+    async fn explicit_stop_with_external_cleanup_completes() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let cleanup_ran = Arc::new(AtomicUsize::new(0));
@@ -7601,11 +8705,203 @@ mod stop_under_gate_deadlock_class {
         );
     }
 
+    #[tokio::test]
+    async fn persistent_external_cleanup_finishes_without_self_join_residue() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let machine = Arc::new(MeerkatMachine::persistent(
+            store as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        ));
+        let session_id = SessionId::new();
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        register(&machine, &session_id, &cleanup_ran, None, false).await;
+
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            machine.stop_runtime_executor(
+                &session_id,
+                "persistent cleanup must not await its own loop task",
+            ),
+        )
+        .await
+        .expect("external cleanup must beat the old two-second self-join timeout")
+        .expect("persistent stop cleanup should succeed");
+
+        assert_eq!(cleanup_ran.load(Ordering::SeqCst), 1);
+        assert!(
+            !machine.contains_session(&session_id).await,
+            "successful persistent cleanup must not leave a Draining retry residue"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_cleanup_failure_reaches_exact_stop_ack_and_retries() {
+        let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+            &inner,
+        )));
+        let machine = Arc::new(MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        ));
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        let loop_task_id = Arc::new(std::sync::Mutex::new(None));
+        let cleanup_task_id = Arc::new(std::sync::Mutex::new(None));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(1)),
+                    cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                    loop_task_id,
+                    cleanup_task_id,
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+
+        let stop_task = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                machine
+                    .stop_runtime_executor(&session_id, "surface persistent cleanup failure")
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("external cleanup should reach the deterministic gate");
+        assert!(!stop_task.is_finished());
+
+        release_cleanup.notify_one();
+        let stop_error = tokio::time::timeout(Duration::from_secs(1), stop_task)
+            .await
+            .expect("failed cleanup must acknowledge the exact stop request")
+            .expect("stop task should not panic")
+            .expect_err("injected unregister persistence failure must fail stop");
+        assert!(
+            stop_error
+                .to_string()
+                .contains("synthetic retryable required-cleanup failure"),
+            "the exact stop acknowledgement must retain cleanup failure: {stop_error}"
+        );
+        assert!(machine.contains_session(&session_id).await);
+        let retry_anchor = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("failed cleanup must retain generated retry authority");
+        assert_eq!(
+            retry_anchor.registration_phase,
+            mm_dsl::RegistrationPhase::Draining,
+            "cleanup failure must retain the generated Draining retry anchor"
+        );
+        release_cleanup.notify_one();
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("retry must complete the retained unregister transaction");
+        assert!(!machine.contains_session(&session_id).await);
+    }
+
+    #[tokio::test]
+    async fn persistent_attached_unregister_finalization_failure_retains_draining_retry() {
+        let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+            &inner,
+        )));
+        let machine = Arc::new(MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        ));
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        release_cleanup.notify_one();
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started,
+                    release_cleanup,
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::clone(&cleanup_calls),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("registered session state")
+                .lifecycle_phase,
+            mm_dsl::MeerkatPhase::Attached,
+            "the finalization fault regression requires an attached runtime parent"
+        );
+
+        store
+            .fail_unregister_finalization
+            .store(true, Ordering::SeqCst);
+        let unregister_result = machine.unregister_session(&session_id).await;
+        assert_eq!(
+            store.unregister_finalization_calls(),
+            1,
+            "attached persistent teardown must route through the atomic finalization owner"
+        );
+        let error = unregister_result.expect_err("DeleteSnapshot finalization fault must surface");
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic unregister finalization failure"),
+            "unexpected unregister error: {error}"
+        );
+        assert!(machine.contains_session(&session_id).await);
+        let retry_anchor = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("failed finalization must retain generated retry authority");
+        assert_eq!(
+            retry_anchor.registration_phase,
+            mm_dsl::RegistrationPhase::Draining
+        );
+        assert!(!retry_anchor.unregister_runtime_loop_drain_pending);
+        assert!(!retry_anchor.unregister_comms_drain_exit_pending);
+        assert!(!retry_anchor.unregister_completion_waiter_drain_pending);
+
+        store
+            .fail_unregister_finalization
+            .store(false, Ordering::SeqCst);
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("retry must complete retained DeleteSnapshot finalization");
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "durable finalization retry must not repeat successful external cleanup"
+        );
+        assert!(!machine.contains_session(&session_id).await);
+    }
+
     /// Path 2: stop requested while a turn is mid-apply (stop effect drained
     /// by process_queue after the apply returns — the drain must surface the
     /// stop instead of applying it under the queue authority guard).
     #[tokio::test]
-    async fn mid_apply_stop_with_reentrant_cleanup_completes() {
+    async fn mid_apply_stop_with_external_cleanup_completes() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let cleanup_ran = Arc::new(AtomicUsize::new(0));
@@ -7630,11 +8926,25 @@ mod stop_under_gate_deadlock_class {
             .expect("turn should start running");
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            machine
-                .stop_runtime_executor(&session_id, "class test: mid-apply stop")
+            let stop_task = {
+                let machine = Arc::clone(&machine);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    machine
+                        .stop_runtime_executor(&session_id, "class test: mid-apply stop")
+                        .await
+                })
+            };
+            tokio::task::yield_now().await;
+            assert!(
+                !stop_task.is_finished(),
+                "stop acknowledgement must wait for the in-flight apply and required cleanup"
+            );
+            release_apply.notify_one();
+            stop_task
                 .await
-                .expect("stop should be accepted");
-            release_apply.notify_waiters();
+                .expect("stop task should not panic")
+                .expect("stop should be accepted after apply unwinds");
             while cleanup_ran.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -7653,7 +8963,7 @@ mod stop_under_gate_deadlock_class {
     /// — the same guard the field deadlock parked on in the
     /// terminal-failure arm).
     #[tokio::test]
-    async fn checkpoint_failure_stop_with_reentrant_cleanup_completes() {
+    async fn checkpoint_failure_stop_with_external_cleanup_completes() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let cleanup_ran = Arc::new(AtomicUsize::new(0));
@@ -9733,10 +11043,34 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
         "no explicit stop command should have reached the executor before it is requested"
     );
 
-    adapter
-        .stop_runtime_executor(&session_id, "attached steered deferred stop")
-        .await
-        .expect("stop should queue against the attached loop");
+    let stop_task = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            adapter
+                .stop_runtime_executor(&session_id, "attached steered deferred stop")
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if adapter
+                .session_dsl_state(&session_id)
+                .await
+                .expect("session DSL state should remain available")
+                .runtime_stop_deferred
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stop request should reach generated deferred-stop authority");
+    assert!(
+        !stop_task.is_finished(),
+        "stop acknowledgement must remain pending while apply is blocked"
+    );
 
     let after_stop_request = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -9861,6 +11195,11 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
             "expected attached steered completion to finish normally before queued stop drains, got {other:?}"
         ),
     }
+    tokio::time::timeout(Duration::from_secs(1), stop_task)
+        .await
+        .expect("deferred stop should acknowledge after apply finishes")
+        .expect("deferred stop task should not panic")
+        .expect("deferred stop should complete required cleanup");
 
     let settled = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -17456,8 +18795,16 @@ struct RuntimeCommitAtomicityStore {
     inner: Arc<crate::store::InMemoryRuntimeStore>,
     fail_atomic_apply: AtomicBool,
     fail_commit_machine_lifecycle: AtomicBool,
+    fail_commit_machine_lifecycle_on_call: AtomicUsize,
+    fail_all_commit_machine_lifecycle: AtomicBool,
     fail_delete_ops_lifecycle: AtomicBool,
+    fail_unregister_finalization: AtomicBool,
+    unsupported_unregister_finalization: AtomicBool,
+    commit_then_report_unknown: AtomicBool,
     commit_machine_lifecycle_calls: AtomicUsize,
+    unregister_finalization_calls: AtomicUsize,
+    delete_ops_lifecycle_calls: AtomicUsize,
+    successful_unregister_progress: std::sync::Mutex<Vec<Option<(bool, bool, bool)>>>,
 }
 
 impl RuntimeCommitAtomicityStore {
@@ -17466,8 +18813,16 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_commit_machine_lifecycle_on_call: AtomicUsize::new(usize::MAX),
+            fail_all_commit_machine_lifecycle: AtomicBool::new(false),
             fail_delete_ops_lifecycle: AtomicBool::new(false),
+            fail_unregister_finalization: AtomicBool::new(false),
+            unsupported_unregister_finalization: AtomicBool::new(false),
+            commit_then_report_unknown: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
+            unregister_finalization_calls: AtomicUsize::new(0),
+            delete_ops_lifecycle_calls: AtomicUsize::new(0),
+            successful_unregister_progress: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -17476,8 +18831,16 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(true),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_commit_machine_lifecycle_on_call: AtomicUsize::new(usize::MAX),
+            fail_all_commit_machine_lifecycle: AtomicBool::new(false),
             fail_delete_ops_lifecycle: AtomicBool::new(false),
+            fail_unregister_finalization: AtomicBool::new(false),
+            unsupported_unregister_finalization: AtomicBool::new(false),
+            commit_then_report_unknown: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
+            unregister_finalization_calls: AtomicUsize::new(0),
+            delete_ops_lifecycle_calls: AtomicUsize::new(0),
+            successful_unregister_progress: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -17486,8 +18849,16 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(true),
+            fail_commit_machine_lifecycle_on_call: AtomicUsize::new(usize::MAX),
+            fail_all_commit_machine_lifecycle: AtomicBool::new(false),
             fail_delete_ops_lifecycle: AtomicBool::new(false),
+            fail_unregister_finalization: AtomicBool::new(false),
+            unsupported_unregister_finalization: AtomicBool::new(false),
+            commit_then_report_unknown: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
+            unregister_finalization_calls: AtomicUsize::new(0),
+            delete_ops_lifecycle_calls: AtomicUsize::new(0),
+            successful_unregister_progress: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -17496,18 +18867,64 @@ impl RuntimeCommitAtomicityStore {
             inner,
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
+            fail_commit_machine_lifecycle_on_call: AtomicUsize::new(usize::MAX),
+            fail_all_commit_machine_lifecycle: AtomicBool::new(false),
             fail_delete_ops_lifecycle: AtomicBool::new(true),
+            fail_unregister_finalization: AtomicBool::new(false),
+            unsupported_unregister_finalization: AtomicBool::new(false),
+            commit_then_report_unknown: AtomicBool::new(false),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
+            unregister_finalization_calls: AtomicUsize::new(0),
+            delete_ops_lifecycle_calls: AtomicUsize::new(0),
+            successful_unregister_progress: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn unsupported_unregister_finalization(inner: Arc<crate::store::InMemoryRuntimeStore>) -> Self {
+        Self {
+            unsupported_unregister_finalization: AtomicBool::new(true),
+            ..Self::pass_through(inner)
+        }
+    }
+
+    fn commit_then_report_unknown(inner: Arc<crate::store::InMemoryRuntimeStore>) -> Self {
+        Self {
+            commit_then_report_unknown: AtomicBool::new(true),
+            ..Self::pass_through(inner)
         }
     }
 
     fn commit_machine_lifecycle_calls(&self) -> usize {
         self.commit_machine_lifecycle_calls.load(Ordering::SeqCst)
     }
+
+    fn unregister_finalization_calls(&self) -> usize {
+        self.unregister_finalization_calls.load(Ordering::SeqCst)
+    }
+
+    fn fail_commit_machine_lifecycle_on_call(&self, call: usize) {
+        self.fail_commit_machine_lifecycle_on_call
+            .store(call, Ordering::SeqCst);
+    }
+
+    fn successful_unregister_progress(&self) -> Vec<Option<(bool, bool, bool)>> {
+        self.successful_unregister_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn delete_ops_lifecycle_calls(&self) -> usize {
+        self.delete_ops_lifecycle_calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
 impl RuntimeStore for RuntimeCommitAtomicityStore {
+    fn supports_compaction_projection_outbox(&self) -> bool {
+        self.inner.supports_compaction_projection_outbox()
+    }
+
     async fn commit_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -17567,6 +18984,26 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         self.inner.load_session_snapshot(runtime_id).await
     }
 
+    async fn load_pending_compaction_projections(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, crate::store::RuntimeStoreError>
+    {
+        self.inner
+            .load_pending_compaction_projections(runtime_id)
+            .await
+    }
+
+    async fn mark_compaction_projection_finalized(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.inner
+            .mark_compaction_projection_finalized(runtime_id, projection)
+            .await
+    }
+
     async fn clear_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -17624,19 +19061,99 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         commit: crate::store::MachineLifecycleCommit,
         input_states: &[crate::input_state::InputStatePersistenceRecord],
     ) -> Result<(), crate::store::RuntimeStoreError> {
-        self.commit_machine_lifecycle_calls
-            .fetch_add(1, Ordering::SeqCst);
+        let call = self
+            .commit_machine_lifecycle_calls
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        let fail_scheduled_call = self
+            .fail_commit_machine_lifecycle_on_call
+            .compare_exchange(call, usize::MAX, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
         if self
-            .fail_commit_machine_lifecycle
-            .swap(false, Ordering::SeqCst)
+            .fail_all_commit_machine_lifecycle
+            .load(Ordering::SeqCst)
+            || self
+                .fail_commit_machine_lifecycle
+                .swap(false, Ordering::SeqCst)
+            || fail_scheduled_call
         {
             return Err(crate::store::RuntimeStoreError::WriteFailed(
                 "synthetic commit_machine_lifecycle failure".into(),
             ));
         }
+        let unregister_progress = commit.snapshot().unregister_progress().map(|progress| {
+            (
+                progress.runtime_loop_drain_pending(),
+                progress.comms_drain_exit_pending(),
+                progress.completion_waiter_drain_pending(),
+            )
+        });
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
-            .await
+            .await?;
+        self.successful_unregister_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(unregister_progress);
+        Ok(())
+    }
+
+    async fn commit_unregister_finalization(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        commit: crate::store::MachineLifecycleCommit,
+        input_states: &[crate::input_state::InputStatePersistenceRecord],
+    ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.unregister_finalization_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.commit_machine_lifecycle_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_unregister_finalization
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "synthetic unregister finalization failure".into(),
+            ));
+        }
+        if self
+            .unsupported_unregister_finalization
+            .load(Ordering::SeqCst)
+        {
+            return Err(crate::store::RuntimeStoreError::Unsupported(
+                "commit_unregister_finalization".to_string(),
+            ));
+        }
+        if self
+            .fail_all_commit_machine_lifecycle
+            .load(Ordering::SeqCst)
+            || self
+                .fail_commit_machine_lifecycle
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".into(),
+            ));
+        }
+        if self.fail_delete_ops_lifecycle.swap(false, Ordering::SeqCst) {
+            return Err(crate::store::RuntimeStoreError::WriteFailed(
+                "synthetic delete_ops_lifecycle failure".into(),
+            ));
+        }
+        self.inner
+            .commit_unregister_finalization(runtime_id, commit, input_states)
+            .await?;
+        if self
+            .commit_then_report_unknown
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(
+                crate::store::RuntimeStoreError::UnregisterFinalizationOutcomeUnknown(
+                    "synthetic lost commit acknowledgement".to_string(),
+                ),
+            );
+        }
+        Ok(())
     }
 
     async fn persist_ops_lifecycle(
@@ -17659,6 +19176,8 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<(), crate::store::RuntimeStoreError> {
+        self.delete_ops_lifecycle_calls
+            .fetch_add(1, Ordering::SeqCst);
         if self.fail_delete_ops_lifecycle.swap(false, Ordering::SeqCst) {
             return Err(crate::store::RuntimeStoreError::WriteFailed(
                 "synthetic delete_ops_lifecycle failure".into(),
@@ -18506,6 +20025,239 @@ async fn spine_invariants_hold_after_steered_input() {
     snapshot
         .validate_spine_invariants()
         .expect("all invariants should hold after steered input");
+}
+
+/// Regression for the visibility projection / DSL lock-order cycle.
+///
+/// The barriers force the historical interleaving exactly: the spine snapshot
+/// owns the DSL mutex while sticky fallback owns the visibility projection.
+/// The snapshot must finish without reaching back into the projection; doing
+/// so would deadlock both threads before the bounded join oracle below.
+#[test]
+fn spine_snapshot_and_sticky_fallback_share_canonical_visibility_lock_order() {
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime"),
+    );
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = runtime
+        .block_on(adapter.prepare_bindings(session_id.clone()))
+        .expect("production bindings");
+
+    let previous = domain_live_identity("gpt-primary");
+    let target = domain_live_identity("gpt-backup");
+    let target_profile = {
+        let mut config = meerkat_core::Config::default();
+        config.models.custom.insert(
+            target.model.clone(),
+            meerkat_core::config::CustomModelConfig {
+                provider: target.provider,
+                display_name: Some("Lock-order fallback target".to_string()),
+                context_window: Some(128_000),
+                max_output_tokens: Some(4096),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let empty_catalog = meerkat_core::ModelCatalog {
+            entries: &[],
+            capabilities: &[],
+            provider_defaults: &[],
+            image_generation_models: &[],
+            providers: &[],
+            default_models: &[],
+            image_generation_defaults: &[],
+            global_default_model: "",
+            provider_priority: &[],
+        };
+        meerkat_core::ModelRegistry::from_config(&config, empty_catalog)
+            .expect("custom target registry")
+            .profile_witness_for_provider(target.provider, &target.model)
+            .expect("target profile witness")
+    };
+    bindings
+        .model_routing()
+        .set_baseline(model(previous.model.as_str()), false)
+        .expect("baseline");
+    bindings
+        .model_routing()
+        .hydrate_llm_capability_surface(&previous, None, &meerkat_core::ToolFilter::All)
+        .expect("initial identity hydration");
+
+    let run_id = RunId::new();
+    bindings
+        .session_admission()
+        .prepare(&run_id)
+        .expect("prepare fallback run");
+    bindings
+        .turn_state()
+        .start_conversation_run(
+            run_id.clone(),
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+            meerkat_core::turn_execution_authority::ContentShape::Conversation,
+            false,
+            false,
+            0,
+        )
+        .expect("start fallback turn");
+    bindings
+        .turn_state()
+        .primitive_applied(run_id.clone())
+        .expect("primitive applied");
+    bindings
+        .turn_state()
+        .recoverable_failure(
+            run_id.clone(),
+            meerkat_core::LlmRetrySchedule {
+                failure: meerkat_core::LlmRetryFailure {
+                    provider: "openai".to_string(),
+                    kind: meerkat_core::LlmRetryFailureKind::RetryableProviderError,
+                    retry_after_ms: None,
+                    duration_ms: None,
+                    message: "overloaded".to_string(),
+                },
+                plan: meerkat_core::LlmRetryPlan {
+                    attempt: 1,
+                    max_retries: 1,
+                    computed_delay_ms: 0,
+                    selected_delay_ms: 0,
+                    retry_after_hint_ms: None,
+                    rate_limit_floor_applied: false,
+                    budget_capped: false,
+                },
+            },
+        )
+        .expect("admit sticky fallback recovery");
+
+    let visibility_owner = runtime.block_on(async {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session")
+                .tool_visibility_owner,
+        )
+    });
+    let probe = Arc::new(super::visibility::VisibilityLockOrderProbe::new());
+    assert!(
+        visibility_owner
+            .install_lock_order_probe(Arc::clone(&probe))
+            .is_ok(),
+        "install visibility lock-order probe once"
+    );
+
+    let snapshot_thread = std::thread::spawn({
+        let runtime = Arc::clone(&runtime);
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        move || runtime.block_on(adapter.meerkat_machine_spine_snapshot(&session_id))
+    });
+    probe.wait_for_snapshot_dsl();
+
+    let model_routing = runtime
+        .block_on(adapter.model_routing_handle_for_test(&session_id))
+        .expect("concrete production routing handle");
+    let target_filter = meerkat_core::ToolFilter::Deny(
+        [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+    );
+    let mut expected_visibility = meerkat_core::SessionToolVisibilityState {
+        capability_base_filter: target_filter,
+        ..Default::default()
+    };
+    expected_visibility.active_revision = 1;
+    expected_visibility.staged_revision = 1;
+    let commit_thread = std::thread::spawn({
+        let previous = previous.clone();
+        let target = target.clone();
+        let expected_visibility = expected_visibility.clone();
+        move || {
+            model_routing.commit_sticky_model_fallback_for_test(
+                &previous,
+                &target,
+                &target_profile,
+                &meerkat_core::handles::StickyModelFallbackVisibilityPlan {
+                    previous_state: Default::default(),
+                    next_state: expected_visibility,
+                    view_image_tool_available: true,
+                    previous_view_image_visible: true,
+                    next_view_image_visible: false,
+                    committed_visible_set_changed: true,
+                    revision_bumped: true,
+                },
+                1,
+            )
+        }
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline
+        && (!snapshot_thread.is_finished() || !commit_thread.is_finished())
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        snapshot_thread.is_finished() && commit_thread.is_finished(),
+        "spine snapshot and sticky fallback did not finish: projection/DSL lock-order cycle"
+    );
+
+    let snapshot = snapshot_thread
+        .join()
+        .expect("snapshot thread")
+        .expect("spine snapshot");
+    commit_thread
+        .join()
+        .expect("fallback thread")
+        .expect("sticky fallback commit");
+    assert_eq!(snapshot.control.phase, RuntimeState::Running);
+    assert_eq!(snapshot.control.current_run_id.as_ref(), Some(&run_id));
+
+    let routing = runtime
+        .block_on(adapter.session_model_routing_status(&session_id))
+        .expect("routing status after fallback");
+    assert_eq!(routing.baseline_model.as_str(), target.model);
+    assert_eq!(routing.effective_model.as_str(), target.model);
+    assert_eq!(routing.session_provider, Some(target.provider));
+
+    let (authority_identity, authority_baseline, authority_visibility) = runtime.block_on(async {
+        let sessions = adapter.sessions.read().await;
+        let authority = sessions
+            .get(&session_id)
+            .expect("registered session")
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut visibility = meerkat_core::SessionToolVisibilityState::default();
+        super::visibility::mirror_visibility_projection_from_state(
+            &mut visibility,
+            authority.state(),
+        );
+        (
+            authority.state().current_session_llm_identity.clone(),
+            authority.state().model_routing_baseline_model.clone(),
+            visibility,
+        )
+    });
+    assert_eq!(
+        authority_identity,
+        Some(mm_dsl::SessionLlmIdentity::from_domain(&target))
+    );
+    assert_eq!(authority_baseline.as_deref(), Some(target.model.as_str()));
+    assert_eq!(authority_visibility, expected_visibility);
+    assert_eq!(
+        bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("visibility projection"),
+        authority_visibility,
+        "sticky fallback must leave the projection coherent with DSL routing truth"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -21830,7 +23582,10 @@ async fn runtime_loop_driver_authority_rejects_detached_driver_after_unregister(
         .expect("current runtime loop driver should be authoritative");
     drop(guard);
 
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("session should unregister cleanly");
 
     match adapter
         .lock_current_runtime_loop_driver_authority(&session_id, &driver)
@@ -22842,6 +24597,7 @@ impl CoreExecutor for RuntimeParityNoopExecutor {
 struct RuntimeParityBlockingExecutor {
     apply_started: Arc<Notify>,
     allow_finish: Arc<Notify>,
+    block_first_apply: bool,
 }
 
 #[async_trait::async_trait]
@@ -22851,8 +24607,11 @@ impl CoreExecutor for RuntimeParityBlockingExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        self.apply_started.notify_waiters();
-        self.allow_finish.notified().await;
+        if self.block_first_apply {
+            self.block_first_apply = false;
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+        }
         Ok(CoreApplyOutput {
             receipt: RunBoundaryReceiptDraft {
                 run_id,
@@ -24375,6 +26134,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
             Box::new(RuntimeParityBlockingExecutor {
                 apply_started: Arc::clone(&apply_started),
                 allow_finish: Arc::clone(&allow_finish),
+                block_first_apply: true,
             }),
         )
         .await
@@ -24553,6 +26313,7 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
             Box::new(RuntimeParityBlockingExecutor {
                 apply_started: Arc::clone(&apply_started),
                 allow_finish: Arc::clone(&allow_finish),
+                block_first_apply: true,
             }),
         )
         .await
@@ -25085,6 +26846,7 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                     Box::new(RuntimeParityBlockingExecutor {
                         apply_started: Arc::clone(&apply_started),
                         allow_finish: Arc::clone(&allow_finish),
+                        block_first_apply: true,
                     }),
                 )
                 .await
@@ -25469,6 +27231,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::Destroyed => "destroyed".to_string(),
         RuntimeDriverError::RecoveryCorruption { reason } => {
             format!("recovery_corruption:{reason}")
+        }
+        RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { reason } => {
+            format!("unregister_finalization_outcome_unknown:{reason}")
         }
         RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
     }
@@ -26767,7 +28532,10 @@ async fn refresh_session_owned_peer_ingress_respawns_authorized_drain_without_re
         "refresh must preserve the existing session-owned runtime id, got {owner:?}"
     );
 
-    adapter.unregister_session(&session_id).await;
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("session should unregister cleanly");
 }
 
 #[tokio::test]

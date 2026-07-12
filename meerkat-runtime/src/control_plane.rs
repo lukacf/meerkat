@@ -29,7 +29,10 @@ pub(crate) async fn terminalize_async_stop(
 
     {
         let mut driver = driver.lock().await;
-        if !matches!(driver.runtime_state(), crate::RuntimeState::Destroyed) {
+        if !matches!(
+            driver.runtime_state(),
+            crate::RuntimeState::Stopped | crate::RuntimeState::Destroyed
+        ) {
             machine_stop_runtime(&mut driver).await?;
         }
     }
@@ -42,18 +45,16 @@ pub(crate) async fn terminalize_async_stop(
     Ok(())
 }
 
-/// Deliver one executor effect and report whether the runtime loop
-/// should stop after applying it.
+/// Deliver a non-terminal executor effect.
 ///
-/// When a stop completes, routes all semantic stop terminalization through
-/// [`terminalize_async_stop`] so DSL executor-exit, driver finalization, durable
-/// stopped truth, and waiter resolution cannot split.
+/// Stop effects are rejected here by construction. The runtime loop's typed
+/// handoff path is the only owner allowed to call the executor stop hook,
+/// terminalize machine authority, and relinquish the exact executor for
+/// external cleanup.
 pub(crate) async fn apply_executor_effect(
-    driver: &SharedDriver,
-    completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     effect: RuntimeEffect,
-) -> Result<bool, RuntimeDriverError> {
+) -> Result<(), RuntimeDriverError> {
     match effect.into_inner() {
         RuntimeEffectInner::CancelAfterBoundary { reason } => {
             executor
@@ -64,25 +65,79 @@ pub(crate) async fn apply_executor_effect(
                         "failed to apply cancel-after-boundary executor effect: {err}"
                     ))
                 })?;
-            Ok(false)
+            Ok(())
+        }
+        RuntimeEffectInner::StopRuntimeExecutor { .. } => Err(RuntimeDriverError::Internal(
+            "stop-runtime-executor effect requires the runtime-loop terminal handoff path"
+                .to_string(),
+        )),
+    }
+}
+
+/// Typed handoff produced when a runtime-loop task realizes an executor
+/// effect. Required post-terminalization cleanup is deliberately excluded from
+/// this task: the loop must first relinquish its executor so an external
+/// teardown owner can run cleanup without ever awaiting the loop's own
+/// `JoinHandle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeLoopEffectOutcome {
+    Continue,
+    StopTerminalizedNeedsExternalCleanup,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeLoopEffectFailure {
+    pub(crate) error: RuntimeDriverError,
+    /// Present only when the executor stop hook itself failed before machine
+    /// terminalization. The retained exact executor must receive this same
+    /// stop request again before cleanup may run.
+    pub(crate) executor_stop_retry_reason: Option<String>,
+}
+
+/// Realize the required executor stop hook at the control-plane ownership
+/// boundary. Runtime-loop and unregister mechanics must delegate here rather
+/// than invoking the executor control primitive directly.
+pub(crate) async fn apply_runtime_executor_stop_hook(
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    reason: String,
+) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+    executor.stop_runtime_executor(reason).await
+}
+
+pub(crate) async fn apply_runtime_loop_executor_effect(
+    driver: &SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    effect: RuntimeEffect,
+) -> Result<RuntimeLoopEffectOutcome, RuntimeLoopEffectFailure> {
+    match effect.into_inner() {
+        RuntimeEffectInner::CancelAfterBoundary { reason } => {
+            executor
+                .cancel_after_boundary(reason)
+                .await
+                .map_err(|err| RuntimeLoopEffectFailure {
+                    error: RuntimeDriverError::Internal(format!(
+                        "failed to apply cancel-after-boundary executor effect: {err}"
+                    )),
+                    executor_stop_retry_reason: None,
+                })?;
+            Ok(RuntimeLoopEffectOutcome::Continue)
         }
         RuntimeEffectInner::StopRuntimeExecutor { reason } => {
-            executor
-                .stop_runtime_executor(reason)
-                .await
-                .map_err(|err| {
-                    RuntimeDriverError::Internal(format!(
-                        "failed to apply stop-runtime-executor effect: {err}"
-                    ))
-                })?;
-            terminalize_async_stop(driver, completions).await?;
-            if let Err(err) = executor.cleanup_after_runtime_stop_terminalized().await {
-                tracing::warn!(
-                    error = %err,
-                    "failed to clean up executor after durable runtime stop"
-                );
+            if let Err(error) = apply_runtime_executor_stop_hook(executor, reason.clone()).await {
+                return Err(RuntimeLoopEffectFailure {
+                    error: RuntimeDriverError::Internal(format!(
+                        "failed to apply stop-runtime-executor effect: {error}"
+                    )),
+                    executor_stop_retry_reason: Some(reason),
+                });
             }
-            Ok(true)
+            terminalize_async_stop(driver, None)
+                .await
+                .map_err(|error| RuntimeLoopEffectFailure {
+                    error,
+                    executor_stop_retry_reason: None,
+                })?;
+            Ok(RuntimeLoopEffectOutcome::StopTerminalizedNeedsExternalCleanup)
         }
     }
 }
@@ -96,11 +151,9 @@ pub(crate) async fn apply_executor_effect(
 /// instead of silently exiting as if a stop effect had already been applied.
 #[derive(Debug)]
 pub(crate) enum EffectDrainOutcome {
-    /// A stop effect was received but NOT applied: stop realization awaits
-    /// executor cleanup that may re-enter the machine (e.g. a mob executor
-    /// unregistering its session), so it must never run under the session
-    /// mutation gate the drain callers hold. The caller drops its authority
-    /// guard first, then applies the returned effect.
+    /// A stop effect was received but NOT applied. The caller drops its
+    /// authority guard first, realizes the stop hook/terminalization, then
+    /// hands required cleanup to the external teardown owner.
     StopEffectPending(RuntimeEffect),
     /// No effects were pending; the channel remains open. The loop may
     /// continue processing queued work.
@@ -113,8 +166,6 @@ pub(crate) enum EffectDrainOutcome {
 /// Drain any ready executor effects before starting another unit of
 /// ordinary queued work.
 pub(crate) async fn drain_ready_executor_effects(
-    driver: &SharedDriver,
-    completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     effect_rx: &mut mpsc::Receiver<RuntimeEffect>,
 ) -> Result<EffectDrainOutcome, RuntimeDriverError> {
@@ -123,13 +174,12 @@ pub(crate) async fn drain_ready_executor_effects(
             Ok(effect) => {
                 if effect.is_stop() {
                     // Never applied here: the caller holds the session
-                    // mutation gate during drains, and the stop path's
-                    // cleanup can re-enter the machine (unregister), which
-                    // acquires the same gate — a self-deadlock that parked
-                    // the loop task forever and wedged whole mobs.
+                    // mutation gate during drains. Stop hooks may re-enter
+                    // machine control, and cleanup must remain an explicit
+                    // post-loop external handoff.
                     return Ok(EffectDrainOutcome::StopEffectPending(effect));
                 }
-                apply_executor_effect(driver, completions, executor, effect).await?;
+                apply_executor_effect(executor, effect).await?;
             }
             Err(mpsc::error::TryRecvError::Empty) => return Ok(EffectDrainOutcome::Empty),
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -147,7 +197,7 @@ pub(crate) mod test_support {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::{RunId, run_primitive::RunPrimitive};
+    use meerkat_core::lifecycle::{InputId, RunId, run_primitive::RunPrimitive};
 
     /// Deterministically fails every `apply` while keeping the stop path
     /// healthy — models a poison payload whose run terminally fails on each
@@ -313,7 +363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_executor_effect_dispatches_only_boundary_and_stop_effects() {
+    async fn apply_executor_effect_dispatches_boundary_and_rejects_stop() {
         let boundary_calls = Arc::new(AtomicUsize::new(0));
         let stop_calls = Arc::new(AtomicUsize::new(0));
         let cleanup_calls = Arc::new(AtomicUsize::new(0));
@@ -323,38 +373,31 @@ mod tests {
             cleanup_calls: Arc::clone(&cleanup_calls),
             fail_boundary: false,
         };
-        let driver = shared_driver();
-
-        let should_stop = apply_executor_effect(
-            &driver,
-            None,
+        apply_executor_effect(
             &mut executor,
             runtime_effect(RuntimeEffectKind::CancelAfterBoundary, "boundary"),
         )
         .await
         .expect("boundary effect should apply");
 
-        assert!(!should_stop);
         assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
 
-        let should_stop = apply_executor_effect(
-            &driver,
-            None,
+        let error = apply_executor_effect(
             &mut executor,
             runtime_effect(RuntimeEffectKind::StopRuntimeExecutor, "stop"),
         )
         .await
-        .expect("stop effect should apply");
+        .expect_err("direct stop application must require terminal handoff");
 
-        assert!(should_stop);
+        assert!(error.to_string().contains("terminal handoff path"));
         assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             cleanup_calls.load(Ordering::SeqCst),
-            1,
-            "post-stop cleanup must run only after machine-owned terminalization succeeds"
+            0,
+            "direct effect application must never own terminal cleanup"
         );
     }
 
@@ -369,11 +412,7 @@ mod tests {
             cleanup_calls,
             fail_boundary: true,
         };
-        let driver = shared_driver();
-
         let err = apply_executor_effect(
-            &driver,
-            None,
             &mut executor,
             runtime_effect(RuntimeEffectKind::CancelAfterBoundary, "boundary"),
         )
@@ -397,10 +436,10 @@ mod tests {
         let driver = shared_driver();
 
         // Stop-pending case: a stop effect is delivered, then the sender is
-        // dropped. The drain must NOT apply the stop (its cleanup can
-        // re-enter the machine and deadlock on the session mutation gate
-        // the drain callers hold); it surfaces the effect for the caller to
-        // apply after releasing its authority guard.
+        // dropped. The drain must NOT apply the stop (the stop hook can
+        // re-enter machine control while drain callers hold session authority);
+        // it surfaces the effect for the runtime-loop handoff path after the
+        // guard is released.
         {
             let stop_calls = Arc::new(AtomicUsize::new(0));
             let mut executor = RecordingExecutor {
@@ -418,7 +457,7 @@ mod tests {
             .expect("send stop effect");
             drop(tx);
 
-            let outcome = drain_ready_executor_effects(&driver, None, &mut executor, &mut rx)
+            let outcome = drain_ready_executor_effects(&mut executor, &mut rx)
                 .await
                 .expect("drain with pending stop should succeed");
             let EffectDrainOutcome::StopEffectPending(effect) = outcome else {
@@ -429,10 +468,13 @@ mod tests {
                 0,
                 "the drain must never apply the stop itself"
             );
-            let should_stop = apply_executor_effect(&driver, None, &mut executor, effect)
+            let outcome = apply_runtime_loop_executor_effect(&driver, &mut executor, effect)
                 .await
-                .expect("caller applies the pending stop guard-free");
-            assert!(should_stop);
+                .expect("runtime-loop handoff applies the pending stop guard-free");
+            assert_eq!(
+                outcome,
+                RuntimeLoopEffectOutcome::StopTerminalizedNeedsExternalCleanup
+            );
             assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
         }
 
@@ -451,7 +493,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<RuntimeEffect>(4);
             drop(tx);
 
-            let outcome = drain_ready_executor_effects(&driver, None, &mut executor, &mut rx)
+            let outcome = drain_ready_executor_effects(&mut executor, &mut rx)
                 .await
                 .expect("drain on closed channel should succeed");
             assert!(

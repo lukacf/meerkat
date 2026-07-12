@@ -2400,6 +2400,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinishRunRunningZero`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyRetirePendingSpawnDispositionCancelCommittedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRetirePendingSpawnDispositionCancelCommittedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRetirePendingSpawnDispositionPreserveAbsentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRetirePendingSpawnDispositionPreserveAbsentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRunningReleasing`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
@@ -2742,6 +2760,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_operator_admission_authority`
   - scenarios: (unclaimed)
 - `MemberOperationEligibilityResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetirePendingSpawnCancellationAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireCommittedIncarnationWithoutPendingSpawnResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireAbsentPendingSpawnPreservationResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BridgeRejectionRecoveryClassified`

@@ -96,7 +96,17 @@ impl MeerkatMachine {
         let committed_visible_set_changed = current_view_image_visible != next_view_image_visible;
         let revision_bumped = committed_visible_set_changed;
         if revision_bumped {
-            next.active_revision = current.active_revision.max(current.staged_revision) + 1;
+            let next_active_revision = current.active_revision.max(current.staged_revision) + 1;
+            next.active_revision = next_active_revision;
+            // Reconfiguration is an immediate committed visibility change,
+            // just like sticky fallback. Rebase the staged lane onto the new
+            // monotonic point; if it already carries pending intent, preserve
+            // that intent one revision after the immediate commit.
+            next.staged_revision = if current.staged_revision > current.active_revision {
+                next_active_revision + 1
+            } else {
+                next_active_revision
+            };
         }
 
         SessionLlmVisibilityPlanProposal {
@@ -418,4 +428,68 @@ impl MeerkatMachine {
     // apply_capability_driven_realtime_transport, and realtime_bootstrap_eligibility
     // were removed as part of the realtime/live-topology DSL plane deletion.
     // Provider session lifecycle now lives outside MeerkatMachine (live-adapter MVP).
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target_without_image_tool_results() -> SessionLlmCapabilitySurface {
+        SessionLlmCapabilitySurface {
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            inline_video: false,
+            vision: false,
+            image_input: false,
+            image_tool_results: false,
+            supports_web_search: false,
+            image_generation: false,
+            realtime: false,
+            call_timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn reconfigure_visibility_rebases_equal_and_pending_staged_revisions() {
+        let base_tool_names = [meerkat_core::ToolName::from(
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        )]
+        .into_iter()
+        .collect();
+        let target_surface = target_without_image_tool_results();
+
+        let converged = SessionToolVisibilityState {
+            active_revision: 1,
+            staged_revision: 1,
+            ..SessionToolVisibilityState::default()
+        };
+        let converged_plan = MeerkatMachine::propose_reconfigured_visibility_plan(
+            &converged,
+            &target_surface,
+            &base_tool_names,
+        );
+        assert_eq!(converged_plan.next_visibility_state.active_revision, 2);
+        assert_eq!(converged_plan.next_visibility_state.staged_revision, 2);
+
+        let pending_filter =
+            meerkat_core::ToolFilter::Deny(["pending".to_string()].into_iter().collect());
+        let pending = SessionToolVisibilityState {
+            staged_filter: pending_filter.clone(),
+            active_revision: 1,
+            staged_revision: 3,
+            ..SessionToolVisibilityState::default()
+        };
+        let pending_plan = MeerkatMachine::propose_reconfigured_visibility_plan(
+            &pending,
+            &target_surface,
+            &base_tool_names,
+        );
+        assert_eq!(pending_plan.next_visibility_state.active_revision, 4);
+        assert_eq!(pending_plan.next_visibility_state.staged_revision, 5);
+        assert_eq!(
+            pending_plan.next_visibility_state.staged_filter,
+            pending_filter
+        );
+    }
 }

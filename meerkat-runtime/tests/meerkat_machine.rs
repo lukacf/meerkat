@@ -221,6 +221,10 @@ impl HarnessRuntimeStore {
 
 #[async_trait::async_trait]
 impl RuntimeStore for HarnessRuntimeStore {
+    fn supports_compaction_projection_outbox(&self) -> bool {
+        self.inner.supports_compaction_projection_outbox()
+    }
+
     async fn commit_session_snapshot(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -281,6 +285,25 @@ impl RuntimeStore for HarnessRuntimeStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
         self.inner.load_session_snapshot(runtime_id).await
+    }
+
+    async fn load_pending_compaction_projections(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
+        self.inner
+            .load_pending_compaction_projections(runtime_id)
+            .await
+    }
+
+    async fn mark_compaction_projection_finalized(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .mark_compaction_projection_finalized(runtime_id, projection)
+            .await
     }
 
     async fn clear_session_snapshot(
@@ -384,6 +407,43 @@ impl RuntimeStore for HarnessRuntimeStore {
         }
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
+            .await
+    }
+
+    async fn commit_unregister_finalization(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        commit: meerkat_runtime::store::MachineLifecycleCommit,
+        input_states: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError> {
+        let call_index = self
+            .commit_machine_lifecycle_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_commit_machine_lifecycle_now
+            .load(Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".to_string(),
+            ));
+        }
+        if self
+            .fail_commit_machine_lifecycle_after
+            .is_some_and(|fail_after| call_index >= fail_after)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".to_string(),
+            ));
+        }
+        if self
+            .delay_commit_machine_lifecycle_after
+            .is_some_and(|delay_after| call_index >= delay_after)
+            && !self.commit_machine_lifecycle_delay.is_zero()
+        {
+            tokio::time::sleep(self.commit_machine_lifecycle_delay).await;
+        }
+        self.inner
+            .commit_unregister_finalization(runtime_id, commit, input_states)
             .await
     }
 
@@ -762,10 +822,16 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
         .await
         .expect("runtime executor registration should succeed");
 
-    adapter
+    let stop_error = adapter
         .stop_runtime_executor(&sid, "async stop lifecycle failure")
         .await
-        .expect("async stop command should enqueue the machine-approved effect");
+        .expect_err("durable stop failure must reach the exact stop acknowledgement");
+    assert!(
+        stop_error
+            .to_string()
+            .contains("synthetic commit_machine_lifecycle failure"),
+        "stop acknowledgement must retain the durable commit failure: {stop_error}"
+    );
     wait_for_atomic_bool(&stop_called, "stop effect should reach executor").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1053,7 +1119,10 @@ async fn unregister_removes_driver() {
         .register_session(sid.clone())
         .await
         .expect("register session");
-    adapter.unregister_session(&sid).await;
+    adapter
+        .unregister_session(&sid)
+        .await
+        .expect("session should unregister cleanly");
 
     let result = adapter.runtime_state(&sid).await;
     assert!(result.is_err());
@@ -1425,7 +1494,10 @@ async fn unregister_session_terminates_pending_completion_waiters() {
     assert!(outcome.is_accepted());
     let handle = handle.expect("accepted input should produce a completion handle");
 
-    adapter.unregister_session(&sid).await;
+    adapter
+        .unregister_session(&sid)
+        .await
+        .expect("session should unregister cleanly");
 
     let result = handle
         .wait()
@@ -2447,10 +2519,16 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
         RuntimeState::Attached
     );
 
-    adapter
+    let stop_error = adapter
         .stop_runtime_executor(&sid, "stale attachment repair test")
         .await
-        .expect("attached runtime should accept the stop effect");
+        .expect_err("a panicked stop hook must fail closed without a cleanup acknowledgement");
+    assert!(
+        stop_error
+            .to_string()
+            .contains("runtime loop exited without acknowledging required stop cleanup"),
+        "unexpected stop error: {stop_error}"
+    );
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -2599,7 +2677,10 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     });
 
     stop_entered.notified().await;
-    stop_task.await.unwrap();
+    assert!(
+        !stop_task.is_finished(),
+        "stop must remain pending until executor stop and required cleanup acknowledge"
+    );
 
     adapter
         .hard_cancel_current_run(&sid, "blocking stop attachment probe")
@@ -2608,6 +2689,10 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
     assert_eq!(interrupt_calls.load(Ordering::SeqCst), 1);
 
     release_stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), stop_task)
+        .await
+        .expect("stop should acknowledge after executor release")
+        .expect("stop task should not panic");
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -2833,7 +2918,10 @@ async fn completed_run_runtime_loop_skips_terminal_lifecycle_snapshot_writer() {
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
             self.stop_called.store(true, Ordering::SeqCst);
-            self.adapter.unregister_session(&self.session_id).await;
+            self.adapter
+                .unregister_session(&self.session_id)
+                .await
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?;
             Ok(())
         }
     }
@@ -3534,7 +3622,10 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
     // Give the drain task time to start before unregistering.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    adapter.unregister_session(&sid).await;
+    adapter
+        .unregister_session(&sid)
+        .await
+        .expect("session should unregister cleanly");
     // The session was just unregistered; the wait verdict may be a typed
     // NotFound rejection from the machine rather than success — both prove
     // the drain is no longer running, which is what this test pins below.
@@ -3722,7 +3813,10 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
         "attached sessions should not spawn a comms drain when keep_alive is disabled"
     );
 
-    adapter.unregister_session(&sid).await;
+    adapter
+        .unregister_session(&sid)
+        .await
+        .expect("session should unregister cleanly");
 }
 
 /// Test that BoundaryApplied fires with correct receipt on success.

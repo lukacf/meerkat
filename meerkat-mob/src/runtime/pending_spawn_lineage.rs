@@ -130,6 +130,33 @@ impl PendingSpawnLineage {
         canceled
     }
 
+    /// Consume only the pending spawn incarnation named by the generated
+    /// MobMachine retire verdict. Stable identity alone is deliberately
+    /// insufficient for this path: an absent retire must not capture a later
+    /// pending incarnation for the same identity.
+    pub(super) fn take_for_member_session(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Vec<PendingSpawnSlot> {
+        let tickets: Vec<_> = self
+            .metadata
+            .iter()
+            .filter(|(_, pending)| {
+                &pending.agent_identity == agent_identity
+                    && &pending.admitted_bridge_session_id == session_id
+            })
+            .map(|(&ticket, _)| ticket)
+            .collect();
+        let mut canceled = Vec::new();
+        for ticket in tickets {
+            if let Some(slot) = self.take_slot(ticket) {
+                canceled.push(slot);
+            }
+        }
+        canceled
+    }
+
     pub(super) fn drain_all(&mut self) -> Vec<PendingSpawnSlot> {
         let tickets: Vec<_> = self.metadata.keys().copied().collect();
         let mut failed = Vec::new();

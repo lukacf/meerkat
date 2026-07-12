@@ -8,7 +8,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreApplyTerminal, CoreExecutorTeardownReason,
+};
 use meerkat_core::lifecycle::run_primitive::ConversationContextAppend;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::RunResult;
@@ -98,6 +100,21 @@ pub type RecoverableServiceApplyRuntimeTurnResultReceiver = tokio::sync::oneshot
     Result<CoreApplyOutput, SessionError>,
     Option<ActiveCapacityGuard>,
 )>;
+
+async fn unregister_session_compensation(
+    runtime_adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    primary_error: &impl std::fmt::Display,
+) -> Result<(), SessionError> {
+    runtime_adapter
+        .unregister_session(session_id)
+        .await
+        .map_err(|cleanup_error| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "{primary_error}; additionally failed to unregister runtime session {session_id} during staged-session compensation: {cleanup_error}"
+            )))
+        })
+}
 
 /// Await the spawned `apply_runtime_turn` task and translate task-vanish
 /// errors into a typed [`StagedTaskJoinError`]. Surfaces map the inner
@@ -255,11 +272,58 @@ pub async fn should_restore_pending_after_start_turn(
 /// Result-receiver returned by [`spawn_pending_create_and_apply_runtime_turn_with_admission_guard`]
 /// and the recovered/recovery variants.
 pub type ServiceApplyRuntimeTurnSpawnReceiver =
-    tokio::sync::oneshot::Receiver<Result<CoreApplyOutput, SessionError>>;
+    tokio::sync::oneshot::Receiver<Result<CoreApplyOutput, StagedApplyRuntimeTurnError>>;
 
 /// Result-receiver returned by [`spawn_pending_create_and_start_turn_with_admission_guard`].
 pub type ServiceStartTurnSpawnReceiver =
     tokio::sync::oneshot::Receiver<Result<RunResult, SessionError>>;
+
+/// Typed result from a promotion task running under `CoreExecutor::apply`.
+/// Teardown requests are preserved separately from ordinary service failures
+/// so the caller can hand the exact executor back before machine cleanup.
+#[derive(Debug, thiserror::Error)]
+pub enum StagedApplyRuntimeTurnError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error("runtime teardown required ({reason:?}): {message}")]
+    TeardownRequired {
+        reason: CoreExecutorTeardownReason,
+        message: String,
+    },
+}
+
+impl StagedApplyRuntimeTurnError {
+    pub fn teardown(reason: CoreExecutorTeardownReason, message: impl Into<String>) -> Self {
+        Self::TeardownRequired {
+            reason,
+            message: message.into(),
+        }
+    }
+
+    pub fn archived_teardown(message: impl Into<String>) -> Self {
+        Self::teardown(CoreExecutorTeardownReason::ArchivedSession, message)
+    }
+
+    pub fn unavailable_teardown(message: impl Into<String>) -> Self {
+        Self::teardown(CoreExecutorTeardownReason::SessionUnavailable, message)
+    }
+}
+
+/// Preserve whether a recovered-create failure owns a newly prepared runtime.
+/// A new registration requires post-handoff teardown; a pre-existing runtime
+/// keeps the ordinary retryable service error. Archived authority always wins.
+pub fn classify_recovered_create_failure(
+    error: SessionError,
+    runtime_was_registered: bool,
+) -> StagedApplyRuntimeTurnError {
+    if is_archived_create_rejection(&error) {
+        return StagedApplyRuntimeTurnError::archived_teardown(error.to_string());
+    }
+    if !runtime_was_registered {
+        return StagedApplyRuntimeTurnError::unavailable_teardown(error.to_string());
+    }
+    error.into()
+}
 
 /// Comms-side context callback fired after the staged session
 /// materializes successfully but before the apply task waits for the
@@ -269,8 +333,9 @@ pub type CommsContextRefreshFn = Arc<dyn Fn(SessionId) -> BoxFut<'static, ()> + 
 
 /// Spawn the staged-session promotion task that materializes the live
 /// session via `create_session` and immediately drives a runtime
-/// `apply_runtime_turn`. The returned receiver yields the inner
-/// session-service result; surfaces translate to their wire shape.
+/// `apply_runtime_turn`. The returned receiver preserves ordinary service
+/// failures separately from typed post-handoff teardown requests; surfaces
+/// translate both onto their runtime-owned error seam.
 ///
 /// `replay_promoted_system_context` runs after a successful turn to
 /// replay any system-context state captured during staged promotion.
@@ -327,12 +392,11 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             }
             Err(err) => {
                 if is_archived_create_rejection(&err) {
-                    let _ = service.discard_live_session(&session_id).await;
-                    runtime_adapter.unregister_session(&session_id).await;
+                    let teardown = StagedApplyRuntimeTurnError::archived_teardown(err.to_string());
                     promotion_cleanup.mark_materialized();
                     let _ = promotion_cleanup.finish_now().await;
                     promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(err));
+                    let _ = result_tx.send(Err(teardown));
                     return;
                 }
                 match pending_live_first_turn_is_still_deferred(&service, &session_id).await {
@@ -364,17 +428,20 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                                     error = %error,
                                     "failed to determine live-session materialization after create_session error"
                                 );
-                                let _ = service.discard_live_session(&session_id).await;
-                                runtime_adapter.unregister_session(&session_id).await;
+                                let primary_error = SessionError::Agent(
+                                    meerkat_core::error::AgentError::InternalError(format!(
+                                        "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
+                                    )),
+                                );
                                 promotion_cleanup
                                     .fail_closed_after_unknown_materialization()
                                     .await;
                                 promotion_cleanup.disarm();
-                                let _ = result_tx.send(Err(SessionError::Agent(
-                                        meerkat_core::error::AgentError::InternalError(format!(
-                                            "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
-                                        )),
-                                    )));
+                                let _ = result_tx.send(Err(
+                                    StagedApplyRuntimeTurnError::unavailable_teardown(
+                                        primary_error.to_string(),
+                                    ),
+                                ));
                                 return;
                             }
                         };
@@ -414,22 +481,24 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                             create_error = %err,
                             "failed to determine deferred-first-turn materialization after create_session error"
                         );
-                        let _ = service.discard_live_session(&session_id).await;
-                        runtime_adapter.unregister_session(&session_id).await;
+                        let primary_error = SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
+                            )),
+                        );
                         promotion_cleanup
                             .fail_closed_after_unknown_materialization()
                             .await;
                         promotion_cleanup.disarm();
-                        let _ = result_tx.send(Err(SessionError::Agent(
-                            meerkat_core::error::AgentError::InternalError(format!(
-                                "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
-                            )),
-                        )));
+                        let _ =
+                            result_tx.send(Err(StagedApplyRuntimeTurnError::unavailable_teardown(
+                                primary_error.to_string(),
+                            )));
                         return;
                     }
                 }
                 promotion_cleanup.disarm();
-                let _ = result_tx.send(Err(err));
+                let _ = result_tx.send(Err(err.into()));
                 return;
             }
         }
@@ -469,13 +538,13 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             {
                 Ok(should_restore) => should_restore,
                 Err(error) => {
-                    let _ = service.discard_live_session(&session_id).await;
-                    runtime_adapter.unregister_session(&session_id).await;
                     promotion_cleanup
                         .fail_closed_after_unknown_materialization()
                         .await;
                     promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(error));
+                    let _ = result_tx.send(Err(StagedApplyRuntimeTurnError::unavailable_teardown(
+                        error.to_string(),
+                    )));
                     return;
                 }
             };
@@ -486,25 +555,17 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                     MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                 )
                 .await;
-            if restore_result.is_ok() {
-                runtime_adapter.unregister_session(&session_id).await;
-                #[cfg(feature = "comms")]
-                if let Err(error) = runtime_adapter.abort_comms_drain(&session_id).await {
-                    // Secondary fault on the restore path: the primary
-                    // restore outcome owns the result channel, so this drain
-                    // fault is surfaced as a typed warning instead of
-                    // overwriting the primary outcome.
-                    tracing::warn!(
-                        %session_id,
-                        %error,
-                        "failed to abort comms drain after materialized-failure restore"
-                    );
-                }
-            }
             promotion_cleanup.disarm();
             let _ = result_tx.send(match restore_result {
-                Ok(()) => result,
-                Err(error) => Err(error),
+                Ok(()) => match result {
+                    Ok(output) => Ok(output),
+                    Err(error) => Err(StagedApplyRuntimeTurnError::unavailable_teardown(
+                        error.to_string(),
+                    )),
+                },
+                Err(error) => Err(StagedApplyRuntimeTurnError::unavailable_teardown(
+                    error.to_string(),
+                )),
             });
             return;
         }
@@ -519,18 +580,19 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
         )
         .await;
         promotion_cleanup.disarm();
-        let _ = result_tx.send(result);
+        let _ = result_tx.send(result.map_err(StagedApplyRuntimeTurnError::from));
     });
     result_rx
 }
 
 /// Spawn a recovered-session promotion task that materializes the live
 /// session via `create_session_with_reserved_admission` and immediately
-/// drives a runtime `apply_runtime_turn`.
+/// drives a runtime `apply_runtime_turn`. Required cleanup is reported as a
+/// typed teardown request; this worker never unregisters the executor it is
+/// currently serving.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: Arc<MeerkatMachine>,
     comms_context_refresh: CommsContextRefreshFn,
     session_id: SessionId,
     create_req: CreateSessionRequest,
@@ -582,22 +644,30 @@ pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
                 {
                     Ok(should_restore) => should_restore,
                     Err(error) => {
-                        let _ = result_tx.send(Err(error));
+                        let _ = result_tx.send(Err(error.into()));
                         return;
                     }
                 };
                 if should_restore {
-                    let _ = service.discard_live_session(&session_id).await;
-                    runtime_adapter.unregister_session(&session_id).await;
+                    return match result {
+                        Ok(output) => {
+                            let _ = result_tx.send(Ok(output));
+                        }
+                        Err(error) => {
+                            let _ = result_tx.send(Err(
+                                StagedApplyRuntimeTurnError::unavailable_teardown(
+                                    error.to_string(),
+                                ),
+                            ));
+                        }
+                    };
                 }
-                result
+                result.map_err(StagedApplyRuntimeTurnError::from)
             }
-            Err(err) => {
-                if !runtime_was_registered {
-                    runtime_adapter.unregister_session(&session_id).await;
-                }
-                Err(err)
-            }
+            Err(err) => Err(classify_recovered_create_failure(
+                err,
+                runtime_was_registered,
+            )),
         };
         let _ = result_tx.send(result);
     });
@@ -658,7 +728,14 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
             Err(err) => {
                 if is_archived_create_rejection(&err) {
                     let _ = service.discard_live_session(&session_id).await;
-                    runtime_adapter.unregister_session(&session_id).await;
+                    let err = unregister_session_compensation(
+                        runtime_adapter.as_ref(),
+                        &session_id,
+                        &err,
+                    )
+                    .await
+                    .err()
+                    .unwrap_or(err);
                     promotion_cleanup.mark_materialized();
                     let _ = promotion_cleanup.finish_now().await;
                     promotion_cleanup.disarm();
@@ -695,16 +772,24 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                                     "failed to determine live-session materialization after create_session error"
                                 );
                                 let _ = service.discard_live_session(&session_id).await;
-                                runtime_adapter.unregister_session(&session_id).await;
+                                let primary_error = SessionError::Agent(
+                                    meerkat_core::error::AgentError::InternalError(format!(
+                                        "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
+                                    )),
+                                );
+                                let final_error = unregister_session_compensation(
+                                    runtime_adapter.as_ref(),
+                                    &session_id,
+                                    &primary_error,
+                                )
+                                .await
+                                .err()
+                                .unwrap_or(primary_error);
                                 promotion_cleanup
                                     .fail_closed_after_unknown_materialization()
                                     .await;
                                 promotion_cleanup.disarm();
-                                let _ = result_tx.send(Err(SessionError::Agent(
-                                        meerkat_core::error::AgentError::InternalError(format!(
-                                            "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
-                                        )),
-                                    )));
+                                let _ = result_tx.send(Err(final_error));
                                 return;
                             }
                         };
@@ -745,16 +830,24 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                             "failed to determine deferred-first-turn materialization after create_session error"
                         );
                         let _ = service.discard_live_session(&session_id).await;
-                        runtime_adapter.unregister_session(&session_id).await;
+                        let primary_error = SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
+                            )),
+                        );
+                        let final_error = unregister_session_compensation(
+                            runtime_adapter.as_ref(),
+                            &session_id,
+                            &primary_error,
+                        )
+                        .await
+                        .err()
+                        .unwrap_or(primary_error);
                         promotion_cleanup
                             .fail_closed_after_unknown_materialization()
                             .await;
                         promotion_cleanup.disarm();
-                        let _ = result_tx.send(Err(SessionError::Agent(
-                            meerkat_core::error::AgentError::InternalError(format!(
-                                "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
-                            )),
-                        )));
+                        let _ = result_tx.send(Err(final_error));
                         return;
                     }
                 }
@@ -785,7 +878,14 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                 Ok(should_restore) => should_restore,
                 Err(error) => {
                     let _ = service.discard_live_session(&session_id).await;
-                    runtime_adapter.unregister_session(&session_id).await;
+                    let error = unregister_session_compensation(
+                        runtime_adapter.as_ref(),
+                        &session_id,
+                        &error,
+                    )
+                    .await
+                    .err()
+                    .unwrap_or(error);
                     promotion_cleanup
                         .fail_closed_after_unknown_materialization()
                         .await;
@@ -801,8 +901,19 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                     MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                 )
                 .await;
+            let mut unregister_result = Ok(());
             if restore_result.is_ok() {
-                runtime_adapter.unregister_session(&session_id).await;
+                let primary_error = result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "staged materialized turn requires restore".to_string());
+                unregister_result = unregister_session_compensation(
+                    runtime_adapter.as_ref(),
+                    &session_id,
+                    &primary_error,
+                )
+                .await;
                 #[cfg(feature = "comms")]
                 if let Err(error) = runtime_adapter.abort_comms_drain(&session_id).await {
                     // Secondary fault on the restore path: the primary
@@ -817,9 +928,9 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                 }
             }
             promotion_cleanup.disarm();
-            let _ = result_tx.send(match restore_result {
-                Ok(()) => result,
-                Err(error) => Err(error),
+            let _ = result_tx.send(match (restore_result, unregister_result) {
+                (Ok(()), Ok(())) => result,
+                (Ok(()), Err(error)) | (Err(error), _) => Err(error),
             });
             return;
         }
@@ -1001,7 +1112,6 @@ impl PendingPromotionCleanup {
             .archive_with_machine_protocol(&self.session_id, protocol)
             .await
         {
-            let _ = service.discard_live_session(&self.session_id).await;
             self.restore_now().await;
             return Err(error);
         }

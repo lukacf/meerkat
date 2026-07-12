@@ -4,8 +4,68 @@ type OpsLifecyclePersistenceReceiver = crate::tokio::sync::mpsc::UnboundedReceiv
     crate::ops_lifecycle::OpsLifecyclePersistenceRequest,
 >;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnregisterTeardownCaller {
+    Explicit,
+    RuntimeLoopWatcher,
+}
+
+std::thread_local! {
+    /// Coordinator identity is scoped to each poll of the owned saga future.
+    ///
+    /// Tokio exposes task IDs on native targets, but the browser runtime does
+    /// not. Poll scoping preserves exact self-join detection on both runtimes:
+    /// concurrent tasks on one thread restore the prior value before another
+    /// future can be polled, while a native task may freely migrate threads
+    /// between polls.
+    static ACTIVE_UNREGISTER_COORDINATOR: std::cell::Cell<Option<uuid::Uuid>> =
+        const { std::cell::Cell::new(None) };
+}
+
+struct UnregisterCoordinatorPollScope<F> {
+    coordinator_id: uuid::Uuid,
+    future: Pin<Box<F>>,
+}
+
+struct RestoreUnregisterCoordinator(Option<uuid::Uuid>);
+
+impl Drop for RestoreUnregisterCoordinator {
+    fn drop(&mut self) {
+        ACTIVE_UNREGISTER_COORDINATOR.with(|active| active.set(self.0));
+    }
+}
+
+impl<F: Future> Future for UnregisterCoordinatorPollScope<F> {
+    type Output = F::Output;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let previous =
+            ACTIVE_UNREGISTER_COORDINATOR.with(|active| active.replace(Some(this.coordinator_id)));
+        let _restore = RestoreUnregisterCoordinator(previous);
+        this.future.as_mut().poll(context)
+    }
+}
+
+fn unregister_coordinator_poll_scope<F: Future>(
+    coordinator_id: uuid::Uuid,
+    future: F,
+) -> UnregisterCoordinatorPollScope<F> {
+    UnregisterCoordinatorPollScope {
+        coordinator_id,
+        future: Box::pin(future),
+    }
+}
+
+fn active_unregister_coordinator() -> Option<uuid::Uuid> {
+    ACTIVE_UNREGISTER_COORDINATOR.with(std::cell::Cell::get)
+}
+
 #[derive(Debug, Clone)]
-struct RuntimeOpsLifecycleDurabilityAuthority {
+pub(super) struct RuntimeOpsLifecycleDurabilityAuthority {
     action: crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction,
 }
 
@@ -16,6 +76,7 @@ struct RuntimeLifecycleRecoveryObservation {
     fence_token: Option<u64>,
     runtime_generation: Option<crate::meerkat_machine::dsl::Generation>,
     runtime_epoch_id: Option<crate::meerkat_machine::dsl::RuntimeEpochId>,
+    unregister_progress: Option<crate::store::MachineUnregisterProgressSnapshot>,
     recovered_from_snapshot: bool,
 }
 
@@ -28,6 +89,7 @@ impl RuntimeLifecycleRecoveryObservation {
                 fence_token: None,
                 runtime_generation: None,
                 runtime_epoch_id: None,
+                unregister_progress: None,
                 recovered_from_snapshot: false,
             };
         };
@@ -44,6 +106,7 @@ impl RuntimeLifecycleRecoveryObservation {
             runtime_epoch_id: binding
                 .runtime_epoch_id()
                 .map(crate::meerkat_machine::dsl::RuntimeEpochId::from),
+            unregister_progress: snapshot.unregister_progress().cloned(),
             recovered_from_snapshot: true,
         }
     }
@@ -54,7 +117,8 @@ impl RuntimeLifecycleRecoveryObservation {
                 || self.agent_runtime_id.is_some()
                 || self.fence_token.is_some()
                 || self.runtime_generation.is_some()
-                || self.runtime_epoch_id.is_some())
+                || self.runtime_epoch_id.is_some()
+                || self.unregister_progress.is_some())
     }
 }
 
@@ -76,6 +140,210 @@ fn fresh_registered_runtime_authority(
         ))
     })?;
     Ok(authority)
+}
+
+fn replay_durable_unregister_progress(
+    authority: &mut crate::meerkat_machine::dsl::MeerkatMachineAuthority,
+    session_id: &SessionId,
+    progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+) -> Result<(), RuntimeDriverError> {
+    let Some(progress) = progress else {
+        return Ok(());
+    };
+    let state = authority.state();
+    let begin = crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterSession {
+        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+        agent_runtime_id: state.active_runtime_id.clone(),
+        fence_token: state.active_fence_token,
+        generation: state.active_runtime_generation,
+        runtime_epoch_id: state.active_runtime_epoch_id.clone(),
+    };
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(authority, begin).map_err(
+        |error| RuntimeDriverError::RecoveryCorruption {
+            reason: format!(
+                "failed to replay durable unregister drain for session {session_id}: {error}"
+            ),
+        },
+    )?;
+
+    let mut feedback = Vec::new();
+    if !progress.runtime_loop_drain_pending() {
+        feedback.push(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                forced_abort: progress.runtime_loop_forced_abort(),
+            },
+        );
+    }
+    if !progress.comms_drain_exit_pending() {
+        feedback.push(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                forced_abort: progress.comms_drain_forced_abort(),
+            },
+        );
+    }
+    if !progress.completion_waiter_drain_pending() {
+        feedback.push(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+            },
+        );
+    }
+    for input in feedback {
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(authority, input).map_err(
+            |error| RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "failed to replay durable unregister feedback for session {session_id}: {error}"
+                ),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod unregister_progress_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn durable_unregister_progress_replays_through_generated_feedback() {
+        let session_id = SessionId::new();
+        let mut authority = fresh_registered_runtime_authority(
+            &session_id,
+            "durable unregister progress replay test",
+        )
+        .expect("fresh authority");
+        let progress =
+            crate::store::MachineUnregisterProgressSnapshot::new(false, true, false, true, false);
+
+        replay_durable_unregister_progress(&mut authority, &session_id, Some(&progress))
+            .expect("generated unregister progress replay");
+
+        let state = authority.state();
+        assert_eq!(
+            state.registration_phase,
+            crate::meerkat_machine::dsl::RegistrationPhase::Draining
+        );
+        assert!(!state.unregister_runtime_loop_drain_pending);
+        assert!(state.unregister_comms_drain_exit_pending);
+        assert!(!state.unregister_completion_waiter_drain_pending);
+        assert!(state.unregister_runtime_loop_forced_abort);
+        assert!(!state.unregister_comms_drain_forced_abort);
+    }
+
+    #[test]
+    fn crash_recovered_pending_producers_close_as_forced_process_loss() {
+        let session_id = SessionId::new();
+        let progress =
+            crate::store::MachineUnregisterProgressSnapshot::new(true, true, true, false, false);
+        let observations = UnregisterTeardownMechanicalObservations::from_durable_process_recovery(
+            Some(&progress),
+        );
+        assert!(
+            observations
+                .runtime_loop_forced_abort
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(
+            observations
+                .comms_drain_forced_abort
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+
+        let mut authority = fresh_registered_runtime_authority(
+            &session_id,
+            "crash-recovered unregister process-loss test",
+        )
+        .expect("fresh authority");
+        replay_durable_unregister_progress(&mut authority, &session_id, Some(&progress))
+            .expect("durable BeginUnregister replay");
+        for input in [
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                forced_abort: observations
+                    .runtime_loop_forced_abort
+                    .load(std::sync::atomic::Ordering::Acquire),
+            },
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                forced_abort: observations
+                    .comms_drain_forced_abort
+                    .load(std::sync::atomic::Ordering::Acquire),
+            },
+        ] {
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut authority, input)
+                .expect("recovered producer feedback must apply");
+        }
+        let state = authority.state();
+        assert!(!state.unregister_runtime_loop_drain_pending);
+        assert!(!state.unregister_comms_drain_exit_pending);
+        assert!(state.unregister_runtime_loop_forced_abort);
+        assert!(state.unregister_comms_drain_forced_abort);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ops_persistence_worker_tests {
+    use super::*;
+    use meerkat_core::ops_lifecycle::{
+        OperationId, OperationKind, OperationSpec, OpsLifecycleError, OpsLifecycleRegistry,
+    };
+
+    #[tokio::test]
+    async fn unregister_closes_and_joins_ops_persistence_before_late_callback() {
+        let store: Arc<dyn RuntimeStore> = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let runtime_id = LogicalRuntimeId::new("ops-worker-unregister-test");
+        let epoch_id = meerkat_core::RuntimeEpochId::new();
+        let cursor_state = Arc::new(meerkat_core::EpochCursorState::new());
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let (persist_tx, persist_rx) = crate::tokio::sync::mpsc::unbounded_channel();
+        let worker = spawn_ops_lifecycle_persistence_worker(
+            Arc::clone(&store),
+            runtime_id.clone(),
+            persist_rx,
+        )
+        .expect("persistence worker");
+        registry.set_persistence_channel(persist_tx, epoch_id.clone(), cursor_state);
+
+        let operation_id = OperationId::new();
+        registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: SessionId::new(),
+                display_name: "detached callback".into(),
+                source_label: "ops worker test".into(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        registry.provisioning_succeeded(&operation_id).unwrap();
+        registry
+            .retire_owner_for_unregister("test unregister".into())
+            .unwrap();
+        join_ops_lifecycle_persistence_worker(worker)
+            .await
+            .expect("closed persistence worker must join");
+
+        let persisted = store
+            .load_ops_lifecycle(&runtime_id)
+            .await
+            .unwrap()
+            .expect("terminal owner snapshot must be durable before join");
+        assert_eq!(persisted.epoch_id, epoch_id);
+        assert_eq!(
+            registry.report_progress(
+                &operation_id,
+                meerkat_core::ops_lifecycle::OperationProgressUpdate {
+                    message: "late".into(),
+                    percent: None,
+                },
+            ),
+            Err(OpsLifecycleError::OwnerRetired)
+        );
+    }
 }
 
 fn runtime_ops_lifecycle_durability_authority_from_effects(
@@ -130,10 +398,10 @@ fn spawn_ops_lifecycle_persistence_worker(
     store: Arc<dyn RuntimeStore>,
     runtime_id: LogicalRuntimeId,
     mut persist_rx: OpsLifecyclePersistenceReceiver,
-) {
+) -> Result<OpsLifecyclePersistenceWorker, RuntimeDriverError> {
     let thread_name = format!("ops-lifecycle-persist-{runtime_id}");
     let worker_runtime_id = runtime_id.clone();
-    let spawn_result = std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
             let runtime = match crate::tokio::runtime::Builder::new_current_thread()
@@ -155,14 +423,13 @@ fn spawn_ops_lifecycle_persistence_worker(
                     persist_ops_lifecycle_request(&store, &worker_runtime_id, request).await;
                 }
             });
-        });
-    if let Err(error) = spawn_result {
-        tracing::error!(
-            %runtime_id,
-            error = %error,
-            "failed to spawn ops lifecycle persistence worker"
-        );
-    }
+        })
+        .map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "failed to spawn ops lifecycle persistence worker for {runtime_id}: {error}"
+            ))
+        })?;
+    Ok(OpsLifecyclePersistenceWorker { handle })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -170,12 +437,38 @@ fn spawn_ops_lifecycle_persistence_worker(
     store: Arc<dyn RuntimeStore>,
     runtime_id: LogicalRuntimeId,
     mut persist_rx: OpsLifecyclePersistenceReceiver,
-) {
-    crate::tokio::spawn(async move {
+) -> Result<OpsLifecyclePersistenceWorker, RuntimeDriverError> {
+    let handle = crate::tokio::spawn(async move {
         while let Some(request) = persist_rx.recv().await {
             persist_ops_lifecycle_request(&store, &runtime_id, request).await;
         }
     });
+    Ok(OpsLifecyclePersistenceWorker { handle })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn join_ops_lifecycle_persistence_worker(
+    worker: OpsLifecyclePersistenceWorker,
+) -> Result<(), RuntimeDriverError> {
+    crate::tokio::task::spawn_blocking(move || worker.handle.join())
+        .await
+        .map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "ops lifecycle persistence join task failed: {error}"
+            ))
+        })?
+        .map_err(|_| {
+            RuntimeDriverError::Internal("ops lifecycle persistence worker panicked".into())
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn join_ops_lifecycle_persistence_worker(
+    worker: OpsLifecyclePersistenceWorker,
+) -> Result<(), RuntimeDriverError> {
+    worker.handle.await.map_err(|error| {
+        RuntimeDriverError::Internal(format!("ops lifecycle persistence worker failed: {error}"))
+    })
 }
 
 impl MeerkatMachine {
@@ -260,6 +553,9 @@ impl MeerkatMachine {
                     %session_id,
                     "MeerkatMachine::register_session_inner found existing session"
                 );
+                if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
+                    return Err(error);
+                }
                 if existing.clear_dead_attachment() {
                     existing.stage_generated_executor_exit_observation().map_err(|reason| {
                         RuntimeDriverError::Internal(format!(
@@ -312,12 +608,19 @@ impl MeerkatMachine {
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
+            ops_lifecycle_persistence_worker: None,
             epoch_id,
             handle_teardown_gate,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
             attachment_slot: RuntimeLoopAttachmentSlot::Empty,
+            runtime_loop_teardown: None,
+            unregister_coordinator: None,
+            pending_unregister_finalization: None,
+            unregister_teardown_observations: Arc::new(
+                UnregisterTeardownMechanicalObservations::new(),
+            ),
             provisional_interrupt_handle: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
@@ -381,6 +684,9 @@ impl MeerkatMachine {
                     %session_id,
                     "MeerkatMachine::register_session_inner found existing session"
                 );
+                if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
+                    return Err(error);
+                }
                 if existing.clear_dead_attachment() {
                     existing.stage_generated_executor_exit_observation().map_err(|reason| {
                         RuntimeDriverError::Internal(format!(
@@ -445,12 +751,19 @@ impl MeerkatMachine {
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
+            ops_lifecycle_persistence_worker: None,
             epoch_id,
             handle_teardown_gate,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
             attachment_slot: RuntimeLoopAttachmentSlot::Empty,
+            runtime_loop_teardown: None,
+            unregister_coordinator: None,
+            pending_unregister_finalization: None,
+            unregister_teardown_observations: Arc::new(
+                UnregisterTeardownMechanicalObservations::new(),
+            ),
             provisional_interrupt_handle: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
@@ -518,6 +831,9 @@ impl MeerkatMachine {
                     %session_id,
                     "MeerkatMachine::register_session_inner found existing session"
                 );
+                if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
+                    return Err(error);
+                }
                 if existing.clear_dead_attachment() {
                     existing.stage_generated_executor_exit_observation().map_err(|reason| {
                         RuntimeDriverError::Internal(format!(
@@ -538,6 +854,11 @@ impl MeerkatMachine {
         let recovery_observation = RuntimeLifecycleRecoveryObservation::from_snapshot(
             self.durable_lifecycle_for_registration(&runtime_id).await?,
         );
+        let recovered_teardown_observations = Arc::new(
+            UnregisterTeardownMechanicalObservations::from_durable_process_recovery(
+                recovery_observation.unregister_progress.as_ref(),
+            ),
+        );
         tracing::debug!(
             %session_id,
             %runtime_id,
@@ -545,7 +866,7 @@ impl MeerkatMachine {
         );
         let observed_runtime_state = recovery_observation.runtime_state;
         let requires_observed_recovery = recovery_observation.requires_observed_recovery();
-        let recovered_authority = if requires_observed_recovery {
+        let mut recovered_authority = if requires_observed_recovery {
             super::dsl_authority::recover_authority_from_runtime_observation(
                 &session_id,
                 observed_runtime_state,
@@ -566,6 +887,11 @@ impl MeerkatMachine {
         } else {
             fresh_registered_runtime_authority(&session_id, "fresh session registration")?
         };
+        replay_durable_unregister_progress(
+            &mut recovered_authority,
+            &session_id,
+            recovery_observation.unregister_progress.as_ref(),
+        )?;
         // Seed the driver's initial phase from the recovered DSL authority
         // uniformly (same as the storeless paths): the authority is the owner;
         // the driver control projection mirrors it, never the raw observation.
@@ -632,12 +958,17 @@ impl MeerkatMachine {
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
+            ops_lifecycle_persistence_worker: None,
             epoch_id,
             handle_teardown_gate,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             tool_visibility_owner,
             attachment_slot: RuntimeLoopAttachmentSlot::Empty,
+            runtime_loop_teardown: None,
+            unregister_coordinator: None,
+            pending_unregister_finalization: None,
+            unregister_teardown_observations: recovered_teardown_observations,
             provisional_interrupt_handle: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
@@ -654,6 +985,9 @@ impl MeerkatMachine {
                 %runtime_id,
                 "MeerkatMachine::register_session_inner found existing session before insert"
             );
+            if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
+                return Err(error);
+            }
             if existing.clear_dead_attachment() {
                 existing
                     .stage_generated_executor_exit_observation()
@@ -678,28 +1012,30 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         epoch_id: &meerkat_core::RuntimeEpochId,
-    ) {
-        let Some(gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
-            return;
-        };
-        {
-            let sessions = self.sessions.read().await;
-            let Some(entry) = sessions.get(session_id) else {
-                return;
-            };
-            if &entry.epoch_id != epoch_id {
-                return;
-            }
-        }
-        if let Err(err) = self
-            .unregister_session_inner_locked_authorized(session_id, gate_guard)
+    ) -> Result<(), RuntimeDriverError> {
+        self.join_or_start_unregister_teardown(
+            session_id,
+            Some(epoch_id),
+            UnregisterTeardownCaller::Explicit,
+        )
+        .await
+    }
+
+    pub(super) async fn compensate_inserted_session_error(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        primary_error: RuntimeDriverError,
+        context: &'static str,
+    ) -> RuntimeDriverError {
+        match self
+            .unregister_session_inner_if_epoch(session_id, epoch_id)
             .await
         {
-            tracing::warn!(
-                %session_id,
-                error = %err,
-                "generated MeerkatMachine rejected epoch-scoped session unregister"
-            );
+            Ok(()) => primary_error,
+            Err(cleanup_error) => RuntimeDriverError::Internal(format!(
+                "{primary_error}; additionally failed to unregister newly inserted session during {context}: {cleanup_error}"
+            )),
         }
     }
 
@@ -848,6 +1184,7 @@ impl MeerkatMachine {
     ) -> Result<(), RuntimeDriverError> {
         enum ExistingExecutorClaim {
             AlreadyClaimed,
+            Blocked(RuntimeDriverError),
             Rejected(String),
             Claimed {
                 gate: Arc<Mutex<()>>,
@@ -870,6 +1207,9 @@ impl MeerkatMachine {
                 };
                 if !Arc::ptr_eq(&entry.mutation_gate, &gate) {
                     continue;
+                }
+                if let Some(error) = entry.registration_blocked_by_unregister(&session_id) {
+                    break ExistingExecutorClaim::Blocked(error);
                 }
                 let repaired_dead_attachment = entry.clear_dead_attachment();
                 let repaired_deferred_stop =
@@ -919,9 +1259,14 @@ impl MeerkatMachine {
                         return Err(err);
                     }
                 };
+            let recovered_teardown_observations = Arc::new(
+                UnregisterTeardownMechanicalObservations::from_durable_process_recovery(
+                    recovery_observation.unregister_progress.as_ref(),
+                ),
+            );
             let observed_runtime_state = recovery_observation.runtime_state;
             let requires_observed_recovery = recovery_observation.requires_observed_recovery();
-            let recovered_authority = if requires_observed_recovery {
+            let mut recovered_authority = if requires_observed_recovery {
                 match super::dsl_authority::recover_authority_from_runtime_observation(
                     &session_id,
                     observed_runtime_state,
@@ -948,6 +1293,11 @@ impl MeerkatMachine {
             } else {
                 fresh_registered_runtime_authority(&session_id, "fresh executor registration")?
             };
+            replay_durable_unregister_progress(
+                &mut recovered_authority,
+                &session_id,
+                recovery_observation.unregister_progress.as_ref(),
+            )?;
             // Seed the driver's initial phase from the recovered DSL authority
             // uniformly: the authority is the owner; the driver control
             // projection mirrors it, never the raw observation.
@@ -1013,12 +1363,17 @@ impl MeerkatMachine {
                     control_projection,
                     driver: driver.clone(),
                     ops_lifecycle: recovered_ops.clone(),
+                    ops_lifecycle_persistence_worker: None,
                     epoch_id: recovered_epoch,
                     handle_teardown_gate: crate::handles::HandleTeardownGate::open(),
                     cursor_state: recovered_cursors,
                     completions: completions.clone(),
                     tool_visibility_owner,
                     attachment_slot: RuntimeLoopAttachmentSlot::Empty,
+                    runtime_loop_teardown: None,
+                    unregister_coordinator: None,
+                    pending_unregister_finalization: None,
+                    unregister_teardown_observations: recovered_teardown_observations,
                     provisional_interrupt_handle: None,
                     dsl_authority: Arc::clone(&dsl_authority),
                     drain_slot: CommsDrainSlot::new(),
@@ -1062,6 +1417,7 @@ impl MeerkatMachine {
             ExistingExecutorClaim::AlreadyClaimed => {
                 return Ok(());
             }
+            ExistingExecutorClaim::Blocked(error) => return Err(error),
             ExistingExecutorClaim::Rejected(reason) => {
                 tracing::warn!(
                     %session_id,
@@ -1123,25 +1479,34 @@ impl MeerkatMachine {
             >();
             let (entry_epoch_id, entry_cursor, runtime_id) = {
                 let sessions = self.sessions.read().await;
-                sessions.get(&session_id).map_or_else(
-                    || {
-                        (
-                            meerkat_core::RuntimeEpochId::new(),
-                            Arc::new(meerkat_core::EpochCursorState::new()),
-                            Self::logical_runtime_id(&session_id),
-                        )
-                    },
-                    |entry| {
-                        (
-                            entry.epoch_id.clone(),
-                            Arc::clone(&entry.cursor_state),
-                            entry.runtime_id.clone(),
-                        )
-                    },
+                let entry = sessions.get(&session_id).ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "session {session_id} disappeared before ops persistence wiring"
+                    ))
+                })?;
+                (
+                    entry.epoch_id.clone(),
+                    Arc::clone(&entry.cursor_state),
+                    entry.runtime_id.clone(),
                 )
             };
-            spawn_ops_lifecycle_persistence_worker(Arc::clone(store), runtime_id, persist_rx);
+            let persistence_worker =
+                spawn_ops_lifecycle_persistence_worker(Arc::clone(store), runtime_id, persist_rx)?;
+            let previous_worker = {
+                let mut sessions = self.sessions.write().await;
+                let entry = sessions.get_mut(&session_id).ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "session {session_id} disappeared while installing ops persistence worker"
+                    ))
+                })?;
+                entry
+                    .ops_lifecycle_persistence_worker
+                    .replace(persistence_worker)
+            };
             ops_lifecycle.set_persistence_channel(persist_tx, entry_epoch_id, entry_cursor);
+            if let Some(previous_worker) = previous_worker {
+                join_ops_lifecycle_persistence_worker(previous_worker).await?;
+            }
         }
 
         // Get the completion feed from the registry for feed-based idle wake.
@@ -1157,19 +1522,18 @@ impl MeerkatMachine {
                 .get(&session_id)
                 .map(|e| Arc::clone(&e.cursor_state))
         };
-        let mut pending_loop_handle =
-            Some(crate::runtime_loop::spawn_runtime_loop_with_completions(
-                driver.clone(),
-                executor,
-                wake_rx,
-                effect_rx,
-                Some(completions.clone()),
-                Some(completion_feed),
-                Some(Arc::clone(&ops_lifecycle) as Arc<dyn meerkat_core::OpsLifecycleRegistry>),
-                entry_cursor_state,
-                Arc::downgrade(self),
-                session_id.clone(),
-            ));
+        let mut pending_loop = Some(crate::runtime_loop::spawn_runtime_loop_with_completions(
+            driver.clone(),
+            executor,
+            wake_rx,
+            effect_rx,
+            Some(completions.clone()),
+            Some(completion_feed),
+            Some(Arc::clone(&ops_lifecycle) as Arc<dyn meerkat_core::OpsLifecycleRegistry>),
+            entry_cursor_state,
+            Arc::downgrade(self),
+            session_id.clone(),
+        ));
 
         let (published, detach_after_abort) = {
             let mut sessions = self.sessions.write().await;
@@ -1190,14 +1554,14 @@ impl MeerkatMachine {
                         );
                         (false, true)
                     } else {
-                        match pending_loop_handle.take() {
-                            Some(loop_handle) => {
+                        match pending_loop.take() {
+                            Some(spawned_loop) => {
                                 entry.attach_runtime_loop(
                                     wake_tx.clone(),
                                     effect_tx,
                                     boundary_handle,
                                     interrupt_handle,
-                                    loop_handle,
+                                    spawned_loop,
                                 );
                                 (true, false)
                             }
@@ -1215,8 +1579,8 @@ impl MeerkatMachine {
         };
 
         if !published {
-            if let Some(loop_handle) = pending_loop_handle.take() {
-                loop_handle.abort();
+            if let Some(spawned_loop) = pending_loop.take() {
+                spawned_loop.loop_handle.abort();
             }
             if detach_after_abort {
                 Self::restore_dsl_authority_snapshot(
@@ -1242,8 +1606,222 @@ impl MeerkatMachine {
     ///
     /// Detaches the executor (Attached → Idle) before removal, then drops
     /// the wake channel sender, which causes the RuntimeLoop to exit.
-    pub async fn unregister_session(&self, session_id: &SessionId) {
-        self.unregister_session_inner(session_id).await;
+    pub async fn unregister_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.join_or_start_unregister_teardown(session_id, None, UnregisterTeardownCaller::Explicit)
+            .await
+    }
+
+    /// Observe a runtime-loop handoff without turning a completed failed saga
+    /// into an implicit retry. Explicit stop/unregister callers own retries;
+    /// this watcher only starts teardown when no coordinator result exists.
+    pub(crate) async fn observe_runtime_loop_teardown(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.join_or_start_unregister_teardown(
+            session_id,
+            None,
+            UnregisterTeardownCaller::RuntimeLoopWatcher,
+        )
+        .await
+    }
+
+    async fn join_or_start_unregister_teardown(
+        &self,
+        session_id: &SessionId,
+        expected_epoch: Option<&meerkat_core::RuntimeEpochId>,
+        caller: UnregisterTeardownCaller,
+    ) -> Result<(), RuntimeDriverError> {
+        enum CoordinatorDecision {
+            Join(crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>),
+            Start {
+                epoch_id: meerkat_core::RuntimeEpochId,
+                coordinator_id: uuid::Uuid,
+                result_tx: crate::tokio::sync::watch::Sender<Option<UnregisterTeardownResult>>,
+                result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+                teardown_slot: Option<Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>>,
+            },
+            AlreadyAbsent,
+            EpochChanged,
+            Completed(Result<(), RuntimeDriverError>),
+        }
+
+        let decision = {
+            let mut sessions = self.sessions.write().await;
+            match sessions.get_mut(session_id) {
+                None => CoordinatorDecision::AlreadyAbsent,
+                Some(entry)
+                    if expected_epoch.is_some_and(|expected| expected != &entry.epoch_id) =>
+                {
+                    CoordinatorDecision::EpochChanged
+                }
+                Some(entry) => {
+                    if caller == UnregisterTeardownCaller::RuntimeLoopWatcher
+                        && let Some(result) = entry
+                            .runtime_loop_teardown
+                            .as_ref()
+                            .and_then(|slot| slot.last_unregister_result())
+                    {
+                        CoordinatorDecision::Completed(result)
+                    } else if let Some(coordinator) = entry.unregister_coordinator.as_ref() {
+                        if coordinator.epoch_id == entry.epoch_id {
+                            if active_unregister_coordinator()
+                                .is_some_and(|active| active == coordinator.coordinator_id)
+                            {
+                                return Err(RuntimeDriverError::Internal(format!(
+                                    "unregister teardown for session {session_id} attempted to join its own coordinator task"
+                                )));
+                            }
+                            CoordinatorDecision::Join(coordinator.result_rx.clone())
+                        } else {
+                            return Err(RuntimeDriverError::Internal(format!(
+                                "stale unregister coordinator epoch for session {session_id}"
+                            )));
+                        }
+                    } else {
+                        if caller == UnregisterTeardownCaller::Explicit
+                            && let Some(teardown_slot) = entry.runtime_loop_teardown.as_ref()
+                        {
+                            // A deliberate caller-owned retry supersedes the
+                            // prior terminal error. Clear it while holding the
+                            // session map lock so the loop watcher either joins
+                            // this coordinator or observes its new result.
+                            teardown_slot.clear_last_unregister_result();
+                        }
+                        let epoch_id = entry.epoch_id.clone();
+                        let coordinator_id = uuid::Uuid::new_v4();
+                        let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
+                        entry.unregister_coordinator = Some(UnregisterTeardownCoordinator {
+                            epoch_id: epoch_id.clone(),
+                            coordinator_id,
+                            result_rx: result_rx.clone(),
+                        });
+                        CoordinatorDecision::Start {
+                            epoch_id,
+                            coordinator_id,
+                            result_tx,
+                            result_rx,
+                            teardown_slot: entry.runtime_loop_teardown.clone(),
+                        }
+                    }
+                }
+            }
+        };
+
+        let mut result_rx = match decision {
+            CoordinatorDecision::Join(result_rx) => result_rx,
+            CoordinatorDecision::AlreadyAbsent | CoordinatorDecision::EpochChanged => {
+                return Ok(());
+            }
+            CoordinatorDecision::Completed(result) => return result,
+            CoordinatorDecision::Start {
+                epoch_id,
+                coordinator_id,
+                result_tx,
+                result_rx,
+                teardown_slot,
+            } => {
+                let saga_machine = self.clone();
+                let saga_session_id = session_id.clone();
+                let saga_epoch_id = epoch_id.clone();
+                let worker = crate::tokio::spawn(unregister_coordinator_poll_scope(
+                    coordinator_id,
+                    async move {
+                        saga_machine
+                            .run_owned_unregister_teardown(&saga_session_id, &saga_epoch_id)
+                            .await
+                    },
+                ));
+                let supervisor_machine = self.clone();
+                let supervisor_session_id = session_id.clone();
+                crate::tokio::spawn(async move {
+                    let result = match worker.await {
+                        Ok(result) => result,
+                        Err(join_error) => Err(RuntimeDriverError::Internal(format!(
+                            "owned unregister coordinator task failed: {join_error}"
+                        ))),
+                    };
+                    if let Some(teardown_slot) = teardown_slot {
+                        teardown_slot.acknowledge_unregister_result(result.clone());
+                    }
+                    // Existing joiners retain cloned watch receivers, so clear
+                    // the matching completed coordinator before publishing.
+                    // A caller that wakes on this result can therefore start a
+                    // deliberate retry immediately instead of accidentally
+                    // rejoining the completed error. The retained loop result
+                    // prevents its watcher from starting that retry itself.
+                    supervisor_machine
+                        .clear_unregister_coordinator(
+                            &supervisor_session_id,
+                            &epoch_id,
+                            coordinator_id,
+                        )
+                        .await;
+                    let _ = result_tx.send(Some(result));
+                });
+                result_rx
+            }
+        };
+
+        loop {
+            if let Some(result) = result_rx.borrow().clone() {
+                return result;
+            }
+            result_rx.changed().await.map_err(|_| {
+                RuntimeDriverError::Internal(format!(
+                    "unregister coordinator result channel closed for session {session_id}"
+                ))
+            })?;
+        }
+    }
+
+    async fn clear_unregister_coordinator(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        coordinator_id: uuid::Uuid,
+    ) {
+        let mut sessions = self.sessions.write().await;
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let should_clear = entry
+            .unregister_coordinator
+            .as_ref()
+            .is_some_and(|coordinator| {
+                coordinator.epoch_id == *epoch_id && coordinator.coordinator_id == coordinator_id
+            });
+        if should_clear {
+            entry.unregister_coordinator = None;
+        }
+    }
+
+    async fn run_owned_unregister_teardown(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+    ) -> Result<(), RuntimeDriverError> {
+        let result = self
+            .run_owned_unregister_teardown_inner(session_id, epoch_id)
+            .await;
+        if let Err(error) = &result {
+            let completions = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .filter(|entry| &entry.epoch_id == epoch_id)
+                    .map(|entry| Arc::clone(&entry.completions))
+            };
+            if let Some(completions) = completions {
+                completions.lock().await.fail_all_waiters(
+                    crate::completion::CompletionWaitError::AuthorityUnavailable(error.to_string()),
+                );
+            }
+        }
+        result
     }
 
     /// Unregister a session and report whether the machine-owned detach and
@@ -1254,10 +1832,8 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let Some(gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
-            return Ok(());
-        };
-        Box::pin(self.unregister_session_inner_locked_authorized(session_id, gate_guard)).await
+        self.join_or_start_unregister_teardown(session_id, None, UnregisterTeardownCaller::Explicit)
+            .await
     }
 
     /// Stage `BeginUnregisterSession`, which opens the machine-owned drain
@@ -1348,56 +1924,123 @@ impl MeerkatMachine {
                     crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::RetainSnapshot,
             }
         };
-        let staged = self
-            .stage_session_dsl_transition(session_id, unregister_input, "UnregisterSession")
-            .await
+        let staged = if self.store.is_some() {
+            let mut sessions = self.sessions.write().await;
+            let entry = sessions
+                .get_mut(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            // Once the final durable transition is staged, every detached
+            // session-owned handle must fail closed. An ordinary finalization
+            // failure rolls back only to the completed-drain retry anchor; it
+            // never reopens the retired runtime epoch for regular work.
+            entry.close_handle_teardown_gate();
+            let staged = Self::stage_dsl_transition_on_authority(
+                &entry.dsl_authority,
+                unregister_input,
+                "UnregisterSession",
+            )
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            entry.pending_unregister_finalization = Some(PendingUnregisterFinalization {
+                durability_authority: authority.clone(),
+                committed_snapshot: staged.committed_snapshot.clone(),
+            });
+            staged
+        } else {
+            self.stage_session_dsl_transition(session_id, unregister_input, "UnregisterSession")
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
+        };
         Ok((staged, authority))
     }
 
     async fn finalize_unregistered_session(
         &self,
-        runtime_id: LogicalRuntimeId,
         driver: SharedDriver,
         durability_authority: RuntimeOpsLifecycleDurabilityAuthority,
+        retired_ops_epoch: &meerkat_core::RuntimeEpochId,
     ) -> Result<(), RuntimeDriverError> {
         let mut driver = driver.lock().await;
         driver.sync_control_projection_from_dsl_authority();
-        drop(driver);
 
         if durability_authority.action
             != crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
         {
             return Ok(());
         }
-        let Some(store) = self.store.as_ref() else {
-            return Ok(());
-        };
-        store.delete_ops_lifecycle(&runtime_id).await.map_err(|err| {
-            RuntimeDriverError::Internal(format!(
-                "failed to delete ops lifecycle snapshot for unregistered runtime {runtime_id}: {err}"
-            ))
-        })?;
-        Ok(())
+        driver
+            .commit_unregister_finalization("unregister", retired_ops_epoch)
+            .await
     }
 
-    pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {
-        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner start");
-        let Some(gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
-            tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner no mutation gate");
-            return;
+    /// Publish the generated terminal lifecycle and retire the matching ops
+    /// snapshot through the store's single atomic unregister transaction. The
+    /// live entry stays installed until that transaction succeeds; on failure
+    /// the generated completed-drain snapshot remains the retry anchor.
+    async fn finalize_unregister_durability_transaction(
+        &self,
+        session_id: &SessionId,
+        driver: SharedDriver,
+        durability_authority: RuntimeOpsLifecycleDurabilityAuthority,
+        retired_ops_epoch: &meerkat_core::RuntimeEpochId,
+        unregister_rollback_snapshot: crate::meerkat_machine::dsl::MeerkatMachineAuthoritySnapshot,
+    ) -> Result<(), RuntimeDriverError> {
+        let transaction_result = self
+            .finalize_unregistered_session(
+                Arc::clone(&driver),
+                durability_authority,
+                retired_ops_epoch,
+            )
+            .await;
+
+        let Err(primary_error) = transaction_result else {
+            return Ok(());
         };
-        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner locked mutation gate");
-        if let Err(err) =
-            Box::pin(self.unregister_session_inner_locked_authorized(session_id, gate_guard)).await
-        {
-            tracing::warn!(
-                %session_id,
-                error = %err,
-                "generated MeerkatMachine rejected session unregister"
-            );
+
+        if matches!(
+            &primary_error,
+            RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
+        ) {
+            // The atomic store transaction may already be durable. Retain the
+            // completed-drain DSL state as an in-memory retry anchor, but do
+            // not overwrite a possibly terminal lifecycle record with an
+            // independent compensating write. The idempotent retry converges
+            // whether the store ultimately committed or rolled back.
+            return Err(primary_error);
         }
-        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner complete");
+        self.restore_session_dsl_state(session_id, unregister_rollback_snapshot)
+            .await;
+        let rollback_result = {
+            let mut driver = driver.lock().await;
+            driver.sync_control_projection_from_dsl_authority();
+            driver
+                .persist_current_machine_lifecycle("unregister rollback")
+                .await
+        };
+        match rollback_result {
+            Ok(()) => Err(primary_error),
+            Err(rollback_error) => Err(RuntimeDriverError::Internal(format!(
+                "{primary_error}; additionally failed to persist unregister rollback: {rollback_error}"
+            ))),
+        }
+    }
+
+    async fn persist_unregister_progress(
+        driver: &SharedDriver,
+        context: &'static str,
+    ) -> Result<(), RuntimeDriverError> {
+        let mut driver = driver.lock().await;
+        driver.sync_control_projection_from_dsl_authority();
+        driver.persist_current_machine_lifecycle(context).await
+    }
+
+    pub(super) async fn unregister_session_inner(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.join_or_start_unregister_teardown(session_id, None, UnregisterTeardownCaller::Explicit)
+            .await
     }
 
     /// Two-phase unregister drain (campaign 0.7.2 D1).
@@ -1430,21 +2073,71 @@ impl MeerkatMachine {
     ///    obligations.
     /// 7. Stage + commit the final `UnregisterSession`; persist, remove the
     ///    entry, finalize.
-    pub(super) async fn unregister_session_inner_locked_authorized(
+    async fn run_owned_unregister_teardown_inner(
         &self,
         session_id: &SessionId,
-        gate_guard: crate::tokio::sync::OwnedMutexGuard<()>,
+        epoch_id: &meerkat_core::RuntimeEpochId,
     ) -> Result<(), RuntimeDriverError> {
+        let Some(gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
+            return Ok(());
+        };
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized start");
         let driver_handle = {
             let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(());
+            };
+            if &entry.epoch_id != epoch_id {
+                return Ok(());
+            }
+            Arc::clone(&entry.driver)
+        };
+
+        let pending_finalization = {
+            let sessions = self.sessions.read().await;
             sessions
                 .get(session_id)
-                .map(|entry| Arc::clone(&entry.driver))
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?
+                .and_then(|entry| entry.pending_unregister_finalization.clone())
         };
+        if let Some(pending) = pending_finalization {
+            let exact_retry_witness_is_current = {
+                let sessions = self.sessions.read().await;
+                sessions.get(session_id).is_some_and(|entry| {
+                    entry
+                        .dsl_authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .snapshot()
+                        .state()
+                        == pending.committed_snapshot.state()
+                })
+            };
+            if !exact_retry_witness_is_current {
+                return Err(RuntimeDriverError::UnregisterFinalizationOutcomeUnknown {
+                    reason: format!(
+                        "session {session_id} no longer matches the exact generated finalization witness"
+                    ),
+                });
+            }
+            let result = self
+                .finalize_unregistered_session(
+                    Arc::clone(&driver_handle),
+                    pending.durability_authority,
+                    epoch_id,
+                )
+                .await;
+            if let Err(error) = result {
+                // A prior atomic finalization may already have committed. Keep
+                // the terminal generated projection and its exact retry
+                // witness across every acknowledgement/retry failure so no
+                // ordinary lifecycle write can overwrite durable terminal
+                // truth.
+                return Err(error);
+            }
+            return self
+                .remove_unregistered_session_entry(session_id, epoch_id)
+                .await;
+        }
 
         // Phase 1: open the drain window. A concurrent second unregister whose
         // BeginUnregisterSession is rejected because the window is already open
@@ -1452,7 +2145,7 @@ impl MeerkatMachine {
         // machine records whether teardown intent should retain the durable
         // runtime snapshot before the drain can advance lifecycle state.
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized beginning drain window");
-        let retry_final_unregister_only = match self
+        match self
             .stage_begin_unregister_session_authority(session_id)
             .await
         {
@@ -1460,7 +2153,6 @@ impl MeerkatMachine {
                 self.commit_session_dsl_transition(session_id, staged, "BeginUnregisterSession")
                     .await
                     .map_err(RuntimeDriverError::Internal)?;
-                false
             }
             Err(reason) => {
                 let already_draining =
@@ -1473,48 +2165,53 @@ impl MeerkatMachine {
                         %session_id,
                         "BeginUnregisterSession rejected: drain already in progress; attempting final unregister retry only"
                     );
-                    true
                 } else {
                     return Err(self
                         .classify_session_dsl_rejection(session_id, reason)
                         .await);
                 }
             }
-        };
-
-        if retry_final_unregister_only {
-            // The retry helper quiesces the supervisor-rotation carrier while
-            // holding the mutation gate, then re-acquires that gate before the
-            // final unregister commit. Release the caller's gate before
-            // entering that sequence so carrier shutdown cannot deadlock on
-            // this outer guard.
-            drop(gate_guard);
-            return self
-                .retry_final_unregister_after_completed_drain(
-                    session_id,
-                    Arc::clone(&driver_handle),
-                )
-                .await;
         }
+        // Also re-persist on an already-Draining retry. A prior live feedback
+        // transition may have succeeded while its store write failed; this
+        // closes that durability gap before any cleanup is attempted again.
+        Self::persist_unregister_progress(&driver_handle, "begin or resume unregister teardown")
+            .await?;
 
         // Phase 2: discharge the runtime-loop-stop and comms-drain-abort
         // obligations, retaining both JoinHandles to await below. The live
         // interrupt handle is captured before `take_loop_join_handle` empties
         // the attachment slot, so the drain can hard-cancel an in-flight run
         // (see Phase 4).
-        let (loop_handle, loop_interrupt_handle, drain_handle, rotation_slot) = {
+        let (
+            loop_handle,
+            loop_interrupt_handle,
+            teardown_slot,
+            drain_handle,
+            rotation_slot,
+            teardown_observations,
+        ) = {
             let mut sessions = self.sessions.write().await;
             match sessions.get_mut(session_id) {
                 Some(entry) => {
-                    let interrupt_handle = entry.interrupt_handle();
+                    let attachment = entry.take_runtime_loop_attachment();
+                    let interrupt_handle = attachment
+                        .as_ref()
+                        .and_then(|attachment| attachment.interrupt_handle.clone())
+                        .or_else(|| entry.interrupt_handle());
+                    let loop_handle = attachment.map(|attachment| attachment.loop_handle);
                     (
-                        entry.take_loop_join_handle(),
+                        loop_handle,
                         interrupt_handle,
+                        entry.runtime_loop_teardown.clone(),
                         entry.drain_slot.abort_keeping_handle(),
                         Some(Arc::clone(&entry.supervisor_rotation_task)),
+                        Arc::clone(&entry.unregister_teardown_observations),
                     )
                 }
-                None => (None, None, None, None),
+                None => {
+                    return Ok(());
+                }
             }
         };
         let rotation_handle = if let Some(slot) = rotation_slot {
@@ -1531,16 +2228,13 @@ impl MeerkatMachine {
         // force-aborted after its drain grace window. The feedback inputs
         // below carry this disposition so the machine records a forced
         // teardown honestly instead of laundering it as clean quiescence.
-        let mut runtime_loop_forced_abort = false;
-        let mut comms_drain_forced_abort = false;
         if let Some(loop_handle) = loop_handle {
             // Dropping `wake_tx`/`effect_tx` (above) drives the loop through its
             // canonical `StopRuntimeExecutor` exit *once it returns to its
             // `select!`* — but a loop blocked inside `CoreExecutor::apply`
             // (mid `start_turn`) never observes the closed channel. Hard-cancel
             // the in-flight run so a well-behaved executor unwinds `apply` and
-            // the loop reaches its clean exit (StopRuntimeExecutor +
-            // discard_live_session) promptly.
+            // the loop reaches its clean stop/terminal-handoff exit promptly.
             if let Some(interrupt_handle) = loop_interrupt_handle
                 && let Err(error) = interrupt_handle
                     .hard_cancel_current_run("runtime session unregistered".to_string())
@@ -1553,31 +2247,21 @@ impl MeerkatMachine {
                 );
             }
 
-            // A backend that does not honor the interrupt (a genuinely stuck
-            // turn) would otherwise wedge the loop's `JoinHandle` forever.
-            // Give the loop a grace window to complete its clean exit, then
-            // abort the task so teardown cannot stall on a stuck run. The
-            // grace is far above any realistic clean-exit latency (sub-ms once
-            // `apply` returns) and far below caller shutdown budgets, so the
-            // responsive path never reaches the abort and its
-            // StopRuntimeExecutor + discard_live_session cleanup is preserved.
-            const RUNTIME_LOOP_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-            let abort_handle = loop_handle.abort_handle();
-            match crate::tokio::time::timeout(RUNTIME_LOOP_DRAIN_GRACE, loop_handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(join_error)) => {
+            // The owned saga may wait indefinitely for a genuinely blocked
+            // executor, but no caller future owns this wait. Aborting the loop
+            // would drop the exact executor and make required external cleanup
+            // impossible to retry, so machine-owned Draining truth is retained
+            // until the loop actually hands the executor off.
+            match loop_handle.await {
+                Ok(()) => {}
+                Err(join_error) => {
+                    teardown_observations
+                        .runtime_loop_forced_abort
+                        .store(true, std::sync::atomic::Ordering::Release);
                     tracing::warn!(
                         %session_id,
                         error = %join_error,
                         "runtime loop task ended abnormally during unregister drain"
-                    );
-                }
-                Err(_elapsed) => {
-                    abort_handle.abort();
-                    runtime_loop_forced_abort = true;
-                    tracing::warn!(
-                        %session_id,
-                        "runtime loop did not quiesce within the unregister drain grace window after hard-cancel; aborting the stuck loop task"
                     );
                 }
             }
@@ -1599,6 +2283,9 @@ impl MeerkatMachine {
                 Ok(Ok(())) => {}
                 Ok(Err(join_error)) if join_error.is_cancelled() => {}
                 Ok(Err(join_error)) => {
+                    teardown_observations
+                        .comms_drain_forced_abort
+                        .store(true, std::sync::atomic::Ordering::Release);
                     tracing::warn!(
                         %session_id,
                         error = %join_error,
@@ -1607,7 +2294,9 @@ impl MeerkatMachine {
                 }
                 Err(_elapsed) => {
                     drain_abort.abort();
-                    comms_drain_forced_abort = true;
+                    teardown_observations
+                        .comms_drain_forced_abort
+                        .store(true, std::sync::atomic::Ordering::Release);
                     tracing::warn!(
                         %session_id,
                         "comms drain task did not quiesce within the unregister drain grace window; abandoning the already-aborted drain task so teardown cannot stall"
@@ -1629,6 +2318,88 @@ impl MeerkatMachine {
             }
         }
 
+        if let Some(teardown_slot) = teardown_slot.as_ref() {
+            teardown_slot.wait_until_published().await;
+        }
+
+        // Commit each producer disposition immediately after it becomes
+        // known. These generated feedback fields are the durable resume
+        // authority; later cleanup/store failures must not force a retry to
+        // reconstruct outcomes from missing JoinHandles.
+        let Some(pre_cleanup_gate) = self.lock_current_session_mutation_gate(session_id).await
+        else {
+            return Ok(());
+        };
+        let pre_cleanup_state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::Internal(format!(
+                "unregister producer-feedback authority unavailable for session {session_id}: {reason}"
+            ))
+        })?;
+        let producer_feedback = [
+            pre_cleanup_state
+                .unregister_runtime_loop_drain_pending
+                .then(|| {
+                    (
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                            forced_abort: teardown_observations
+                                .runtime_loop_forced_abort
+                                .load(std::sync::atomic::Ordering::Acquire),
+                        },
+                        "RuntimeLoopStoppedForUnregister",
+                        "unregister runtime-loop disposition",
+                    )
+                }),
+            pre_cleanup_state
+                .unregister_comms_drain_exit_pending
+                .then(|| {
+                    (
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+                            forced_abort: teardown_observations
+                                .comms_drain_forced_abort
+                                .load(std::sync::atomic::Ordering::Acquire),
+                        },
+                        "CommsDrainExitedForUnregister",
+                        "unregister comms-drain disposition",
+                    )
+                }),
+        ];
+        for feedback in producer_feedback.into_iter().flatten() {
+            let (input, context, persistence_context) = feedback;
+            let staged = self
+                .stage_session_dsl_transition(session_id, input, context)
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+            self.commit_session_dsl_transition(session_id, staged, context)
+                .await
+                .map_err(RuntimeDriverError::Internal)?;
+            Self::persist_unregister_progress(&driver_handle, persistence_context).await?;
+        }
+        Self::persist_unregister_progress(
+            &driver_handle,
+            "unregister producer dispositions reconciled",
+        )
+        .await?;
+        drop(pre_cleanup_gate);
+
+        // Canonical stop terminalization must succeed before any surface-owned
+        // cleanup can discard live session material. The call is idempotent for
+        // an already-Stopped driver and repairs a loop-local terminalization
+        // failure before cleanup is retried.
+        match teardown_slot {
+            Some(teardown_slot) => {
+                teardown_slot.cleanup_once(&driver_handle).await?;
+            }
+            None => {
+                // Storeless registrations and cold-recovered Draining epochs
+                // have no live executor in this process. They still require
+                // canonical runtime terminalization, but there is no external
+                // cleanup object to fabricate or skip.
+                crate::control_plane::terminalize_async_stop(&driver_handle, None).await?;
+            }
+        }
+
         // Phase 5: re-acquire the gate. If the session vanished while the gate
         // was released (e.g. a racing teardown), the drain already completed
         // elsewhere — nothing left to commit.
@@ -1639,18 +2410,31 @@ impl MeerkatMachine {
             );
             return Ok(());
         };
+        {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(());
+            };
+            if &entry.epoch_id != epoch_id {
+                return Ok(());
+            }
+        }
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized re-acquired mutation gate after drain");
 
+        let unregister_state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::Internal(format!(
+                "unregister obligation authority unavailable for session {session_id}: {reason}"
+            ))
+        })?;
+
         // Resolve any completion waiters the in-flight run did not already
-        // resolve. A run that committed during the drain window resolves its
-        // own waiter with the committed outcome; this sweep terminalizes any
-        // that are still outstanding so the final commit cannot strand them.
-        let runtime_terminated_completion_authority =
-            crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
-                &driver_handle,
-            )
-            .await?;
-        {
+        // resolve. A resumed saga consults the generated obligation flag and
+        // never consumes a second completion-authority token for an already
+        // closed prefix.
+        if unregister_state.unregister_completion_waiter_drain_pending {
+            let runtime_terminated_completion_authority = crate::meerkat_machine::driver::
+                machine_resolve_runtime_terminated_completion_result(&driver_handle)
+                .await?;
             let completions = {
                 let sessions = self.sessions.read().await;
                 sessions
@@ -1658,9 +2442,6 @@ impl MeerkatMachine {
                     .map(|entry| Arc::clone(&entry.completions))
             };
             if let Some(completions) = completions {
-                // The drain-phase sweep is the single token-consuming
-                // terminalization point for waiters the in-flight run did not
-                // already resolve with its committed outcome.
                 completions.lock().await.resolve_all_runtime_terminated(
                     "runtime session unregistered",
                     runtime_terminated_completion_authority,
@@ -1672,28 +2453,40 @@ impl MeerkatMachine {
         // Each runtime-loop / comms-drain input carries whether that producer
         // quiesced cleanly or had to be force-aborted after its grace window,
         // so the machine records the real teardown disposition.
-        for (input, context) in [
-            (
+        let runtime_loop_forced_abort = teardown_observations
+            .runtime_loop_forced_abort
+            .load(std::sync::atomic::Ordering::Acquire);
+        let comms_drain_forced_abort = teardown_observations
+            .comms_drain_forced_abort
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mut obligation_feedback = Vec::new();
+        if unregister_state.unregister_runtime_loop_drain_pending {
+            obligation_feedback.push((
                 crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
                     forced_abort: runtime_loop_forced_abort,
                 },
                 "RuntimeLoopStoppedForUnregister",
-            ),
-            (
+            ));
+        }
+        if unregister_state.unregister_comms_drain_exit_pending {
+            obligation_feedback.push((
                 crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
                     forced_abort: comms_drain_forced_abort,
                 },
                 "CommsDrainExitedForUnregister",
-            ),
-            (
+            ));
+        }
+        if unregister_state.unregister_completion_waiter_drain_pending {
+            obligation_feedback.push((
                 crate::meerkat_machine::dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
                 },
                 "CompletionWaitersResolvedForUnregister",
-            ),
-        ] {
+            ));
+        }
+        for (input, context) in obligation_feedback {
             let staged = match self
                 .stage_session_dsl_transition(session_id, input, context)
                 .await
@@ -1705,168 +2498,136 @@ impl MeerkatMachine {
                 .await
                 .map_err(RuntimeDriverError::Internal)?;
         }
+        Self::persist_unregister_progress(
+            &driver_handle,
+            "unregister completion-waiter disposition reconciled",
+        )
+        .await?;
+
+        // Quiesce the remaining session-scoped operation producers before
+        // final lifecycle deletion. Runtime-loop and comms producers are
+        // already stopped above; this generated terminalization closes every
+        // live op while holding the registry write lock, persists each
+        // transition synchronously, then drops the registry's persistence
+        // sender. Only after the owned worker joins can the store tombstone
+        // this exact epoch without a late detached callback resurrecting it.
+        let ops_lifecycle = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions.get(session_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "session disappeared before ops lifecycle quiescence: {session_id}"
+                ))
+            })?;
+            if &entry.epoch_id != epoch_id {
+                return Ok(());
+            }
+            Arc::clone(&entry.ops_lifecycle)
+        };
+        ops_lifecycle
+            .retire_owner_for_unregister("runtime session unregistered".into())
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to terminalize ops lifecycle before unregister: {error}"
+                ))
+            })?;
+        let persistence_worker = {
+            let mut sessions = self.sessions.write().await;
+            sessions
+                .get_mut(session_id)
+                .filter(|entry| &entry.epoch_id == epoch_id)
+                .and_then(|entry| entry.ops_lifecycle_persistence_worker.take())
+        };
+        if let Some(persistence_worker) = persistence_worker {
+            join_ops_lifecycle_persistence_worker(persistence_worker).await?;
+        }
 
         // Phase 7: stage + commit the final UnregisterSession.
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized staging unregister");
         let (staged, durability_authority) =
             self.stage_unregister_session_authority(session_id).await?;
+        if staged.has_routed_signal_effect() {
+            // Final unregister currently has no cross-machine seam signal.
+            // Its dispatch-failure recovery may therefore restore the local
+            // Draining retry anchor. If the generated contract ever adds a
+            // routed effect, fail before dispatch and restore the staged local
+            // state; that future contract needs a non-rollback delivery saga.
+            let previous_snapshot = staged.previous_snapshot.clone();
+            self.restore_session_dsl_state(session_id, previous_snapshot)
+                .await;
+            if let Some(entry) = self.sessions.write().await.get_mut(session_id) {
+                entry.pending_unregister_finalization = None;
+            }
+            return Err(RuntimeDriverError::Internal(format!(
+                "final unregister for session {session_id} unexpectedly emitted a routed seam signal; refusing rollback-unsafe dispatch"
+            )));
+        }
         let unregister_rollback_snapshot = staged.previous_snapshot.clone();
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committing unregister");
-        self.commit_session_dsl_transition(session_id, staged, "UnregisterSession")
+        if let Err(error) = self
+            .commit_session_dsl_transition(session_id, staged, "UnregisterSession")
             .await
-            .map_err(RuntimeDriverError::Internal)?;
-        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committed unregister");
-        if durability_authority.action
-            == crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
         {
-            driver_handle
-                .lock()
-                .await
-                .persist_current_machine_lifecycle("unregister")
-                .await?;
-        }
-        let finalize_target = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .map(|entry| (entry.runtime_id.clone(), Arc::clone(&entry.driver)))
-        };
-        if let Some((runtime_id, driver)) = finalize_target {
-            tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized finalizing durable unregister");
-            if let Err(err) = self
-                .finalize_unregistered_session(
-                    runtime_id,
-                    Arc::clone(&driver),
-                    durability_authority,
-                )
-                .await
-            {
-                self.restore_session_dsl_state(session_id, unregister_rollback_snapshot)
-                    .await;
-                driver
-                    .lock()
-                    .await
-                    .sync_control_projection_from_dsl_authority();
-                if let Err(rollback_error) = driver
-                    .lock()
-                    .await
-                    .persist_current_machine_lifecycle("unregister rollback")
-                    .await
-                {
-                    return Err(RuntimeDriverError::Internal(format!(
-                        "{err}; additionally failed to persist unregister rollback: {rollback_error}"
-                    )));
-                }
-                return Err(err);
+            // Safe only because `has_routed_signal_effect` was rejected above
+            // before dispatch. No cross-machine observer can have seen this
+            // final transition while local authority is restored.
+            self.restore_session_dsl_state(session_id, unregister_rollback_snapshot.clone())
+                .await;
+            let rollback_result = Self::persist_unregister_progress(
+                &driver_handle,
+                "unregister effect-dispatch rollback",
+            )
+            .await;
+            if let Some(entry) = self.sessions.write().await.get_mut(session_id) {
+                entry.pending_unregister_finalization = None;
             }
+            return match rollback_result {
+                Ok(()) => Err(RuntimeDriverError::Internal(error)),
+                Err(rollback_error) => Err(RuntimeDriverError::Internal(format!(
+                    "{error}; additionally failed to persist unregister effect-dispatch rollback: {rollback_error}"
+                ))),
+            };
+        }
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized committed unregister");
+        tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized finalizing durable unregister");
+        let finalization_result = self
+            .finalize_unregister_durability_transaction(
+                session_id,
+                Arc::clone(&driver_handle),
+                durability_authority,
+                epoch_id,
+                unregister_rollback_snapshot,
+            )
+            .await;
+        if let Err(error) = finalization_result {
+            if !matches!(
+                &error,
+                RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
+            ) && let Some(entry) = self.sessions.write().await.get_mut(session_id)
+            {
+                entry.pending_unregister_finalization = None;
+            }
+            return Err(error);
         }
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized removing entry");
-        let (drain_task, rotation_task) = {
-            let mut sessions = self.sessions.write().await;
-            let Some(entry) = sessions.get_mut(session_id) else {
-                return Ok(());
-            };
-            entry.close_handle_teardown_gate();
-            (
-                entry.drain_slot.take_handle(),
-                Arc::clone(&entry.supervisor_rotation_task),
-            )
-        };
-        if let Some(drain_task) = drain_task {
-            drain_task.abort();
-            let _ = drain_task.await;
-        }
-        rotation_task.abort_and_wait().await;
-        let entry = {
-            let mut sessions = self.sessions.write().await;
-            sessions.remove(session_id)
-        };
-        drop(entry);
+        self.remove_unregistered_session_entry(session_id, epoch_id)
+            .await?;
         tracing::info!(%session_id, "MeerkatMachine::unregister_session_inner_locked_authorized complete");
         Ok(())
     }
 
-    async fn retry_final_unregister_after_completed_drain(
+    async fn remove_unregistered_session_entry(
         &self,
         session_id: &SessionId,
-        driver_handle: SharedDriver,
+        epoch_id: &meerkat_core::RuntimeEpochId,
     ) -> Result<(), RuntimeDriverError> {
-        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
-            return Ok(());
-        };
-        let rotation_slot = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .map(|entry| Arc::clone(&entry.supervisor_rotation_task))
-        };
-        if let Some(rotation_slot) = rotation_slot {
-            rotation_slot.abort_and_wait().await;
-        }
-        let (staged, durability_authority) =
-            match self.stage_unregister_session_authority(session_id).await {
-                Ok(pair) => pair,
-                Err(err @ RuntimeDriverError::ValidationFailed { .. }) => {
-                    tracing::debug!(
-                        %session_id,
-                        error = %err,
-                        "final unregister retry is not ready; original drain remains in progress"
-                    );
-                    return Ok(());
-                }
-                Err(err) => return Err(err),
-            };
-        let unregister_rollback_snapshot = staged.previous_snapshot.clone();
-        self.commit_session_dsl_transition(session_id, staged, "UnregisterSession")
-            .await
-            .map_err(RuntimeDriverError::Internal)?;
-        if durability_authority.action
-            == crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::DeleteSnapshot
-        {
-            driver_handle
-                .lock()
-                .await
-                .persist_current_machine_lifecycle("unregister")
-                .await?;
-        }
-        let finalize_target = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .map(|entry| (entry.runtime_id.clone(), Arc::clone(&entry.driver)))
-        };
-        if let Some((runtime_id, driver)) = finalize_target
-            && let Err(err) = self
-                .finalize_unregistered_session(
-                    runtime_id,
-                    Arc::clone(&driver),
-                    durability_authority,
-                )
-                .await
-        {
-            self.restore_session_dsl_state(session_id, unregister_rollback_snapshot)
-                .await;
-            driver
-                .lock()
-                .await
-                .sync_control_projection_from_dsl_authority();
-            if let Err(rollback_error) = driver
-                .lock()
-                .await
-                .persist_current_machine_lifecycle("unregister rollback")
-                .await
-            {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "{err}; additionally failed to persist unregister rollback: {rollback_error}"
-                )));
-            }
-            return Err(err);
-        }
         let (drain_task, rotation_task) = {
             let mut sessions = self.sessions.write().await;
             let Some(entry) = sessions.get_mut(session_id) else {
                 return Ok(());
             };
+            if &entry.epoch_id != epoch_id {
+                return Ok(());
+            }
             entry.close_handle_teardown_gate();
             (
                 entry.drain_slot.take_handle(),
@@ -1878,11 +2639,18 @@ impl MeerkatMachine {
             let _ = drain_task.await;
         }
         rotation_task.abort_and_wait().await;
-        let entry = {
+        let removed_entry = {
             let mut sessions = self.sessions.write().await;
-            sessions.remove(session_id)
+            if sessions
+                .get(session_id)
+                .is_some_and(|entry| &entry.epoch_id == epoch_id)
+            {
+                sessions.remove(session_id)
+            } else {
+                None
+            }
         };
-        drop(entry);
+        drop(removed_entry);
         Ok(())
     }
 
@@ -2114,17 +2882,16 @@ impl MeerkatMachine {
         let Some(entry) = entry else {
             return false;
         };
-        let runtime_id = entry.runtime_id.clone();
+        let retired_ops_epoch = entry.epoch_id.clone();
         let driver = Arc::clone(&entry.driver);
         if let Err(err) = self
             .finalize_unregistered_session(
-                runtime_id,
                 driver,
-            RuntimeOpsLifecycleDurabilityAuthority {
-                action:
-                    crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::RetainSnapshot,
-            },
-        )
+                RuntimeOpsLifecycleDurabilityAuthority {
+                    action: crate::meerkat_machine::dsl::RuntimeOpsLifecycleDurabilityAction::RetainSnapshot,
+                },
+                &retired_ops_epoch,
+            )
             .await
         {
             tracing::warn!(

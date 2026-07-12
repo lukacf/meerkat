@@ -53,7 +53,9 @@ use meerkat_core::{
     ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
     SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride, ToolFilter,
 };
-use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
+use meerkat_runtime::RuntimeOpsLifecycleRegistry;
+#[cfg(test)]
+use meerkat_runtime::RuntimeTurnStateHandle;
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
 #[cfg(all(feature = "memory-store", not(feature = "jsonl-store")))]
@@ -4557,19 +4559,21 @@ impl AgentFactory {
                 &resolved_llm_identity,
                 build_config.override_web_search,
             )?;
+            let primary_target_profile = registry.profile_witness_for_provider(
+                resolved_llm_identity.provider,
+                &resolved_llm_identity.model,
+            ).ok_or_else(|| {
+                BuildAgentError::Config(format!(
+                    "model fallback cannot bind active model '{}:{}' because it is absent from the effective model registry",
+                    resolved_llm_identity.provider.as_str(),
+                    resolved_llm_identity.model
+                ))
+            })?;
             let mut candidates = vec![ModelFallbackCandidate {
                 identity: resolved_llm_identity.clone(),
                 request_policy: primary_request_policy,
                 client: Arc::clone(&llm_adapter),
-                capability_base_filter: capability_base_filter_override
-                    .clone()
-                    .unwrap_or(ToolFilter::All),
-                context_window: registry
-                    .entry(&model)
-                    .and_then(|entry| entry.context_window),
-                max_output_tokens: registry
-                    .entry(&model)
-                    .and_then(|entry| entry.max_output_tokens),
+                target_profile: primary_target_profile,
             }];
             let auth_lease_handle = match &build_config.runtime_build_mode {
                 RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
@@ -4578,6 +4582,18 @@ impl AgentFactory {
             for identity in
                 self.model_fallback_identities(config, &registry, &resolved_llm_identity)?
             {
+                let target_profile = match registry
+                    .profile_witness_for_provider(identity.provider, &identity.model)
+                {
+                    Some(profile) => profile,
+                    None => {
+                        return Err(BuildAgentError::Config(format!(
+                            "model fallback target '{}:{}' is absent from the effective model registry",
+                            identity.provider.as_str(),
+                            identity.model
+                        )));
+                    }
+                };
                 let raw_client = match self
                     .build_llm_client_for_identity_with_auth_lease(
                         config,
@@ -4611,27 +4627,13 @@ impl AgentFactory {
                     Arc::new(adapter),
                     build_config.agent_llm_client_decorator.as_ref(),
                 );
-                let capability_base_filter = registry
-                    .profile_for_provider(identity.provider, &identity.model)
-                    .map(|profile| {
-                        meerkat_core::capability_base_filter_for_image_tool_results(
-                            profile.image_tool_results,
-                        )
-                    })
-                    .unwrap_or(ToolFilter::All);
                 let request_policy = self.request_policy_for_llm_identity(
                     config,
                     &identity,
                     build_config.override_web_search,
                 )?;
                 candidates.push(ModelFallbackCandidate {
-                    context_window: registry
-                        .entry_for_provider(identity.provider, &identity.model)
-                        .and_then(|entry| entry.context_window),
-                    max_output_tokens: registry
-                        .entry_for_provider(identity.provider, &identity.model)
-                        .and_then(|entry| entry.max_output_tokens),
-                    capability_base_filter,
+                    target_profile,
                     request_policy,
                     identity,
                     client: decorated,
@@ -5758,6 +5760,7 @@ impl AgentFactory {
                 build_override
             }
         };
+        let effective_model_registry = Arc::new(registry.clone());
 
         let mut builder = AgentBuilder::new()
             .model(model.clone())
@@ -5770,8 +5773,9 @@ impl AgentFactory {
             })
             .with_hook_run_overrides(build_config.hooks_override)
             .with_model_defaults_resolver(Arc::new(RegistryBackedDefaultsResolver {
-                registry: Arc::new(registry.clone()),
+                registry: Arc::clone(&effective_model_registry),
             }))
+            .with_effective_model_registry(effective_model_registry)
             // Config-owned tool execution policy (per-call timeout, per-tool
             // overrides, dispatch concurrency) reaches the agent loop through
             // this seam; without it every factory-built agent silently ran on
@@ -5978,6 +5982,13 @@ impl AgentFactory {
                 builder =
                     builder.with_tool_visibility_owner(bindings.tool_visibility_owner().clone());
                 builder = builder.with_turn_state_handle(Arc::clone(bindings.turn_state()));
+                builder = builder.with_model_routing_handle(Arc::clone(bindings.model_routing()));
+                builder = builder.with_sticky_model_fallback_commit_coordinator(Arc::clone(
+                    bindings.sticky_model_fallback_commit_coordinator(),
+                ));
+                builder = builder.with_compaction_commit_coordinator(Arc::clone(
+                    bindings.compaction_commit_coordinator(),
+                ));
                 builder = builder.require_runtime_execution_kind_stamp();
                 builder = builder.with_external_tool_surface_handle(Arc::clone(
                     bindings.external_tool_surface(),
@@ -5987,12 +5998,10 @@ impl AgentFactory {
                     .with_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
             }
             RuntimeBuildMode::StandaloneEphemeral => {
-                builder =
-                    builder.with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
                 let capability_base_filter_for_machine = capability_base_filter_override
                     .clone()
                     .unwrap_or(ToolFilter::All);
-                let visibility_owner = meerkat_runtime::standalone_tool_visibility_owner(
+                let authorities = meerkat_runtime::standalone_session_runtime_authorities(
                     &session_id,
                     &resolved_llm_identity,
                     model_profile.as_ref(),
@@ -6000,10 +6009,13 @@ impl AgentFactory {
                 )
                 .map_err(|err| {
                     BuildAgentError::Config(format!(
-                        "Failed to prepare standalone tool visibility authority: {err}"
+                        "Failed to prepare standalone session authority: {err}"
                     ))
                 })?;
-                builder = builder.with_tool_visibility_owner(visibility_owner);
+                builder = builder
+                    .with_turn_state_handle(Arc::clone(authorities.turn_state()))
+                    .with_model_routing_handle(Arc::clone(authorities.model_routing()))
+                    .with_tool_visibility_owner(authorities.tool_visibility_owner().clone());
             }
         }
         // 12h. Wire completion feed + enrichment for cursor-based delivery
@@ -7248,6 +7260,772 @@ mod tests {
             profile: None,
             origin: meerkat_core::BindingOrigin::Configured,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct ScriptedStickyFallbackClient {
+        provider: Provider,
+        fail_recoverably: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait]
+    impl LlmClient for ScriptedStickyFallbackClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_recoverably {
+                Box::pin(futures::stream::iter(vec![Err(
+                    meerkat_client::LlmError::ServerOverloaded,
+                )]))
+            } else {
+                Box::pin(futures::stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::TextDelta {
+                        delta: "backup success".to_string(),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    }),
+                ]))
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            self.provider
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct ScriptedStickyFallbackProviderRuntime {
+        provider: Provider,
+        client: Arc<dyn LlmClient>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait]
+    impl meerkat_llm_core::provider_runtime::ProviderRuntime for ScriptedStickyFallbackProviderRuntime {
+        fn provider_id(&self) -> Provider {
+            self.provider
+        }
+
+        async fn resolve_binding(
+            &self,
+            binding: &meerkat_llm_core::provider_runtime::ValidatedBinding,
+            _env: &meerkat_llm_core::provider_runtime::ResolverEnvironment,
+        ) -> Result<
+            meerkat_llm_core::provider_runtime::ResolvedConnection,
+            meerkat_llm_core::provider_runtime::ProviderAuthError,
+        > {
+            Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: self.provider,
+                backend: binding.backend(),
+                backend_profile: Arc::clone(binding.backend_profile()),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
+                        format!("test-{}-key", self.provider.as_str()),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        format!("sticky-fallback-test:{}", self.provider.as_str()),
+                    ),
+                ),
+            })
+        }
+
+        fn build_client(
+            &self,
+            _connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
+        ) -> Result<Arc<dyn LlmClient>, meerkat_llm_core::provider_runtime::ProviderClientError>
+        {
+            Ok(Arc::clone(&self.client))
+        }
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    struct StickyFallbackVisibilityDispatcher {
+        tools: Arc<[Arc<meerkat_core::ToolDef>]>,
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl AgentToolDispatcher for StickyFallbackVisibilityDispatcher {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            Ok(
+                meerkat_core::ToolResult::new(call.id.to_string(), call.name.to_string(), false)
+                    .into(),
+            )
+        }
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn sticky_fallback_visibility_dispatcher(tool_name: &str) -> Arc<dyn AgentToolDispatcher> {
+        Arc::new(StickyFallbackVisibilityDispatcher {
+            tools: Arc::from([visibility_tool(tool_name)]),
+        })
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn scripted_sticky_fallback_factory(
+        store_path: PathBuf,
+        primary_calls: Arc<std::sync::atomic::AtomicUsize>,
+        backup_calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> AgentFactory {
+        let primary_client: Arc<dyn LlmClient> = Arc::new(ScriptedStickyFallbackClient {
+            provider: Provider::Anthropic,
+            fail_recoverably: true,
+            calls: primary_calls,
+        });
+        let backup_client: Arc<dyn LlmClient> = Arc::new(ScriptedStickyFallbackClient {
+            provider: Provider::OpenAI,
+            fail_recoverably: false,
+            calls: backup_calls,
+        });
+        let mut factory = AgentFactory::new(store_path)
+            .without_token_store()
+            .builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Anthropic,
+                    client: primary_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::OpenAI,
+                    client: backup_client,
+                })),
+        );
+        factory
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn sticky_fallback_test_config(backup_model: &str, backup_binding: AuthBindingRef) -> Config {
+        let mut config = Config::default();
+        config.realm.insert(
+            "fallback_test".to_string(),
+            inline_realm_section(&[
+                ("anthropic", "test-primary-key"),
+                ("openai", "test-backup-key"),
+            ]),
+        );
+        config.models.custom.insert(
+            backup_model.to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: Some("Text-only backup".to_string()),
+                context_window: Some(32_000),
+                max_output_tokens: Some(4_096),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        config.model_fallback.enabled = true;
+        config.model_fallback.chain = vec![ModelFallbackTarget {
+            model: backup_model.to_string(),
+            provider: Some(Provider::OpenAI),
+            auth_binding: Some(backup_binding),
+        }];
+        config.retry.max_retries = 1;
+        config.retry.initial_delay = std::time::Duration::ZERO;
+        config.retry.max_delay = std::time::Duration::ZERO;
+        config.retry.multiplier = 1.0;
+        config
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn sticky_fallback_runtime_request(
+        primary_model: &str,
+        external_tools: Arc<dyn AgentToolDispatcher>,
+    ) -> CreateSessionRequest {
+        CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: primary_model.to_string(),
+            prompt: meerkat_core::ContentInput::Text(String::new()),
+            system_prompt: crate::SystemPromptOverride::Set(
+                "persistent sticky fallback regression".to_string(),
+            ),
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                provider: Some(Provider::Anthropic),
+                realm_id: Some(RealmId::parse("fallback_test").expect("test realm")),
+                external_tools: Some(external_tools),
+                override_builtins: ToolCategoryOverride::Disable,
+                ..Default::default()
+            }),
+            labels: None,
+        }
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn assert_persisted_sticky_fallback_state(
+        session: &Session,
+        backup_model: &str,
+        backup_binding: &AuthBindingRef,
+        external_filter: &ToolFilter,
+        original_prompt: &str,
+    ) {
+        let identity = session
+            .session_metadata()
+            .expect("fallback session must retain canonical metadata")
+            .llm_identity();
+        assert_eq!(identity.model, backup_model);
+        assert_eq!(identity.provider, Provider::OpenAI);
+        assert_eq!(identity.auth_binding.as_ref(), Some(backup_binding));
+
+        let visibility = session
+            .try_tool_visibility_state()
+            .expect("canonical visibility metadata should decode")
+            .expect("runtime-backed session should persist visibility metadata");
+        let expected_capability_filter = ToolFilter::Deny(
+            [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            visibility.capability_base_filter, expected_capability_filter,
+            "durable visibility must follow the fallback model profile"
+        );
+        assert_eq!(&visibility.active_filter, external_filter);
+        assert_eq!(&visibility.staged_filter, external_filter);
+        assert_eq!(visibility.active_revision, visibility.staged_revision);
+        assert!(
+            visibility.active_revision > 0,
+            "the staged external filter must cross the real turn boundary"
+        );
+        if let ToolFilter::Allow(names) | ToolFilter::Deny(names) = external_filter {
+            for name in names {
+                assert!(
+                    visibility
+                        .filter_witnesses
+                        .get(name)
+                        .is_some_and(meerkat_core::ToolVisibilityWitness::has_identity_witness),
+                    "durable filter tool {name} must retain its provenance witness"
+                );
+            }
+        }
+
+        let user_texts = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_texts,
+            vec![original_prompt.to_string()],
+            "fallback details must never be flattened into a fabricated user prompt"
+        );
+        let assistant_texts = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::BlockAssistant(assistant) => {
+                    Some(assistant.text_blocks().collect::<Vec<_>>().join("\n"))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            assistant_texts,
+            vec!["backup success".to_string()],
+            "fallback details must remain typed notice data, not assistant prose"
+        );
+        let typed_fallback_notices = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::SystemNotice(notice)
+                    if notice.blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            meerkat_core::SystemNoticeBlock::RuntimeNotice { category, .. }
+                                if category == "model_fallback"
+                        )
+                    }) =>
+                {
+                    Some(notice)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(typed_fallback_notices.len(), 1);
+        assert_eq!(
+            typed_fallback_notices[0].kind,
+            meerkat_core::SystemNoticeKind::Generic
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn session_owned_no_store_sticky_fallback_updates_binding_authorities() {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+        let primary_model = "claude-sonnet-4-5";
+        let backup_model = "custom-text-only-backup";
+        let primary_binding = configured_auth_binding("fallback_test", "default_anthropic");
+        let backup_binding = configured_auth_binding("fallback_test", "default_openai");
+        let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let primary_client: Arc<dyn LlmClient> = Arc::new(ScriptedStickyFallbackClient {
+            provider: Provider::Anthropic,
+            fail_recoverably: true,
+            calls: Arc::clone(&primary_calls),
+        });
+        let backup_client: Arc<dyn LlmClient> = Arc::new(ScriptedStickyFallbackClient {
+            provider: Provider::OpenAI,
+            fail_recoverably: false,
+            calls: Arc::clone(&backup_calls),
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_token_store()
+            .builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Anthropic,
+                    client: primary_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::OpenAI,
+                    client: backup_client,
+                })),
+        );
+
+        let mut config = Config::default();
+        config.realm.insert(
+            "fallback_test".to_string(),
+            inline_realm_section(&[
+                ("anthropic", "test-primary-key"),
+                ("openai", "test-backup-key"),
+            ]),
+        );
+        config.models.custom.insert(
+            backup_model.to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: Some("Text-only backup".to_string()),
+                context_window: Some(32_000),
+                max_output_tokens: Some(4_096),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        config.model_fallback.enabled = true;
+        config.model_fallback.chain = vec![ModelFallbackTarget {
+            model: backup_model.to_string(),
+            provider: Some(Provider::OpenAI),
+            auth_binding: Some(backup_binding.clone()),
+        }];
+        config.retry.max_retries = 1;
+        config.retry.initial_delay = std::time::Duration::ZERO;
+        config.retry.max_delay = std::time::Duration::ZERO;
+        config.retry.multiplier = 1.0;
+
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("ephemeral machine should prepare real session-owned bindings");
+        let mut build = AgentBuildConfig::new(primary_model);
+        build.provider = Some(Provider::Anthropic);
+        build.realm_id = Some(RealmId::parse("fallback_test").expect("test realm"));
+        build.auth_binding = Some(primary_binding.clone());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("real factory should build the session-owned fallback chain");
+        let initial_visibility = bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("initial machine visibility");
+        let initial_routing = runtime
+            .session_model_routing_status(&session_id)
+            .await
+            .expect("initial model-routing status");
+        assert_eq!(initial_visibility.capability_base_filter, ToolFilter::All);
+        assert_eq!(initial_routing.baseline_model.as_str(), primary_model);
+        assert_eq!(initial_routing.session_provider, Some(Provider::Anthropic));
+
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        let result = agent
+            .run(meerkat_core::ContentInput::Text(
+                "exercise fallback".to_string(),
+            ))
+            .await
+            .expect("recoverable primary failure should retry successfully on backup");
+        assert_eq!(result.text, "backup success");
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(backup_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let active_identity = agent
+            .session()
+            .session_metadata()
+            .expect("fallback should retain canonical session metadata")
+            .llm_identity();
+        assert_eq!(active_identity.model, backup_model);
+        assert_eq!(active_identity.provider, Provider::OpenAI);
+        assert_eq!(active_identity.auth_binding, Some(backup_binding));
+
+        let fallback_visibility = bindings
+            .tool_visibility_owner()
+            .visibility_state()
+            .expect("fallback machine visibility");
+        let expected_backup_filter = ToolFilter::Deny(
+            [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            fallback_visibility.capability_base_filter, expected_backup_filter,
+            "prepared binding visibility must publish the backup profile"
+        );
+        let fallback_routing = runtime
+            .session_model_routing_status(&session_id)
+            .await
+            .expect("fallback model-routing status");
+        assert_eq!(fallback_routing.baseline_model.as_str(), backup_model);
+        assert_eq!(fallback_routing.effective_model.as_str(), backup_model);
+        assert_eq!(fallback_routing.session_provider, Some(Provider::OpenAI));
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn runtime_backed_persistent_sticky_fallback_survives_authoritative_reload() {
+        use meerkat_core::service::SessionService as _;
+        use meerkat_runtime::completion::CompletionOutcome;
+        use meerkat_runtime::{RuntimeStore as _, SessionServiceRuntimeExt as _};
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-5";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+        const EXTERNAL_TOOL: &str = "known_external_tool";
+        const ORIGINAL_PROMPT: &str = "persist this exact user prompt";
+
+        let primary_binding = configured_auth_binding("fallback_test", "default_anthropic");
+        let backup_binding = configured_auth_binding("fallback_test", "default_openai");
+        let config = sticky_fallback_test_config(BACKUP_MODEL, backup_binding.clone());
+        let temp = tempfile::tempdir().expect("persistent fallback tempdir");
+        let sqlite_store = Arc::new(
+            meerkat_store::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
+                .expect("open sqlite session store"),
+        );
+        let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let external_filter = ToolFilter::Deny([EXTERNAL_TOOL.to_string()].into_iter().collect());
+        let runtime_id;
+        let session_id;
+
+        {
+            let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let backup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let factory = scripted_sticky_fallback_factory(
+                temp.path().join("first-factory-sessions"),
+                Arc::clone(&primary_calls),
+                Arc::clone(&backup_calls),
+            );
+            let builder = crate::FactoryAgentBuilder::new(factory, config.clone());
+            assert!(
+                builder.default_llm_client.is_none(),
+                "the regression must resolve both clients through the real provider registry"
+            );
+            let persistence = crate::PersistenceBundle::new(
+                Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+                Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+                Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+            );
+            let (service, adapter) =
+                crate::surface::build_runtime_backed_service(builder, 4, persistence);
+            let service = Arc::new(service);
+            let session = Session::new();
+            session_id = session.id().clone();
+            runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+            let request = sticky_fallback_runtime_request(
+                PRIMARY_MODEL,
+                sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+            );
+            let result = Box::pin(crate::surface::materialize_session(
+                &service,
+                &adapter,
+                session,
+                request,
+                {
+                    let service = Arc::clone(&service);
+                    let adapter = Arc::clone(&adapter);
+                    move |session_id| {
+                        crate::surface::default_persistent_executor(service, adapter, session_id)
+                    }
+                },
+            ))
+            .await
+            .expect("materialize real runtime-backed fallback session");
+            assert_eq!(result.session_id, session_id);
+
+            let initial_snapshot_bytes = runtime_store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("load initial runtime snapshot")
+                .expect("runtime-backed create must materialize an initial snapshot");
+            let initial_snapshot: Session = serde_json::from_slice(&initial_snapshot_bytes)
+                .expect("initial runtime snapshot should deserialize");
+            assert_eq!(
+                initial_snapshot
+                    .try_tool_visibility_state()
+                    .expect("initial visibility metadata should decode"),
+                Some(SessionToolVisibilityState::default()),
+                "runtime-backed creation must seal the all-default visibility parent before staging"
+            );
+            let initial_identity = initial_snapshot
+                .session_metadata()
+                .expect("initial runtime snapshot should carry session metadata")
+                .llm_identity();
+            assert_eq!(initial_identity.model, PRIMARY_MODEL);
+            assert_eq!(initial_identity.provider, Provider::Anthropic);
+            assert_eq!(initial_identity.auth_binding, Some(primary_binding.clone()));
+
+            service
+                .set_session_tool_filter(&session_id, external_filter.clone())
+                .await
+                .expect("stage known external visibility filter");
+            let staged_session = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("load staged authoritative session")
+                .expect("staged authoritative session should exist");
+            let staged_visibility = staged_session
+                .try_tool_visibility_state()
+                .expect("staged visibility metadata should decode")
+                .expect("staged visibility metadata should exist");
+            assert_eq!(staged_visibility.active_filter, ToolFilter::All);
+            assert_eq!(staged_visibility.staged_filter, external_filter);
+            assert!(
+                staged_visibility
+                    .filter_witnesses
+                    .get(EXTERNAL_TOOL)
+                    .is_some_and(meerkat_core::ToolVisibilityWitness::has_identity_witness),
+                "staged filter must carry the real external tool's provenance witness"
+            );
+
+            let (_accept, completion) = adapter
+                .accept_input_with_completion(
+                    &session_id,
+                    meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                        ORIGINAL_PROMPT,
+                        None,
+                    )),
+                )
+                .await
+                .expect("accept real runtime prompt");
+            let completion = completion.expect("runtime prompt should provide a completion handle");
+            let completion =
+                tokio::time::timeout(std::time::Duration::from_secs(10), completion.wait())
+                    .await
+                    .expect("runtime prompt should complete before timeout")
+                    .expect("runtime completion waiter should resolve");
+            assert!(
+                matches!(
+                    completion,
+                    CompletionOutcome::Completed(ref run) if run.text == "backup success"
+                ),
+                "unexpected fallback completion: {completion:?}"
+            );
+            assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(backup_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+            let live_identity = service
+                .live_session_llm_identity(&session_id)
+                .await
+                .expect("read live identity watch");
+            assert_eq!(live_identity.model, BACKUP_MODEL);
+            assert_eq!(live_identity.provider, Provider::OpenAI);
+            assert_eq!(live_identity.auth_binding.as_ref(), Some(&backup_binding));
+            let live_routing = adapter
+                .session_model_routing_status(&session_id)
+                .await
+                .expect("read live fallback routing");
+            assert_eq!(live_routing.baseline_model.as_str(), BACKUP_MODEL);
+            assert_eq!(live_routing.effective_model.as_str(), BACKUP_MODEL);
+            assert_eq!(live_routing.session_provider, Some(Provider::OpenAI));
+
+            let authoritative = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("load durable authoritative fallback session")
+                .expect("durable authoritative fallback session should exist");
+            assert_persisted_sticky_fallback_state(
+                &authoritative,
+                BACKUP_MODEL,
+                &backup_binding,
+                &external_filter,
+                ORIGINAL_PROMPT,
+            );
+            let runtime_snapshot_bytes = runtime_store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("load fallback runtime snapshot")
+                .expect("fallback runtime snapshot should exist");
+            let runtime_snapshot: Session = serde_json::from_slice(&runtime_snapshot_bytes)
+                .expect("fallback runtime snapshot should deserialize");
+            assert_persisted_sticky_fallback_state(
+                &runtime_snapshot,
+                BACKUP_MODEL,
+                &backup_binding,
+                &external_filter,
+                ORIGINAL_PROMPT,
+            );
+        }
+
+        let restart_primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restart_backup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restart_factory = scripted_sticky_fallback_factory(
+            temp.path().join("restarted-factory-sessions"),
+            Arc::clone(&restart_primary_calls),
+            Arc::clone(&restart_backup_calls),
+        );
+        let restart_builder = crate::FactoryAgentBuilder::new(restart_factory, config);
+        assert!(restart_builder.default_llm_client.is_none());
+        let restart_persistence = crate::PersistenceBundle::new(
+            Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+        );
+        let (restart_service, restart_adapter) =
+            crate::surface::build_runtime_backed_service(restart_builder, 4, restart_persistence);
+        let restart_service = Arc::new(restart_service);
+        assert!(
+            !restart_adapter.contains_session(&session_id).await,
+            "fresh runtime adapter must start without an in-memory registration"
+        );
+        let resume_session = restart_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load fallback target from retained persistence")
+            .expect("retained fallback session should exist");
+        assert_persisted_sticky_fallback_state(
+            &resume_session,
+            BACKUP_MODEL,
+            &backup_binding,
+            &external_filter,
+            ORIGINAL_PROMPT,
+        );
+        let restart_request = sticky_fallback_runtime_request(
+            PRIMARY_MODEL,
+            sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+        );
+        let restart_result = Box::pin(crate::surface::materialize_session(
+            &restart_service,
+            &restart_adapter,
+            resume_session,
+            restart_request,
+            {
+                let service = Arc::clone(&restart_service);
+                let adapter = Arc::clone(&restart_adapter);
+                move |session_id| {
+                    crate::surface::default_persistent_executor(service, adapter, session_id)
+                }
+            },
+        ))
+        .await
+        .expect("rematerialize retained fallback session");
+        assert_eq!(restart_result.session_id, session_id);
+        assert_eq!(
+            restart_primary_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "reload must not probe or replay the failed primary"
+        );
+        assert_eq!(
+            restart_backup_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "reload must not fabricate a new fallback turn"
+        );
+
+        let reloaded_live_identity = restart_service
+            .live_session_llm_identity(&session_id)
+            .await
+            .expect("read reloaded live identity watch");
+        assert_eq!(reloaded_live_identity.model, BACKUP_MODEL);
+        assert_eq!(reloaded_live_identity.provider, Provider::OpenAI);
+        assert_eq!(
+            reloaded_live_identity.auth_binding.as_ref(),
+            Some(&backup_binding)
+        );
+        let reloaded_routing = restart_adapter
+            .session_model_routing_status(&session_id)
+            .await
+            .expect("read reloaded fallback routing");
+        assert_eq!(reloaded_routing.baseline_model.as_str(), BACKUP_MODEL);
+        assert_eq!(reloaded_routing.effective_model.as_str(), BACKUP_MODEL);
+        assert_eq!(reloaded_routing.session_provider, Some(Provider::OpenAI));
+        let reloaded_authoritative = restart_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load rematerialized authoritative session")
+            .expect("rematerialized authoritative session should exist");
+        assert_persisted_sticky_fallback_state(
+            &reloaded_authoritative,
+            BACKUP_MODEL,
+            &backup_binding,
+            &external_filter,
+            ORIGINAL_PROMPT,
+        );
+        let reloaded_snapshot_bytes = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load rematerialized runtime snapshot")
+            .expect("rematerialized runtime snapshot should exist");
+        let reloaded_snapshot: Session = serde_json::from_slice(&reloaded_snapshot_bytes)
+            .expect("rematerialized runtime snapshot should deserialize");
+        assert_persisted_sticky_fallback_state(
+            &reloaded_snapshot,
+            BACKUP_MODEL,
+            &backup_binding,
+            &external_filter,
+            ORIGINAL_PROMPT,
+        );
     }
 
     fn openai_realm_with_bindings(bindings: &[(&str, &str)]) -> RealmConfigSection {
@@ -9257,13 +10035,13 @@ mod tests {
         let expected_filter = meerkat_core::tool_scope::ToolFilter::All;
         let owner_state = bindings.tool_visibility_owner().visibility_state().unwrap();
         assert_eq!(&owner_state.capability_base_filter, &expected_filter);
-        assert!(
+        assert_eq!(
             agent
                 .session()
                 .try_tool_visibility_state()
-                .expect("parse visibility")
-                .is_none(),
-            "runtime-backed capability filtering must not be derived from session metadata"
+                .expect("parse visibility"),
+            Some(owner_state),
+            "runtime-backed sessions must persist the generated-owner visibility projection as a rebuildable CAS parent"
         );
     }
 

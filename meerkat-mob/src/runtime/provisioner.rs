@@ -643,7 +643,10 @@ impl SessionBackend {
         }
     }
 
-    async fn unregister_runtime_session_binding(&self, session_id: &SessionId) {
+    async fn unregister_runtime_session_binding(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
         if let Some(adapter) = &self.runtime_adapter {
             #[cfg(target_arch = "wasm32")]
             if adapter
@@ -664,36 +667,28 @@ impl SessionBackend {
                 );
                 adapter.discard_terminal_storeless_session(session_id).await;
                 self.remove_runtime_session_state(session_id).await;
-                return;
+                return Ok(());
             }
 
-            let registered = tokio::time::timeout(
-                Duration::from_secs(2),
-                adapter.contains_session(session_id),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                tracing::warn!(
-                    %session_id,
-                    "timed out checking runtime session registration during mob archive cleanup"
-                );
-                false
-            });
-            if registered
-                && tokio::time::timeout(
-                    Duration::from_secs(2),
-                    adapter.unregister_session(session_id),
-                )
+            // Unregister is idempotent and owns its complete two-phase drain.
+            // An outer timeout can cancel that authority mid-transition and
+            // strand the session in Draining, so archive cleanup awaits it.
+            adapter
+                .unregister_session(session_id)
                 .await
-                .is_err()
-            {
-                tracing::warn!(
-                    %session_id,
-                    "timed out unregistering runtime session during mob archive cleanup"
-                );
+                .map_err(|error| {
+                    Self::runtime_archive_error(format!(
+                        "failed to unregister runtime session during mob archive cleanup for {session_id}: {error}"
+                    ))
+                })?;
+            if adapter.contains_session(session_id).await {
+                return Err(Self::runtime_archive_error(format!(
+                    "runtime session remains registered after mob archive cleanup for {session_id}"
+                )));
             }
             self.remove_runtime_session_state(session_id).await;
         }
+        Ok(())
     }
 
     #[cfg(feature = "runtime-adapter")]
@@ -972,7 +967,7 @@ impl SessionBackend {
                     session_id,
                 )
                 .await?;
-                self.unregister_runtime_session_binding(session_id).await;
+                self.unregister_runtime_session_binding(session_id).await?;
                 return Ok(());
             }
 
@@ -990,7 +985,7 @@ impl SessionBackend {
                         session_id = %session_id,
                         "SessionBackend::archive_with_authority_then_unregister unregistering runtime binding"
                     );
-                    self.unregister_runtime_session_binding(session_id).await;
+                    self.unregister_runtime_session_binding(session_id).await?;
                     tracing::info!(
                         session_id = %session_id,
                         "SessionBackend::archive_with_authority_then_unregister complete"
@@ -1035,7 +1030,7 @@ impl SessionBackend {
                                 session_id,
                             )
                             .await?;
-                            self.unregister_runtime_session_binding(session_id).await;
+                            self.unregister_runtime_session_binding(session_id).await?;
                             return Ok(());
                         }
                         return Err(SessionError::Agent(
@@ -1044,7 +1039,7 @@ impl SessionBackend {
                             )),
                         ));
                     }
-                    self.unregister_runtime_session_binding(session_id).await;
+                    self.unregister_runtime_session_binding(session_id).await?;
                     Err(SessionError::NotFound { id })
                 }
                 Err(error) => Err(error),
@@ -1948,6 +1943,23 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
+    async fn reconcile_committed_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .reconcile_runtime_compaction_projections(&self.bridge_session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .abort_uncommitted_compaction_projections(&self.bridge_session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.session_service
             .cancel_after_boundary_with_machine_authority(
@@ -1969,24 +1981,21 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         tracing::debug!(
             bridge_session_id = %self.bridge_session_id,
-            "mob runtime executor received stop; unregistering runtime session then discarding live session"
+            "mob runtime executor received machine-authorized external cleanup"
         );
-        // Unregister from the runtime adapter BEFORE discarding the live session.
-        // Teardown then exposes only a "gone-from-adapter / still-in-session-service"
-        // split-state, which a concurrent mob retire->archive tolerates. The reverse
-        // order (discard first) removes the session from the session-service while it
-        // is still registered in the adapter, so a concurrent archive read misses with
-        // NotFound while the provisioner guard still sees contains_session() == true,
-        // raising a spurious InternalError on every retire/respawn/console-reset of an
-        // idle member. Regression coverage: runtime::tests
-        // cleanup_after_runtime_stop_unregisters_adapter_before_discarding_live_session.
-        self.runtime_adapter
-            .unregister_session(&self.bridge_session_id)
-            .await;
+        // Runtime removal belongs to the machine-owned unregister saga. This
+        // hook owns only provisioner/session material, so it cannot recursively
+        // join the coordinator that is currently invoking it.
         let discard_result = self
             .session_service
             .discard_live_session(&self.bridge_session_id)
             .await;
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(err) => {
+                return Err(CoreExecutorError::control_failed_runtime(err.to_string()));
+            }
+        }
         let removed = {
             let mut runtime_sessions = self.runtime_sessions.write().await;
             let should_remove = runtime_sessions
@@ -2003,10 +2012,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         } else {
             self.state.clear_queued_turns().await;
         }
-        match discard_result {
-            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
-        }
+        Ok(())
     }
 }
 
@@ -2148,7 +2154,11 @@ impl MobProvisioner for SessionBackend {
                     (&self.runtime_adapter, &pre_registered_bridge_session_id)
                     && !session_error_means_session_identity_already_active(&e, pre_id)
                 {
-                    adapter.unregister_session(pre_id).await;
+                    if let Err(cleanup_error) = adapter.unregister_session(pre_id).await {
+                        return Err(MobError::Internal(format!(
+                            "{e}; additionally failed to unregister pre-registered runtime session {pre_id}: {cleanup_error}"
+                        )));
+                    }
                 }
                 return Err(e.into());
             }
@@ -2173,7 +2183,7 @@ impl MobProvisioner for SessionBackend {
                 )));
             }
             self.unregister_runtime_session_binding(admitted_bridge_session_id)
-                .await;
+                .await?;
             return Err(MobError::Internal(format!(
                 "session service returned bridge session '{created_bridge_session_id}' for admitted mob spawn session '{admitted_bridge_session_id}'"
             )));
@@ -2190,7 +2200,11 @@ impl MobProvisioner for SessionBackend {
                     actual_bridge_session_id = %created_bridge_session_id,
                     "mob provisioner: session service returned different ID; reconciling runtime registration"
                 );
-                adapter.unregister_session(pre_id).await;
+                adapter.unregister_session(pre_id).await.map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to unregister stale pre-registered runtime session {pre_id}: {error}"
+                    ))
+                })?;
             }
             tracing::debug!(
                 bridge_session_id = %created_bridge_session_id,
@@ -2290,14 +2304,31 @@ impl MobProvisioner for SessionBackend {
                 )
                 .await
             {
-                let _ = adapter.retire_runtime(&created_bridge_session_id).await;
-                adapter.unregister_session(&created_bridge_session_id).await;
-                let _ = self
+                let mut cleanup_failures = Vec::new();
+                if let Err(cleanup_error) =
+                    adapter.retire_runtime(&created_bridge_session_id).await
+                {
+                    cleanup_failures.push(format!("retire runtime: {cleanup_error}"));
+                }
+                if let Err(cleanup_error) =
+                    adapter.unregister_session(&created_bridge_session_id).await
+                {
+                    cleanup_failures.push(format!("unregister runtime: {cleanup_error}"));
+                }
+                if let Err(cleanup_error) = self
                     .session_service
                     .discard_live_session(&created_bridge_session_id)
-                    .await;
+                    .await
+                {
+                    cleanup_failures.push(format!("discard live session: {cleanup_error}"));
+                }
+                let cleanup_suffix = if cleanup_failures.is_empty() {
+                    String::new()
+                } else {
+                    format!("; additionally cleanup failed: {}", cleanup_failures.join("; "))
+                };
                 return Err(MobError::Internal(format!(
-                    "failed to promote revived durable session document '{created_bridge_session_id}': {error}"
+                    "failed to promote revived durable session document '{created_bridge_session_id}': {error}{cleanup_suffix}"
                 )));
             }
             if let Err(error) = adapter.reset_runtime(&created_bridge_session_id).await {

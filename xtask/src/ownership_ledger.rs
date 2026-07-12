@@ -2435,7 +2435,7 @@ fn state_cells() -> Vec<StateCellEntry> {
     vec![
         state_entry!(
             "meerkat-runtime/src/meerkat_machine/mod.rs",
-            "MeerkatMachine.sessions",
+            "MeerkatMachineShared.sessions",
             Subsystem::Runtime,
             StateClass::CapabilityIndex,
             "MeerkatMachine registered-session + attachment publication contract",
@@ -2459,7 +2459,7 @@ fn state_cells() -> Vec<StateCellEntry> {
                 StalenessPolicy::Forbidden,
             )),
             EntryStatus::Closed,
-            "wave-c C-H2 collapse: drain slots now live on RuntimeSessionEntry so slot presence is structurally identical to session registration — the subset invariant with MeerkatMachine.sessions is vacuous by construction; unregister aborts the slot before removing the entry",
+            "wave-c C-H2 collapse: drain slots now live on RuntimeSessionEntry so slot presence is structurally identical to session registration — the subset invariant with MeerkatMachineShared.sessions is vacuous by construction; unregister aborts the slot before removing the entry",
         ),
         state_entry!(
             "meerkat-runtime/src/meerkat_machine/mod.rs",
@@ -2669,7 +2669,7 @@ fn state_cells() -> Vec<StateCellEntry> {
                 StalenessPolicy::Forbidden,
             )),
             EntryStatus::Closed,
-            "sealed RosterAuthority is now the sole mutator for the roster projection and helper/runtime reads consume authority snapshots only",
+            "sealed RosterAuthority is the sole roster projection mutator; runtime reads are mechanical materialization only, and public retire cancel-vs-preserve behavior comes from MobMachine's incarnation-scoped verdict rather than roster presence",
         ),
         state_entry!(
             "meerkat-mob/src/runtime/actor.rs",
@@ -2766,7 +2766,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
             &[
-                "sessions",
+                "MeerkatMachineShared.sessions",
                 "RuntimeSessionEntry.driver",
                 "RuntimeSessionEntry.ops_lifecycle",
                 "RuntimeSessionEntry.completions"
@@ -2799,7 +2799,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
             &[
-                "sessions",
+                "MeerkatMachineShared.sessions",
                 "RuntimeSessionEntry.attachment_slot",
                 "RuntimeSessionEntry.driver"
             ],
@@ -2816,7 +2816,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
             &[
-                "sessions",
+                "MeerkatMachineShared.sessions",
                 "RuntimeSessionEntry.attachment_slot",
                 "RuntimeSessionEntry.driver"
             ],
@@ -2832,7 +2832,10 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "unregister_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
-            &["sessions", "RuntimeSessionEntry.drain_slot"],
+            &[
+                "MeerkatMachineShared.sessions",
+                "RuntimeSessionEntry.drain_slot",
+            ],
             "registered-session contract + MeerkatMachine drain-control region",
             &["session removed and no drain remains live or suppressing"],
             &["drain slot is owned by session entry (wave-c C-H2)"],
@@ -3351,10 +3354,21 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             "retire",
             BoundaryKind::PublicInherent,
             "MobHandle",
-            &["roster", "MobActor.retired_event_index"],
-            "RosterAuthority + disposal pipeline",
-            &["retire surface reflects canonical member lifecycle truth"],
-            &["member/session removal follows lifecycle invariants"],
+            &[
+                "MobActor.dsl_authority",
+                "MobActor.pending_spawns",
+                "roster",
+                "MobActor.retired_event_index"
+            ],
+            "MobMachine incarnation-scoped retire disposition + PendingSpawnLineage + RosterAuthority projection + disposal pipeline",
+            &[
+                "retire surface reflects canonical member lifecycle truth",
+                "MobMachine alone classifies whether the exact pending spawn session may be canceled or a later incarnation must be preserved",
+            ],
+            &[
+                "member/session removal follows lifecycle invariants",
+                "roster projection presence cannot select pending-spawn cancellation",
+            ],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(

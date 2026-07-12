@@ -9,12 +9,15 @@
 use async_trait::async_trait;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use meerkat_core::memory::{
-    EmbeddingModel, HnswParams, MemoryEnumerationPage, MemoryEnumerationRequest, MemoryIndexBatch,
-    MemoryIndexReceipt, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryRecord,
-    MemoryResult, MemoryScopeDropReceipt, MemorySearchScope, MemoryStore, MemoryStoreError,
+    CompactionProjectionId, CompactionProjectionPersistence, CompactionStageReceipt,
+    CompactionStageReconcileReceipt, EmbeddingModel, HnswParams, MemoryEnumerationPage,
+    MemoryEnumerationRequest, MemoryIndexBatch, MemoryIndexReceipt, MemoryMetadata, MemoryOwner,
+    MemoryRankingPolicy, MemoryRecord, MemoryResult, MemoryScopeDropReceipt, MemorySearchScope,
+    MemoryStore, MemoryStoreError,
 };
 use meerkat_core::types::SessionId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,6 +58,82 @@ const CREATE_MEMORY_ALLOCATOR_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS mem
 const SEED_MEMORY_ALLOCATOR_SQL: &str = "INSERT INTO memory_allocator (id, high_water) \
      SELECT 0, COALESCE((SELECT MAX(point_id) + 1 FROM memory_metadata), 0) \
      WHERE NOT EXISTS (SELECT 1 FROM memory_allocator WHERE id = 0)";
+
+/// Invisible durable compaction batches. `state = 'staged'` rows are never
+/// consulted by search/enumeration; finalization moves their entries into the
+/// ordinary memory tables and flips the state in one SQLite transaction.
+const CREATE_COMPACTION_STAGE_SCHEMA_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS memory_compaction_stage (
+    session_id TEXT NOT NULL,
+    parent_revision TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    commit_fingerprint TEXT NOT NULL,
+    entries_json BLOB NOT NULL,
+    payload_digest BLOB NOT NULL,
+    indexed_entries INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('staged', 'finalized')),
+    PRIMARY KEY (session_id, parent_revision, revision, commit_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_compaction_stage_session
+    ON memory_compaction_stage (session_id, state);
+CREATE TABLE IF NOT EXISTS memory_scope_tombstone (
+    session_id TEXT PRIMARY KEY,
+    drop_generation INTEGER NOT NULL CHECK (drop_generation > 0)
+)";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DurableCompactionStageEntry {
+    content: String,
+    metadata: MemoryMetadata,
+}
+
+#[derive(serde::Serialize)]
+struct DurableCompactionStageDigestEntry<'a> {
+    content: &'a str,
+    session_id: &'a SessionId,
+    source: &'a meerkat_core::memory::MemorySource,
+}
+
+fn compaction_stage_payload_digest(
+    entries: &[DurableCompactionStageEntry],
+) -> Result<Vec<u8>, MemoryStoreError> {
+    // `indexed_at` is publication metadata, not semantic identity. A dropped
+    // stage await can leave the first insertion durable while the Agent later
+    // retries the same content-derived transcript rewrite with a newly minted
+    // commit timestamp. Excluding that volatile field makes the retry exact
+    // and idempotent while the first durable stage retains its timestamp.
+    let canonical = entries
+        .iter()
+        .map(|entry| DurableCompactionStageDigestEntry {
+            content: &entry.content,
+            session_id: &entry.metadata.session_id,
+            source: &entry.metadata.source,
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&canonical)
+        .map_err(|error| MemoryStoreError::Embedding(error.to_string()))?;
+    Ok(Sha256::digest(bytes).to_vec())
+}
+
+/// Whether the canonical session scope has been durably deleted.
+///
+/// A tombstone is permanent because session identity is never reused. Every
+/// publisher checks it inside the same SQLite write transaction as its rows,
+/// making scope deletion win regardless of process restart or cross-instance
+/// interleaving.
+fn scope_is_tombstoned(
+    conn: &Connection,
+    session_id: &SessionId,
+) -> Result<bool, MemoryStoreError> {
+    conn.query_row(
+        "SELECT 1 FROM memory_scope_tombstone WHERE session_id = ?1",
+        params![session_id.to_string()],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(|error| MemoryStoreError::Storage(error.to_string()))
+}
 
 /// Default vocabulary dimension for the bag-of-words embedding model.
 const DEFAULT_VOCAB_DIM: usize = 4096;
@@ -178,6 +257,8 @@ fn migrate_memory_schema(conn: &mut Connection) -> Result<(), MemoryStoreError> 
     tx.execute(CREATE_MEMORY_ALLOCATOR_SCHEMA_SQL, [])
         .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     tx.execute(SEED_MEMORY_ALLOCATOR_SQL, [])
+        .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+    tx.execute_batch(CREATE_COMPACTION_STAGE_SCHEMA_SQL)
         .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
     tx.commit()
         .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
@@ -356,6 +437,22 @@ enum ScopedIndexState {
     Poisoned,
 }
 
+#[cfg(test)]
+struct BlockingMutationPause {
+    reached: std::sync::Barrier,
+    release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl BlockingMutationPause {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reached: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        })
+    }
+}
+
 struct ScopedHnswIndex {
     index: MemoryHnswIndex,
     #[cfg(test)]
@@ -388,7 +485,7 @@ pub struct HnswMemoryStore {
     // borrow caller memory, this type must be revisited before upgrading.
     indices: Arc<std::sync::RwLock<HashMap<SessionId, ScopedIndexState>>>,
     db_path: PathBuf,
-    insert_lock: Mutex<()>,
+    insert_lock: Arc<Mutex<()>>,
     path: PathBuf,
     /// Injected typed ranking policy: the authority for embedding generation
     /// and HNSW index parameters (not store-local constants).
@@ -399,6 +496,12 @@ pub struct HnswMemoryStore {
     /// exercised deterministically. Production builds never carry this field.
     #[cfg(test)]
     fail_hnsw_insert_after: Arc<std::sync::atomic::AtomicI64>,
+    /// One-shot deterministic cancellation windows used by crash-safety
+    /// tests. Production builds carry neither hook.
+    #[cfg(test)]
+    stage_commit_pause: std::sync::Mutex<Option<Arc<BlockingMutationPause>>>,
+    #[cfg(test)]
+    finalize_publish_pause: std::sync::Mutex<Option<Arc<BlockingMutationPause>>>,
 }
 
 impl std::fmt::Debug for HnswMemoryStore {
@@ -441,11 +544,15 @@ impl HnswMemoryStore {
         Ok(Self {
             indices: Arc::new(std::sync::RwLock::new(HashMap::new())),
             db_path,
-            insert_lock: Mutex::new(()),
+            insert_lock: Arc::new(Mutex::new(())),
             path: dir.to_path_buf(),
             policy,
             #[cfg(test)]
             fail_hnsw_insert_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
+            #[cfg(test)]
+            stage_commit_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            finalize_publish_pause: std::sync::Mutex::new(None),
         })
     }
 
@@ -495,10 +602,481 @@ impl HnswMemoryStore {
         self.fail_hnsw_insert_after
             .store(after, std::sync::atomic::Ordering::Release);
     }
+
+    #[cfg(test)]
+    fn arm_stage_commit_pause(&self) -> Arc<BlockingMutationPause> {
+        let pause = BlockingMutationPause::new();
+        *self
+            .stage_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        pause
+    }
+
+    #[cfg(test)]
+    fn arm_finalize_publish_pause(&self) -> Arc<BlockingMutationPause> {
+        let pause = BlockingMutationPause::new();
+        *self
+            .finalize_publish_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        pause
+    }
 }
 
 #[async_trait]
 impl MemoryStore for HnswMemoryStore {
+    fn compaction_projection_persistence(&self) -> CompactionProjectionPersistence {
+        CompactionProjectionPersistence::DurableStaged
+    }
+
+    async fn stage_compaction_batch(
+        &self,
+        projection: CompactionProjectionId,
+        batch: MemoryIndexBatch,
+    ) -> Result<CompactionStageReceipt, MemoryStoreError> {
+        let (scope, requests) = batch.into_parts();
+        if scope.session_id() != projection.session_id() {
+            return Err(MemoryStoreError::Scope(format!(
+                "compaction projection session {} is outside batch scope {}",
+                projection.session_id(),
+                scope.session_id()
+            )));
+        }
+        let mut entries = Vec::new();
+        for request in requests {
+            let (_scope, content, metadata) = request.into_parts();
+            if content.is_indexable() {
+                entries.push(DurableCompactionStageEntry {
+                    content: content.into_indexable_text(),
+                    metadata,
+                });
+            }
+        }
+        let staged_entries = entries.len();
+        let entries_json = serde_json::to_vec(&entries)
+            .map_err(|error| MemoryStoreError::Embedding(error.to_string()))?;
+        let payload_digest = compaction_stage_payload_digest(&entries)?;
+        let indexed_entries =
+            i64::try_from(staged_entries).map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
+        let db_path = self.db_path.clone();
+        let projection_for_write = projection.clone();
+        #[cfg(test)]
+        let stage_commit_pause = self
+            .stage_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let publication_guard = Arc::clone(&self.insert_lock).lock_owned().await;
+        let tombstoned = tokio::task::spawn_blocking(move || -> Result<bool, MemoryStoreError> {
+            let _publication_guard = publication_guard;
+            let mut conn = open_connection(&db_path)?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+            if scope_is_tombstoned(&tx, projection_for_write.session_id())? {
+                // A stale agent may retry its pre-delete stage after the
+                // canonical session owner is gone. Acknowledge the exact
+                // request as a zero stage so the caller can unwind normally,
+                // but never recreate durable or live projection state.
+                tx.execute(
+                    "DELETE FROM memory_compaction_stage WHERE session_id = ?1",
+                    params![projection_for_write.session_id().to_string()],
+                )
+                .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                tx.commit()
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                return Ok(true);
+            }
+            let existing = tx
+                .query_row(
+                    "SELECT payload_digest, indexed_entries, state FROM memory_compaction_stage \
+                     WHERE session_id = ?1 AND parent_revision = ?2 AND revision = ?3 \
+                       AND commit_fingerprint = ?4",
+                    params![
+                        projection_for_write.session_id().to_string(),
+                        projection_for_write.parent_revision(),
+                        projection_for_write.revision(),
+                        projection_for_write.commit_fingerprint(),
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+            if let Some((existing_digest, existing_count, state)) = existing {
+                let compatible = existing_count == indexed_entries
+                    && existing_digest == payload_digest
+                    && matches!(state.as_str(), "staged" | "finalized");
+                if !compatible {
+                    return Err(MemoryStoreError::Storage(
+                        "conflicting durable compaction stage for the same transcript rewrite"
+                            .to_string(),
+                    ));
+                }
+                tx.commit()
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO memory_compaction_stage \
+                 (session_id, parent_revision, revision, commit_fingerprint, entries_json, payload_digest, indexed_entries, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'staged')",
+                params![
+                    projection_for_write.session_id().to_string(),
+                    projection_for_write.parent_revision(),
+                    projection_for_write.revision(),
+                    projection_for_write.commit_fingerprint(),
+                    entries_json,
+                    payload_digest,
+                    indexed_entries,
+                ],
+            )
+            .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+            #[cfg(test)]
+            if let Some(pause) = stage_commit_pause {
+                pause.reached.wait();
+                pause.release.wait();
+            }
+            Ok(false)
+        })
+        .await
+        .map_err(|error| MemoryStoreError::TaskJoin(format!("stage task join failed: {error}")))??;
+
+        Ok(CompactionStageReceipt {
+            projection,
+            staged_entries: if tombstoned { 0 } else { staged_entries },
+        })
+    }
+
+    async fn finalize_compaction_batch(
+        &self,
+        projection: &CompactionProjectionId,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        let receipt_scope =
+            meerkat_core::memory::MemoryIndexScope::for_session(projection.session_id().clone());
+        let db_path = self.db_path.clone();
+        let indices = Arc::clone(&self.indices);
+        let projection = projection.clone();
+        let embedding_model = Arc::clone(self.policy.embedding_model());
+        let hnsw_params = self.policy.hnsw_params();
+        #[cfg(test)]
+        let finalize_publish_pause = self
+            .finalize_publish_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let publication_guard = Arc::clone(&self.insert_lock).lock_owned().await;
+        let indexed_entries =
+            tokio::task::spawn_blocking(move || -> Result<usize, MemoryStoreError> {
+                let _publication_guard = publication_guard;
+                let mut conn = open_connection(&db_path)?;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                if scope_is_tombstoned(&tx, projection.session_id())? {
+                    // The RuntimeStore may still carry a pending outbox row
+                    // when session deletion wins. Return a successful zero
+                    // publication so that authority can acknowledge/clear the
+                    // outbox, while defensively purging any stale rows left by
+                    // an interleaving or older writer.
+                    backfill_null_session_ids(&tx)?;
+                    let session_param = projection.session_id().to_string();
+                    tx.execute(
+                        "DELETE FROM memory_text WHERE point_id IN \
+                         (SELECT point_id FROM memory_metadata WHERE session_id = ?1)",
+                        params![session_param],
+                    )
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    tx.execute(
+                        "DELETE FROM memory_metadata WHERE session_id = ?1",
+                        params![session_param],
+                    )
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    tx.execute(
+                        "DELETE FROM memory_compaction_stage WHERE session_id = ?1",
+                        params![session_param],
+                    )
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    tx.commit()
+                        .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    indices
+                        .write()
+                        .map_err(|_| MemoryStoreError::LockPoisoned)?
+                        .remove(projection.session_id());
+                    return Ok(0);
+                }
+                let (entries_json, indexed_entries_i64, state) = tx
+                    .query_row(
+                        "SELECT entries_json, indexed_entries, state FROM memory_compaction_stage \
+                         WHERE session_id = ?1 AND parent_revision = ?2 AND revision = ?3 \
+                           AND commit_fingerprint = ?4",
+                        params![
+                            projection.session_id().to_string(),
+                            projection.parent_revision(),
+                            projection.revision(),
+                            projection.commit_fingerprint(),
+                        ],
+                        |row| {
+                            Ok((
+                                row.get::<_, Vec<u8>>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?
+                    .ok_or_else(|| {
+                        MemoryStoreError::Storage(format!(
+                            "missing durable compaction stage for committed rewrite {}",
+                            projection.revision()
+                        ))
+                    })?;
+                let indexed_entries = usize::try_from(indexed_entries_i64)
+                    .map_err(|_| MemoryStoreError::PointIdOutOfRange)?;
+                if state == "staged" {
+                    let entries: Vec<DurableCompactionStageEntry> =
+                        serde_json::from_slice(&entries_json)
+                            .map_err(|error| MemoryStoreError::Embedding(error.to_string()))?;
+                    if entries.len() != indexed_entries {
+                        return Err(MemoryStoreError::Storage(
+                            "durable compaction stage entry count is corrupt".to_string(),
+                        ));
+                    }
+                    let point_ids = allocate_point_ids(&tx, indexed_entries)?;
+                    let session_param = projection.session_id().to_string();
+                    for (point_id, entry) in point_ids.iter().zip(&entries) {
+                        let metadata_json = serde_json::to_vec(&entry.metadata)
+                            .map_err(|error| MemoryStoreError::Embedding(error.to_string()))?;
+                        tx.execute(
+                            "INSERT INTO memory_metadata (point_id, metadata_json, session_id) \
+                             VALUES (?1, ?2, ?3)",
+                            params![point_id, metadata_json, session_param],
+                        )
+                        .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                        tx.execute(
+                            "INSERT INTO memory_text (point_id, content) VALUES (?1, ?2)",
+                            params![point_id, entry.content.as_bytes()],
+                        )
+                        .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    }
+                    tx.execute(
+                        "UPDATE memory_compaction_stage \
+                         SET state = 'finalized', entries_json = ?5 \
+                         WHERE session_id = ?1 AND parent_revision = ?2 AND revision = ?3 \
+                           AND commit_fingerprint = ?4",
+                        params![
+                            projection.session_id().to_string(),
+                            projection.parent_revision(),
+                            projection.revision(),
+                            projection.commit_fingerprint(),
+                            b"[]".as_slice(),
+                        ],
+                    )
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                } else if state != "finalized" {
+                    return Err(MemoryStoreError::Storage(format!(
+                        "unknown durable compaction stage state '{state}'"
+                    )));
+                }
+                tx.commit()
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+
+                // Cancellation-safe publication: this blocking owner continues
+                // after an awaiting future is dropped, and rebuilds the live
+                // index from the just-committed durable rows before returning.
+                let rebuilt = rebuild_scoped_index_from_db(
+                    &conn,
+                    projection.session_id(),
+                    embedding_model.as_ref(),
+                    hnsw_params,
+                );
+                #[cfg(test)]
+                if let Some(pause) = finalize_publish_pause {
+                    pause.reached.wait();
+                    pause.release.wait();
+                }
+                let mut live = indices
+                    .write()
+                    .map_err(|_| MemoryStoreError::LockPoisoned)?;
+                match rebuilt {
+                    Ok(rebuilt) => {
+                        live.insert(
+                            projection.session_id().clone(),
+                            ScopedIndexState::Live(rebuilt),
+                        );
+                    }
+                    Err(error) => {
+                        live.insert(projection.session_id().clone(), ScopedIndexState::Poisoned);
+                        return Err(error);
+                    }
+                }
+                Ok(indexed_entries)
+            })
+            .await
+            .map_err(|error| {
+                MemoryStoreError::TaskJoin(format!("finalize task join failed: {error}"))
+            })??;
+
+        Ok(MemoryIndexReceipt {
+            scope: receipt_scope,
+            indexed_entries,
+        })
+    }
+
+    async fn abort_compaction_batch(
+        &self,
+        projection: &CompactionProjectionId,
+    ) -> Result<(), MemoryStoreError> {
+        let db_path = self.db_path.clone();
+        let projection = projection.clone();
+        let publication_guard = Arc::clone(&self.insert_lock).lock_owned().await;
+        tokio::task::spawn_blocking(move || -> Result<(), MemoryStoreError> {
+            let _publication_guard = publication_guard;
+            let conn = open_connection(&db_path)?;
+            conn.execute(
+                "DELETE FROM memory_compaction_stage \
+                 WHERE session_id = ?1 AND parent_revision = ?2 AND revision = ?3 \
+                   AND commit_fingerprint = ?4 \
+                   AND state = 'staged'",
+                params![
+                    projection.session_id().to_string(),
+                    projection.parent_revision(),
+                    projection.revision(),
+                    projection.commit_fingerprint(),
+                ],
+            )
+            .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            MemoryStoreError::TaskJoin(format!("abort task join failed: {error}"))
+        })??;
+        Ok(())
+    }
+
+    async fn reconcile_compaction_stages(
+        &self,
+        owner: &MemoryOwner,
+        committed: &[CompactionProjectionId],
+    ) -> Result<CompactionStageReconcileReceipt, MemoryStoreError> {
+        let committed = committed
+            .iter()
+            .filter(|projection| projection.session_id() == owner.session_id())
+            .map(|projection| {
+                (
+                    projection.parent_revision().to_string(),
+                    projection.revision().to_string(),
+                    projection.commit_fingerprint().to_string(),
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let db_path = self.db_path.clone();
+        let session_id = owner.session_id().clone();
+        let publication_guard = Arc::clone(&self.insert_lock).lock_owned().await;
+        tokio::task::spawn_blocking(
+            move || -> Result<CompactionStageReconcileReceipt, MemoryStoreError> {
+                let _publication_guard = publication_guard;
+                let mut conn = open_connection(&db_path)?;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                if scope_is_tombstoned(&tx, &session_id)? {
+                    // Empty and non-empty RuntimeStore outbox authority both
+                    // reconcile successfully after canonical scope deletion.
+                    // Finalize will likewise acknowledge each exact pending
+                    // projection with a zero publication, allowing the outbox
+                    // owner to clear it without resurrecting memory.
+                    backfill_null_session_ids(&tx)?;
+                    let session_param = session_id.to_string();
+                    tx.execute(
+                        "DELETE FROM memory_text WHERE point_id IN \
+                         (SELECT point_id FROM memory_metadata WHERE session_id = ?1)",
+                        params![session_param],
+                    )
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    tx.execute(
+                        "DELETE FROM memory_metadata WHERE session_id = ?1",
+                        params![session_param],
+                    )
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    tx.execute(
+                        "DELETE FROM memory_compaction_stage WHERE session_id = ?1",
+                        params![session_param],
+                    )
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    tx.commit()
+                        .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    return Ok(CompactionStageReconcileReceipt::default());
+                }
+                let mut staged = Vec::new();
+                {
+                    let mut statement = tx
+                        .prepare(
+                            "SELECT parent_revision, revision, commit_fingerprint FROM memory_compaction_stage \
+                             WHERE session_id = ?1 AND state = 'staged'",
+                        )
+                        .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    let rows = statement
+                        .query_map(params![session_id.to_string()], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        })
+                        .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                    for row in rows {
+                        staged.push(
+                            row.map_err(|error| MemoryStoreError::Storage(error.to_string()))?,
+                        );
+                    }
+                }
+                let mut receipt = CompactionStageReconcileReceipt::default();
+                for (parent_revision, revision, commit_fingerprint) in staged {
+                    if committed.contains(&(
+                        parent_revision.clone(),
+                        revision.clone(),
+                        commit_fingerprint.clone(),
+                    )) {
+                        receipt.retained_committed += 1;
+                    } else {
+                        tx.execute(
+                            "DELETE FROM memory_compaction_stage \
+                             WHERE session_id = ?1 AND parent_revision = ?2 AND revision = ?3 \
+                               AND commit_fingerprint = ?4 \
+                               AND state = 'staged'",
+                            params![
+                                session_id.to_string(),
+                                parent_revision,
+                                revision,
+                                commit_fingerprint,
+                            ],
+                        )
+                        .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                        receipt.aborted_orphans += 1;
+                    }
+                }
+                tx.commit()
+                    .map_err(|error| MemoryStoreError::Storage(error.to_string()))?;
+                Ok(receipt)
+            },
+        )
+        .await
+        .map_err(|error| {
+            MemoryStoreError::TaskJoin(format!("reconcile task join failed: {error}"))
+        })?
+    }
+
     async fn index_scoped_batch(
         &self,
         batch: MemoryIndexBatch,
@@ -539,13 +1117,23 @@ impl MemoryStore for HnswMemoryStore {
 
         // Serialize in-process inserts so live index updates apply in commit
         // order.
-        let _guard = self.insert_lock.lock().await;
+        let publication_guard = Arc::clone(&self.insert_lock).lock_owned().await;
 
         let insert_result = tokio::task::spawn_blocking(move || {
+            let _publication_guard = publication_guard;
             let mut conn = open_connection(&db_path)?;
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+            if scope_is_tombstoned(&tx, &session_id)? {
+                tx.commit()
+                    .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+                indices
+                    .write()
+                    .map_err(|_| MemoryStoreError::LockPoisoned)?
+                    .remove(&session_id);
+                return Ok::<usize, MemoryStoreError>(0);
+            }
             // Transactional point-ID allocation: IDs come from the durable
             // allocator inside the same transaction as the row writes, so
             // concurrent instances over the same file can never allocate
@@ -691,15 +1279,15 @@ impl MemoryStore for HnswMemoryStore {
                 }
             }
 
-            Ok::<(), MemoryStoreError>(())
+            Ok::<usize, MemoryStoreError>(indexed_entries)
         })
         .await
         .map_err(|e| MemoryStoreError::TaskJoin(format!("index task join failed: {e}")))?;
-        insert_result?;
+        let published_entries = insert_result?;
 
         Ok(MemoryIndexReceipt {
             scope: receipt_scope,
-            indexed_entries,
+            indexed_entries: published_entries,
         })
     }
 
@@ -717,11 +1305,14 @@ impl MemoryStore for HnswMemoryStore {
         // inline: the lazy rebuild-and-publish must be serialized with the
         // index/drop publishers (below), or a rebuild snapshot taken while a
         // batch commit is in flight would publish a stale live index.
-        match self.search_pass(scope, query, limit, false).await? {
+        match self.search_pass(scope, query, limit, None).await? {
             Some(results) => Ok(results),
             None => {
-                let _guard = self.insert_lock.lock().await;
-                match self.search_pass(scope, query, limit, true).await? {
+                let publication_guard = Arc::clone(&self.insert_lock).lock_owned().await;
+                match self
+                    .search_pass(scope, query, limit, Some(publication_guard))
+                    .await?
+                {
                     Some(results) => Ok(results),
                     // Structurally unreachable: the load pass always loads.
                     // Fail closed rather than serve an empty result for a
@@ -761,8 +1352,9 @@ impl HnswMemoryStore {
         scope: &MemorySearchScope,
         query: &str,
         limit: usize,
-        load_if_missing: bool,
+        publication_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<Option<Vec<MemoryResult>>, MemoryStoreError> {
+        let load_if_missing = publication_guard.is_some();
         let query = query.to_owned();
         let scope = scope.clone();
         let db_path = self.db_path.clone();
@@ -772,7 +1364,24 @@ impl HnswMemoryStore {
         let ef_search = hnsw_params.ef_search;
 
         tokio::task::spawn_blocking(move || {
+            // When this is the lazy publication pass, ownership of the guard
+            // lives in the blocking owner. Dropping the caller's await cannot
+            // let a newer writer publish and then be overwritten by this
+            // older rebuild snapshot.
+            let _publication_guard = publication_guard;
             let embedding = embedding_model.embed(&query);
+            let conn = open_connection(&db_path)?;
+            if scope_is_tombstoned(&conn, scope.session_id())? {
+                // Cross-instance finalization can publish a stale local index
+                // after another instance commits the deletion tombstone. The
+                // durable tombstone is checked before every cached-index read,
+                // so that stale projection is discarded rather than served.
+                indices
+                    .write()
+                    .map_err(|_| MemoryStoreError::LockPoisoned)?
+                    .remove(scope.session_id());
+                return Ok(Some(Vec::new()));
+            }
             // Fast path: an already-loaded scope serves under the shared read
             // lock. An unloaded scope falls through to the lazy load below —
             // it must never early-return empty, which would silently hide the
@@ -792,8 +1401,6 @@ impl HnswMemoryStore {
                     }
                 }
             };
-
-            let conn = open_connection(&db_path)?;
             let neighbors = match loaded_neighbors {
                 Some(neighbors) => neighbors,
                 None if !load_if_missing => return Ok(None),
@@ -894,10 +1501,11 @@ impl HnswMemoryStore {
 
         // Serialize with in-process inserts so a concurrent batch cannot
         // publish live points for rows this drop is deleting.
-        let _guard = self.insert_lock.lock().await;
+        let publication_guard = Arc::clone(&self.insert_lock).lock_owned().await;
 
         tokio::task::spawn_blocking(
             move || -> Result<MemoryScopeDropReceipt, MemoryStoreError> {
+                let _publication_guard = publication_guard;
                 let mut conn = open_connection(&db_path)?;
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -909,6 +1517,14 @@ impl HnswMemoryStore {
                 // design so it composes with this caller transaction.
                 backfill_null_session_ids(&tx)?;
                 let session_param = owner.session_id().to_string();
+                tx.execute(
+                    "INSERT INTO memory_scope_tombstone (session_id, drop_generation) \
+                     VALUES (?1, 1) \
+                     ON CONFLICT(session_id) DO UPDATE \
+                     SET drop_generation = memory_scope_tombstone.drop_generation + 1",
+                    params![session_param],
+                )
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                 // One transaction over both tables makes the drop all-or-nothing:
                 // text rows go first (they are reachable only through the metadata
                 // rows' point_ids), then the indexed metadata rows, whose count is
@@ -925,6 +1541,16 @@ impl HnswMemoryStore {
                         params![session_param],
                     )
                     .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
+                // Scope deletion also removes every invisible/finalized stage.
+                // The separate scope tombstone is deliberately retained: a
+                // pending runtime outbox or stale process can then receive a
+                // successful zero-finalize acknowledgement without recreating
+                // the stage or its visible rows.
+                tx.execute(
+                    "DELETE FROM memory_compaction_stage WHERE session_id = ?1",
+                    params![session_param],
+                )
+                .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
                 tx.commit()
                     .map_err(|e| MemoryStoreError::Storage(e.to_string()))?;
 
@@ -962,6 +1588,12 @@ impl HnswMemoryStore {
 
         tokio::task::spawn_blocking(move || -> Result<MemoryEnumerationPage, MemoryStoreError> {
             let conn = open_connection(&db_path)?;
+            if scope_is_tombstoned(&conn, scope.session_id())? {
+                return Ok(MemoryEnumerationPage {
+                    records: Vec::new(),
+                    next_offset: None,
+                });
+            }
             // Heal first: old-binary rows with a NULL projection cell must be
             // visible to the scoped page SELECT below.
             backfill_null_session_ids(&conn)?;
@@ -1155,6 +1787,612 @@ mod tests {
     fn query_i64(db_path: &std::path::Path, sql: &str) -> i64 {
         let conn = Connection::open(db_path).unwrap();
         conn.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    fn compaction_projection(
+        session_id: &SessionId,
+        parent_revision: &str,
+        revision: &str,
+    ) -> CompactionProjectionId {
+        compaction_projection_with_actor(session_id, parent_revision, revision, "memory-stage-test")
+    }
+
+    fn compaction_projection_with_actor(
+        session_id: &SessionId,
+        parent_revision: &str,
+        revision: &str,
+        actor: &str,
+    ) -> CompactionProjectionId {
+        serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "parent_revision": parent_revision,
+            "revision": revision,
+            "commit_fingerprint": format!("sha256:test-fixture-{actor}"),
+        }))
+        .expect("persisted compaction projection fixture")
+    }
+
+    async fn wait_for_pause(pause: &Arc<BlockingMutationPause>) {
+        let pause = Arc::clone(pause);
+        tokio::task::spawn_blocking(move || {
+            pause.reached.wait();
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn release_pause(pause: &Arc<BlockingMutationPause>) {
+        let pause = Arc::clone(pause);
+        tokio::task::spawn_blocking(move || {
+            pause.release.wait();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_compaction_stage_is_invisible_across_reopen_and_finalize_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let projection = compaction_projection(&session_id, "parent-a", "revision-a");
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        {
+            let store = HnswMemoryStore::open(&memory_dir).unwrap();
+            let receipt = store
+                .stage_compaction_batch(
+                    projection.clone(),
+                    MemoryIndexBatch::single(request("invisible staged memory", &session_id)),
+                )
+                .await
+                .unwrap();
+            assert_eq!(receipt.staged_entries, 1);
+            assert!(
+                store
+                    .enumerate_scoped(&scope, enumeration(10, 0))
+                    .await
+                    .unwrap()
+                    .records
+                    .is_empty(),
+                "a staged batch must not be visible in-process"
+            );
+        }
+
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        assert!(
+            store
+                .enumerate_scoped(&scope, enumeration(10, 0))
+                .await
+                .unwrap()
+                .records
+                .is_empty(),
+            "a cold reopen must not publish an uncommitted stage"
+        );
+        let reconcile = store
+            .reconcile_compaction_stages(
+                &MemoryOwner::canonical_session(session_id.clone()),
+                std::slice::from_ref(&projection),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconcile.retained_committed, 1);
+        assert_eq!(reconcile.aborted_orphans, 0);
+
+        store.finalize_compaction_batch(&projection).await.unwrap();
+        store.finalize_compaction_batch(&projection).await.unwrap();
+        let page = store
+            .enumerate_scoped(&scope, enumeration(10, 0))
+            .await
+            .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].content, "invisible staged memory");
+
+        // Finalized tombstones retain the exact payload digest: an identical
+        // retry is accepted, while a conflicting reuse of the rewrite id is
+        // rejected without adding a second visible row.
+        store
+            .stage_compaction_batch(
+                projection.clone(),
+                MemoryIndexBatch::single(request("invisible staged memory", &session_id)),
+            )
+            .await
+            .unwrap();
+        let conflict = store
+            .stage_compaction_batch(
+                projection,
+                MemoryIndexBatch::single(request("conflicting retry", &session_id)),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            conflict
+                .to_string()
+                .contains("conflicting durable compaction stage")
+        );
+        assert_eq!(
+            store
+                .enumerate_scoped(&scope, enumeration(10, 0))
+                .await
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_stage_await_retries_same_rewrite_with_new_timestamp_idempotently() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let first_projection =
+            compaction_projection(&session_id, "parent-cancel", "revision-cancel");
+        let retry_projection =
+            compaction_projection(&session_id, "parent-cancel", "revision-cancel");
+        assert_eq!(first_projection, retry_projection);
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let store = Arc::new(HnswMemoryStore::open(&memory_dir).unwrap());
+        let first_timestamp = UNIX_EPOCH + Duration::from_secs(10);
+        let retry_timestamp = UNIX_EPOCH + Duration::from_secs(20);
+        let pause = store.arm_stage_commit_pause();
+        let stage_store = Arc::clone(&store);
+        let stage_session = session_id.clone();
+        let stage = tokio::spawn(async move {
+            stage_store
+                .stage_compaction_batch(
+                    first_projection,
+                    MemoryIndexBatch::single(request_with(
+                        "recover after cancellation",
+                        &stage_session,
+                        MessageRange::single(0),
+                        first_timestamp,
+                    )),
+                )
+                .await
+        });
+        wait_for_pause(&pause).await;
+        stage.abort();
+        assert!(stage.await.unwrap_err().is_cancelled());
+        release_pause(&pause).await;
+
+        assert!(
+            store
+                .enumerate_scoped(&scope, enumeration(10, 0))
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
+
+        // The retry carries a newly minted commit/index timestamp but the
+        // same semantic rewrite and payload. It must match the durable first
+        // stage rather than conflict or duplicate it.
+        store
+            .stage_compaction_batch(
+                retry_projection.clone(),
+                MemoryIndexBatch::single(request_with(
+                    "recover after cancellation",
+                    &session_id,
+                    MessageRange::single(0),
+                    retry_timestamp,
+                )),
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_compaction_batch(&retry_projection)
+            .await
+            .unwrap();
+        let page = store
+            .enumerate_scoped(&scope, enumeration(10, 0))
+            .await
+            .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].content, "recover after cancellation");
+        assert_eq!(page.records[0].metadata.indexed_at, first_timestamp);
+    }
+
+    #[tokio::test]
+    async fn cancelled_finalize_cannot_overwrite_a_newer_live_index() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let projection = compaction_projection(&session_id, "parent-finalize", "revision-finalize");
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let store = Arc::new(HnswMemoryStore::open(&memory_dir).unwrap());
+        store
+            .stage_compaction_batch(
+                projection.clone(),
+                MemoryIndexBatch::single(request("compaction publication", &session_id)),
+            )
+            .await
+            .unwrap();
+
+        let pause = store.arm_finalize_publish_pause();
+        let finalize_store = Arc::clone(&store);
+        let finalize =
+            tokio::spawn(
+                async move { finalize_store.finalize_compaction_batch(&projection).await },
+            );
+        wait_for_pause(&pause).await;
+        finalize.abort();
+        assert!(finalize.await.unwrap_err().is_cancelled());
+
+        let index_store = Arc::clone(&store);
+        let index_session = session_id.clone();
+        let mut concurrent_index = tokio::spawn(async move {
+            index_store
+                .index_scoped(request("newer concurrent memory", &index_session))
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut concurrent_index)
+                .await
+                .is_err(),
+            "detached finalization must retain the publication lock"
+        );
+        release_pause(&pause).await;
+        concurrent_index.await.unwrap().unwrap();
+
+        let page = store
+            .enumerate_scoped(&scope, enumeration(10, 0))
+            .await
+            .unwrap();
+        assert_eq!(page.records.len(), 2);
+        let results = store.search(&scope, "memory", 10).await.unwrap();
+        let contents = results
+            .iter()
+            .map(|result| result.content.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(contents.contains("compaction publication"));
+        assert!(contents.contains("newer concurrent memory"));
+    }
+
+    #[tokio::test]
+    async fn scope_drop_serializes_with_finalize_and_retains_deletion_tombstone() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let projection = compaction_projection(&session_id, "parent-drop", "revision-drop");
+        let owner = MemoryOwner::canonical_session(session_id.clone());
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let store = Arc::new(HnswMemoryStore::open(&memory_dir).unwrap());
+        store
+            .stage_compaction_batch(
+                projection.clone(),
+                MemoryIndexBatch::single(request("must not resurrect", &session_id)),
+            )
+            .await
+            .unwrap();
+
+        let pause = store.arm_finalize_publish_pause();
+        let finalize_store = Arc::clone(&store);
+        let finalize_projection = projection.clone();
+        let finalize = tokio::spawn(async move {
+            finalize_store
+                .finalize_compaction_batch(&finalize_projection)
+                .await
+        });
+        wait_for_pause(&pause).await;
+
+        let drop_store = Arc::clone(&store);
+        let mut drop_task = tokio::spawn(async move { drop_store.drop_scope(&owner).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut drop_task)
+                .await
+                .is_err(),
+            "scope drop must serialize behind the detached finalizer"
+        );
+        release_pause(&pause).await;
+        finalize.await.unwrap().unwrap();
+        let receipt = drop_task.await.unwrap().unwrap();
+        assert_eq!(receipt.dropped_entries, 1);
+        assert!(
+            store
+                .enumerate_scoped(&scope, enumeration(10, 0))
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        let finalized_after_drop = store.finalize_compaction_batch(&projection).await.unwrap();
+        assert_eq!(finalized_after_drop.indexed_entries, 0);
+        let restaged = store
+            .stage_compaction_batch(
+                projection.clone(),
+                MemoryIndexBatch::single(request("must still not resurrect", &session_id)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restaged.staged_entries, 0);
+        let reconciled = store
+            .reconcile_compaction_stages(
+                &MemoryOwner::canonical_session(session_id.clone()),
+                std::slice::from_ref(&projection),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconciled, CompactionStageReconcileReceipt::default());
+    }
+
+    #[tokio::test]
+    async fn dropped_scope_acks_pending_outbox_and_stale_stage_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let db_path = memory_dir.join("memory.sqlite3");
+        let session_id = SessionId::new();
+        let owner = MemoryOwner::canonical_session(session_id.clone());
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let projection = compaction_projection(&session_id, "parent-pending", "revision-pending");
+
+        {
+            let store = HnswMemoryStore::open(&memory_dir).unwrap();
+            store
+                .stage_compaction_batch(
+                    projection.clone(),
+                    MemoryIndexBatch::single(request("pending outbox payload", &session_id)),
+                )
+                .await
+                .unwrap();
+            let dropped = store.drop_scope(&owner).await.unwrap();
+            assert_eq!(dropped.dropped_entries, 0);
+
+            // `projection` models a RuntimeStore row that committed before the
+            // session deletion. Reconcile + finalize must both acknowledge it
+            // without publishing, so RuntimeStore can clear that pending row.
+            let reconciled = store
+                .reconcile_compaction_stages(&owner, std::slice::from_ref(&projection))
+                .await
+                .unwrap();
+            assert_eq!(reconciled, CompactionStageReconcileReceipt::default());
+            assert_eq!(
+                store
+                    .finalize_compaction_batch(&projection)
+                    .await
+                    .unwrap()
+                    .indexed_entries,
+                0
+            );
+            assert_eq!(
+                store
+                    .stage_compaction_batch(
+                        projection.clone(),
+                        MemoryIndexBatch::single(request("stale restage", &session_id)),
+                    )
+                    .await
+                    .unwrap()
+                    .staged_entries,
+                0
+            );
+            assert_eq!(
+                store
+                    .index_scoped(request("stale direct publication", &session_id))
+                    .await
+                    .unwrap()
+                    .indexed_entries,
+                0
+            );
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        let tombstones: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_scope_tombstone WHERE session_id = ?1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tombstones, 1, "scope tombstone must survive close/reopen");
+        drop(conn);
+
+        let reopened = HnswMemoryStore::open(&memory_dir).unwrap();
+        assert_eq!(
+            reopened
+                .reconcile_compaction_stages(&owner, std::slice::from_ref(&projection))
+                .await
+                .unwrap(),
+            CompactionStageReconcileReceipt::default()
+        );
+        assert_eq!(
+            reopened
+                .finalize_compaction_batch(&projection)
+                .await
+                .unwrap()
+                .indexed_entries,
+            0
+        );
+        assert!(
+            reopened
+                .enumerate_scoped(&scope, enumeration(10, 0))
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .search(&scope, "payload", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_instance_drop_wins_after_finalize_commit_before_live_publish() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let owner = MemoryOwner::canonical_session(session_id.clone());
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let projection = compaction_projection(
+            &session_id,
+            "parent-cross-instance",
+            "revision-cross-instance",
+        );
+        let finalizing = Arc::new(HnswMemoryStore::open(&memory_dir).unwrap());
+        finalizing
+            .stage_compaction_batch(
+                projection.clone(),
+                MemoryIndexBatch::single(request("cross-instance stale index", &session_id)),
+            )
+            .await
+            .unwrap();
+
+        let pause = finalizing.arm_finalize_publish_pause();
+        let finalizing_task_store = Arc::clone(&finalizing);
+        let finalize_projection = projection.clone();
+        let finalize_task = tokio::spawn(async move {
+            finalizing_task_store
+                .finalize_compaction_batch(&finalize_projection)
+                .await
+        });
+        wait_for_pause(&pause).await;
+
+        // A distinct store instance has a distinct process-local publication
+        // lock. Its SQLite tombstone/delete transaction must still win after
+        // the first instance committed rows but before it publishes its cached
+        // HNSW rebuild.
+        let deleting = HnswMemoryStore::open(&memory_dir).unwrap();
+        let deleted = tokio::time::timeout(Duration::from_secs(1), deleting.drop_scope(&owner))
+            .await
+            .expect("cross-instance drop must not wait on another instance's live-index lock")
+            .unwrap();
+        assert_eq!(deleted.dropped_entries, 1);
+        release_pause(&pause).await;
+        assert_eq!(
+            finalize_task.await.unwrap().unwrap().indexed_entries,
+            1,
+            "the overlapping finalizer may acknowledge its pre-delete commit"
+        );
+
+        assert!(
+            finalizing
+                .search(&scope, "stale", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "durable tombstone must fence a stale cached index published after deletion"
+        );
+        assert_eq!(
+            finalizing
+                .finalize_compaction_batch(&projection)
+                .await
+                .unwrap()
+                .indexed_entries,
+            0
+        );
+        assert_eq!(
+            finalizing
+                .stage_compaction_batch(
+                    projection,
+                    MemoryIndexBatch::single(request("stale replay", &session_id)),
+                )
+                .await
+                .unwrap()
+                .staged_entries,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_authority_reconciliation_aborts_only_unfinalized_orphans() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let projection = compaction_projection(&session_id, "parent-orphan", "revision-orphan");
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        store
+            .stage_compaction_batch(
+                projection.clone(),
+                MemoryIndexBatch::single(request("must stay invisible", &session_id)),
+            )
+            .await
+            .unwrap();
+
+        let receipt = store
+            .reconcile_compaction_stages(&MemoryOwner::canonical_session(session_id.clone()), &[])
+            .await
+            .unwrap();
+        assert_eq!(receipt.retained_committed, 0);
+        assert_eq!(receipt.aborted_orphans, 1);
+        let missing = store
+            .finalize_compaction_batch(&projection)
+            .await
+            .unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("missing durable compaction stage")
+        );
+        assert!(
+            store
+                .enumerate_scoped(
+                    &MemorySearchScope::for_session(session_id),
+                    enumeration(10, 0),
+                )
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_distinguishes_semantic_commits_with_the_same_content_edge() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let committed = compaction_projection_with_actor(
+            &session_id,
+            "shared-parent",
+            "shared-revision",
+            "committed-actor",
+        );
+        let orphan = compaction_projection_with_actor(
+            &session_id,
+            "shared-parent",
+            "shared-revision",
+            "orphan-actor",
+        );
+        assert_ne!(committed, orphan);
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        store
+            .stage_compaction_batch(
+                committed.clone(),
+                MemoryIndexBatch::single(request("committed projection", &session_id)),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_compaction_batch(
+                orphan.clone(),
+                MemoryIndexBatch::single(request("orphan projection", &session_id)),
+            )
+            .await
+            .unwrap();
+
+        let receipt = store
+            .reconcile_compaction_stages(
+                &MemoryOwner::canonical_session(session_id.clone()),
+                std::slice::from_ref(&committed),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.retained_committed, 1);
+        assert_eq!(receipt.aborted_orphans, 1);
+        store.finalize_compaction_batch(&committed).await.unwrap();
+        assert!(store.finalize_compaction_batch(&orphan).await.is_err());
+        let page = store
+            .enumerate_scoped(
+                &MemorySearchScope::for_session(session_id),
+                enumeration(10, 0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].content, "committed projection");
     }
 
     #[tokio::test]
@@ -2116,8 +3354,9 @@ mod tests {
             .await
             .unwrap();
 
+        let replacement_session_id = SessionId::new();
         store
-            .index_scoped(request("entry after the drop", &session_id))
+            .index_scoped(request("entry after the drop", &replacement_session_id))
             .await
             .unwrap();
         assert_eq!(

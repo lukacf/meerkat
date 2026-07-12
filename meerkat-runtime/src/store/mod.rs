@@ -14,7 +14,8 @@ use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::runtime_state::RuntimeState;
 
 const LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 1;
-const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 2;
+const SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 2;
+const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 3;
 
 /// Errors from RuntimeStore operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -38,6 +39,20 @@ pub enum RuntimeStoreError {
     /// Operation is not supported by this store implementation.
     #[error("Unsupported store operation: {0}")]
     Unsupported(String),
+    /// A detached producer attempted to persist an ops snapshot after the
+    /// matching epoch was atomically retired by unregister.
+    #[error("Ops lifecycle epoch {epoch_id} for runtime {runtime_id} is retired")]
+    OpsLifecycleEpochRetired {
+        runtime_id: String,
+        epoch_id: meerkat_core::RuntimeEpochId,
+    },
+    /// An unregister-finalization commit may have become durable, but the
+    /// backend could not authoritatively classify its outcome.
+    ///
+    /// Callers must retry the idempotent atomic finalization and must not
+    /// publish a compensating lifecycle rollback for this error.
+    #[error("Unregister finalization outcome is unknown: {0}")]
+    UnregisterFinalizationOutcomeUnknown(String),
     /// Runtime snapshot CAS rejected a stale transcript rewrite.
     #[error("Transcript revision conflict: expected {expected}, actual {actual}")]
     TranscriptRevisionConflict { expected: String, actual: String },
@@ -55,6 +70,14 @@ pub type AuthOAuthFlowSnapshotUpdate<'a> =
 pub struct SessionDelta {
     /// Serialized session snapshot (opaque to RuntimeStore).
     pub session_snapshot: Vec<u8>,
+}
+
+fn validated_compaction_projection_intents(
+    session: &meerkat_core::Session,
+) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
+    session
+        .validated_compaction_projection_intents()
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
 }
 
 /// Runtime binding facts selected by generated MeerkatMachine authority.
@@ -335,6 +358,57 @@ pub struct MachineLifecycleSnapshot {
     runtime_state: RuntimeState,
     binding: MachineLifecycleBindingFacts,
     supervisor_authority: SupervisorAuthoritySnapshot,
+    unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+}
+
+/// Durable generated unregister-saga progress needed to resume an interrupted
+/// Draining epoch without reconstructing missing producer outcomes in shell
+/// code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineUnregisterProgressSnapshot {
+    runtime_loop_drain_pending: bool,
+    comms_drain_exit_pending: bool,
+    completion_waiter_drain_pending: bool,
+    runtime_loop_forced_abort: bool,
+    comms_drain_forced_abort: bool,
+}
+
+impl MachineUnregisterProgressSnapshot {
+    pub(crate) fn new(
+        runtime_loop_drain_pending: bool,
+        comms_drain_exit_pending: bool,
+        completion_waiter_drain_pending: bool,
+        runtime_loop_forced_abort: bool,
+        comms_drain_forced_abort: bool,
+    ) -> Self {
+        Self {
+            runtime_loop_drain_pending,
+            comms_drain_exit_pending,
+            completion_waiter_drain_pending,
+            runtime_loop_forced_abort,
+            comms_drain_forced_abort,
+        }
+    }
+
+    pub(crate) fn runtime_loop_drain_pending(&self) -> bool {
+        self.runtime_loop_drain_pending
+    }
+
+    pub(crate) fn comms_drain_exit_pending(&self) -> bool {
+        self.comms_drain_exit_pending
+    }
+
+    pub(crate) fn completion_waiter_drain_pending(&self) -> bool {
+        self.completion_waiter_drain_pending
+    }
+
+    pub(crate) fn runtime_loop_forced_abort(&self) -> bool {
+        self.runtime_loop_forced_abort
+    }
+
+    pub(crate) fn comms_drain_forced_abort(&self) -> bool {
+        self.comms_drain_forced_abort
+    }
 }
 
 impl MachineLifecycleSnapshot {
@@ -343,10 +417,20 @@ impl MachineLifecycleSnapshot {
         binding: MachineLifecycleBindingFacts,
         supervisor_authority: SupervisorAuthoritySnapshot,
     ) -> Self {
+        Self::new_with_unregister_progress(runtime_state, binding, supervisor_authority, None)
+    }
+
+    pub(crate) fn new_with_unregister_progress(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+        unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+    ) -> Self {
         Self {
             runtime_state,
             binding,
             supervisor_authority,
+            unregister_progress,
         }
     }
 
@@ -362,6 +446,10 @@ impl MachineLifecycleSnapshot {
 
     pub fn supervisor_authority(&self) -> &SupervisorAuthoritySnapshot {
         &self.supervisor_authority
+    }
+
+    pub fn unregister_progress(&self) -> Option<&MachineUnregisterProgressSnapshot> {
+        self.unregister_progress.as_ref()
     }
 }
 
@@ -387,7 +475,7 @@ fn require_present_nullable<T>(
 ) -> Result<Option<T>, RuntimeStoreError> {
     value.ok_or_else(|| {
         RuntimeStoreError::ReadFailed(format!(
-            "machine lifecycle v2 field {field} is required (explicit null is allowed)"
+            "machine lifecycle field {field} is required (explicit null is allowed)"
         ))
     })
 }
@@ -465,13 +553,72 @@ impl From<MachineLifecycleBindingFactsStoreWireV1> for MachineLifecycleBindingFa
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct MachineLifecycleSnapshotStoreWire {
     record_version: u16,
     runtime_state: RuntimeState,
     binding: MachineLifecycleBindingFactsStoreWire,
     supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
+    unregister_progress: Option<MachineUnregisterProgressSnapshotStoreWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineLifecycleSnapshotStoreWireV3 {
+    record_version: u16,
+    runtime_state: RuntimeState,
+    binding: MachineLifecycleBindingFactsStoreWire,
+    supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing v3 field from explicit null progress"
+    )]
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    unregister_progress: Option<Option<MachineUnregisterProgressSnapshotStoreWire>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineLifecycleSnapshotStoreWireV2 {
+    record_version: u16,
+    runtime_state: RuntimeState,
+    binding: MachineLifecycleBindingFactsStoreWire,
+    supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineUnregisterProgressSnapshotStoreWire {
+    runtime_loop_drain_pending: bool,
+    comms_drain_exit_pending: bool,
+    completion_waiter_drain_pending: bool,
+    runtime_loop_forced_abort: bool,
+    comms_drain_forced_abort: bool,
+}
+
+impl From<&MachineUnregisterProgressSnapshot> for MachineUnregisterProgressSnapshotStoreWire {
+    fn from(snapshot: &MachineUnregisterProgressSnapshot) -> Self {
+        Self {
+            runtime_loop_drain_pending: snapshot.runtime_loop_drain_pending(),
+            comms_drain_exit_pending: snapshot.comms_drain_exit_pending(),
+            completion_waiter_drain_pending: snapshot.completion_waiter_drain_pending(),
+            runtime_loop_forced_abort: snapshot.runtime_loop_forced_abort(),
+            comms_drain_forced_abort: snapshot.comms_drain_forced_abort(),
+        }
+    }
+}
+
+impl From<MachineUnregisterProgressSnapshotStoreWire> for MachineUnregisterProgressSnapshot {
+    fn from(snapshot: MachineUnregisterProgressSnapshotStoreWire) -> Self {
+        Self::new(
+            snapshot.runtime_loop_drain_pending,
+            snapshot.comms_drain_exit_pending,
+            snapshot.completion_waiter_drain_pending,
+            snapshot.runtime_loop_forced_abort,
+            snapshot.comms_drain_forced_abort,
+        )
+    }
 }
 
 /// Exact pre-supervisor-authority lifecycle shape. Version 1 is decoded only
@@ -1158,24 +1305,50 @@ impl From<&MachineLifecycleSnapshot> for MachineLifecycleSnapshotStoreWire {
             runtime_state: snapshot.runtime_state(),
             binding: snapshot.binding().into(),
             supervisor_authority: snapshot.supervisor_authority().into(),
+            unregister_progress: snapshot.unregister_progress().map(Into::into),
         }
     }
 }
 
-impl TryFrom<MachineLifecycleSnapshotStoreWire> for MachineLifecycleSnapshot {
+fn validate_unregister_progress_snapshot(
+    progress: Option<&MachineUnregisterProgressSnapshot>,
+) -> Result<(), RuntimeStoreError> {
+    if let Some(progress) = progress {
+        if progress.runtime_loop_drain_pending() && progress.runtime_loop_forced_abort() {
+            return Err(RuntimeStoreError::ReadFailed(
+                "unregister runtime-loop forced disposition cannot precede obligation closure"
+                    .into(),
+            ));
+        }
+        if progress.comms_drain_exit_pending() && progress.comms_drain_forced_abort() {
+            return Err(RuntimeStoreError::ReadFailed(
+                "unregister comms-drain forced disposition cannot precede obligation closure"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl TryFrom<MachineLifecycleSnapshotStoreWireV3> for MachineLifecycleSnapshot {
     type Error = RuntimeStoreError;
 
-    fn try_from(record: MachineLifecycleSnapshotStoreWire) -> Result<Self, Self::Error> {
+    fn try_from(record: MachineLifecycleSnapshotStoreWireV3) -> Result<Self, Self::Error> {
         if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
             return Err(RuntimeStoreError::ReadFailed(format!(
                 "unsupported machine lifecycle store record version {}",
                 record.record_version
             )));
         }
-        Ok(Self::new(
+        let unregister_progress =
+            require_present_nullable(record.unregister_progress, "unregister_progress")?
+                .map(Into::into);
+        validate_unregister_progress_snapshot(unregister_progress.as_ref())?;
+        Ok(Self::new_with_unregister_progress(
             record.runtime_state,
             record.binding.try_into()?,
             record.supervisor_authority.try_into()?,
+            unregister_progress,
         ))
     }
 }
@@ -1201,8 +1374,23 @@ fn decode_machine_lifecycle_store_record(
                 SupervisorAuthoritySnapshot::UnboundNoReceipt,
             ))
         }
+        SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+            let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWireV2>(bytes)
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+            if record.record_version != SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+                return Err(RuntimeStoreError::ReadFailed(format!(
+                    "unsupported machine lifecycle store record version {}",
+                    record.record_version
+                )));
+            }
+            Ok(MachineLifecycleSnapshot::new(
+                record.runtime_state,
+                record.binding.try_into()?,
+                record.supervisor_authority.try_into()?,
+            ))
+        }
         MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
-            let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWire>(bytes)
+            let record = serde_json::from_slice::<MachineLifecycleSnapshotStoreWireV3>(bytes)
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
             MachineLifecycleSnapshot::try_from(record)
         }
@@ -1259,6 +1447,8 @@ impl MachineLifecycleStoreRecord {
     pub fn encode(&self) -> Result<Vec<u8>, RuntimeStoreError> {
         validate_supervisor_authority_snapshot(self.snapshot.supervisor_authority())
             .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        validate_unregister_progress_snapshot(self.snapshot.unregister_progress())
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
         let wire = MachineLifecycleSnapshotStoreWire::from(&self.snapshot);
         serde_json::to_vec(&wire).map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
     }
@@ -1272,17 +1462,53 @@ impl MachineLifecycleStoreRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineLifecycleCommit {
     snapshot: MachineLifecycleSnapshot,
+    /// Exact ops epoch that the final unregister transaction must tombstone.
+    /// This is transaction metadata, not part of the lifecycle store record.
+    retired_ops_epoch: Option<meerkat_core::RuntimeEpochId>,
 }
 
 impl MachineLifecycleCommit {
+    #[cfg(test)]
     pub(crate) fn new_with_binding(
         runtime_state: RuntimeState,
         binding: MachineLifecycleBindingFacts,
         supervisor_authority: SupervisorAuthoritySnapshot,
     ) -> Self {
+        Self::new_with_binding_and_unregister_progress(
+            runtime_state,
+            binding,
+            supervisor_authority,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_binding_and_unregister_progress(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+        unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+    ) -> Self {
         Self {
-            snapshot: MachineLifecycleSnapshot::new(runtime_state, binding, supervisor_authority),
+            snapshot: MachineLifecycleSnapshot::new_with_unregister_progress(
+                runtime_state,
+                binding,
+                supervisor_authority,
+                unregister_progress,
+            ),
+            retired_ops_epoch: None,
         }
+    }
+
+    pub(crate) fn for_unregister_finalization(
+        mut self,
+        retired_ops_epoch: meerkat_core::RuntimeEpochId,
+    ) -> Self {
+        self.retired_ops_epoch = Some(retired_ops_epoch);
+        self
+    }
+
+    pub(crate) fn retired_ops_epoch(&self) -> Option<&meerkat_core::RuntimeEpochId> {
+        self.retired_ops_epoch.as_ref()
     }
 
     /// Runtime state selected by the owning MeerkatMachine transition.
@@ -1313,6 +1539,13 @@ impl MachineLifecycleCommit {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
+    /// Whether [`RuntimeStore::atomic_apply`] durably records typed compaction
+    /// projection intents in the same boundary as the session rewrite.
+    /// Unknown/custom stores fail closed by default.
+    fn supports_compaction_projection_outbox(&self) -> bool {
+        false
+    }
+
     /// Stable key for process-local auth/OAuth authority reuse across reopened
     /// handles for the same durable store.
     fn auth_authority_key(&self) -> Option<String> {
@@ -1394,6 +1627,10 @@ pub trait RuntimeStore: Send + Sync {
     /// table, writes that table in the same transaction. Runtime snapshot
     /// authority remains keyed only by `runtime_id`; `session_store_key` must
     /// not create a raw session UUID runtime alias.
+    /// Compaction intents must be inserted as pending outbox rows in this same
+    /// boundary. An intent whose exact outbox identity is already finalized is
+    /// a stale snapshot replay and must be rejected without mutating any part
+    /// of the boundary.
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -1402,6 +1639,35 @@ pub trait RuntimeStore: Send + Sync {
         input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError>;
+
+    /// Load exact compaction projection intents committed by atomic_apply but
+    /// not yet acknowledged as finalized by the memory store.
+    async fn load_pending_compaction_projections(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
+        let _ = runtime_id;
+        Err(RuntimeStoreError::Unsupported(
+            "load_pending_compaction_projections".to_string(),
+        ))
+    }
+
+    /// Idempotently acknowledge post-commit memory finalization.
+    ///
+    /// The acknowledgement and removal of this exact intent from the
+    /// authoritative persisted session snapshot MUST occur in one atomic
+    /// boundary. The finalized outbox row remains as a tombstone so later
+    /// snapshot writes can reject stale metadata replay.
+    async fn mark_compaction_projection_finalized(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = (runtime_id, projection);
+        Err(RuntimeStoreError::Unsupported(
+            "mark_compaction_projection_finalized".to_string(),
+        ))
+    }
 
     /// Load all input states for a runtime.
     async fn load_input_states(
@@ -1508,6 +1774,36 @@ pub trait RuntimeStore: Send + Sync {
     /// no public constructor, so this cannot be used by compatibility callers
     /// to pick runtime truth.
     async fn commit_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        commit: MachineLifecycleCommit,
+        input_states: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError>;
+
+    /// Atomically publish final unregister lifecycle truth and retire the
+    /// matching ops-lifecycle epoch.
+    ///
+    /// The lifecycle record, input-state updates, and ops snapshot deletion
+    /// MUST commit in one store transaction (or one indivisible in-memory
+    /// critical section). A terminal lifecycle record with the old ops epoch
+    /// still present is forbidden: recovery would otherwise resurrect stale
+    /// operation/cursor authority after unregister. The commit also carries
+    /// the exact retired ops epoch; implementations MUST atomically retain a
+    /// durable deletion-wins fence for it, and every later
+    /// `persist_ops_lifecycle` for that epoch must return
+    /// [`RuntimeStoreError::OpsLifecycleEpochRetired`] rather than recreate the
+    /// row. Implementations must also be idempotent so retry after a process
+    /// crash following commit converges on the same terminal lifecycle with no
+    /// ops snapshot and the same epoch fence.
+    ///
+    /// `Ok(())` means the whole finalization is visible. Every error except
+    /// [`RuntimeStoreError::UnregisterFinalizationOutcomeUnknown`] MUST mean
+    /// none of it is visible. A backend with an ambiguous commit
+    /// acknowledgement must first resolve that ambiguity internally by
+    /// reading its transaction authority. It may use the typed unknown error
+    /// only when it cannot prove either the exact final state or the exact
+    /// pre-transaction state; callers then retry without a durable rollback.
+    async fn commit_unregister_finalization(
         &self,
         runtime_id: &LogicalRuntimeId,
         commit: MachineLifecycleCommit,
@@ -1639,7 +1935,7 @@ mod lifecycle_record_compatibility_tests {
     }
 
     #[test]
-    fn version_two_record_requires_supervisor_authority() {
+    fn current_record_requires_supervisor_authority_and_unregister_progress_presence() {
         assert_decode_fails(serde_json::json!({
             "record_version": MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
             "runtime_state": RuntimeState::Idle,
@@ -1648,21 +1944,28 @@ mod lifecycle_record_compatibility_tests {
                 "fence_token": null,
                 "runtime_generation": null,
                 "runtime_epoch_id": null
-            }
+            },
+            "unregister_progress": null
         }));
     }
 
     #[test]
-    fn version_two_nullable_fields_require_presence_but_accept_explicit_null() {
+    fn current_nullable_fields_require_presence_but_accept_explicit_null() {
         let unbound = snapshot(SupervisorAuthoritySnapshot::UnboundNoReceipt);
         let encoded = encoded_value(&unbound);
         assert_eq!(
             decode_machine_lifecycle_store_record(
-                &serde_json::to_vec(&encoded).expect("serialize valid v2 record")
+                &serde_json::to_vec(&encoded).expect("serialize valid current record")
             )
-            .expect("explicit-null v2 binding fields must decode"),
+            .expect("explicit-null current binding fields must decode"),
             unbound
         );
+        let mut missing_progress = encoded.clone();
+        missing_progress
+            .as_object_mut()
+            .expect("lifecycle record object")
+            .remove("unregister_progress");
+        assert_decode_fails(missing_progress);
 
         for field in [
             "agent_runtime_id",
@@ -1692,6 +1995,40 @@ mod lifecycle_record_compatibility_tests {
             .expect("rotation object")
             .remove("rejection");
         assert_decode_fails(missing_rejection);
+    }
+
+    #[test]
+    fn version_two_supervisor_record_migrates_with_no_unregister_progress() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "record_version": SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            "runtime_state": RuntimeState::Retired,
+            "binding": {
+                "agent_runtime_id": "rt:session:legacy-v2",
+                "fence_token": 23,
+                "runtime_generation": 5,
+                "runtime_epoch_id": "epoch-legacy-v2"
+            },
+            "supervisor_authority": { "kind": "unbound_no_receipt" }
+        }))
+        .expect("serialize v2 lifecycle record");
+
+        let decoded = decode_machine_lifecycle_store_record(&bytes)
+            .expect("valid v2 supervisor record must migrate");
+        assert_eq!(decoded.runtime_state(), RuntimeState::Retired);
+        assert_eq!(decoded.unregister_progress(), None);
+    }
+
+    #[test]
+    fn current_unregister_progress_rejects_forced_disposition_before_feedback() {
+        let mut value = encoded_value(&snapshot(SupervisorAuthoritySnapshot::UnboundNoReceipt));
+        value["unregister_progress"] = serde_json::json!({
+            "runtime_loop_drain_pending": true,
+            "comms_drain_exit_pending": false,
+            "completion_waiter_drain_pending": true,
+            "runtime_loop_forced_abort": true,
+            "comms_drain_forced_abort": false
+        });
+        assert_decode_fails(value);
     }
 
     #[test]

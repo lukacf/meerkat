@@ -11,6 +11,184 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures (enforced by the `semver-breaks` release gate
 via cargo-semver-checks against the published baselines).
 
+## [Unreleased]
+
+### Breaking
+
+- `meerkat_core::CompactionResult` gained the required
+  `summary: CompactionSummary` and `retained: Vec<CompactionRetained>` fields,
+  and its `discarded` field is now `Vec<CompactionDiscard>` instead of
+  `Vec<Message>`. Custom compactors must identify the exact rebuilt summary
+  slot, use the canonical typed summary content, provide exact source/rebuilt
+  offsets for retained messages, and provide canonical source offsets for
+  discarded messages; retained and discarded entries must partition the full
+  pre-compaction transcript.
+- `meerkat_core::agent::compact::CompactionOutcome::discarded` is now
+  `Vec<CompactionDiscard>` instead of `Vec<Message>`, and the exhaustive
+  `CompactionError` enum gained `InvalidRebuild(String)`.
+- `meerkat_core::AgentLlmFallbackSwitch` replaced the caller-owned
+  `capability_base_filter`, `context_window`, and `max_output_tokens` fields
+  with the required `target_profile: ModelProfileWitness`. Profile witnesses
+  are minted by `ModelRegistry::profile_witness_for_provider` for one exact
+  typed provider/model pair and one construction-scoped effective-registry
+  authority; unresolved targets and unprovenanced or foreign-registry profiles
+  fail closed. The exhaustive `AgentBuildPolicyError` enum gained
+  `MissingModelRoutingHandle` and `MissingEffectiveModelRegistry`.
+- `meerkat_core::AgentLlmClient::commit_model_fallback` now takes
+  `(previous_identity, target_identity)` and returns `Result<(), AgentError>`
+  instead of accepting one identity with a default no-op. Fallback-capable
+  clients must also implement the new `active_model_fallback_identity` exact
+  identity projection and, when supporting structured extraction fallback,
+  `compile_model_fallback_schema` for inactive target-client compilation. The
+  client-local `active_capability_base_filter` and `active_max_output_tokens`
+  semantic projections were removed; ToolScope and the registry-minted active
+  profile now own those facts across later turns.
+- `meerkat_core::handles::ModelRoutingHandle` gained the required
+  `stage_sticky_model_fallback(activation_proof, visibility_plan)` method,
+  which returns a one-shot `StickyModelFallbackMachineCommit` instead of
+  mutating immediately.
+  `StickyModelFallbackActivationProof` has no public constructor and is minted
+  only by the core agent loop after recovery and effective-registry validation;
+  implementers must preview the exact generated parent and make the returned
+  token reject if that parent changes before identity, registry-proven profile
+  provenance, routing, and visibility are committed.
+- Generated MeerkatMachine public alphabets gained the exhaustive
+  `CommitStickyModelFallback` input and `CommitStickyModelFallbackRunning`
+  transition. Downstream matches over generated DSL/kernel input, input-kind,
+  or transition-kind enums must handle the new variants.
+- Generated MobMachine public alphabets gained the exhaustive
+  `ClassifyRetirePendingSpawnDisposition` input and structural retire
+  disposition effects. Retire shells must consume the machine-authorized exact
+  runtime, generation, and pending session instead of deriving cancellation
+  from a roster projection.
+- `meerkat_runtime::MeerkatMachine::unregister_session` now returns
+  `Result<(), RuntimeDriverError>` instead of `()`. Required cleanup callers
+  must propagate or explicitly combine machine-owned unregister failures. The
+  `Ok(())` now proves removal rather than meaning another teardown may still
+  be running. Concurrent stop/unregister callers join the same machine-owned
+  teardown result, and a runtime loop cannot await or abort its own unregister
+  coordinator task.
+- `meerkat_runtime::mob_adapter::unregister_mob_member` now returns
+  `Result<(), RuntimeDriverError>` instead of `()`. Mob-facing callers must
+  handle incomplete machine-owned unregister cleanup explicitly.
+- `meerkat_runtime::RuntimeStore` gained the required
+  `commit_unregister_finalization(runtime_id, commit, input_states)` method.
+  Custom runtime stores must atomically publish the machine lifecycle/input
+  updates and delete the matching ops-lifecycle snapshot; a fallback composed
+  from `commit_machine_lifecycle` plus `delete_ops_lifecycle` is not crash-safe
+  and is deliberately unsupported. Ordinary errors guarantee no finalization
+  effects. Stores that cannot classify a commit acknowledgement use the new
+  non-exhaustive
+  `RuntimeStoreError::UnregisterFinalizationOutcomeUnknown` variant; it maps to
+  `RuntimeDriverError::UnregisterFinalizationOutcomeUnknown`, which retains the
+  live retry anchor without publishing an unsafe compensating lifecycle
+  rollback.
+- Semantic-memory compaction gained a resultful staged-projection lifecycle.
+  `MemoryStore` now exposes `compaction_projection_persistence`,
+  `stage_compaction_batch`, `finalize_compaction_batch`,
+  `abort_compaction_batch`, and `reconcile_compaction_stages`; unknown stores
+  default to `CompactionProjectionPersistence::Unsupported` and must opt into
+  either process-local immediate publication or durable staging. `CoreExecutor`
+  and session-agent/service execution hooks gained compaction-outbox
+  reconciliation, while `RuntimeStore` gained capability, pending-load, and
+  finalized-ack methods for the atomic compaction projection outbox. Custom
+  durable stores/executors must implement these seams or compaction fails
+  closed while preserving transcript history.
+- `TranscriptRewriteSelection` gained current-format `EditMessageRange` and
+  `CompactionMessageRange` variants. New generic `MessageRange` requests are
+  persisted as typed edits, while only the core compaction path can mint the
+  opaque compaction semantic. Exhaustive downstream matches must handle the
+  new variants; presentation code can use `TranscriptRewriteSelection::bounds`
+  to retain the existing half-open-range rendering.
+
+### Fixed
+
+- Python and TypeScript now validate canonical `comms/send` result variants and
+  member-progress snapshots before returning them, rejecting missing, legacy,
+  malformed, or unknown fields instead of casting them to generated types.
+- Helper spawn/fork APIs now carry the canonical `model_override` through the
+  Python, TypeScript, Web, and WASM lowering paths.
+- Public mob retire now asks MobMachine for an incarnation-scoped pending-spawn
+  disposition. Only the exact machine-authorized pending session can be
+  canceled; an absent committed identity preserves a pending later incarnation.
+- Batched runtime inputs now merge transcript causality field by field with a
+  conflict-stable consensus. Distinct interactions can retain one shared
+  objective, while a conflicting interaction, run, or objective remains
+  cleared for the rest of the batch and cannot be reseeded by a later input.
+- Durable compaction no longer exposes discarded-history memory before the
+  authoritative transcript rewrite commits. The agent stages an invisible
+  batch keyed by the exact semantic `TranscriptRewriteCommit`, RuntimeStore
+  records the matching intent in the same `atomic_apply` transaction, and the
+  runtime finalizes memory only from that durable outbox. Cancellation,
+  process loss, cold restart, duplicate delivery, stale runtime epochs, and
+  scope deletion now reconcile idempotently without compatibility SessionStore
+  metadata becoming commit authority; unsupported and standalone durable
+  pairings preserve the original transcript and fail closed. Finalized outbox
+  identities remain tombstones, and every runtime snapshot write seam rejects
+  stale metadata that attempts to replay one without re-publishing authority.
+- Compaction projection authority is now derived from the typed rewrite
+  semantic rather than the free-form audit reason. Generic rewrites cannot mint
+  a projection by spelling `reason.kind` as `compaction`, including when their
+  replacement contains a typed compaction summary. Marker-free durable records
+  from earlier releases are migrated only when the retained parent/revision
+  bodies prove a full-range shrinking compaction; existing projection IDs keep
+  matching their exact legacy fingerprint.
+- HNSW scope deletion now commits a durable per-session tombstone in the same
+  transaction as visible-row and staged-projection removal. Concurrent or
+  post-restart stage, finalize, reconcile, direct-index, and cached-index
+  publication cannot resurrect the dropped scope; pending outbox finalization
+  instead receives an idempotent zero-entry success and can clear its intent.
+
+- Runtime executor stop now transfers required post-terminalization cleanup to
+  an external teardown task and resolves a request-specific acknowledgement
+  only after loop exit, cleanup, unregister, and completion authority settle.
+  Cleanup failure is returned to the exact stop caller and retained unregister
+  authority remains retryable instead of timing out on a two-second self-join
+  or reporting success from the projected `Stopped` state alone.
+- Sticky model fallback now prevalidates extraction/provider parameters and
+  target-client schema lowering, reversibly activates the exact prebuilt client,
+  and preauthorizes identity, effective-registry-scoped catalog-profile
+  provenance, capability/routing truth, canonical visibility state, and
+  visibility revision through generated MeerkatMachine authority. Persistent
+  runtimes then supervise an exact control-only RuntimeStore CAS before
+  consuming the generated commit token and publishing prepared session/request
+  state. The CAS changes identity and typed visibility without committing the
+  in-flight prompt, fallback notice, transcript history, or usage; a terminal
+  fallback retry and cold restart therefore remain sticky to the target without
+  duplicating the failed input. Lost acknowledgements are reconciled by exact
+  reread, machine rejection compensates the exact CAS, and unprovable outcomes
+  force executor teardown. Client-proposed capability filters, context windows,
+  and output limits are absent from the public fallback proposal and are
+  derived only from the captured effective registry; unresolved fallback
+  targets are rejected. The generated routing commit requires an opaque,
+  core-minted one-shot activation proof, while later turns read ToolScope and
+  the registry-minted active profile instead of client-local semantic
+  projections. The supervised result survives a dropped run future so hard
+  interrupt settles publication or compensation before session discard.
+  Standalone sessions now share one turn/routing/visibility authority for the
+  same path. Fallback visibility also rebases the staged revision after its
+  immediate active commit, preserving pending staged intent without allowing a
+  later boundary to decrease the active revision.
+- Archive cleanup no longer reports success after generated unregister,
+  lifecycle-persistence, or snapshot-finalization failure. Failed post-commit
+  durability restores a retryable machine snapshot and required live/RPC
+  cleanup callers preserve both primary and cleanup errors.
+- Runtime completion relays now publish an outcome only after required cleanup
+  succeeds. REST, RPC, and MCP treat archive/live-state reads and generated
+  cleanup resolution as fallible authority, retain pre-admission/surface state
+  on failure, and reserve benign cleanup races for a proven archived session
+  whose runtime registration is already absent.
+- Mob runtime teardown awaits the authoritative unregister without a competing
+  timeout, probes no unknown state as absence, attempts every member binding,
+  and retains the actor outside `Stopped` as the retry owner until cleanup is
+  complete.
+- Compaction validates exact summary/retained/discarded provenance, requires a
+  real non-growing reduction, prepares a transcript replacement, and rejects
+  arbitrary summary insertion or no-op rewrites before committing the
+  semantic-memory projection. Failed rewrite/index attempts now still persist
+  their cadence guard, preventing immediate retry loops as well as shifted
+  source ranges or memory rows for content that never left the authoritative
+  transcript.
 ## [0.7.28] - 2026-07-11
 
 ### Breaking

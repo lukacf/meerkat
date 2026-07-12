@@ -26,7 +26,11 @@ pub(crate) trait RosterMutator: sealed::Sealed {
 ///
 /// This registry owns the same data that `Roster` exposes and keeps writes
 /// local to the actor. It is not behavior authority for machine facts; runtime
-/// control paths must consult generated `MobMachine` state before acting.
+/// control paths must consult generated `MobMachine` state before acting. In
+/// particular, roster presence must never decide whether a retire cancels a
+/// pending spawn: `ClassifyRetirePendingSpawnDisposition` owns that
+/// incarnation-scoped verdict and names the exact pending session when
+/// cancellation is authorized.
 #[derive(Debug, Clone)]
 pub(crate) struct RosterAuthority {
     roster: Roster,

@@ -169,6 +169,10 @@ async fn persist_destroyed_runtime_lifecycle(
 
 #[async_trait]
 impl RuntimeStore for FailPersistInputStore {
+    fn supports_compaction_projection_outbox(&self) -> bool {
+        self.inner.supports_compaction_projection_outbox()
+    }
+
     async fn commit_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -236,6 +240,25 @@ impl RuntimeStore for FailPersistInputStore {
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
         self.inner.load_session_snapshot(runtime_id).await
+    }
+
+    async fn load_pending_compaction_projections(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
+        self.inner
+            .load_pending_compaction_projections(runtime_id)
+            .await
+    }
+
+    async fn mark_compaction_projection_finalized(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .mark_compaction_projection_finalized(runtime_id, projection)
+            .await
     }
 
     async fn clear_session_snapshot(
@@ -315,6 +338,25 @@ impl RuntimeStore for FailPersistInputStore {
         }
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
+            .await
+    }
+
+    async fn commit_unregister_finalization(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        commit: meerkat_runtime::store::MachineLifecycleCommit,
+        input_states: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError> {
+        if self
+            .fail_commit_machine_lifecycle
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".into(),
+            ));
+        }
+        self.inner
+            .commit_unregister_finalization(runtime_id, commit, input_states)
             .await
     }
 

@@ -23,17 +23,49 @@ use crate::meerkat_machine::dsl as mm_dsl;
 #[derive(Debug)]
 pub struct RuntimeTurnStateHandle {
     dsl: Arc<HandleDslAuthority>,
+    standalone_session_id: Option<meerkat_core::SessionId>,
 }
 
 impl RuntimeTurnStateHandle {
     /// Construct a handle backed by the session's shared DSL authority.
     pub fn new(dsl: Arc<HandleDslAuthority>) -> Self {
-        Self { dsl }
+        Self {
+            dsl,
+            standalone_session_id: None,
+        }
+    }
+
+    /// Construct the standalone facade handle. With no runtime loop to stage
+    /// `Prepare`, the turn handle performs that generated input immediately
+    /// before each run-start input on the same shared authority.
+    pub(crate) fn standalone(
+        dsl: Arc<HandleDslAuthority>,
+        session_id: meerkat_core::SessionId,
+    ) -> Self {
+        Self {
+            dsl,
+            standalone_session_id: Some(session_id),
+        }
     }
 
     /// Construct a handle backed by an ephemeral DSL authority.
     pub fn ephemeral() -> Self {
         Self::new(Arc::new(HandleDslAuthority::ephemeral()))
+    }
+
+    fn prepare_standalone_run(&self, run_id: &RunId) -> Result<(), DslTransitionError> {
+        let Some(session_id) = self.standalone_session_id.as_ref() else {
+            return Ok(());
+        };
+        // Intra-machine generated input: no routed effect crosses a machine
+        // boundary, so the CompositionDispatcher is not applicable here.
+        self.dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::Prepare {
+                session_id: mm_dsl::SessionId::from_domain(session_id),
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "TurnStateHandle::standalone_prepare",
+        )
     }
 }
 
@@ -141,6 +173,15 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         input: TurnExecutionInput,
     ) -> Result<Vec<TurnExecutionEffect>, DslTransitionError> {
         let context = "TurnStateHandle::apply_turn_input";
+        let standalone_run_id = match &input {
+            TurnExecutionInput::StartConversationRun { run_id, .. }
+            | TurnExecutionInput::StartImmediateAppend { run_id }
+            | TurnExecutionInput::StartImmediateContext { run_id } => Some(run_id),
+            _ => None,
+        };
+        if let Some(run_id) = standalone_run_id {
+            self.prepare_standalone_run(run_id)?;
+        }
         let dsl_input = match input {
             TurnExecutionInput::StartConversationRun {
                 run_id,
@@ -386,6 +427,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         image_tool_results_enabled: bool,
         max_extraction_retries: u64,
     ) -> Result<(), DslTransitionError> {
+        self.prepare_standalone_run(&run_id)?;
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartConversationRun {
@@ -401,6 +443,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn start_immediate_append(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.prepare_standalone_run(&run_id)?;
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartImmediateAppend {
@@ -411,6 +454,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     }
 
     fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.prepare_standalone_run(&run_id)?;
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartImmediateContext {

@@ -73,6 +73,8 @@ pub struct AgentBuilder {
     pub(super) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     pub(super) compaction_curator: Option<Arc<dyn crate::compact::CompactionCurator>>,
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
+    pub(super) compaction_commit_coordinator:
+        Option<Arc<dyn crate::memory::CompactionCommitCoordinator>>,
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     pub(super) blob_store: Option<Arc<dyn crate::BlobStore>>,
@@ -92,6 +94,10 @@ pub struct AgentBuilder {
     pub(super) capability_base_filter_override: Option<ToolFilter>,
     pub(super) initial_visibility_authority: Option<InheritedToolVisibilityAuthority>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
+    pub(super) model_routing_handle: Option<Arc<dyn crate::handles::ModelRoutingHandle>>,
+    pub(super) sticky_model_fallback_commit_coordinator:
+        Option<Arc<dyn crate::handles::StickyModelFallbackCommitCoordinator>>,
+    pub(super) effective_model_registry: Option<Arc<crate::ModelRegistry>>,
     pub(super) runtime_execution_kind_required: bool,
     #[allow(dead_code)]
     pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
@@ -113,6 +119,10 @@ pub enum AgentBuildPolicyError {
     MissingSessionBuildState,
     #[error("factory policy build requires a runtime turn-state handle")]
     MissingTurnStateHandle,
+    #[error("runtime-backed agent build requires the canonical model-routing handle")]
+    MissingModelRoutingHandle,
+    #[error("factory policy build requires the captured effective model registry")]
+    MissingEffectiveModelRegistry,
     #[error("runtime-backed agent build requires a canonical tool visibility owner")]
     MissingToolVisibilityOwner,
     #[error("runtime-backed agent build received legacy inherited tool visibility metadata")]
@@ -135,6 +145,10 @@ pub enum AgentBuildPolicyError {
     OpsCursorSeed { message: String },
     #[error("failed to establish session compaction cadence: {message}")]
     CompactionCadence { message: String },
+    #[error("failed to reconcile durable compaction-memory stages: {message}")]
+    CompactionMemoryReconcile { message: String },
+    #[error("durable compaction-memory stages require a resultful runtime commit coordinator")]
+    MissingCompactionCommitCoordinator,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -230,6 +244,7 @@ impl AgentBuilder {
             compactor: None,
             compaction_curator: None,
             memory_store: None,
+            compaction_commit_coordinator: None,
             skill_engine: None,
             checkpointer: None,
             blob_store: None,
@@ -248,6 +263,9 @@ impl AgentBuilder {
             capability_base_filter_override: None,
             initial_visibility_authority: None,
             turn_state_handle: None,
+            model_routing_handle: None,
+            sticky_model_fallback_commit_coordinator: None,
+            effective_model_registry: None,
             runtime_execution_kind_required: false,
             runtime_execution_kind: None,
             external_tool_surface_handle: None,
@@ -339,6 +357,17 @@ impl AgentBuilder {
     /// Set the memory store for indexing compaction discards.
     pub fn memory_store(mut self, store: Arc<dyn crate::memory::MemoryStore>) -> Self {
         self.memory_store = Some(store);
+        self
+    }
+
+    /// Bind the runtime-owned resultful commit handoff for durable compaction
+    /// transcript+memory pairs.
+    #[doc(hidden)]
+    pub fn with_compaction_commit_coordinator(
+        mut self,
+        coordinator: Arc<dyn crate::memory::CompactionCommitCoordinator>,
+    ) -> Self {
+        self.compaction_commit_coordinator = Some(coordinator);
         self
     }
 
@@ -442,6 +471,14 @@ impl AgentBuilder {
         if self.turn_state_handle.is_none() {
             return Err(AgentBuildPolicyError::MissingTurnStateHandle);
         }
+        if self.effective_model_registry.is_none() {
+            return Err(AgentBuildPolicyError::MissingEffectiveModelRegistry);
+        }
+        if self.requires_explicit_runtime_tool_visibility_owner()
+            && self.model_routing_handle.is_none()
+        {
+            return Err(AgentBuildPolicyError::MissingModelRoutingHandle);
+        }
         if self.requires_explicit_runtime_tool_visibility_owner()
             && self.tool_visibility_owner.is_none()
         {
@@ -477,6 +514,9 @@ impl AgentBuilder {
         let tool_visibility_owner = self.tool_visibility_owner.clone();
         if runtime_tool_visibility_owner_required && tool_visibility_owner.is_none() {
             return Err(AgentBuildPolicyError::MissingToolVisibilityOwner);
+        }
+        if runtime_tool_visibility_owner_required && self.model_routing_handle.is_none() {
+            return Err(AgentBuildPolicyError::MissingModelRoutingHandle);
         }
         let mut session = self.session.unwrap_or_default();
         let discarded_runtime_steer_context = session.discard_transient_runtime_steer_context();
@@ -628,6 +668,38 @@ impl AgentBuilder {
             resolved_config.max_turns = Some(crate::config::DEFAULT_MAX_TURNS);
         }
 
+        // Seed active model limits only from the captured effective registry
+        // and the durable session identity. The LLM client is an execution
+        // adapter, not capability or token-limit authority.
+        let active_model_profile = self.effective_model_registry.as_ref().and_then(|registry| {
+            session.session_metadata().and_then(|metadata| {
+                let identity = metadata.llm_identity();
+                registry.profile_witness_for_provider(identity.provider, &identity.model)
+            })
+        });
+
+        // A standalone durable store has no runtime outbox authority: abort
+        // every invisible stage and keep durable compaction disabled. A
+        // runtime-backed build deliberately does NOT reconcile from Session
+        // metadata here—the compatibility SessionStore can be ahead of
+        // RuntimeStore. Runtime-loop startup supplies the exact atomic outbox
+        // identities instead.
+        if let Some(memory_store) = self.memory_store.as_ref()
+            && memory_store.compaction_projection_persistence()
+                == crate::memory::CompactionProjectionPersistence::DurableStaged
+            && self.compaction_commit_coordinator.is_none()
+        {
+            memory_store
+                .reconcile_compaction_stages(
+                    &crate::memory::MemoryOwner::canonical_session(session.id().clone()),
+                    &[],
+                )
+                .await
+                .map_err(|error| AgentBuildPolicyError::CompactionMemoryReconcile {
+                    message: error.to_string(),
+                })?;
+        }
+
         // Typed cancel-after-boundary command channel. The agent retains both
         // ends: the receiver is drained at turn boundaries, the sender is
         // cloned for the requesting surface via `cancel_after_boundary_handle`.
@@ -651,6 +723,9 @@ impl AgentBuilder {
             last_input_tokens: 0,
             compaction_cadence,
             memory_store: self.memory_store,
+            compaction_commit_coordinator: self.compaction_commit_coordinator,
+            compaction_transaction: None,
+            in_flight_compaction_stage: None,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
             terminal_error_detail: None,
@@ -674,6 +749,11 @@ impl AgentBuilder {
             runtime_execution_kind: self.runtime_execution_kind,
             active_transcript_identity: None,
             turn_state_handle: self.turn_state_handle,
+            model_routing_handle: self.model_routing_handle,
+            sticky_model_fallback_commit_coordinator: self.sticky_model_fallback_commit_coordinator,
+            pending_sticky_model_fallback_activation: None,
+            effective_model_registry: self.effective_model_registry,
+            active_model_profile,
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
             mcp_server_lifecycle_handle: self.mcp_server_lifecycle_handle,
@@ -790,41 +870,44 @@ impl AgentBuilder {
                 false
             };
 
-        if visibility_state != SessionToolVisibilityState::default()
+        let visibility_state_requires_restore = visibility_state
+            != SessionToolVisibilityState::default()
             || has_canonical_visibility_state
             || has_initial_visibility_state
-            || capability_base_filter_changed
+            || capability_base_filter_changed;
+        if visibility_state_requires_restore
+            && let Err(err) = agent.tool_scope.set_visibility_state(visibility_state)
         {
-            if let Err(err) = agent.tool_scope.set_visibility_state(visibility_state) {
-                return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+            return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                message: err.to_string(),
+            });
+        }
+        // Runtime-backed persistence must always materialize the generated
+        // owner's exact projection, including its all-default state. The
+        // control-only sticky-fallback CAS then has a typed parent in the
+        // pre-turn RuntimeStore snapshot rather than depending on whether a
+        // capability filter happened to be non-default during construction.
+        if runtime_tool_visibility_owner_required || visibility_state_requires_restore {
+            let authorized_visibility_state = agent
+                .tool_scope
+                .authorized_visibility_state()
+                .map_err(|err| AgentBuildPolicyError::ToolVisibilityPersist {
+                    message: err.to_string(),
+                })?;
+            if let Err(err) = agent
+                .session
+                .set_tool_visibility_state(authorized_visibility_state)
+            {
+                return Err(AgentBuildPolicyError::ToolVisibilityPersist {
                     message: err.to_string(),
                 });
             }
-            if !runtime_tool_visibility_owner_required
-                || has_canonical_visibility_state
-                || has_initial_visibility_state
-            {
-                let authorized_visibility_state = agent
-                    .tool_scope
-                    .authorized_visibility_state()
-                    .map_err(|err| AgentBuildPolicyError::ToolVisibilityPersist {
-                        message: err.to_string(),
-                    })?;
-                if let Err(err) = agent
-                    .session
-                    .set_tool_visibility_state(authorized_visibility_state)
-                {
-                    return Err(AgentBuildPolicyError::ToolVisibilityPersist {
-                        message: err.to_string(),
-                    });
-                }
-                agent
-                    .session
-                    .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
-                agent
-                    .session
-                    .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
-            }
+            agent
+                .session
+                .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
+            agent
+                .session
+                .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
         }
 
         Ok(agent)
@@ -968,6 +1051,31 @@ impl AgentBuilder {
     /// Set the runtime-backed turn-state diagnostic handle for this build.
     pub fn with_turn_state_handle(mut self, handle: Arc<dyn crate::TurnStateHandle>) -> Self {
         self.turn_state_handle = Some(handle);
+        self
+    }
+
+    /// Set the runtime-backed model-routing authority handle for this build.
+    pub fn with_model_routing_handle(
+        mut self,
+        handle: Arc<dyn crate::handles::ModelRoutingHandle>,
+    ) -> Self {
+        self.model_routing_handle = Some(handle);
+        self
+    }
+
+    /// Set the runtime-owned durable sticky-fallback commit coordinator.
+    pub fn with_sticky_model_fallback_commit_coordinator(
+        mut self,
+        coordinator: Arc<dyn crate::handles::StickyModelFallbackCommitCoordinator>,
+    ) -> Self {
+        self.sticky_model_fallback_commit_coordinator = Some(coordinator);
+        self
+    }
+
+    /// Bind fallback profile and limit validation to the exact effective
+    /// registry captured by the construction pipeline.
+    pub fn with_effective_model_registry(mut self, registry: Arc<crate::ModelRegistry>) -> Self {
+        self.effective_model_registry = Some(registry);
         self
     }
 
@@ -1174,6 +1282,84 @@ mod tests {
         generated_visibility_owner_from(Arc::new(
             crate::tool_scope::GeneratedTestToolVisibilityOwner::new(),
         ))
+    }
+
+    struct BuilderTestModelRoutingHandle {
+        visibility_owner: Arc<dyn ToolVisibilityOwner>,
+    }
+
+    struct BuilderTestStickyModelFallbackCommit {
+        visibility_owner: Arc<dyn ToolVisibilityOwner>,
+        next_state: crate::SessionToolVisibilityState,
+    }
+
+    impl crate::handles::StickyModelFallbackMachineCommit for BuilderTestStickyModelFallbackCommit {
+        fn commit(self: Box<Self>) -> Result<(), crate::handles::DslTransitionError> {
+            self.visibility_owner
+                .replace_visibility_state(self.next_state)
+                .map_err(|error| {
+                    crate::handles::DslTransitionError::no_matching(
+                        "BuilderTestModelRoutingHandle::stage_sticky_model_fallback/commit",
+                        error.to_string(),
+                    )
+                })
+        }
+    }
+
+    impl crate::handles::ModelRoutingHandle for BuilderTestModelRoutingHandle {
+        fn set_baseline(
+            &self,
+            _baseline_model: crate::lifecycle::run_primitive::ModelId,
+            _realtime_capable: bool,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn hydrate_llm_capability_surface(
+            &self,
+            _identity: &crate::SessionLlmIdentity,
+            _profile: Option<&crate::model_profile::ModelProfile>,
+            _capability_base_filter: &ToolFilter,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn stage_sticky_model_fallback(
+            &self,
+            activation: crate::StickyModelFallbackActivationProof,
+            visibility_plan: &crate::handles::StickyModelFallbackVisibilityPlan,
+        ) -> Result<
+            Box<dyn crate::handles::StickyModelFallbackMachineCommit>,
+            crate::handles::DslTransitionError,
+        > {
+            if !activation
+                .target_profile()
+                .matches_identity(activation.target_identity())
+            {
+                return Err(crate::handles::DslTransitionError::guard_rejected(
+                    "BuilderTestModelRoutingHandle::stage_sticky_model_fallback",
+                    "test fallback profile witness does not match the target identity",
+                ));
+            }
+            Ok(Box::new(BuilderTestStickyModelFallbackCommit {
+                visibility_owner: Arc::clone(&self.visibility_owner),
+                next_state: visibility_plan.next_state.clone(),
+            }))
+        }
+    }
+
+    trait RuntimeBackedTestBuilderExt {
+        fn with_runtime_test_visibility_owner(self, owner: GeneratedToolVisibilityOwner) -> Self;
+    }
+
+    impl RuntimeBackedTestBuilderExt for AgentBuilder {
+        fn with_runtime_test_visibility_owner(self, owner: GeneratedToolVisibilityOwner) -> Self {
+            let model_routing_handle = Arc::new(BuilderTestModelRoutingHandle {
+                visibility_owner: owner.owner(),
+            });
+            self.with_tool_visibility_owner(owner)
+                .with_model_routing_handle(model_routing_handle)
+        }
     }
 
     fn session_with_raw_metadata(session: Session, key: &str, value: serde_json::Value) -> Session {
@@ -1688,7 +1874,7 @@ mod tests {
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1752,7 +1938,7 @@ mod tests {
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1790,7 +1976,7 @@ mod tests {
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1817,7 +2003,7 @@ mod tests {
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1854,7 +2040,7 @@ mod tests {
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1897,7 +2083,7 @@ mod tests {
         let result = AgentBuilder::new()
             .resume_session(session)
             .with_epoch_cursor_state(Arc::new(crate::runtime_epoch::EpochCursorState::new()))
-            .with_tool_visibility_owner(generated_visibility_owner_from(owner.clone()))
+            .with_runtime_test_visibility_owner(generated_visibility_owner_from(owner.clone()))
             .build_inner(client, tools, store)
             .await;
 
@@ -1919,7 +2105,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
-            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -1938,7 +2124,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
-            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -1968,7 +2154,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
-            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -1994,7 +2180,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
-            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;
@@ -2026,7 +2212,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
-            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
             .require_runtime_execution_kind_stamp()
             .build_standalone(client, tools, store)
             .await;

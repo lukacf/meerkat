@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::compact::{CompactionContext, CompactionResult, Compactor};
+use meerkat_core::compact::{
+    COMPACTION_SUMMARY_PREFIX, CompactionContext, CompactionResult, CompactionSummary, Compactor,
+};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
@@ -788,10 +790,25 @@ impl Compactor for TrackingCompactor {
     fn rebuild_history(
         &self,
         messages: &[meerkat_core::types::Message],
-        _summary: &str,
+        summary: &str,
     ) -> CompactionResult {
+        let summary_message = meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::compaction_summary(format!(
+                "{COMPACTION_SUMMARY_PREFIX}{summary}"
+            )),
+        );
         CompactionResult {
             messages: messages.to_vec(),
+            summary: CompactionSummary::new(0, summary_message),
+            retained: messages
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(offset, message)| {
+                    let offset = u64::try_from(offset).unwrap_or(u64::MAX);
+                    meerkat_core::compact::CompactionRetained::new(offset, offset, message)
+                })
+                .collect(),
             discarded: Vec::new(),
         }
     }

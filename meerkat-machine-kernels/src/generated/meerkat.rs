@@ -5250,6 +5250,68 @@ impl std::fmt::Display for PreRunPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum Provider {
+    #[default]
+    #[serde(rename = "Anthropic")]
+    Anthropic,
+    #[serde(rename = "OpenAI")]
+    OpenAI,
+    #[serde(rename = "Gemini")]
+    Gemini,
+    #[serde(rename = "SelfHosted")]
+    SelfHosted,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl Provider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic",
+            Self::OpenAI => "OpenAI",
+            Self::Gemini => "Gemini",
+            Self::SelfHosted => "SelfHosted",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for Provider {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Anthropic" => Ok(Self::Anthropic),
+            "OpenAI" => Ok(Self::OpenAI),
+            "Gemini" => Ok(Self::Gemini),
+            "SelfHosted" => Ok(Self::SelfHosted),
+            "Other" => Ok(Self::Other),
+            other => Err(format!("invalid Provider value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for Provider {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RealtimeTranscriptLaneKind {
     #[default]
     #[serde(rename = "Display")]
@@ -10905,6 +10967,28 @@ pub mod inputs {
         pub current_capability_base_filter: ToolFilter,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitStickyModelFallback {
+        pub previous_identity: SessionLlmIdentity,
+        pub previous_visibility_state: SessionToolVisibilityState,
+        pub target_identity: SessionLlmIdentity,
+        pub target_model: String,
+        pub target_profile_provider: Option<Provider>,
+        pub target_profile_model: Option<String>,
+        pub target_capability_surface: Option<SessionLlmCapabilitySurface>,
+        pub target_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+        pub target_capability_base_filter: ToolFilter,
+        pub target_realtime_capable: bool,
+        pub view_image_tool_available: bool,
+        pub previous_view_image_visible: bool,
+        pub next_view_image_visible: bool,
+        pub previous_active_visibility_revision: u64,
+        pub previous_staged_visibility_revision: u64,
+        pub next_visibility_state: SessionToolVisibilityState,
+        pub next_active_visibility_revision: u64,
+        pub tool_visibility_delta: SessionToolVisibilityDelta,
+        pub retry_attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReconfigureSessionLlmIdentity {
         pub previous_identity: SessionLlmIdentity,
         pub previous_visibility_state: SessionToolVisibilityState,
@@ -12472,6 +12556,7 @@ pub enum Input {
     UnregisterSession(inputs::UnregisterSession),
     ResolveRuntimeOpsLifecycleDurability(inputs::ResolveRuntimeOpsLifecycleDurability),
     HydrateSessionLlmState(inputs::HydrateSessionLlmState),
+    CommitStickyModelFallback(inputs::CommitStickyModelFallback),
     ReconfigureSessionLlmIdentity(inputs::ReconfigureSessionLlmIdentity),
     ClearSessionLlmState(inputs::ClearSessionLlmState),
     PrepareBindings(inputs::PrepareBindings),
@@ -12777,6 +12862,7 @@ impl Input {
                 InputKind::ResolveRuntimeOpsLifecycleDurability
             }
             Self::HydrateSessionLlmState(_) => InputKind::HydrateSessionLlmState,
+            Self::CommitStickyModelFallback(_) => InputKind::CommitStickyModelFallback,
             Self::ReconfigureSessionLlmIdentity(_) => InputKind::ReconfigureSessionLlmIdentity,
             Self::ClearSessionLlmState(_) => InputKind::ClearSessionLlmState,
             Self::PrepareBindings(_) => InputKind::PrepareBindings,
@@ -13145,6 +13231,7 @@ pub enum InputKind {
     UnregisterSession,
     ResolveRuntimeOpsLifecycleDurability,
     HydrateSessionLlmState,
+    CommitStickyModelFallback,
     ReconfigureSessionLlmIdentity,
     ClearSessionLlmState,
     PrepareBindings,
@@ -15133,6 +15220,7 @@ pub enum TransitionId {
     HydrateSessionLlmStateAttached,
     HydrateSessionLlmStateRunning,
     HydrateSessionLlmStateRetired,
+    CommitStickyModelFallbackRunning,
     ReconfigureSessionLlmIdentityAttached,
     ReconfigureSessionLlmIdentityRunning,
     ReconfigureSessionLlmIdentityIdle,

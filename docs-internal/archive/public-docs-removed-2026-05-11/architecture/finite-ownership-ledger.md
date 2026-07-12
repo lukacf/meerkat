@@ -51,7 +51,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 
 | Path | Symbol | Class | Status | Anchor | Contract |
 | --- | --- | --- | --- | --- | --- |
-| `meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachine.sessions` | `capability-index` | `closed` | `MeerkatMachine registered-session + attachment publication contract` | src: `registered session entries with recovered driver/completion capabilities`; trigger: `register/ensure/attach/detach/unregister/destroy transitions + dead-attachment normalization`; stale: `forbidden` |
+| `meerkat-runtime/src/meerkat_machine/mod.rs` | `MeerkatMachineShared.sessions` | `capability-index` | `closed` | `MeerkatMachine registered-session + attachment publication contract` | src: `registered session entries with recovered driver/completion capabilities`; trigger: `register/ensure/attach/detach/unregister/destroy transitions + dead-attachment normalization`; stale: `forbidden` |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.drain_slot` | `capability-index` | `closed` | `MeerkatMachine registered-session contract + drain-control region` | src: `per-session comms drain lifecycle slot co-owned by the registered-session entry`; trigger: `register/unregister/destroy + drain lifecycle transitions + control installation`; stale: `forbidden` |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.driver` | `capability-handle` | `closed` | `MeerkatMachine control + admission + input-lifecycle regions` | - |
 | `meerkat-runtime/src/meerkat_machine/mod.rs` | `RuntimeSessionEntry.attachment_slot` | `capability-handle` | `closed` | `MeerkatMachine attachment publication contract` | - |
@@ -63,11 +63,11 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 
 | Path | Symbol | Boundary | Status | Writes | Anchor |
 | --- | --- | --- | --- | --- | --- |
-| `meerkat-runtime/src/meerkat_machine/mod.rs` | `register_session` | `public-inherent` | `closed` | `sessions`, `RuntimeSessionEntry.driver`, `RuntimeSessionEntry.ops_lifecycle`, `RuntimeSessionEntry.completions` | `MeerkatMachine registration + recovery publication contract` |
+| `meerkat-runtime/src/meerkat_machine/mod.rs` | `register_session` | `public-inherent` | `closed` | `MeerkatMachineShared.sessions`, `RuntimeSessionEntry.driver`, `RuntimeSessionEntry.ops_lifecycle`, `RuntimeSessionEntry.completions` | `MeerkatMachine registration + recovery publication contract` |
 | `meerkat-runtime/src/meerkat_machine/session_management.rs` | `set_session_silent_intents` | `public-inherent` | `closed` | `RuntimeSessionEntry.driver` | `MeerkatMachine admission/control policy truth` |
-| `meerkat-runtime/src/meerkat_machine/session_management.rs` | `register_session_with_executor` | `public-inherent` | `closed` | `sessions`, `RuntimeSessionEntry.attachment_slot`, `RuntimeSessionEntry.driver` | `MeerkatMachine registration + attachment publication contract` |
-| `meerkat-runtime/src/meerkat_machine/session_management.rs` | `ensure_session_with_executor` | `public-inherent` | `closed` | `sessions`, `RuntimeSessionEntry.attachment_slot`, `RuntimeSessionEntry.driver` | `MeerkatMachine attachment publication contract + RuntimeControlPlane transitions` |
-| `meerkat-runtime/src/meerkat_machine/session_management.rs` | `unregister_session` | `public-inherent` | `closed` | `sessions`, `RuntimeSessionEntry.drain_slot` | `registered-session contract + MeerkatMachine drain-control region` |
+| `meerkat-runtime/src/meerkat_machine/session_management.rs` | `register_session_with_executor` | `public-inherent` | `closed` | `MeerkatMachineShared.sessions`, `RuntimeSessionEntry.attachment_slot`, `RuntimeSessionEntry.driver` | `MeerkatMachine registration + attachment publication contract` |
+| `meerkat-runtime/src/meerkat_machine/session_management.rs` | `ensure_session_with_executor` | `public-inherent` | `closed` | `MeerkatMachineShared.sessions`, `RuntimeSessionEntry.attachment_slot`, `RuntimeSessionEntry.driver` | `MeerkatMachine attachment publication contract + RuntimeControlPlane transitions` |
+| `meerkat-runtime/src/meerkat_machine/session_management.rs` | `unregister_session` | `public-inherent` | `closed` | `MeerkatMachineShared.sessions`, `RuntimeSessionEntry.drain_slot` | `registered-session contract + MeerkatMachine drain-control region` |
 | `meerkat-runtime/src/user_interrupt.rs` | `hard_cancel_current_run` | `public-inherent` | `closed` | `RuntimeSessionEntry.driver`, `RuntimeSessionEntry.attachment_slot` | `MeerkatMachine control region + runtime attachment publication contract` |
 | `meerkat-runtime/src/meerkat_machine/runtime_control.rs` | `stop_runtime_executor` | `public-inherent` | `closed` | `RuntimeSessionEntry.driver`, `RuntimeSessionEntry.completions`, `RuntimeSessionEntry.attachment_slot` | `MeerkatMachine control region + runtime attachment publication contract` |
 | `meerkat-runtime/src/meerkat_machine/runtime_control.rs` | `accept_input_with_completion` | `public-inherent` | `closed` | `RuntimeSessionEntry.driver`, `RuntimeSessionEntry.completions`, `RuntimeSessionEntry.attachment_slot` | `MeerkatMachine admission + input-lifecycle regions` |
@@ -159,7 +159,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | --- | --- | --- | --- | --- | --- |
 | `meerkat-mob/src/runtime/handle.rs` | `spawn_spec` | `public-inherent` | `closed` | `MobActor.pending_spawns` | `PendingSpawnLineage + RosterAuthority` |
 | `meerkat-mob/src/runtime/handle.rs` | `spawn_many` | `public-inherent` | `closed` | `MobActor.pending_spawns` | `PendingSpawnLineage + RosterAuthority` |
-| `meerkat-mob/src/runtime/handle.rs` | `retire` | `public-inherent` | `closed` | `roster`, `MobActor.retired_event_index` | `RosterAuthority + disposal pipeline` |
+| `meerkat-mob/src/runtime/handle.rs` | `retire` | `public-inherent` | `closed` | `MobActor.dsl_authority`, `MobActor.pending_spawns`, `roster`, `MobActor.retired_event_index` | `MobMachine incarnation-scoped retire disposition + PendingSpawnLineage + RosterAuthority projection + disposal pipeline` |
 | `meerkat-mob/src/runtime/handle.rs` | `respawn` | `public-inherent` | `closed` | `roster`, `MobActor.pending_spawns`, `MobActor.dsl_authority` | `respawn helper contract + PendingSpawnLineage + RosterAuthority` |
 | `meerkat-mob/src/runtime/handle.rs` | `retire_all` | `public-inherent` | `closed` | `roster`, `MobActor.pending_spawns` | `PendingSpawnLineage + RosterAuthority + disposal pipeline` |
 | `meerkat-mob/src/runtime/handle.rs` | `wire` | `public-inherent` | `closed` | `roster`, `MobActor.dsl_authority`, `MobActor.edge_locks` | `RosterAuthority wiring projection contract + trust-edge mutation + edge-lock discipline` |

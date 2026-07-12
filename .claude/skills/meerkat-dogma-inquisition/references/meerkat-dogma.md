@@ -281,6 +281,29 @@ Faults that affect semantics must be modeled or fail closed. This includes:
 - cascading failure across seams
 - test-mode behavior that differs from production semantics
 
+Batching must preserve causality without inventing consensus. Transcript
+interaction, run, and objective identities are merged independently; agreement
+on one field survives disagreement on another. A conflicting field remains
+conflicted for the full batch and cannot be repopulated by a later input merely
+because its public projection is empty.
+
+A transcript compaction and its discarded-history memory projection are one
+semantic commit even when they cross stores. Durable memory must remain
+invisible until the authoritative transcript rewrite is committed; the runtime
+must record the exact typed rewrite intent in the same atomic boundary, and
+only that durable outbox may authorize idempotent finalization or recovery.
+The compaction semantic is an opaque witness minted by the validated core
+rebuild path, never inferred from a caller-controlled reason string. Reasons
+remain audit/presentation data. Marker-free legacy commits may acquire the
+typed semantic only when their retained revision bodies prove the exact
+full-range shrinking compaction shape.
+Session metadata and compatibility checkpoints may carry the intent but cannot
+become commit authority. Cancellation, process loss, retry, and scope deletion
+must leave either the old transcript with no visible projection or the committed
+rewrite with its exact projection—never a half-published pair. Scope deletion
+must persist a deletion-wins tombstone that fences staged, finalized, cached,
+and later-replayed projections across concurrency and process restart.
+
 If the system cannot explain what happened, who owns the consequence, and what
 the caller may trust, the design is not complete.
 

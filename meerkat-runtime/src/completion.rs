@@ -119,6 +119,21 @@ impl CompletionCleanupObservation {
         }
     }
 
+    /// Return whether this runtime-minted observation proves that `session_id`
+    /// reached the machine-owned runtime-termination completion class.
+    ///
+    /// Cleanup relays use this narrow proof when executor-owned terminal
+    /// cleanup has already removed the runtime registration before the
+    /// completion waiter is delivered. It must not be replaced with a generic
+    /// "registration is absent" check: absence alone carries no terminal
+    /// authority.
+    #[must_use]
+    pub fn proves_runtime_termination_for(&self, session_id: &SessionId) -> bool {
+        self.owner_session_id == *session_id
+            && self.observed_outcome
+                == crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeTerminated
+    }
+
     pub(crate) fn owner_session_id(&self) -> &SessionId {
         &self.owner_session_id
     }
@@ -280,6 +295,39 @@ impl CompletionHandle {
                 Err(error) => cleanup(Err(error.clone())).await,
             }
             let _ = tx.send(outcome);
+        });
+        Self { rx }
+    }
+
+    /// Relay completion through required, fallible cleanup before publishing
+    /// the outcome. A cleanup failure withholds a successful runtime result;
+    /// when waiter delivery and cleanup both fail, both causes are preserved.
+    pub fn with_resultful_completion_cleanup<F, Fut>(self, cleanup: F) -> Self
+    where
+        F: FnOnce(Result<CompletionCleanupObservation, CompletionWaitError>) -> Fut
+            + Send
+            + 'static,
+        Fut: Future<Output = Result<(), CompletionWaitError>> + Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        crate::tokio::spawn(async move {
+            let outcome = self.try_wait_delivery().await;
+            let cleanup_input = match &outcome {
+                Ok(delivery) => Ok(delivery.cleanup_observation.clone()),
+                Err(error) => Err(error.clone()),
+            };
+            let cleanup_result = cleanup(cleanup_input).await;
+            let gated = match (outcome, cleanup_result) {
+                (Ok(delivery), Ok(())) => Ok(delivery),
+                (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+                (Err(primary_error), Ok(())) => Err(primary_error),
+                (Err(primary_error), Err(cleanup_error)) => {
+                    Err(CompletionWaitError::AuthorityUnavailable(format!(
+                        "{primary_error}; additionally failed required completion cleanup: {cleanup_error}"
+                    )))
+                }
+            };
+            let _ = tx.send(gated);
         });
         Self { rx }
     }
@@ -1316,7 +1364,10 @@ mod tests {
             .await
             .expect("waiter should resolve with generated cleanup observation");
 
-        adapter.unregister_session(&session_id).await;
+        adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("initial runtime binding should unregister cleanly");
         adapter
             .prepare_bindings(session_id.clone())
             .await
@@ -1577,6 +1628,42 @@ mod tests {
             other => panic!("Expected CompletedWithoutResult, got {other:?}"),
         }
         assert!(observed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn resultful_completion_cleanup_withholds_success_and_combines_failures() {
+        let handle = CompletionHandle::already_completed_without_result()
+            .expect("generated completion authority should classify no-result completion")
+            .with_resultful_completion_cleanup(|_| async {
+                Err(CompletionWaitError::AuthorityUnavailable(
+                    "required cleanup failed".to_string(),
+                ))
+            });
+        let error = handle
+            .wait()
+            .await
+            .expect_err("required cleanup failure must withhold success");
+        assert!(error.to_string().contains("required cleanup failed"));
+
+        let (tx, rx) = oneshot::channel();
+        drop(tx);
+        let handle =
+            CompletionHandle { rx }.with_resultful_completion_cleanup(|completion| async move {
+                assert!(matches!(
+                    completion,
+                    Err(CompletionWaitError::ChannelClosed)
+                ));
+                Err(CompletionWaitError::AuthorityUnavailable(
+                    "cleanup authority failed".to_string(),
+                ))
+            });
+        let error = handle
+            .wait()
+            .await
+            .expect_err("two failures must remain a failure");
+        let rendered = error.to_string();
+        assert!(rendered.contains("completion channel closed"));
+        assert!(rendered.contains("cleanup authority failed"));
     }
 
     #[tokio::test]

@@ -96,6 +96,27 @@ impl SessionAgent for FactoryAgent {
         self.agent.run_with_events(prompt, event_tx).await
     }
 
+    async fn reconcile_runtime_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .reconcile_runtime_compaction_projections(intents)
+            .await
+    }
+
+    async fn settle_inflight_sticky_model_fallback(
+        &mut self,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.settle_inflight_sticky_model_fallback().await
+    }
+
+    async fn abort_uncommitted_compaction_projections(
+        &mut self,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.abort_uncommitted_compaction_projections().await
+    }
+
     async fn run_turn_with_events(
         &mut self,
         input: SessionAgentTurnInput,
@@ -184,39 +205,8 @@ impl SessionAgent for FactoryAgent {
         identity: meerkat_core::SessionLlmIdentity,
         request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        // Atomically update the live client and the session's durable
-        // LLM request policy/identity so subsequent turns run against the
-        // new model/provider/provider_params/auth_binding and persisted
-        // recovery sees the swap.
-        let previous_auth_binding = self
-            .agent
-            .session()
-            .session_metadata()
-            .and_then(|metadata| metadata.auth_binding);
         self.agent
-            .replace_client_with_request_policy(client, request_policy);
-        self.agent
-            .rotate_auth_lease_auth_binding(
-                previous_auth_binding.as_ref(),
-                identity.auth_binding.as_ref(),
-            )
-            .map_err(|e| {
-                meerkat_core::error::AgentError::ConfigError(format!(
-                    "failed to rotate auth lease during llm identity hot-swap: {e}"
-                ))
-            })?;
-        if let Some(mut metadata) = self.agent.session().session_metadata() {
-            metadata.apply_llm_identity(&identity);
-            self.agent
-                .session_mut()
-                .set_session_metadata(metadata)
-                .map_err(|e| {
-                    meerkat_core::error::AgentError::ConfigError(format!(
-                        "failed to apply hot-swapped llm identity to session metadata: {e}"
-                    ))
-                })?;
-        }
-        Ok(())
+            .hot_swap_llm_identity(client, identity, request_policy)
     }
 
     fn update_keep_alive(&mut self, keep_alive: bool) {

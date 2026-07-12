@@ -4,6 +4,235 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Typed session-snapshot outbox carrier for compaction projection intent.
+pub const SESSION_COMPACTION_PROJECTION_INTENTS_KEY: &str = "session_compaction_projection_intents";
+
+/// Durable identity of the semantic-memory projection paired with one
+/// authoritative compaction transcript rewrite.
+///
+/// The identity is derived from the exact [`crate::TranscriptRewriteCommit`]
+/// rather than a turn counter, wall clock, or locally minted batch id. That
+/// makes stage/finalize/recovery idempotent across cancellation and process
+/// loss while keeping the transcript rewrite as the semantic owner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CompactionProjectionId {
+    session_id: crate::types::SessionId,
+    parent_revision: String,
+    revision: String,
+    /// Canonical identity of the exact semantic rewrite commit. Wall-clock
+    /// `committed_at` is deliberately excluded so a cancelled retry of the
+    /// same rewrite remains idempotent.
+    commit_fingerprint: String,
+}
+
+#[derive(Serialize)]
+struct CompactionCommitFingerprint<'a> {
+    selection: &'a crate::TranscriptRewriteSelection,
+    original_span_digest: &'a str,
+    replacement_digest: &'a str,
+    messages_before: usize,
+    messages_after: usize,
+    actor: &'a Option<String>,
+}
+
+/// Pre-typed-selection fingerprint retained strictly as a durable decoder for
+/// compaction intents written before the semantic authority field existed.
+#[derive(Serialize)]
+struct LegacyCompactionCommitFingerprint<'a> {
+    selection: &'a crate::TranscriptRewriteSelection,
+    original_span_digest: &'a str,
+    replacement_digest: &'a str,
+    messages_before: usize,
+    messages_after: usize,
+    reason: &'a crate::TranscriptRewriteReason,
+    actor: &'a Option<String>,
+}
+
+/// Exact post-commit projection work carried by the session snapshot into the
+/// runtime's atomic-apply outbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompactionProjectionIntent {
+    pub projection: CompactionProjectionId,
+    pub summary_tokens: u64,
+    pub messages_before: usize,
+    pub messages_after: usize,
+}
+
+impl CompactionProjectionId {
+    /// Mint the projection identity for the exact validated compaction rewrite.
+    ///
+    /// This is crate-private: a durable semantic tag is sufficient to validate
+    /// an already-carried ID during recovery, but never to mint a new ID. Only
+    /// the core compaction owner can supply the opaque witness, which is
+    /// rechecked against the commit's exact pre/post transcript digests.
+    pub(crate) fn from_validated_transcript_rewrite(
+        session_id: crate::types::SessionId,
+        commit: &crate::TranscriptRewriteCommit,
+        authority: &crate::agent::compact::ValidatedCompactionRewrite,
+    ) -> Option<Self> {
+        if !authority.authorizes_commit(commit) {
+            return None;
+        }
+        Self::derive_from_typed_transcript_rewrite(session_id, commit)
+    }
+
+    fn derive_from_typed_transcript_rewrite(
+        session_id: crate::types::SessionId,
+        commit: &crate::TranscriptRewriteCommit,
+    ) -> Option<Self> {
+        if commit.selection.semantic() != crate::TranscriptRewriteSemantic::Compaction {
+            return None;
+        }
+        let canonical = serde_json::to_vec(&CompactionCommitFingerprint {
+            selection: &commit.selection,
+            original_span_digest: &commit.original_span_digest,
+            replacement_digest: &commit.replacement_digest,
+            messages_before: commit.messages_before,
+            messages_after: commit.messages_after,
+            actor: &commit.actor,
+        })
+        .ok()?;
+        let digest = Sha256::digest(canonical);
+        let mut commit_fingerprint = String::with_capacity("sha256:".len() + digest.len() * 2);
+        commit_fingerprint.push_str("sha256:");
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in digest {
+            commit_fingerprint.push(HEX[(byte >> 4) as usize] as char);
+            commit_fingerprint.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        Some(Self {
+            session_id,
+            parent_revision: commit.parent_revision.clone(),
+            revision: commit.revision.clone(),
+            commit_fingerprint,
+        })
+    }
+
+    /// Validate this identity against a typed compaction commit, admitting the
+    /// exact legacy fingerprint only for backward-compatible persisted data.
+    pub(crate) fn matches_transcript_rewrite(
+        &self,
+        session_id: &crate::types::SessionId,
+        commit: &crate::TranscriptRewriteCommit,
+    ) -> bool {
+        if Self::derive_from_typed_transcript_rewrite(session_id.clone(), commit).as_ref()
+            == Some(self)
+        {
+            return true;
+        }
+        if commit.selection.semantic() != crate::TranscriptRewriteSemantic::Compaction {
+            return false;
+        }
+        Self::legacy_from_typed_compaction(session_id.clone(), commit).as_ref() == Some(self)
+    }
+
+    fn legacy_from_typed_compaction(
+        session_id: crate::types::SessionId,
+        commit: &crate::TranscriptRewriteCommit,
+    ) -> Option<Self> {
+        if commit.selection.semantic() != crate::TranscriptRewriteSemantic::Compaction {
+            return None;
+        }
+        let (start, end) = commit.selection.bounds();
+        let legacy_selection = crate::TranscriptRewriteSelection::MessageRange { start, end };
+        let canonical = serde_json::to_vec(&LegacyCompactionCommitFingerprint {
+            selection: &legacy_selection,
+            original_span_digest: &commit.original_span_digest,
+            replacement_digest: &commit.replacement_digest,
+            messages_before: commit.messages_before,
+            messages_after: commit.messages_after,
+            reason: &commit.reason,
+            actor: &commit.actor,
+        })
+        .ok()?;
+        let digest = Sha256::digest(canonical);
+        let mut fingerprint = String::with_capacity("sha256:".len() + digest.len() * 2);
+        fingerprint.push_str("sha256:");
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in digest {
+            fingerprint.push(HEX[(byte >> 4) as usize] as char);
+            fingerprint.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        Some(Self {
+            session_id,
+            parent_revision: commit.parent_revision.clone(),
+            revision: commit.revision.clone(),
+            commit_fingerprint: fingerprint,
+        })
+    }
+
+    pub fn session_id(&self) -> &crate::types::SessionId {
+        &self.session_id
+    }
+
+    pub fn parent_revision(&self) -> &str {
+        &self.parent_revision
+    }
+
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    pub fn commit_fingerprint(&self) -> &str {
+        &self.commit_fingerprint
+    }
+}
+
+/// Store behavior for compaction-derived semantic-memory projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionProjectionPersistence {
+    /// Store does not implement the compaction projection lifecycle. Recall
+    /// and explicit indexing may still work, but compaction must preserve the
+    /// transcript rather than publishing an unpaired memory projection.
+    Unsupported,
+    /// Process-local store with no durable crash window. The agent may publish
+    /// the batch immediately after its in-memory transcript rewrite succeeds.
+    EphemeralImmediate,
+    /// Durable store. Batches must first be persisted invisibly, then finalized
+    /// only after the runtime atomically commits the paired transcript rewrite.
+    DurableStaged,
+}
+
+/// Resultful runtime handoff that authorizes a durable transcript+memory pair.
+///
+/// Runtime-backed construction injects this handle from the runtime epoch.
+/// Standalone construction has no coordinator and therefore fails closed for
+/// [`CompactionProjectionPersistence::DurableStaged`] stores.
+pub trait CompactionCommitCoordinator: Send + Sync {
+    fn authorize_projection(
+        &self,
+        projection: &CompactionProjectionId,
+    ) -> Result<(), CompactionCommitCoordinationError>;
+}
+
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum CompactionCommitCoordinationError {
+    #[error(
+        "compaction projection session mismatch: coordinator owns {expected}, projection owns {actual}"
+    )]
+    SessionMismatch {
+        expected: crate::types::SessionId,
+        actual: crate::types::SessionId,
+    },
+    #[error("compaction projection coordinator rejected the handoff: {0}")]
+    Rejected(String),
+}
+
+/// Receipt for an invisible durable stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionStageReceipt {
+    pub projection: CompactionProjectionId,
+    pub staged_entries: usize,
+}
+
+/// Receipt for idempotent stage reconciliation at agent-build ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompactionStageReconcileReceipt {
+    pub retained_committed: usize,
+    pub aborted_orphans: usize,
+}
 
 /// Canonical semantic-memory owner.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -488,6 +717,13 @@ impl std::fmt::Debug for MemoryRankingPolicy {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MemoryStore: Send + Sync {
+    /// Compaction projection durability contract for this store.
+    fn compaction_projection_persistence(&self) -> CompactionProjectionPersistence {
+        // Unknown/custom stores fail closed without making legacy recall-only
+        // implementations pretend to support durable staging/reconciliation.
+        CompactionProjectionPersistence::Unsupported
+    }
+
     /// Index a typed, owner-scoped memory request.
     async fn index_scoped(
         &self,
@@ -506,6 +742,60 @@ pub trait MemoryStore: Send + Sync {
         batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError>;
 
+    /// Persist a compaction batch durably but invisibly.
+    ///
+    /// Durable stores override this. Search/enumeration must not observe any
+    /// staged row until [`MemoryStore::finalize_compaction_batch`] succeeds.
+    async fn stage_compaction_batch(
+        &self,
+        projection: CompactionProjectionId,
+        batch: MemoryIndexBatch,
+    ) -> Result<CompactionStageReceipt, MemoryStoreError> {
+        let _ = (projection, batch);
+        Err(MemoryStoreError::Unsupported {
+            operation: "stage_compaction_batch",
+        })
+    }
+
+    /// Idempotently publish one previously staged durable batch.
+    async fn finalize_compaction_batch(
+        &self,
+        projection: &CompactionProjectionId,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        let _ = projection;
+        Err(MemoryStoreError::Unsupported {
+            operation: "finalize_compaction_batch",
+        })
+    }
+
+    /// Idempotently discard one uncommitted invisible stage.
+    async fn abort_compaction_batch(
+        &self,
+        projection: &CompactionProjectionId,
+    ) -> Result<(), MemoryStoreError> {
+        let _ = projection;
+        Err(MemoryStoreError::Unsupported {
+            operation: "abort_compaction_batch",
+        })
+    }
+
+    /// Reconcile durable invisible stages against authoritative transcript
+    /// rewrite identities at agent-build ingress.
+    ///
+    /// Stages absent from `committed` are crash/cancellation orphans and are
+    /// aborted. Matching stages remain invisible for the runtime outbox owner
+    /// to finalize.
+    async fn reconcile_compaction_stages(
+        &self,
+        owner: &MemoryOwner,
+        committed: &[CompactionProjectionId],
+    ) -> Result<CompactionStageReconcileReceipt, MemoryStoreError> {
+        let _ = (owner, committed);
+        Err(MemoryStoreError::Unsupported {
+            operation: "reconcile_compaction_stages",
+        })
+    }
+
     /// Semantic search: return up to `limit` results ordered by relevance.
     async fn search(
         &self,
@@ -514,11 +804,15 @@ pub trait MemoryStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<MemoryResult>, MemoryStoreError>;
 
-    /// Atomically drop every indexed entry owned by `owner`.
+    /// Atomically and permanently drop every indexed entry owned by `owner`.
     ///
     /// All-or-nothing per scope: either every durable entry for the owner is
-    /// removed or none are. Other owners' entries are untouched. Unsupported
-    /// by default for stores without a deletion capability.
+    /// removed or none are. Durable staging implementations must retain a
+    /// deletion-wins tombstone so stale stage/finalize/reconcile/index work
+    /// cannot republish this identity after concurrency or restart; a pending
+    /// finalize may acknowledge the deletion with a zero-entry success. Other
+    /// owners' entries are untouched. Unsupported by default for stores
+    /// without a deletion capability.
     async fn drop_scope(
         &self,
         owner: &MemoryOwner,
@@ -666,6 +960,122 @@ mod tests {
 
     fn range(start: u64, end: u64) -> MessageRange {
         MessageRange::new(start, end).unwrap()
+    }
+
+    fn compaction_commit(
+        committed_at: crate::time_compat::SystemTime,
+    ) -> (
+        crate::TranscriptRewriteCommit,
+        crate::agent::compact::ValidatedCompactionRewrite,
+    ) {
+        let mut session = crate::Session::new();
+        session.push(crate::types::Message::User(
+            crate::types::UserMessage::text("verbose context one"),
+        ));
+        session.push(crate::types::Message::User(
+            crate::types::UserMessage::text("verbose context two"),
+        ));
+        let replacement = vec![crate::types::Message::User(
+            crate::types::UserMessage::compaction_summary("compacted context"),
+        )];
+        let authority = crate::agent::compact::ValidatedCompactionRewrite::for_test(
+            session.messages(),
+            &replacement,
+        )
+        .unwrap();
+        let mut commit = session
+            .replace_messages_for_compaction_internal(replacement, &authority)
+            .unwrap()
+            .unwrap();
+        commit.committed_at = committed_at;
+        (commit, authority)
+    }
+
+    #[test]
+    fn projection_identity_fingerprints_semantic_commit_but_excludes_wall_time() {
+        let session_id = crate::types::SessionId::new();
+        let (first_commit, first_authority) =
+            compaction_commit(UNIX_EPOCH + Duration::from_secs(1));
+        let first = CompactionProjectionId::from_validated_transcript_rewrite(
+            session_id.clone(),
+            &first_commit,
+            &first_authority,
+        )
+        .unwrap();
+        let (retry_commit, retry_authority) =
+            compaction_commit(UNIX_EPOCH + Duration::from_secs(2));
+        let retry = CompactionProjectionId::from_validated_transcript_rewrite(
+            session_id.clone(),
+            &retry_commit,
+            &retry_authority,
+        )
+        .unwrap();
+        assert_eq!(first, retry, "wall time must not break cancellation retry");
+
+        let (mut distinct_commit, distinct_authority) =
+            compaction_commit(UNIX_EPOCH + Duration::from_secs(1));
+        distinct_commit.actor = Some("agent-b".to_string());
+        let distinct = CompactionProjectionId::from_validated_transcript_rewrite(
+            session_id,
+            &distinct_commit,
+            &distinct_authority,
+        )
+        .unwrap();
+        assert_ne!(first, distinct, "semantic commit fields must fence aliases");
+        assert_ne!(first.commit_fingerprint(), distinct.commit_fingerprint());
+
+        let (mut presentation_only, presentation_authority) =
+            compaction_commit(UNIX_EPOCH + Duration::from_secs(3));
+        presentation_only.reason = crate::TranscriptRewriteReason {
+            kind: "context_reduction".to_string(),
+            note: Some("free-form audit wording changed".to_string()),
+        };
+        let presentation_only = CompactionProjectionId::from_validated_transcript_rewrite(
+            first.session_id().clone(),
+            &presentation_only,
+            &presentation_authority,
+        )
+        .unwrap();
+        assert_eq!(
+            first, presentation_only,
+            "free-form audit reason must not participate in projection authority or identity"
+        );
+    }
+
+    #[test]
+    fn free_form_compaction_reason_cannot_mint_projection_authority() {
+        let (mut generic, authority) = compaction_commit(UNIX_EPOCH);
+        generic.selection = crate::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 };
+        generic.reason = crate::TranscriptRewriteReason::new("compaction");
+        assert!(
+            CompactionProjectionId::from_validated_transcript_rewrite(
+                crate::types::SessionId::new(),
+                &generic,
+                &authority,
+            )
+            .is_none(),
+            "display reason text is never a compaction witness"
+        );
+    }
+
+    #[test]
+    fn typed_compaction_commit_accepts_exact_pre_semantic_fingerprint_for_prior_data() {
+        let session_id = crate::types::SessionId::new();
+        let (commit, authority) = compaction_commit(UNIX_EPOCH);
+        let current = CompactionProjectionId::from_validated_transcript_rewrite(
+            session_id.clone(),
+            &commit,
+            &authority,
+        )
+        .unwrap();
+        let legacy =
+            CompactionProjectionId::legacy_from_typed_compaction(session_id.clone(), &commit)
+                .unwrap();
+        assert_ne!(
+            legacy, current,
+            "typed semantic changes the canonical fingerprint"
+        );
+        assert!(legacy.matches_transcript_rewrite(&session_id, &commit));
     }
 
     #[test]
@@ -831,6 +1241,10 @@ mod tests {
     #[tokio::test]
     async fn drop_scope_default_is_typed_unsupported() {
         let store = MinimalStore;
+        assert_eq!(
+            store.compaction_projection_persistence(),
+            CompactionProjectionPersistence::Unsupported
+        );
         let owner = MemoryOwner::canonical_session(crate::types::SessionId::new());
         let error = store.drop_scope(&owner).await.unwrap_err();
         assert!(matches!(
@@ -840,6 +1254,22 @@ mod tests {
             }
         ));
         assert_eq!(error.error_code(), "memory_unsupported");
+    }
+
+    #[tokio::test]
+    async fn reconcile_compaction_stages_default_is_typed_unsupported() {
+        let store = MinimalStore;
+        let owner = MemoryOwner::canonical_session(crate::types::SessionId::new());
+        let error = store
+            .reconcile_compaction_stages(&owner, &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MemoryStoreError::Unsupported {
+                operation: "reconcile_compaction_stages",
+            }
+        ));
     }
 
     #[tokio::test]

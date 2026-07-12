@@ -1104,6 +1104,7 @@ export class Mob {
     options: {
       agentIdentity: string;
       profileName?: string;
+      modelOverride?: string;
       authBinding?: AuthBindingRef;
       runtimeMode?: string;
       backend?: string;
@@ -1119,6 +1120,7 @@ export class Mob {
           // here was silently dropped by the WASM deserializer, so the helper
           // was built with the default profile.
           role_name: options.profileName,
+          model_override: options.modelOverride,
           auth_binding: options.authBinding,
           runtime_mode: options.runtimeMode,
           backend: options.backend,
@@ -1142,6 +1144,7 @@ export class Mob {
     options: {
       agentIdentity: string;
       profileName?: string;
+      modelOverride?: string;
       authBinding?: AuthBindingRef;
       forkContext?: Record<string, unknown>;
       runtimeMode?: string;
@@ -1159,6 +1162,7 @@ export class Mob {
           // here was silently dropped by the WASM deserializer, so the helper
           // was built with the default profile.
           role_name: options.profileName,
+          model_override: options.modelOverride,
           auth_binding: options.authBinding,
           fork_context: options.forkContext,
           runtime_mode: options.runtimeMode,

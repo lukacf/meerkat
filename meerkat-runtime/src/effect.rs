@@ -4,6 +4,10 @@
 //! facts into executable runtime-loop effects.
 
 use crate::meerkat_machine::{DslTransitionEffects, dsl};
+use crate::traits::RuntimeDriverError;
+
+pub(crate) type StopEffectCompletion =
+    crate::tokio::sync::oneshot::Sender<Result<(), RuntimeDriverError>>;
 
 /// Neutral fact projected from a committed MeerkatMachine DSL transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,9 +25,10 @@ impl RuntimeEffectFact {
 }
 
 /// Sealed executable effect sent to the runtime loop.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct RuntimeEffect {
     inner: RuntimeEffectInner,
+    stop_completion: Option<StopEffectCompletion>,
 }
 
 /// Runtime-loop executor effects. Hard cancel is intentionally absent.
@@ -34,10 +39,10 @@ pub(crate) enum RuntimeEffectInner {
 }
 
 impl RuntimeEffect {
-    /// Whether realizing this effect stops the runtime executor. Stop
-    /// realization awaits executor cleanup that may re-enter the machine
-    /// (e.g. a mob executor unregistering its session), so callers must
-    /// NEVER apply a stop effect while holding the session mutation gate.
+    /// Whether realizing this effect stops the runtime executor. Runtime-loop
+    /// callers must apply stops outside the session mutation gate: the stop
+    /// hook may re-enter machine control, and required cleanup is handed to an
+    /// external teardown owner after the loop relinquishes the executor.
     pub(crate) fn is_stop(&self) -> bool {
         matches!(self.inner, RuntimeEffectInner::StopRuntimeExecutor { .. })
     }
@@ -51,15 +56,40 @@ impl RuntimeEffect {
                 RuntimeEffectInner::StopRuntimeExecutor { reason }
             }
         };
-        Self { inner }
+        Self {
+            inner,
+            stop_completion: None,
+        }
     }
 
     pub(crate) fn into_inner(self) -> RuntimeEffectInner {
         self.inner
     }
+
+    /// Attach the result carrier for one concrete projected stop request.
+    ///
+    /// This is intentionally injected only after the generated DSL effect has
+    /// been projected. It is shell acknowledgement, not machine authority, and
+    /// must never be shared across distinct stop requests.
+    pub(crate) fn with_stop_completion(
+        mut self,
+        completion: StopEffectCompletion,
+    ) -> Result<Self, RuntimeDriverError> {
+        if !self.is_stop() {
+            return Err(RuntimeDriverError::Internal(
+                "stop completion may only be attached to StopRuntimeExecutor effects".into(),
+            ));
+        }
+        self.stop_completion = Some(completion);
+        Ok(self)
+    }
+
+    pub(crate) fn take_stop_completion(&mut self) -> Option<StopEffectCompletion> {
+        self.stop_completion.take()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct ProjectedRuntimeEffect {
     effect: RuntimeEffect,
     reason: String,

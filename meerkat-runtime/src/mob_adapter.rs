@@ -60,8 +60,11 @@ pub async fn register_mob_member(
 }
 
 /// Unregister a mob member's session from the runtime adapter.
-pub async fn unregister_mob_member(adapter: &MeerkatMachine, session_id: &SessionId) {
-    adapter.unregister_session(session_id).await;
+pub async fn unregister_mob_member(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+) -> Result<(), RuntimeDriverError> {
+    adapter.unregister_session(session_id).await
 }
 
 /// Deliver a flow step to a mob member through the runtime path.
@@ -184,7 +187,7 @@ mod tests {
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await.unwrap();
 
-        unregister_mob_member(&adapter, &sid).await;
+        unregister_mob_member(&adapter, &sid).await.unwrap();
 
         // Should fail now
         let result = adapter.runtime_state(&sid).await;

@@ -1276,7 +1276,7 @@ test('Mob.listMembers rejects missing canonical agent_identity', async () => {
 // contract and the TS/Python SDKs. The web SDK previously serialized
 // `profile_name`, which the WASM boundary silently dropped, so
 // `spawnHelper`/`forkHelper` built helpers with the DEFAULT profile.
-test('Mob.spawnHelper / forkHelper serialize canonical role_name (not profile_name)', async () => {
+test('Mob.spawnHelper / forkHelper serialize canonical role_name and model_override', async () => {
   let spawnCaptured;
   let forkCaptured;
   const mob = new Mob('mob-web-unit', {
@@ -1290,11 +1290,21 @@ test('Mob.spawnHelper / forkHelper serialize canonical role_name (not profile_na
     },
   });
 
-  await mob.spawnHelper('do it', { agentIdentity: 'h-1', profileName: 'reviewer' });
-  await mob.forkHelper('src-1', 'do it', { agentIdentity: 'h-2', profileName: 'reviewer' });
+  await mob.spawnHelper('do it', {
+    agentIdentity: 'h-1',
+    profileName: 'reviewer',
+    modelOverride: 'gpt-5.6-sol',
+  });
+  await mob.forkHelper('src-1', 'do it', {
+    agentIdentity: 'h-2',
+    profileName: 'reviewer',
+    modelOverride: 'claude-opus-4-8',
+  });
 
   assert.equal(spawnCaptured.role_name, 'reviewer');
   assert.equal(spawnCaptured.profile_name, undefined);
+  assert.equal(spawnCaptured.model_override, 'gpt-5.6-sol');
   assert.equal(forkCaptured.role_name, 'reviewer');
   assert.equal(forkCaptured.profile_name, undefined);
+  assert.equal(forkCaptured.model_override, 'claude-opus-4-8');
 });

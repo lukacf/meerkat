@@ -188,6 +188,9 @@ pub struct SessionRuntimeBindings {
     /// The factory sets this after resolving the concrete LLM identity so
     /// runtime-backed tool resolution observes a machine-owned baseline.
     model_routing: Arc<dyn ModelRoutingHandle>,
+    /// Cancellation-safe durable sticky-fallback transaction coordinator.
+    sticky_model_fallback_commit_coordinator:
+        Arc<dyn crate::handles::StickyModelFallbackCommitCoordinator>,
     /// Auth lease lifecycle DSL handle (Phase 1.5-rev addition).
     auth_lease: GeneratedAuthLeaseHandle,
     /// MCP server lifecycle DSL handle (Phase 5G / T5g addition).
@@ -224,6 +227,9 @@ pub struct SessionRuntimeBindings {
     /// Required with session-owned peer request/response semantics so stream
     /// reservations remain a projection of machine state.
     interaction_stream: Arc<dyn InteractionStreamHandle>,
+    /// Resultful handoff authorizing durable compaction transcript+memory
+    /// pairs for this exact session/runtime epoch.
+    compaction_commit_coordinator: Arc<dyn crate::memory::CompactionCommitCoordinator>,
     runtime_authority: Arc<dyn Any + Send + Sync>,
 }
 
@@ -247,12 +253,16 @@ impl SessionRuntimeBindings {
         peer_comms_install: GeneratedPeerCommsInstallFactory,
         session_admission: Arc<dyn SessionAdmissionHandle>,
         model_routing: Arc<dyn ModelRoutingHandle>,
+        sticky_model_fallback_commit_coordinator: Arc<
+            dyn crate::handles::StickyModelFallbackCommitCoordinator,
+        >,
         auth_lease: GeneratedAuthLeaseHandle,
         mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
         peer_interaction: Arc<dyn PeerInteractionHandle>,
         session_context: Arc<dyn SessionContextHandle>,
         session_claim_handle: Arc<dyn SessionClaimHandle>,
         interaction_stream: Arc<dyn InteractionStreamHandle>,
+        compaction_commit_coordinator: Arc<dyn crate::memory::CompactionCommitCoordinator>,
         runtime_authority: Arc<dyn Any + Send + Sync>,
     ) -> Self {
         Self {
@@ -267,12 +277,14 @@ impl SessionRuntimeBindings {
             peer_comms_install,
             session_admission,
             model_routing,
+            sticky_model_fallback_commit_coordinator,
             auth_lease,
             mcp_server_lifecycle,
             peer_interaction,
             session_context,
             session_claim_handle,
             interaction_stream,
+            compaction_commit_coordinator,
             runtime_authority,
         }
     }
@@ -328,6 +340,12 @@ impl SessionRuntimeBindings {
         &self.model_routing
     }
 
+    pub fn sticky_model_fallback_commit_coordinator(
+        &self,
+    ) -> &Arc<dyn crate::handles::StickyModelFallbackCommitCoordinator> {
+        &self.sticky_model_fallback_commit_coordinator
+    }
+
     pub fn auth_lease(&self) -> &GeneratedAuthLeaseHandle {
         &self.auth_lease
     }
@@ -352,6 +370,12 @@ impl SessionRuntimeBindings {
         &self.interaction_stream
     }
 
+    pub fn compaction_commit_coordinator(
+        &self,
+    ) -> &Arc<dyn crate::memory::CompactionCommitCoordinator> {
+        &self.compaction_commit_coordinator
+    }
+
     #[doc(hidden)]
     pub fn __runtime_authority(&self) -> &(dyn Any + Send + Sync) {
         self.runtime_authority.as_ref()
@@ -372,12 +396,16 @@ impl Clone for SessionRuntimeBindings {
             peer_comms_install: self.peer_comms_install.clone(),
             session_admission: Arc::clone(&self.session_admission),
             model_routing: Arc::clone(&self.model_routing),
+            sticky_model_fallback_commit_coordinator: Arc::clone(
+                &self.sticky_model_fallback_commit_coordinator,
+            ),
             auth_lease: self.auth_lease.clone(),
             mcp_server_lifecycle: Arc::clone(&self.mcp_server_lifecycle),
             peer_interaction: Arc::clone(&self.peer_interaction),
             session_context: Arc::clone(&self.session_context),
             session_claim_handle: Arc::clone(&self.session_claim_handle),
             interaction_stream: Arc::clone(&self.interaction_stream),
+            compaction_commit_coordinator: Arc::clone(&self.compaction_commit_coordinator),
             runtime_authority: Arc::clone(&self.runtime_authority),
         }
     }
@@ -397,12 +425,20 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("peer_comms", &"<dyn PeerCommsHandle>")
             .field("session_admission", &"<dyn SessionAdmissionHandle>")
             .field("model_routing", &"<dyn ModelRoutingHandle>")
+            .field(
+                "sticky_model_fallback_commit_coordinator",
+                &"<dyn StickyModelFallbackCommitCoordinator>",
+            )
             .field("auth_lease", &"<dyn AuthLeaseHandle>")
             .field("mcp_server_lifecycle", &"<dyn McpServerLifecycleHandle>")
             .field("peer_interaction", &"<dyn PeerInteractionHandle>")
             .field("session_context", &"<dyn SessionContextHandle>")
             .field("session_claim_handle", &"<dyn SessionClaimHandle>")
             .field("interaction_stream", &"<dyn InteractionStreamHandle>")
+            .field(
+                "compaction_commit_coordinator",
+                &"<dyn CompactionCommitCoordinator>",
+            )
             .finish()
     }
 }

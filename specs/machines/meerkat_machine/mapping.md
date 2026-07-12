@@ -230,6 +230,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `HydrateSessionLlmStateRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CommitStickyModelFallbackRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ReconfigureSessionLlmIdentityAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

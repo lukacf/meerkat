@@ -317,15 +317,51 @@ that realm has a matching provider binding; unavailable catalog-default
 candidates are skipped rather than silently bleeding into another realm. For an
 explicit custom chain, an unavailable target is a configuration error.
 
-When a switch is applied, Meerkat updates the session LLM identity, request
-policy, auth lease, provider parameters, output-token ceiling, and capability
-base filter before retrying. The agent receives a hidden system notice with the
+When a switch is applied, Meerkat validates a capability-profile witness minted
+by the agent's exact captured effective-registry authority, then freshly
+resolves the target profile, context window, output ceiling, and capability
+filter from that registry. An independently constructed registry cannot
+authorize the switch even when it contains an identical provider/model row;
+an unresolved target is rejected, and the public fallback proposal carries no
+client-owned capability or limit fields. Meerkat seals the accepted identity,
+profile, filter, and retry attempt in an opaque one-shot activation proof that
+only the core agent loop can mint; holding a public runtime routing handle is
+not enough to fabricate a commit. Meerkat
+prepares the next session/request policy and complete tool-visibility state,
+then asks generated authority to preauthorize an exact one-shot routing commit.
+After reversibly activating the exact prebuilt target client and rotating the
+auth lease, the runtime supervisor compare-and-swaps a control-only copy of the
+last committed session snapshot: only LLM identity and typed visibility change;
+the in-flight prompt, fallback notice, transcript history, and usage do not.
+The preauthorized token then atomically recommits the generated runtime's LLM
+identity, capability surface, routing baseline, visibility filters, and
+visibility revision before the agent publishes prepared local state. Lost store
+acknowledgements are resolved by reading back the exact old or target bytes, and
+a rejected machine realization restores the old bytes before client/auth
+compensation. An unprovable third outcome forces canonical executor teardown;
+it never enters ordinary failed-batch retry. Runtime routing status and
+image-generation `Auto` therefore observe the same sticky fallback provider as
+later agent turns, including the new provider parameters, output-token ceiling,
+and capability base filter. Later turns read the registry-minted active profile
+and canonical ToolScope projection, never client-local capability or limit
+projections. The immediate visibility commit rebases any pending
+staged revision, so a later normal turn boundary preserves pending intent but
+cannot roll the active revision backward. The supervised operation outlives a
+dropped run future, so hard interrupt settles the same result before the live
+session can be discarded. Once the control commit succeeds, the fallback stays
+sticky even if that provider retry is terminal; cold recovery loads the target
+identity with the pre-turn transcript, so the failed input can be retried once
+without duplicating its prompt or notice. The agent receives a hidden system notice with the
 source model, fallback model, failure reason, skipped targets, active model
 limits, and any tools hidden by the fallback model's capabilities.
 
 For structured-output extraction turns, fallback keeps the extraction request
-deterministic: Meerkat reapplies the output schema for the new provider and
-keeps provider-native web search/grounding disabled on the retry.
+deterministic: before changing any active state, Meerkat compiles the schema
+through the exact inactive target client, injects that provider-lowered
+representation into the target request, and keeps provider-native web
+search/grounding disabled on the retry. Target compilation failure leaves the
+client, lease, runtime identity, visibility, and session fallback state
+unchanged.
 
 Capability changes are expected. For example, falling back from a 1M-context
 vision model to a 128K local model can clamp output tokens, hide image-result

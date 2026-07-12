@@ -41,6 +41,11 @@ pub enum RuntimeDriverError {
     #[error("Recovery corruption: {reason}")]
     RecoveryCorruption { reason: String },
 
+    /// Atomic unregister persistence may already be durable. The live retry
+    /// anchor is retained, but no compensating durable rollback may run.
+    #[error("Unregister finalization outcome is unknown: {reason}")]
+    UnregisterFinalizationOutcomeUnknown { reason: String },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),

@@ -522,12 +522,14 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
         .expect("generated peer-comms install factory"),
         Arc::clone(prepared.session_admission()),
         Arc::clone(prepared.model_routing()),
+        Arc::clone(prepared.sticky_model_fallback_commit_coordinator()),
         prepared.auth_lease().clone(),
         Arc::clone(prepared.mcp_server_lifecycle()),
         Arc::clone(prepared.peer_interaction()),
         Arc::clone(prepared.session_context()),
         Arc::clone(prepared.session_claim_handle()),
         Arc::clone(prepared.interaction_stream()),
+        Arc::clone(prepared.compaction_commit_coordinator()),
         Arc::new(()),
     );
 

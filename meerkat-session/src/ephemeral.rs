@@ -142,6 +142,13 @@ enum SessionCommand {
     ExportSession {
         reply_tx: oneshot::Sender<Result<meerkat_core::Session, SystemContextStateError>>,
     },
+    ReconcileRuntimeCompactionProjections {
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
+    AbortUncommittedCompactionProjections {
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
     ExecutionSnapshot {
         reply_tx: oneshot::Sender<
             Result<Option<meerkat_core::AgentExecutionSnapshot>, SnapshotProjectionError>,
@@ -508,6 +515,46 @@ pub trait SessionAgent: Send {
         prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
+
+    /// Reconcile/finalize compaction memory stages authorized by the exact
+    /// RuntimeStore atomic outbox. Standalone agents have no such authority.
+    async fn reconcile_runtime_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        if intents.is_empty() {
+            Ok(())
+        } else {
+            Err(meerkat_core::error::AgentError::ConfigError(
+                "runtime compaction projection reconciliation is unsupported by this session agent"
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// Await a supervised sticky-fallback control transaction whose original
+    /// run future may have been dropped by a hard interrupt. Runtime-backed
+    /// agents publish or compensate the retained saga before the session task
+    /// reports the turn result; agents without sticky fallback state are a
+    /// no-op.
+    async fn settle_inflight_sticky_model_fallback(
+        &mut self,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    /// Abort any invisible compaction-memory stage owned by a run future that
+    /// was dropped by a hard interrupt before the runtime could atomically
+    /// commit its session snapshot and outbox intent.
+    ///
+    /// SessionTask invokes this only for the hard-interrupt path. Successful
+    /// runs must retain their stage until RuntimeStore::atomic_apply commits the
+    /// paired transcript rewrite.
+    async fn abort_uncommitted_compaction_projections(
+        &mut self,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
 
     /// Run the next turn.
     ///
@@ -1260,6 +1307,73 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })?;
 
         Ok(session)
+    }
+
+    /// Reconcile/finalize invisible compaction memory stages from the exact
+    /// runtime atomic outbox.
+    pub async fn reconcile_runtime_compaction_projections(
+        &self,
+        id: &SessionId,
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    ) -> Result<(), SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+                .command_tx
+                .clone()
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ReconcileRuntimeCompactionProjections { intents, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task exited before compaction projection reconciliation".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped compaction projection reconciliation reply".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Abort the live compaction transaction after RuntimeStore rejected the
+    /// boundary and its authoritative outbox was observed empty.
+    pub async fn abort_uncommitted_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+                .command_tx
+                .clone()
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::AbortUncommittedCompactionProjections { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task exited before uncommitted compaction abort".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped uncommitted compaction abort reply".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -2922,6 +3036,21 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         self.start_turn_with_admission(id, req, None).await
     }
 
+    async fn reconcile_runtime_compaction_projections(
+        &self,
+        id: &SessionId,
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    ) -> Result<(), SessionError> {
+        EphemeralSessionService::reconcile_runtime_compaction_projections(self, id, intents).await
+    }
+
+    async fn abort_uncommitted_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        EphemeralSessionService::abort_uncommitted_compaction_projections(self, id).await
+    }
+
     async fn set_session_client(
         &self,
         id: &SessionId,
@@ -3614,7 +3743,7 @@ fn restore_deferred_turn_inputs(
 /// already-buffered commands resolving each waiter with its typed
 /// benign/terminal outcome, then closes the machine-owned drain obligation
 /// and authorizes session teardown.
-fn drain_session_task_commands<A: SessionAgent>(
+async fn drain_session_task_commands<A: SessionAgent>(
     commands: &mut mpsc::Receiver<SessionCommand>,
     agent: &mut A,
     control: &SessionTaskControl,
@@ -3665,6 +3794,16 @@ fn drain_session_task_commands<A: SessionAgent>(
             }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
+            }
+            SessionCommand::ReconcileRuntimeCompactionProjections { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
+                // Cleanup is still mandatory while shutting down: dropping
+                // this command would strand an invisible stage after the
+                // runtime already proved its atomic boundary did not commit.
+                let result = agent.abort_uncommitted_compaction_projections().await;
+                let _ = reply_tx.send(result);
             }
             SessionCommand::ExecutionSnapshot { reply_tx } => {
                 let _ = reply_tx.send(agent.execution_snapshot());
@@ -4215,7 +4354,7 @@ async fn session_task<A: SessionAgent>(
 
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
-                let (result, resolved_projection) = {
+                let (result, resolved_projection, interrupted) = {
                     #[cfg(not(target_arch = "wasm32"))]
                     type RunFut<'a> = std::pin::Pin<
                         Box<
@@ -4329,8 +4468,30 @@ async fn session_task<A: SessionAgent>(
                         }
                     }
 
-                    (r, resolved_projection)
+                    (r, resolved_projection, interrupted)
                 }; // run_fut dropped here
+
+                let result = match agent.settle_inflight_sticky_model_fallback().await {
+                    Ok(()) => result,
+                    Err(error) => Err(error),
+                };
+                let result = if interrupted {
+                    match agent.abort_uncommitted_compaction_projections().await {
+                        Ok(()) => result,
+                        Err(abort_error) => match result {
+                            Err(primary) => Err(primary.with_ancillary_failure(
+                                "failed to abort hard-interrupted compaction projection",
+                                abort_error,
+                            )),
+                            Ok(_) => Err(abort_error),
+                        },
+                    }
+                } else {
+                    result
+                };
+                if let Some(identity) = agent.durable_llm_identity() {
+                    control.llm_identity_tx.send_replace(identity);
+                }
 
                 let discard_active_context_error = match agent
                     .discard_unapplied_active_turn_system_context()
@@ -4372,16 +4533,27 @@ async fn session_task<A: SessionAgent>(
                         error = %error,
                         "failed to clear turn tool overlay; failing turn to avoid stale scope"
                     );
-                    Err(error)
+                    match result {
+                        Err(primary) if primary.requires_session_teardown() => Err(primary
+                            .with_ancillary_failure("failed to clear turn tool overlay", &error)),
+                        _ => Err(error),
+                    }
                 } else if let Some(error) = discard_active_context_error {
                     tracing::error!(
                         error = %error,
                         "failed to sync system-context state while discarding stale active-turn \
                          context; failing turn to avoid stale canonical metadata"
                     );
-                    Err(meerkat_core::error::AgentError::InternalError(
-                        error.to_string(),
-                    ))
+                    match result {
+                        Err(primary) if primary.requires_session_teardown() => Err(primary
+                            .with_ancillary_failure(
+                                "failed to discard unapplied active-turn system context",
+                                &error,
+                            )),
+                        _ => Err(meerkat_core::error::AgentError::InternalError(
+                            error.to_string(),
+                        )),
+                    }
                 } else {
                     result
                 };
@@ -4413,12 +4585,23 @@ async fn session_task<A: SessionAgent>(
                         &control,
                         &mut next_seq,
                         &source,
-                    );
+                    )
+                    .await;
                     break;
                 }
             }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
+            }
+            SessionCommand::ReconcileRuntimeCompactionProjections { intents, reply_tx } => {
+                let result = agent
+                    .reconcile_runtime_compaction_projections(&intents)
+                    .await;
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
+                let result = agent.abort_uncommitted_compaction_projections().await;
+                let _ = reply_tx.send(result);
             }
             SessionCommand::ExecutionSnapshot { reply_tx } => {
                 let _ = reply_tx.send(agent.execution_snapshot());
@@ -4656,7 +4839,8 @@ async fn session_task<A: SessionAgent>(
                     &control,
                     &mut next_seq,
                     &source,
-                );
+                )
+                .await;
                 break;
             }
         }
@@ -6671,6 +6855,7 @@ mod admission_window_tests {
     struct AdmissionProbeBuilder {
         run_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
+        compaction_abort_calls: Arc<AtomicUsize>,
         cancel_after_boundary_tx: CancelAfterBoundarySender,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
@@ -6681,6 +6866,7 @@ mod admission_window_tests {
         identity: SessionLlmIdentity,
         run_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
+        compaction_abort_calls: Arc<AtomicUsize>,
         cancel_after_boundary_tx: CancelAfterBoundarySender,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
@@ -6702,6 +6888,7 @@ mod admission_window_tests {
                 identity: test_llm_identity(&req.model),
                 run_calls: Arc::clone(&self.run_calls),
                 cancel_calls: Arc::clone(&self.cancel_calls),
+                compaction_abort_calls: Arc::clone(&self.compaction_abort_calls),
                 cancel_after_boundary_tx: self.cancel_after_boundary_tx.clone(),
                 turn_admission_for_run: Arc::clone(&self.turn_admission_for_run),
                 interrupt_before_success: self.interrupt_before_success,
@@ -6767,6 +6954,11 @@ mod admission_window_tests {
 
         fn cancel(&mut self) {
             self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), AgentError> {
+            self.compaction_abort_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
@@ -6835,11 +7027,13 @@ mod admission_window_tests {
     fn probe_builder(
         run_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
+        compaction_abort_calls: Arc<AtomicUsize>,
         cancel_after_boundary_tx: CancelAfterBoundarySender,
     ) -> AdmissionProbeBuilder {
         AdmissionProbeBuilder {
             run_calls,
             cancel_calls,
+            compaction_abort_calls,
             cancel_after_boundary_tx,
             turn_admission_for_run: Arc::new(Mutex::new(None)),
             interrupt_before_success: false,
@@ -6889,12 +7083,14 @@ mod admission_window_tests {
     async fn hard_interrupt_during_admission_cancels_before_agent_poll() {
         let run_calls = Arc::new(AtomicUsize::new(0));
         let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let compaction_abort_calls = Arc::new(AtomicUsize::new(0));
         let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
             tokio::sync::mpsc::unbounded_channel();
         let service = EphemeralSessionService::new(
             probe_builder(
                 Arc::clone(&run_calls),
                 Arc::clone(&cancel_calls),
+                Arc::clone(&compaction_abort_calls),
                 cancel_after_boundary_tx,
             ),
             1,
@@ -6910,6 +7106,14 @@ mod admission_window_tests {
         assert!(matches!(result, Err(AgentError::Cancelled)));
         assert_eq!(run_calls.load(Ordering::SeqCst), 0);
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(compaction_abort_calls.load(Ordering::SeqCst), 1);
+
+        let next = service
+            .start_turn(&session_id, start_turn_request())
+            .await
+            .expect("next turn should run after interrupted compaction cleanup");
+        assert_eq!(next.text, "ran");
+        assert_eq!(compaction_abort_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -6920,6 +7124,7 @@ mod admission_window_tests {
         let service = EphemeralSessionService::new(
             probe_builder(
                 Arc::clone(&run_calls),
+                Arc::new(AtomicUsize::new(0)),
                 Arc::new(AtomicUsize::new(0)),
                 cancel_after_boundary_tx,
             ),
@@ -6955,12 +7160,14 @@ mod admission_window_tests {
     async fn hard_interrupt_pending_when_run_result_is_ready_wins_over_success() {
         let run_calls = Arc::new(AtomicUsize::new(0));
         let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let compaction_abort_calls = Arc::new(AtomicUsize::new(0));
         let turn_admission_for_run = Arc::new(Mutex::new(None));
         let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
             tokio::sync::mpsc::unbounded_channel();
         let mut builder = probe_builder(
             Arc::clone(&run_calls),
             Arc::clone(&cancel_calls),
+            Arc::clone(&compaction_abort_calls),
             cancel_after_boundary_tx,
         );
         builder.turn_admission_for_run = Arc::clone(&turn_admission_for_run);
@@ -6989,6 +7196,7 @@ mod admission_window_tests {
         ));
         assert_eq!(run_calls.load(Ordering::SeqCst), 1);
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(compaction_abort_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -6999,6 +7207,7 @@ mod admission_window_tests {
         let service = EphemeralSessionService::new(
             probe_builder(
                 Arc::clone(&run_calls),
+                Arc::new(AtomicUsize::new(0)),
                 Arc::new(AtomicUsize::new(0)),
                 cancel_after_boundary_tx,
             ),
@@ -7672,12 +7881,14 @@ mod inline_video_admission_tests {
 
     struct BuilderIdentityProbe {
         identity: Option<SessionLlmIdentity>,
+        committed_identity_before_turn_failure: Option<SessionLlmIdentity>,
         validated_identities: Arc<Mutex<Vec<SessionLlmIdentity>>>,
     }
 
     struct BuilderIdentityAgent {
         session_id: SessionId,
         identity: Option<SessionLlmIdentity>,
+        committed_identity_before_turn_failure: Option<SessionLlmIdentity>,
         system_context_state: meerkat_core::SystemContextStateHandle,
     }
 
@@ -7737,6 +7948,9 @@ mod inline_video_admission_tests {
             Ok(BuilderIdentityAgent {
                 session_id: SessionId::new(),
                 identity: self.identity.clone(),
+                committed_identity_before_turn_failure: self
+                    .committed_identity_before_turn_failure
+                    .clone(),
                 system_context_state: meerkat_core::SystemContextStateHandle::new(
                     Default::default(),
                 )
@@ -7753,6 +7967,14 @@ mod inline_video_admission_tests {
             _prompt: ContentInput,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<RunResult, AgentError> {
+            if let Some(target) = self.committed_identity_before_turn_failure.take() {
+                self.identity = Some(target.clone());
+                return Err(AgentError::llm(
+                    target.provider.as_str(),
+                    meerkat_core::error::LlmFailureReason::InvalidModel(target.model.clone()),
+                    "backup terminal failure",
+                ));
+            }
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: self.session_id.clone(),
@@ -7888,6 +8110,7 @@ mod inline_video_admission_tests {
         let service = EphemeralSessionService::new(
             BuilderIdentityProbe {
                 identity: Some(durable_identity.clone()),
+                committed_identity_before_turn_failure: None,
                 validated_identities: Arc::clone(&validated_identities),
             },
             1,
@@ -7920,6 +8143,7 @@ mod inline_video_admission_tests {
         let service = EphemeralSessionService::new(
             BuilderIdentityProbe {
                 identity: None,
+                committed_identity_before_turn_failure: None,
                 validated_identities: Arc::clone(&validated_identities),
             },
             1,
@@ -7956,6 +8180,7 @@ mod inline_video_admission_tests {
         let service = EphemeralSessionService::new(
             BuilderIdentityProbe {
                 identity: Some(durable_identity.clone()),
+                committed_identity_before_turn_failure: None,
                 validated_identities: Arc::clone(&validated_identities),
             },
             1,
@@ -7990,12 +8215,61 @@ mod inline_video_admission_tests {
     }
 
     #[tokio::test]
+    async fn failed_turn_republishes_settled_sticky_fallback_identity() {
+        let primary_identity = identity(Provider::Anthropic, "primary-model");
+        let backup_identity = identity(Provider::OpenAI, "backup-model");
+        let service = EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: Some(primary_identity.clone()),
+                committed_identity_before_turn_failure: Some(backup_identity.clone()),
+                validated_identities: Arc::new(Mutex::new(Vec::new())),
+            },
+            1,
+        );
+        let result = service
+            .create_session(create_request(
+                ContentInput::Text("defer".to_string()),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create session");
+        assert_eq!(
+            service
+                .live_session_llm_identity(&result.session_id)
+                .await
+                .expect("initial live identity"),
+            primary_identity
+        );
+
+        let turn_error = service
+            .start_turn(
+                &result.session_id,
+                start_turn_request(ContentInput::Text("run".to_string())),
+            )
+            .await
+            .expect_err("backup terminal failure must remain the turn result");
+        assert!(matches!(
+            turn_error,
+            SessionError::Agent(AgentError::Llm { .. })
+        ));
+        assert_eq!(
+            service
+                .live_session_llm_identity(&result.session_id)
+                .await
+                .expect("settled fallback live identity"),
+            backup_identity,
+            "the live identity watch must mirror the committed fallback even when its retry fails"
+        );
+    }
+
+    #[tokio::test]
     async fn hot_swap_replaces_builder_seeded_live_identity() {
         let durable_identity = identity(Provider::Gemini, "providerless-video-alias");
         let validated_identities = Arc::new(Mutex::new(Vec::new()));
         let service = EphemeralSessionService::new(
             BuilderIdentityProbe {
                 identity: Some(durable_identity),
+                committed_identity_before_turn_failure: None,
                 validated_identities,
             },
             1,

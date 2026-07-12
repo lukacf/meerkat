@@ -2512,7 +2512,11 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
         calls.append((method, params))
         if method == "comms/peers":
             return {"peers": [{"name": "agent-a"}]}
-        return {"kind": "peer_message_sent", "acked": True}
+        return {
+            "kind": "peer_message_sent",
+            "envelope_id": "env-1",
+            "delivery": "acked",
+        }
 
     client._request = fake_request  # type: ignore[method-assign]
 
@@ -2530,9 +2534,41 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
     peers = await client.peers("s1")
 
     assert send_receipt["kind"] == "peer_message_sent"
+    assert send_receipt["envelope_id"] == "env-1"
     assert peers["peers"] == [{"name": "agent-a"}]
     assert [m for m, _ in calls] == ["comms/send", "comms/peers"]
     assert calls[0][1]["blocks"] == blocks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"kind": "peer_message_sent", "delivery": "acked"},
+        {"kind": "peer_message_sent", "envelope_id": "env-1", "acked": True},
+        {
+            "kind": "peer_message_sent",
+            "envelope_id": "env-1",
+            "delivery": "acked",
+            "acked": True,
+        },
+        {
+            "kind": "peer_request_sent",
+            "envelope_id": "env-1",
+            "interaction_id": "interaction-1",
+            "stream_reserved": False,
+        },
+        {"kind": "input_accepted", "interaction_id": "interaction-1"},
+        {"kind": "legacy_sent", "envelope_id": "env-1"},
+    ],
+)
+async def test_client_comms_send_rejects_noncanonical_receipts(response) -> None:
+    client = MeerkatClient()
+    client._request = lambda _method, _params: asyncio.sleep(0, result=response)  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.send("s1", kind="peer_message", to="agent-a", body="hello")
+    assert excinfo.value.code == "INVALID_RESPONSE"
 
 
 @pytest.mark.asyncio
@@ -5549,6 +5585,93 @@ async def test_mob_helper_results_require_canonical_agent_identity() -> None:
             agent_identity="fork-a",
             role_name="worker",
         )
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_helper_wrappers_forward_canonical_model_override() -> None:
+    from meerkat.mob import Mob
+
+    client = MeerkatClient()
+    calls = []
+
+    async def helper_result(method, params):
+        calls.append((method, params))
+        return {
+            "tokens_used": 1,
+            "agent_identity": params.get("agent_identity") or "helper-a",
+            "member_ref": _make_member_ref(
+                params["mob_id"], params.get("agent_identity") or "helper-a"
+            ),
+        }
+
+    client._request = helper_result  # type: ignore[method-assign]
+    mob = Mob(client, "mob-1")
+    await mob.spawn_helper(
+        "help", agent_identity="helper-a", model_override="gpt-5.6-sol"
+    )
+    await mob.fork_helper(
+        "source-a",
+        "review",
+        agent_identity="fork-a",
+        model_override="claude-opus-4-8",
+    )
+
+    assert calls[0][1]["model_override"] == "gpt-5.6-sol"
+    assert calls[1][1]["model_override"] == "claude-opus-4-8"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "progress",
+    [
+        {"run_state": "idle"},
+        {
+            "run_state": "running",
+            "in_flight_work": 0,
+            "last_progress_at_ms": 1,
+            "last_progress_event": "unchanged",
+            "health": "healthy",
+        },
+        {
+            "run_state": "idle",
+            "in_flight_work": -1,
+            "last_progress_at_ms": 1,
+            "last_progress_event": "unchanged",
+            "health": "healthy",
+        },
+        {
+            "run_state": "idle",
+            "in_flight_work": 0,
+            "last_progress_at_ms": 1,
+            "last_progress_event": "legacy",
+            "health": "healthy",
+        },
+        {
+            "run_state": "idle",
+            "in_flight_work": 0,
+            "last_progress_at_ms": 1,
+            "last_progress_event": "unchanged",
+            "health": "healthy",
+            "legacy_health_state": "green",
+        },
+    ],
+)
+async def test_member_status_rejects_malformed_progress(progress) -> None:
+    client = MeerkatClient()
+
+    async def malformed(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "worker-1"),
+            "tokens_used": 0,
+            "is_final": False,
+            "progress": progress,
+        }
+
+    client._request = malformed  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.mob_member_status("mob-1", "worker-1")
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 

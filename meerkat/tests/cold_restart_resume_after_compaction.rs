@@ -14,7 +14,7 @@
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use meerkat::surface::{
         build_runtime_backed_service, default_persistent_executor, materialize_session,
@@ -23,15 +23,288 @@ mod tests {
         AgentFactory, Config, CreateSessionRequest, FactoryAgentBuilder, PersistenceBundle,
         PersistentSessionService, Session,
     };
-    use meerkat_client::TestClient;
+    use meerkat_client::types::LlmStream;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use meerkat_core::SessionBuildOptions;
     use meerkat_core::session_store::{SessionFilter, SessionStore, SessionStoreError};
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    use meerkat_core::{MemoryEnumerationRequest, MemorySearchScope, MemoryStore};
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    use meerkat_runtime::RuntimeStore;
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{Input, MeerkatMachine, PromptInput};
     use tokio::time::Duration;
 
+    /// Deterministic client whose compaction response actually carries the
+    /// history it replaces. Normal turns still return the small `ok` response
+    /// used by these persistence tests; summary calls echo prior user text so
+    /// assertions can distinguish preserved semantic history from a raw
+    /// retained transcript message.
+    struct HistorySummarizingTestClient;
+
+    #[async_trait::async_trait]
+    impl LlmClient for HistorySummarizingTestClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            let last_user = request
+                .messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    meerkat_core::Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                });
+            let text = if last_user
+                .as_deref()
+                .is_some_and(|text| text.contains("CONTEXT COMPACTION"))
+            {
+                let summary = request
+                    .messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        meerkat_core::Message::User(user)
+                            if !user.text_content().contains("CONTEXT COMPACTION") =>
+                        {
+                            Some(user.text_content())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if summary.is_empty() {
+                    "empty history".to_string()
+                } else {
+                    summary
+                }
+            } else {
+                "ok".to_string()
+            };
+            let events = vec![
+                LlmEvent::TextDelta {
+                    delta: text,
+                    meta: None,
+                },
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                },
+            ];
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    struct CompactionFailureTrackingClient {
+        fail_compaction: bool,
+        compaction_attempts: Arc<AtomicUsize>,
+    }
+
+    impl CompactionFailureTrackingClient {
+        fn new(fail_compaction: bool, compaction_attempts: Arc<AtomicUsize>) -> Self {
+            Self {
+                fail_compaction,
+                compaction_attempts,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for CompactionFailureTrackingClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            let is_compaction = request.messages.iter().rev().any(|message| {
+                matches!(
+                    message,
+                    meerkat_core::Message::User(user)
+                        if user.text_content().contains("CONTEXT COMPACTION")
+                )
+            });
+            if is_compaction {
+                self.compaction_attempts.fetch_add(1, Ordering::SeqCst);
+                if self.fail_compaction {
+                    return Box::pin(futures::stream::iter([Err(LlmError::IncompleteResponse {
+                        message: "cold-restart compaction failure".to_string(),
+                    })]));
+                }
+            }
+
+            let text = if is_compaction { "summary" } else { "ok" };
+            Box::pin(futures::stream::iter(
+                [
+                    LlmEvent::TextDelta {
+                        delta: text.to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ]
+                .into_iter()
+                .map(Ok),
+            ))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Completes the first ordinary turn, summarizes the compaction request,
+    /// then asks for a host callback on the ordinary request immediately
+    /// following that rewrite.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    struct CallbackPendingAfterCompactionClient {
+        ordinary_calls: AtomicUsize,
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    impl CallbackPendingAfterCompactionClient {
+        fn new() -> Self {
+            Self {
+                ordinary_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[async_trait::async_trait]
+    impl LlmClient for CallbackPendingAfterCompactionClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            let is_compaction = request.messages.iter().rev().any(|message| {
+                matches!(
+                    message,
+                    meerkat_core::Message::User(user)
+                        if user.text_content().contains("CONTEXT COMPACTION")
+                )
+            });
+            let events = if is_compaction {
+                vec![
+                    LlmEvent::TextDelta {
+                        delta: "callback compaction summary".to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ]
+            } else if self.ordinary_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![
+                    LlmEvent::TextDelta {
+                        delta: "ok".to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ]
+            } else {
+                vec![
+                    LlmEvent::ToolCallComplete {
+                        id: "toolu_compaction_callback".to_string(),
+                        name: "external_callback".to_string(),
+                        args: serde_json::json!({ "key": "after-compaction" }),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
+                        },
+                    },
+                ]
+            };
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    struct CallbackPendingDispatcher;
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for CallbackPendingDispatcher {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            Arc::from([Arc::new(meerkat_core::ToolDef::new(
+                "external_callback",
+                "external callback test tool",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" }
+                    }
+                }),
+            ))])
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            let args = serde_json::from_str(call.args.get()).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "raw": call.args.get()
+                })
+            });
+            Err(meerkat_core::ToolError::callback_pending(call.name, args))
+        }
+    }
+
     async fn build_service(
         root: &std::path::Path,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+    ) {
+        build_service_with_client(root, Arc::new(HistorySummarizingTestClient)).await
+    }
+
+    async fn build_service_with_client(
+        root: &std::path::Path,
+        client: Arc<dyn LlmClient>,
     ) -> (
         Arc<PersistentSessionService<FactoryAgentBuilder>>,
         Arc<MeerkatMachine>,
@@ -46,9 +319,313 @@ mod tests {
         .expect("open realm persistence");
         let factory = AgentFactory::new(root.join("sessions"));
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());
-        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        builder.default_llm_client = Some(client);
         let (service, adapter) = build_runtime_backed_service(builder, 4, persistence);
         (Arc::new(service), adapter)
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn build_callback_memory_service(
+        root: &std::path::Path,
+        client: Arc<dyn LlmClient>,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        Arc<meerkat_runtime::store::SqliteRuntimeStore>,
+    ) {
+        let sqlite_path = root.join("sessions.sqlite3");
+        let session_store: Arc<dyn SessionStore> = Arc::new(
+            meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open session sqlite"),
+        );
+        let runtime_store = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
+                .expect("open runtime sqlite"),
+        );
+        let runtime_store_for_bundle: Arc<dyn RuntimeStore> = runtime_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
+        let bundle = PersistenceBundle::new(session_store, runtime_store_for_bundle, blob_store);
+
+        let factory = AgentFactory::new(root.join("sessions")).memory(true);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(client);
+        let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
+        (Arc::new(service), adapter, runtime_store)
+    }
+
+    /// RuntimeStore fault wrapper that rejects exactly one `atomic_apply`
+    /// before delegating any writes. The underlying sqlite store therefore
+    /// provides an authoritative empty outbox observation for the runtime
+    /// loop's post-error compaction settlement path.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    struct FailNextAtomicApplyStore {
+        inner: Arc<meerkat_runtime::store::SqliteRuntimeStore>,
+        fail_next: AtomicBool,
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    impl FailNextAtomicApplyStore {
+        fn new(inner: Arc<meerkat_runtime::store::SqliteRuntimeStore>) -> Self {
+            Self {
+                inner,
+                fail_next: AtomicBool::new(false),
+            }
+        }
+
+        fn arm(&self) {
+            self.fail_next.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[async_trait::async_trait]
+    impl RuntimeStore for FailNextAtomicApplyStore {
+        fn supports_compaction_projection_outbox(&self) -> bool {
+            self.inner.supports_compaction_projection_outbox()
+        }
+
+        fn auth_authority_key(&self) -> Option<String> {
+            self.inner.auth_authority_key()
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            session_delta: meerkat_runtime::SessionDelta,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
+        async fn commit_session_transcript_rewrite_snapshot(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            session_delta: meerkat_runtime::SessionDelta,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .commit_session_transcript_rewrite_snapshot(runtime_id, session_delta, commit)
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            session_delta: Option<meerkat_runtime::SessionDelta>,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            input_updates: Vec<meerkat_runtime::input_state::InputStatePersistenceRecord>,
+            session_store_key: Option<meerkat::SessionId>,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            if self.fail_next.swap(false, Ordering::AcqRel) {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "injected pre-commit atomic_apply failure".to_string(),
+                ));
+            }
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_pending_compaction_projections(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, meerkat_runtime::RuntimeStoreError>
+        {
+            self.inner
+                .load_pending_compaction_projections(runtime_id)
+                .await
+        }
+
+        async fn mark_compaction_projection_finalized(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            projection: &meerkat_core::CompactionProjectionId,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .mark_compaction_projection_finalized(runtime_id, projection)
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            Vec<meerkat_runtime::input_state::StoredInputState>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            run_id: &meerkat_core::RunId,
+            sequence: u64,
+        ) -> Result<
+            Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner.clear_session_snapshot(runtime_id).await
+        }
+
+        async fn replace_session_snapshot_if_current(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected_current: &[u8],
+            replacement: Vec<u8>,
+        ) -> Result<bool, meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                .await
+        }
+
+        async fn clear_session_snapshot_if_current(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected_current: &[u8],
+        ) -> Result<bool, meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .clear_session_snapshot_if_current(runtime_id, expected_current)
+                .await
+        }
+
+        async fn is_runtime_projection_quarantined(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<bool, meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .is_runtime_projection_quarantined(runtime_id)
+                .await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            state: &meerkat_runtime::input_state::InputStatePersistenceRecord,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            input_id: &meerkat_core::InputId,
+        ) -> Result<
+            Option<meerkat_runtime::input_state::StoredInputState>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_machine_lifecycle_record(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+            self.inner.load_machine_lifecycle_record(runtime_id).await
+        }
+
+        async fn commit_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+
+        async fn commit_unregister_finalization(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .commit_unregister_finalization(runtime_id, commit, input_states)
+                .await
+        }
+
+        async fn persist_ops_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            snapshot: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+        }
+
+        async fn load_ops_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_ops_lifecycle(runtime_id).await
+        }
+
+        async fn delete_ops_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner.delete_ops_lifecycle(runtime_id).await
+        }
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn build_atomic_apply_failure_memory_service(
+        root: &std::path::Path,
+        client: Arc<dyn LlmClient>,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        Arc<FailNextAtomicApplyStore>,
+        Arc<meerkat_runtime::store::SqliteRuntimeStore>,
+    ) {
+        let sqlite_path = root.join("sessions.sqlite3");
+        let session_store: Arc<dyn SessionStore> = Arc::new(
+            meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open session sqlite"),
+        );
+        let raw_runtime_store = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
+                .expect("open runtime sqlite"),
+        );
+        let fault_store = Arc::new(FailNextAtomicApplyStore::new(Arc::clone(
+            &raw_runtime_store,
+        )));
+        let runtime_store: Arc<dyn RuntimeStore> = fault_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
+        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store);
+
+        let factory = AgentFactory::new(root.join("sessions")).memory(true);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(client);
+        let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
+        (Arc::new(service), adapter, fault_store, raw_runtime_store)
     }
 
     /// Same request shape as the passing baseline, plus an aggressive
@@ -75,6 +652,19 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    fn callback_memory_request() -> CreateSessionRequest {
+        let mut request = create_request();
+        let build = request
+            .build
+            .as_mut()
+            .expect("compaction request must carry build options");
+        build.external_tools = Some(Arc::new(CallbackPendingDispatcher));
+        build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
+        build.override_memory = meerkat_core::ToolCategoryOverride::Enable;
+        request
+    }
+
     async fn materialize(
         service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
         adapter: &Arc<MeerkatMachine>,
@@ -93,6 +683,27 @@ mod tests {
         ))
         .await
         .expect("materialize session");
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    async fn materialize_callback_memory_session(
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        adapter: &Arc<MeerkatMachine>,
+        session: Session,
+    ) {
+        let service_for_executor = Arc::clone(service);
+        let adapter_for_executor = Arc::clone(adapter);
+        Box::pin(materialize_session(
+            service,
+            adapter,
+            session,
+            callback_memory_request(),
+            move |session_id| {
+                default_persistent_executor(service_for_executor, adapter_for_executor, session_id)
+            },
+        ))
+        .await
+        .expect("materialize callback-memory session");
     }
 
     async fn run_prompt(
@@ -142,6 +753,17 @@ mod tests {
             .expect("transcript history state must deserialize")
             .map(|state| state.commits.len())
             .unwrap_or(0)
+    }
+
+    fn compaction_cadence(session: &Session) -> meerkat_core::compact::SessionCompactionCadence {
+        serde_json::from_value(
+            session
+                .metadata()
+                .get(meerkat_core::compact::SESSION_COMPACTION_CADENCE_KEY)
+                .expect("compaction cadence metadata must be durable")
+                .clone(),
+        )
+        .expect("compaction cadence metadata must deserialize")
     }
 
     /// One compaction (summary injection rewrite) before the cold restart.
@@ -223,6 +845,350 @@ mod tests {
             texts.iter().any(|t| t.contains("third turn after restart")),
             "the post-restart turn must be recorded: {texts:?}"
         );
+    }
+
+    /// Callback-pending is a committed runtime terminal, not a run failure.
+    /// When it follows a durable compaction stage, the same runtime boundary
+    /// must atomically carry the typed rewrite into the outbox, finalize the
+    /// memory projection, clear the intent, and leave both facts recoverable
+    /// after a cold reopen.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn callback_pending_compaction_projection_finalizes_before_cold_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let discarded_source = "discarded callback source before compaction";
+
+        let session_id = {
+            let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
+            let (service, adapter, runtime_store) =
+                build_callback_memory_service(temp.path(), client);
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize_callback_memory_session(&service, &adapter, session).await;
+
+            run_prompt(&adapter, &session_id, discarded_source).await;
+            let callback = run_prompt_capture(
+                &adapter,
+                &session_id,
+                "second turn compacts then requests callback",
+            )
+            .await;
+            assert!(
+                matches!(
+                    &callback,
+                    Ok(CompletionOutcome::CallbackPending { tool_name, .. })
+                        if tool_name == "external_callback"
+                ),
+                "compacted turn must resolve as callback-pending: {callback:?}"
+            );
+
+            let authoritative = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("load authoritative callback-pending session")
+                .expect("callback-pending session must exist");
+            assert!(
+                has_compaction_summary(&authoritative),
+                "callback-pending commit must retain the typed compaction rewrite"
+            );
+            assert!(
+                rewrite_commit_count(&authoritative) >= 1,
+                "callback-pending commit must retain its TranscriptRewriteCommit"
+            );
+            assert!(
+                authoritative
+                    .compaction_projection_intents()
+                    .expect("read callback-pending compaction intents")
+                    .is_empty(),
+                "runtime finalization must clear the session-carried projection intent"
+            );
+
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+            assert!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("load callback-pending projection outbox")
+                    .is_empty(),
+                "callback-pending completion must drain the committed runtime outbox"
+            );
+            let runtime_snapshot = runtime_store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("load callback-pending runtime snapshot")
+                .expect("callback-pending runtime snapshot must exist");
+            let runtime_session: Session = serde_json::from_slice(&runtime_snapshot)
+                .expect("callback-pending runtime snapshot must be a session");
+            assert!(has_compaction_summary(&runtime_session));
+            assert!(
+                runtime_session
+                    .compaction_projection_intents()
+                    .expect("read runtime snapshot compaction intents")
+                    .is_empty(),
+                "finalization acknowledgement must clean the authoritative runtime snapshot"
+            );
+
+            let memory_store =
+                meerkat_memory::HnswMemoryStore::open(temp.path().join("sessions").join("memory"))
+                    .expect("reopen finalized memory store in first lifetime");
+            let page = memory_store
+                .enumerate_scoped(
+                    &MemorySearchScope::for_session(session_id.clone()),
+                    MemoryEnumerationRequest {
+                        limit: 64,
+                        offset: 0,
+                        source_overlap: None,
+                        indexed_after: None,
+                    },
+                )
+                .await
+                .expect("enumerate finalized compaction memory");
+            let source_record = page
+                .records
+                .iter()
+                .find(|record| record.content.contains(discarded_source))
+                .expect("discarded source must be visible only after finalization");
+            assert_eq!(source_record.metadata.session_id, session_id);
+            assert!(matches!(
+                &source_record.metadata.source,
+                meerkat_core::MemorySource::Compaction { source_range }
+                    if source_range.start() < source_range.end()
+            ));
+            session_id
+        };
+
+        // A new service, runtime store, agent, and HNSW handle over the same
+        // files must recover the paired rewrite/index state without reviving
+        // a finalized outbox intent.
+        let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
+        let (service, adapter, runtime_store) = build_callback_memory_service(temp.path(), client);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        assert!(
+            runtime_store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .expect("load cold-reopened projection outbox")
+                .is_empty(),
+            "cold reopen must not revive a finalized projection intent"
+        );
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load callback-pending session after cold reopen")
+            .expect("callback-pending session must survive cold reopen");
+        assert!(has_compaction_summary(&resume_source));
+        assert!(
+            resume_source
+                .compaction_projection_intents()
+                .expect("read cold-reopened compaction intents")
+                .is_empty()
+        );
+        materialize_callback_memory_session(&service, &adapter, resume_source).await;
+
+        let reopened_memory =
+            meerkat_memory::HnswMemoryStore::open(temp.path().join("sessions").join("memory"))
+                .expect("cold reopen finalized memory store");
+        let page = reopened_memory
+            .enumerate_scoped(
+                &MemorySearchScope::for_session(session_id),
+                MemoryEnumerationRequest {
+                    limit: 64,
+                    offset: 0,
+                    source_overlap: None,
+                    indexed_after: None,
+                },
+            )
+            .await
+            .expect("enumerate memory after cold reopen");
+        assert!(
+            page.records
+                .iter()
+                .any(|record| record.content.contains(discarded_source)),
+            "discarded source memory must survive a cold HNSW reopen"
+        );
+    }
+
+    /// A rejected RuntimeStore atomic boundary has no committed outbox
+    /// authority. The live agent must therefore roll back the compaction
+    /// rewrite and delete its exact invisible HNSW stage immediately; later
+    /// recovery must have no orphan left to discover or clean up.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn atomic_apply_failure_aborts_live_compaction_stage_before_teardown() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let compaction_attempts = Arc::new(AtomicUsize::new(0));
+        let client: Arc<dyn LlmClient> = Arc::new(CompactionFailureTrackingClient::new(
+            false,
+            Arc::clone(&compaction_attempts),
+        ));
+        let (service, adapter, fault_store, runtime_store) =
+            build_atomic_apply_failure_memory_service(temp.path(), client);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        materialize_callback_memory_session(&service, &adapter, session).await;
+        run_prompt(
+            &adapter,
+            &session_id,
+            "source that would be projected if the boundary committed",
+        )
+        .await;
+
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let baseline_snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load baseline runtime snapshot")
+            .expect("first turn must commit a runtime snapshot");
+        let baseline: Session =
+            serde_json::from_slice(&baseline_snapshot).expect("baseline snapshot is a session");
+        assert!(!has_compaction_summary(&baseline));
+
+        fault_store.arm();
+        let outcome = run_prompt_capture(
+            &adapter,
+            &session_id,
+            "second turn stages compaction then fails atomic apply",
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(CompletionOutcome::CompletedWithFinalizationFailure { .. }
+                    | CompletionOutcome::RuntimeTerminated { .. })
+                    | Err(_)
+            ),
+            "a rejected runtime boundary must not report success: {outcome:?}"
+        );
+        assert_eq!(
+            compaction_attempts.load(Ordering::SeqCst),
+            1,
+            "test setup must reach the compaction stage before atomic_apply fails"
+        );
+        assert_eq!(
+            runtime_store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("reload runtime snapshot after rejected atomic apply"),
+            Some(baseline_snapshot),
+            "the rejected atomic boundary must leave the old transcript authoritative"
+        );
+        assert!(
+            runtime_store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .expect("load outbox after rejected atomic apply")
+                .is_empty(),
+            "a pre-commit failure must leave no runtime outbox authority"
+        );
+
+        let memory_store =
+            meerkat_memory::HnswMemoryStore::open(temp.path().join("sessions").join("memory"))
+                .expect("reopen HNSW memory after rejected atomic apply");
+        let cleanup = memory_store
+            .reconcile_compaction_stages(
+                &meerkat_core::MemoryOwner::canonical_session(session_id.clone()),
+                &[],
+            )
+            .await
+            .expect("reconcile empty authority after live abort");
+        assert_eq!(
+            cleanup.aborted_orphans, 0,
+            "the live post-error abort must delete the stage before teardown; recovery must find no orphan"
+        );
+        let page = memory_store
+            .enumerate_scoped(
+                &MemorySearchScope::for_session(session_id),
+                MemoryEnumerationRequest {
+                    limit: 64,
+                    offset: 0,
+                    source_overlap: None,
+                    indexed_after: None,
+                },
+            )
+            .await
+            .expect("enumerate memory after rejected atomic apply");
+        assert!(
+            page.records.is_empty(),
+            "an uncommitted compaction stage must never become query-visible"
+        );
+    }
+
+    /// A failed compaction attempt is itself a durable cadence boundary. A
+    /// process restart must not forget it and immediately hammer the compaction
+    /// path again before `min_turns_between_compactions` has elapsed.
+    #[tokio::test]
+    async fn failed_compaction_attempt_cadence_survives_cold_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first_lifetime_attempts = Arc::new(AtomicUsize::new(0));
+
+        let session_id = {
+            let client: Arc<dyn LlmClient> = Arc::new(CompactionFailureTrackingClient::new(
+                true,
+                Arc::clone(&first_lifetime_attempts),
+            ));
+            let (service, adapter) = build_service_with_client(temp.path(), client).await;
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, "first turn before failed compaction").await;
+            run_prompt(&adapter, &session_id, "second turn attempts compaction").await;
+
+            assert_eq!(
+                first_lifetime_attempts.load(Ordering::SeqCst),
+                1,
+                "the first process lifetime must execute exactly one failed compaction attempt"
+            );
+            let persisted = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("authoritative load after failed compaction")
+                .expect("session should exist");
+            let cadence = compaction_cadence(&persisted);
+            assert_eq!(cadence.session_boundary_index, 2);
+            assert_eq!(cadence.last_compaction_boundary_index, None);
+            assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
+            session_id
+        };
+
+        let restarted_attempts = Arc::new(AtomicUsize::new(0));
+        let client: Arc<dyn LlmClient> = Arc::new(CompactionFailureTrackingClient::new(
+            false,
+            Arc::clone(&restarted_attempts),
+        ));
+        let (service, adapter) = build_service_with_client(temp.path(), client).await;
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after restart")
+            .expect("session should survive restart");
+        assert_eq!(
+            compaction_cadence(&resume_source).last_compaction_attempt_boundary_index,
+            Some(1),
+            "the failed-attempt boundary must survive the cold restart"
+        );
+
+        materialize(&service, &adapter, resume_source).await;
+        run_prompt(
+            &adapter,
+            &session_id,
+            "third turn immediately after failed-attempt restart",
+        )
+        .await;
+
+        assert_eq!(
+            restarted_attempts.load(Ordering::SeqCst),
+            0,
+            "the first post-restart boundary must be cadence-guarded from immediate retry"
+        );
+        let persisted = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load after guarded resumed turn")
+            .expect("session should still exist");
+        let cadence = compaction_cadence(&persisted);
+        assert_eq!(cadence.session_boundary_index, 3);
+        assert_eq!(cadence.last_compaction_boundary_index, None);
+        assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
     }
 
     /// Session-store wrapper modeling a host that loses the ability to write
@@ -345,7 +1311,7 @@ mod tests {
 
         let factory = AgentFactory::new(root.join("sessions"));
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());
-        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        builder.default_llm_client = Some(Arc::new(HistorySummarizingTestClient));
         let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
         let service = service.with_event_projection(
             Arc::new(meerkat_session::event_store::FileEventStore::new(
@@ -502,7 +1468,7 @@ mod tests {
 
         let factory = AgentFactory::new(root.join("sessions"));
         let mut builder = FactoryAgentBuilder::new(factory, Config::default());
-        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        builder.default_llm_client = Some(Arc::new(HistorySummarizingTestClient));
         let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
         (Arc::new(service), adapter, raw_row_store)
     }

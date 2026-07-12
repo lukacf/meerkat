@@ -889,6 +889,7 @@ meerkat_machine_runtime_internal_inputs!(
         McpServerReload,
     ],
     ModelRoutingLifecycle => [
+        CommitStickyModelFallback,
         ModelRoutingStatus,
         RequestFiniteSwitchTurn,
         RequestUntilChangedSwitchTurn,

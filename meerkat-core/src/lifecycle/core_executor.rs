@@ -159,6 +159,36 @@ pub struct CoreControlFailureCause {
     pub message: String,
 }
 
+/// Machine-independent reason an executor can no longer own its live session.
+///
+/// This is a handoff request, not an ordinary apply failure: the runtime loop
+/// must close the staged run, publish the exact executor, and let the
+/// machine-owned unregister saga perform external cleanup. Executors must not
+/// call unregister (or discard their session) from inside `apply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoreExecutorTeardownReason {
+    ArchivedSession,
+    SessionUnavailable,
+}
+
+impl CoreExecutorTeardownReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ArchivedSession => "ArchivedSession",
+            Self::SessionUnavailable => "SessionUnavailable",
+        }
+    }
+
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        match value {
+            "ArchivedSession" => Some(Self::ArchivedSession),
+            "SessionUnavailable" => Some(Self::SessionUnavailable),
+            _ => None,
+        }
+    }
+}
+
 impl CoreControlFailureCause {
     pub fn new(kind: CoreControlFailureCauseKind, message: impl Into<String>) -> Self {
         Self {
@@ -201,6 +231,16 @@ pub enum CoreExecutorError {
     TerminalFailure {
         outcome: TurnTerminalOutcome,
         cause_kind: TurnTerminalCauseKind,
+        message: String,
+    },
+
+    /// The executor's owned session reached a terminal/unavailable condition
+    /// that requires canonical teardown after the runtime loop hands off the
+    /// exact executor. This variant must never enter failed-batch backlog
+    /// retry, and must never be realized by unregistering inside `apply`.
+    #[error("Executor requires teardown ({reason:?}): {message}")]
+    TeardownRequired {
+        reason: CoreExecutorTeardownReason,
         message: String,
     },
 
@@ -250,9 +290,30 @@ impl CoreExecutorError {
         }
     }
 
+    pub fn teardown_required(
+        reason: CoreExecutorTeardownReason,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::TeardownRequired {
+            reason,
+            message: message.into(),
+        }
+    }
+
+    pub fn archived_session_requires_teardown(message: impl Into<String>) -> Self {
+        Self::teardown_required(CoreExecutorTeardownReason::ArchivedSession, message)
+    }
+
+    pub fn session_unavailable_requires_teardown(message: impl Into<String>) -> Self {
+        Self::teardown_required(CoreExecutorTeardownReason::SessionUnavailable, message)
+    }
+
     pub fn apply_failed_from_session_error(error: SessionError) -> Self {
         match error {
             SessionError::Agent(AgentError::Cancelled) => Self::Cancelled,
+            SessionError::Agent(AgentError::StickyModelFallbackAuthorityUnknown { message }) => {
+                Self::session_unavailable_requires_teardown(message)
+            }
             SessionError::Agent(AgentError::TerminalFailure {
                 outcome,
                 cause_kind,
@@ -279,6 +340,10 @@ impl CoreExecutorError {
         matches!(self, Self::Cancelled)
     }
 
+    pub fn requires_runtime_teardown(&self) -> bool {
+        matches!(self, Self::TeardownRequired { .. })
+    }
+
     pub fn control_failed(cause: CoreControlFailureCause) -> Self {
         Self::ControlFailed { cause }
     }
@@ -295,6 +360,10 @@ impl CoreExecutorError {
                     "typed machine terminal failure escaped runtime-loop handling: {cause_kind:?}"
                 ))
             }
+            Self::TeardownRequired { reason, message } => CoreApplyFailureCause::new(
+                CoreApplyFailureCauseKind::ExecutorStopped,
+                format!("executor requested {} teardown: {message}", reason.as_str()),
+            ),
             Self::ControlFailed { cause } => {
                 CoreApplyFailureCause::executor_control_failed(cause.message.clone())
             }
@@ -495,11 +564,40 @@ pub trait CoreExecutor: Send + Sync {
     ///
     /// RuntimeStore remains the authority for runtime-backed turns; this hook
     /// is for compatibility projections such as `SessionStore` snapshots that
-    /// must not be written before the machine commit succeeds.
+    /// must not be written before the machine commit succeeds. Recovery may
+    /// invoke this with the authoritative RuntimeStore snapshot after outbox
+    /// finalization so a stale compatibility snapshot cannot resurrect an
+    /// already-finalized compaction intent.
     async fn checkpoint_committed_session_snapshot(
         &mut self,
         _session_snapshot: &[u8],
     ) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    /// Reconcile and finalize semantic-memory compaction stages named by the
+    /// exact RuntimeStore atomic outbox. The empty slice is authoritative: a
+    /// durable implementation must use it to abort any invisible stage left by
+    /// a crash before the runtime boundary committed.
+    async fn reconcile_committed_compaction_projections(
+        &mut self,
+        intents: &[crate::memory::CompactionProjectionIntent],
+    ) -> Result<(), CoreExecutorError> {
+        if intents.is_empty() {
+            Ok(())
+        } else {
+            Err(CoreExecutorError::Internal(
+                "executor cannot reconcile committed compaction projections".to_string(),
+            ))
+        }
+    }
+
+    /// Roll back and abort any invisible compaction stage after the runtime
+    /// boundary commit was rejected and the authoritative outbox was observed
+    /// empty. This is deliberately separate from committed reconciliation so
+    /// an empty post-error observation can never be mistaken for commit
+    /// authority.
+    async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 
@@ -509,8 +607,13 @@ pub trait CoreExecutor: Send + Sync {
     /// Ask this runtime executor to stop accepting work.
     async fn stop_runtime_executor(&mut self, reason: String) -> Result<(), CoreExecutorError>;
 
-    /// Cleanup that is safe only after the runtime control plane has durably
-    /// terminalized the stop.
+    /// Cleanup of executor-owned external/session material that is safe only
+    /// after the runtime control plane has durably terminalized the stop.
+    ///
+    /// This hook must not unregister the runtime session. The machine-owned
+    /// unregister coordinator invokes it and owns registration removal; a
+    /// recursive unregister would attempt to join the coordinator from its own
+    /// worker task and is rejected fail-closed.
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         Ok(())
     }

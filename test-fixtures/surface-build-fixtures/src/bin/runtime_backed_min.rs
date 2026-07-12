@@ -81,6 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }))?
     );
     service.discard_live_session(&result.session_id).await?;
-    runtime_adapter.unregister_session(&result.session_id).await;
+    runtime_adapter
+        .unregister_session(&result.session_id)
+        .await?;
     Ok(())
 }

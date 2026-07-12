@@ -1535,6 +1535,26 @@
           }
         ]
       },
+      "CompactionRewriteRange": {
+        "description": "Opaque range carried by the typed compaction rewrite semantic.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -2988,6 +3008,26 @@
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
       },
+      "TranscriptEditRewriteRange": {
+        "description": "Opaque current-format range carried by an ordinary transcript edit.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
       "TranscriptRevisionBody": {
         "description": "Immutable transcript revision body retained by the session-local graph.",
         "properties": {
@@ -3070,7 +3110,7 @@
         "type": "object"
       },
       "TranscriptRewriteReason": {
-        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
             "type": "string"
@@ -3111,7 +3151,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
-            "description": "Replace messages in `[start, end)`.",
+            "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
                 "format": "uint",
@@ -3132,6 +3172,40 @@
               "type",
               "start",
               "end"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Current typed ordinary-edit semantic.",
+            "properties": {
+              "range": {
+                "$ref": "#/$defs/TranscriptEditRewriteRange"
+              },
+              "type": {
+                "const": "edit_message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "range"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
+            "properties": {
+              "range": {
+                "$ref": "#/$defs/CompactionRewriteRange"
+              },
+              "type": {
+                "const": "compaction_message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "range"
             ],
             "type": "object"
           }
@@ -17867,6 +17941,26 @@
           }
         ]
       },
+      "CompactionRewriteRange": {
+        "description": "Opaque range carried by the typed compaction rewrite semantic.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -19409,6 +19503,26 @@
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
       },
+      "TranscriptEditRewriteRange": {
+        "description": "Opaque current-format range carried by an ordinary transcript edit.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
       "TranscriptRevisionBody": {
         "description": "Immutable transcript revision body retained by the session-local graph.",
         "properties": {
@@ -19491,7 +19605,7 @@
         "type": "object"
       },
       "TranscriptRewriteReason": {
-        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
             "type": "string"
@@ -19532,7 +19646,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
-            "description": "Replace messages in `[start, end)`.",
+            "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
                 "format": "uint",
@@ -19553,6 +19667,40 @@
               "type",
               "start",
               "end"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Current typed ordinary-edit semantic.",
+            "properties": {
+              "range": {
+                "$ref": "#/$defs/TranscriptEditRewriteRange"
+              },
+              "type": {
+                "const": "edit_message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "range"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
+            "properties": {
+              "range": {
+                "$ref": "#/$defs/CompactionRewriteRange"
+              },
+              "type": {
+                "const": "compaction_message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "range"
             ],
             "type": "object"
           }
@@ -42336,6 +42484,26 @@
   },
   "SessionTranscriptRewriteResult": {
     "$defs": {
+      "CompactionRewriteRange": {
+        "description": "Opaque range carried by the typed compaction rewrite semantic.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
       "SystemTime": {
         "properties": {
           "nanos_since_epoch": {
@@ -42352,6 +42520,26 @@
         "required": [
           "secs_since_epoch",
           "nanos_since_epoch"
+        ],
+        "type": "object"
+      },
+      "TranscriptEditRewriteRange": {
+        "description": "Opaque current-format range carried by an ordinary transcript edit.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
         ],
         "type": "object"
       },
@@ -42410,7 +42598,7 @@
         "type": "object"
       },
       "TranscriptRewriteReason": {
-        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
+        "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
             "type": "string"
@@ -42431,7 +42619,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
-            "description": "Replace messages in `[start, end)`.",
+            "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
                 "format": "uint",
@@ -42452,6 +42640,40 @@
               "type",
               "start",
               "end"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Current typed ordinary-edit semantic.",
+            "properties": {
+              "range": {
+                "$ref": "#/$defs/TranscriptEditRewriteRange"
+              },
+              "type": {
+                "const": "edit_message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "range"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
+            "properties": {
+              "range": {
+                "$ref": "#/$defs/CompactionRewriteRange"
+              },
+              "type": {
+                "const": "compaction_message_range",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "range"
             ],
             "type": "object"
           }
@@ -44972,7 +45194,7 @@
   },
   "TranscriptRewriteReason": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance. It is not a\nsecond policy authority; rewrite admission is enforced by the typed\nselection, digest, parent-revision, and store-guard contracts.",
+    "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
     "properties": {
       "kind": {
         "type": "string"
@@ -44991,11 +45213,53 @@
     "type": "object"
   },
   "TranscriptRewriteSelection": {
+    "$defs": {
+      "CompactionRewriteRange": {
+        "description": "Opaque range carried by the typed compaction rewrite semantic.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "TranscriptEditRewriteRange": {
+        "description": "Opaque current-format range carried by an ordinary transcript edit.",
+        "properties": {
+          "end": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "A concrete transcript span selected for same-session rewrite.",
     "oneOf": [
       {
-        "description": "Replace messages in `[start, end)`.",
+        "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
         "properties": {
           "end": {
             "format": "uint",
@@ -45016,6 +45280,40 @@
           "type",
           "start",
           "end"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Current typed ordinary-edit semantic.",
+        "properties": {
+          "range": {
+            "$ref": "#/$defs/TranscriptEditRewriteRange"
+          },
+          "type": {
+            "const": "edit_message_range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "range"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
+        "properties": {
+          "range": {
+            "$ref": "#/$defs/CompactionRewriteRange"
+          },
+          "type": {
+            "const": "compaction_message_range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "range"
         ],
         "type": "object"
       }

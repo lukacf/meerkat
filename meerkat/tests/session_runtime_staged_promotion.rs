@@ -10,9 +10,12 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat::session_runtime::staged_promotion::{
-    PendingPromotionCleanupMode, StagedTaskJoinError, await_service_apply_runtime_turn,
-    await_service_apply_runtime_turn_with_recoverable_admission,
+    PendingPromotionCleanupMode, StagedApplyRuntimeTurnError, StagedTaskJoinError,
+    await_service_apply_runtime_turn, await_service_apply_runtime_turn_with_recoverable_admission,
+    classify_recovered_create_failure,
 };
+use meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason;
+use meerkat_core::service::SessionError;
 use meerkat_core::types::SessionId;
 
 #[test]
@@ -25,6 +28,44 @@ fn cleanup_mode_variants_are_distinct_and_copy() {
     let finish_copy = finish;
     assert_eq!(restore, restore_copy);
     assert_eq!(finish, finish_copy);
+}
+
+#[test]
+fn non_archived_restore_failure_requests_session_unavailable_teardown() {
+    let error = StagedApplyRuntimeTurnError::unavailable_teardown(
+        "materialized staged session requires restore",
+    );
+    assert!(matches!(
+        error,
+        StagedApplyRuntimeTurnError::TeardownRequired {
+            reason: CoreExecutorTeardownReason::SessionUnavailable,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn recovered_create_failure_tears_down_only_new_runtime_registration() {
+    let new_registration = classify_recovered_create_failure(
+        SessionError::Unsupported("synthetic create failure".to_string()),
+        false,
+    );
+    assert!(matches!(
+        new_registration,
+        StagedApplyRuntimeTurnError::TeardownRequired {
+            reason: CoreExecutorTeardownReason::SessionUnavailable,
+            ..
+        }
+    ));
+
+    let existing_registration = classify_recovered_create_failure(
+        SessionError::Unsupported("synthetic create failure".to_string()),
+        true,
+    );
+    assert!(matches!(
+        existing_registration,
+        StagedApplyRuntimeTurnError::Session(SessionError::Unsupported(_))
+    ));
 }
 
 /// Regression: when the spawned task vanishes before reporting a

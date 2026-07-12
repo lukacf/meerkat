@@ -6340,11 +6340,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // revival. The document promotion may have landed while the
             // runtime is still Retired. Treat that exact Active+Retired pair
             // as an idempotent in-progress revival, repair the compatibility
-            // projection, and let the caller perform the runtime reset. No
-            // other runtime state is accepted here.
-            let active = self.save_compatibility_projection_only(session).await?;
-            self.synchronize_live_session_after_archived_revival(id, &active)
-                .await?;
+            // projection, and let the caller perform the runtime reset. A
+            // live agent in this branch was materialized from this already-
+            // active snapshot, so requiring durable-snapshot synchronization
+            // would reject otherwise-valid custom SessionAgent
+            // implementations that use the default unsupported capability.
+            // No other runtime state is accepted here.
+            self.save_compatibility_projection_only(session).await?;
             return Ok(());
         }
 
@@ -20746,6 +20748,83 @@ mod tests {
             ),
             "unexpected active-session revival error: {active_error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_machine_authorized_active_retired_revival_does_not_require_live_snapshot_sync() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            EventfulBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        store.save(&session).await.expect("seed active session");
+
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("register active runtime");
+        meerkat_runtime::RuntimeControlPlane::retire(
+            &machine,
+            &PersistentSessionService::<EventfulBuilder>::runtime_id_for_session(&id),
+        )
+        .await
+        .expect("retire runtime while leaving the document active");
+
+        let admission = service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve live-session admission");
+        let created = service
+            .create_session_with_reserved_machine_archived_resume_admission(
+                resume_request(session),
+                admission,
+                machine.session_control_authority(),
+            )
+            .await
+            .expect("materialize the already-active compatibility snapshot");
+        assert_eq!(created.session_id, id);
+        assert!(
+            service
+                .inner
+                .has_live_session(&id)
+                .await
+                .expect("live-session status should succeed")
+        );
+
+        // EventfulDummyAgent intentionally uses SessionAgent's default
+        // DurableSnapshotSyncUnsupported capability. This idempotent crash
+        // boundary must not require a semantic sync because the live agent
+        // was just built from the same already-active snapshot.
+        service
+            .revive_archived_session_with_machine_authority(
+                &id,
+                machine.session_control_authority(),
+            )
+            .await
+            .expect("Active+Retired compatibility revival must remain supported");
+        assert!(
+            service
+                .inner
+                .has_live_session(&id)
+                .await
+                .expect("live-session status should succeed after revival")
+        );
+        let durable = service
+            .load_authoritative_session_base(&id)
+            .await
+            .expect("load active session")
+            .expect("active session remains durable");
+        assert!(!session_marks_archived(&durable));
     }
 
     /// Ask 21b regression: the partial state left by an archive whose

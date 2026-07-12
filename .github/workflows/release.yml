@@ -691,6 +691,91 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  publish_unix_release_and_homebrew:
+    name: Publish macOS/Linux release assets and update Homebrew
+    needs: [release_validate_gate, build_binaries_buildbuddy]
+    if: >-
+      always() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.release_validate_gate.result == 'success' &&
+      needs.build_binaries_buildbuddy.result == 'success' &&
+      github.actor == 'lukacf' &&
+      (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
+       vars.MEERKAT_RELEASE_BUILDBUDDY == '1')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download macOS/Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: meerkat-*-buildbuddy
+          path: release-artifacts
+
+      - name: Build macOS/Linux checksum manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: scripts/release-build-asset-manifest release-artifacts "${RELEASE_TAG}"
+
+      - name: Require complete Homebrew archive set
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - "${RELEASE_TAG}" release-artifacts/index.json <<'PY'
+          import json
+          import sys
+
+          tag, index_path = sys.argv[1:]
+          version = tag.removeprefix("v")
+          binaries = ("rkat", "rkat-rpc", "rkat-rest", "rkat-mcp")
+          targets = (
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-unknown-linux-gnu",
+          )
+          expected = {
+              f"{binary}-{version}-{target}.tar.gz"
+              for binary in binaries
+              for target in targets
+          }
+          with open(index_path, encoding="utf-8") as source:
+              actual = set(json.load(source)["artifacts"])
+          if actual != expected:
+              missing = sorted(expected - actual)
+              extra = sorted(actual - expected)
+              raise SystemExit(
+                  f"Homebrew release asset mismatch: missing={missing}, extra={extra}"
+              )
+          print(f"Verified {len(actual)} macOS/Linux release archives")
+          PY
+
+      # Never churn already-published archives on a rerun. Missing archives
+      # are still added, while the final publisher handles Windows later.
+      - name: Publish macOS/Linux release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/**/*.tar.gz
+          draft: false
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          overwrite_files: false
+          tag_name: ${{ github.ref_name }}
+
+      - name: Update Homebrew tap from published macOS/Linux assets
+        continue-on-error: true
+        uses: ./.github/actions/update-homebrew
+        with:
+          release_tag: ${{ github.ref_name }}
+          github_token: ${{ github.token }}
+          tap_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          checksums_path: release-artifacts/checksums.sha256
+
   build_web_sdk_package:
     name: Build Web SDK package
     needs: [require_ci_green, release_validate_gate]
@@ -814,13 +899,18 @@ jobs:
         github.event.inputs.publish_release_assets_only == 'true' &&
         needs.release_validate_gate.result == 'skipped')) &&
       needs.build_binaries_gate.result == 'success'
-    needs: [release_validate_gate, build_binaries_gate]
+    # Waiting for the early publisher prevents manifest upload races if a
+    # future Windows build happens to finish before the Unix release job.
+    # `always()` above keeps this authoritative path available if that early
+    # optimization is skipped or fails.
+    needs: [release_validate_gate, build_binaries_gate, publish_unix_release_and_homebrew]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      # Recovery runs execute the current workflow against an older release
+      # tag, so load helpers from the workflow ref rather than that old tag.
+      - name: Checkout workflow helpers
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
           fetch-depth: 0
 
       - name: Download all artifacts
@@ -829,7 +919,6 @@ jobs:
           path: release-artifacts
 
       - name: Build checksum manifest
-        working-directory: release-artifacts
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
@@ -838,69 +927,31 @@ jobs:
             echo "release_tag is required for release asset recovery" >&2
             exit 1
           fi
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
+          scripts/release-build-asset-manifest release-artifacts "${RELEASE_TAG}"
 
-          def sha256(path):
-              digest = hashlib.sha256()
-              with path.open("rb") as source:
-                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              return digest.hexdigest()
-
-          archive_paths = sorted(
-              (
-                  path
-                  for path in Path(".").rglob("*")
-                  if path.is_file()
-                  and (path.name.endswith(".tar.gz") or path.name.endswith(".zip"))
-              ),
-              key=lambda path: (path.name, path.as_posix()),
-          )
-          if not archive_paths:
-              raise SystemExit("No release artifacts found")
-
-          artifacts_by_name = {}
-          for path in archive_paths:
-              public_name = path.name
-              previous = artifacts_by_name.get(public_name)
-              if previous is not None:
-                  raise SystemExit(
-                      "duplicate release asset basename "
-                      f"{public_name!r}: {previous.as_posix()} and {path.as_posix()}"
-                  )
-              artifacts_by_name[public_name] = path
-
-          with open("checksums.sha256", "w", encoding="utf-8") as checksums:
-              for public_name, path in artifacts_by_name.items():
-                  checksums.write(f"{sha256(path)}  {public_name}\n")
-
-          tag = os.environ["RELEASE_TAG"]
-          manifest = {
-              "version": tag.lstrip("v"),
-              "tag": tag,
-              "artifacts": list(artifacts_by_name),
-              "checksums": "checksums.sha256",
-          }
-
-          with open("index.json", "w", encoding="utf-8") as f:
-              json.dump(manifest, f, indent=2)
-          PY
-
-      - name: Publish GitHub release
+      - name: Publish release archives
         uses: softprops/action-gh-release@v2
         with:
           files: |
             release-artifacts/**/*.tar.gz
             release-artifacts/**/*.zip
+          draft: false
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          overwrite_files: false
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+
+      # Publish checksums and index.json only after every platform archive is
+      # present, keeping the public manifest a complete release authority.
+      - name: Publish complete release manifest
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
             release-artifacts/checksums.sha256
             release-artifacts/index.json
           draft: false
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          overwrite_files: true
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
 
   update_homebrew:
@@ -914,132 +965,17 @@ jobs:
     needs: [publish_github_release]
     runs-on: ubuntu-latest
     steps:
-      # An assets-only backfill can target an OLD tag after a newer release
-      # has already shipped; pointing the tap at it would DOWNGRADE every
-      # `brew upgrade` user (field: the v0.7.24 backfill re-pointed the tap
-      # from 0.7.25 to 0.7.24). The tap must only ever track the repository's
-      # latest release.
-      - name: Require target tag to be the latest release
-        id: latest_guard
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          LATEST=$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)
-          if [ "${LATEST}" != "${RELEASE_TAG}" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "target ${RELEASE_TAG} is not the latest release (${LATEST}); leaving the tap untouched"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout tap
-        if: steps.latest_guard.outputs.skip != 'true'
+      - name: Checkout workflow helpers
         uses: actions/checkout@v6
+
+      # This is the authoritative fallback for GitHub-hosted releases and for
+      # any transient failure in the early BuildBuddy/Homebrew path.
+      - name: Update Homebrew tap from complete release
+        uses: ./.github/actions/update-homebrew
         with:
-          repository: lukacf/homebrew-meerkat
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-meerkat
-
-      - name: Download checksums
-        if: steps.latest_guard.outputs.skip != 'true'
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          curl -fsSL "https://github.com/lukacf/meerkat/releases/download/${RELEASE_TAG}/checksums.sha256" -o checksums.sha256
-
-      - name: Generate updated formula
-        if: steps.latest_guard.outputs.skip != 'true'
-        env:
-          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          VERSION="${VERSION#v}"
-          TAG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
-          BASE="https://github.com/lukacf/meerkat/releases/download/${TAG}"
-
-          get_sha() { grep "$1" checksums.sha256 | awk '{print $1}'; }
-
-          gen_resource() {
-            local name="$1" target="$2"
-            echo "  resource \"${name}\" do"
-            echo "    url \"${BASE}/${name}-${VERSION}-${target}.tar.gz\""
-            echo "    sha256 \"$(get_sha "${name}-${VERSION}-${target}.tar.gz")\""
-            echo "  end"
-          }
-
-          gen_platform() {
-            local target="$1"
-            echo "    url \"${BASE}/rkat-${VERSION}-${target}.tar.gz\""
-            echo "    sha256 \"$(get_sha "rkat-${VERSION}-${target}.tar.gz")\""
-            echo ""
-            for r in rkat-rpc rkat-rest rkat-mcp; do
-              gen_resource "$r" "$target"
-              echo ""
-            done
-          }
-
-          {
-            echo 'class Rkat < Formula'
-            echo '  desc "Minimal, high-performance agent harness for LLM-powered applications"'
-            echo '  homepage "https://github.com/lukacf/meerkat"'
-            echo "  version \"${VERSION}\""
-            echo '  license "MIT"'
-            echo ''
-            echo '  on_macos do'
-            echo '    on_arm do'
-            gen_platform "aarch64-apple-darwin"
-            echo '    end'
-            echo ''
-            echo '    on_intel do'
-            gen_platform "x86_64-apple-darwin"
-            echo '    end'
-            echo '  end'
-            echo ''
-            echo '  on_linux do'
-            echo '    on_arm do'
-            gen_platform "aarch64-unknown-linux-gnu"
-            echo '    end'
-            echo ''
-            echo '    on_intel do'
-            gen_platform "x86_64-unknown-linux-gnu"
-            echo '    end'
-            echo '  end'
-            echo ''
-            echo '  def install'
-            echo '    bin.install "rkat"'
-            echo ''
-            echo '    %w[rkat-rpc rkat-rest rkat-mcp].each do |name|'
-            echo '      resource(name).stage do'
-            echo '        bin.install name'
-            echo '      end'
-            echo '    end'
-            echo '  end'
-            echo ''
-            echo '  test do'
-            echo '    assert_match "rkat #{version}", shell_output("#{bin}/rkat --version")'
-            echo '  end'
-            echo 'end'
-          } > homebrew-meerkat/rkat.rb
-
-      - name: Commit and push formula
-        if: steps.latest_guard.outputs.skip != 'true'
-        working-directory: homebrew-meerkat
-        env:
-          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- rkat.rb; then
-            echo "Homebrew formula already up to date"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add rkat.rb
-          git commit -m "Update rkat to ${VERSION#v}"
-          git push
+          release_tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+          github_token: ${{ github.token }}
+          tap_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   # Registry publishing runs automatically on tag pushes alongside binary
   # builds. For recovery (e.g. npm was down during the tag-triggered run),

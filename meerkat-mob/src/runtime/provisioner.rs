@@ -397,7 +397,7 @@ fn stamp_eager_session_owned_initial_turn_metadata(req: &mut CreateSessionReques
 #[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
     #[cfg(feature = "runtime-adapter")]
-    async fn restore_failed_resume_before_receipt(
+    pub(super) async fn restore_failed_resume_before_receipt(
         &self,
         session_id: &SessionId,
         restore_retired: bool,
@@ -407,20 +407,76 @@ impl SessionBackend {
                 "resume rollback for '{session_id}' requires runtime authority"
             ))
         })?;
-        if restore_retired
-            && adapter.contains_session(session_id).await
-            && !adapter
-                .meerkat_machine_archive_snapshot(session_id)
-                .await
-                .is_some_and(|snapshot| {
-                    snapshot.control.phase == meerkat_runtime::RuntimeState::Retired
-                })
-        {
-            adapter.retire_runtime(session_id).await.map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to restore revived session '{session_id}' to Retired: {error}"
-                ))
-            })?;
+        if restore_retired {
+            // A retired-session revival crosses two durable authorities before
+            // executor attachment: Archived -> Active, then Retired -> Idle.
+            // First remove the stale live projection: its agent snapshot was
+            // materialized while Archived and is not the promoted document
+            // authority. The archive protocol must read the durable Active
+            // projection instead.
+            match self.session_service.discard_live_session(session_id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+
+            let retired_document = self
+                .session_service
+                .load_revivable_retired_session(session_id)
+                .await?;
+            let document_already_archived = retired_document.as_ref().is_some_and(|session| {
+                session.lifecycle_terminal()
+                    == Some(meerkat_core::session::SessionLifecycleTerminal::Archived)
+            });
+
+            if retired_document.is_some() && !document_already_archived {
+                // Active+Retired is the crash-recoverable midpoint of revival.
+                // Temporarily return the runtime to Idle so the document
+                // archive authority cannot mistake Retired compatibility
+                // evidence for an already-written Archived document.
+                adapter.reset_runtime(session_id).await.map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to reopen revived session '{session_id}' for document rollback: {error}"
+                    ))
+                })?;
+            }
+
+            if !document_already_archived {
+                match self
+                    .session_service
+                    .archive_with_mob_lifecycle_authority(session_id)
+                    .await
+                {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(error) => {
+                        return Err(MobError::Internal(format!(
+                            "failed to restore revived session '{session_id}' to Archived+Retired: {error}"
+                        )));
+                    }
+                }
+            }
+
+            let restored = self
+                .session_service
+                .load_revivable_retired_session(session_id)
+                .await?
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "revived session rollback did not restore retired session '{session_id}'"
+                    ))
+                })?;
+            if restored.lifecycle_terminal()
+                != Some(meerkat_core::session::SessionLifecycleTerminal::Archived)
+            {
+                return Err(MobError::Internal(format!(
+                    "revived session rollback did not restore archived document '{session_id}'"
+                )));
+            }
+
+            if adapter.contains_session(session_id).await {
+                self.unregister_runtime_session_binding(session_id).await?;
+            }
+            self.remove_runtime_session_state(session_id).await;
+            return Ok(());
         }
         if adapter.contains_session(session_id).await {
             adapter
@@ -641,6 +697,14 @@ impl SessionBackend {
         if let Some(state) = removed {
             state.clear_queued_turns().await;
         }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn has_runtime_session_sidecar_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> bool {
+        self.runtime_sessions.read().await.contains_key(session_id)
     }
 
     async fn unregister_runtime_session_binding(
@@ -2220,6 +2284,34 @@ impl MobProvisioner for SessionBackend {
                     ))
                 })?;
             }
+            if reviving_retired_session {
+                // Explicit revival owns the only path across both absorbing
+                // lifecycle boundaries. Prove and promote the archived
+                // document while the runtime is still durably Retired, then
+                // reset Retired -> Idle before generic executor attachment.
+                // Retired must remain non-registrable on every ordinary
+                // ensure-session path.
+                self.session_service
+                    .promote_revivable_retired_session(
+                        &created_bridge_session_id,
+                        adapter.session_control_authority(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to promote revived durable session document '{created_bridge_session_id}': {error}"
+                        ))
+                    })?;
+                adapter
+                    .reset_runtime(&created_bridge_session_id)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to promote revived durable session '{created_bridge_session_id}' to idle: {error}"
+                        ))
+                    })?;
+                session_origin = ProvisionSessionOrigin::RevivedRetired;
+            }
             tracing::debug!(
                 bridge_session_id = %created_bridge_session_id,
                 "SessionBackend::provision_member checking runtime session state"
@@ -2299,72 +2391,6 @@ impl MobProvisioner for SessionBackend {
             .ops_adapter
             .mark_member_provisioned(&created_bridge_session_id, &req.peer_name)
             .await?;
-        if reviving_retired_session {
-            let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
-                MobError::Internal(
-                    "retired durable session revival lost runtime authority".into(),
-                )
-            })?;
-            // Prove and consume the archived+retired revival boundary before
-            // mutating runtime state.  The document transition is authorized
-            // only while the durable runtime still says Retired; resetting it
-            // first would erase the evidence that makes this a revival rather
-            // than an arbitrary archived-session reopen.
-            if let Err(error) = self
-                .session_service
-                .promote_revivable_retired_session(
-                    &created_bridge_session_id,
-                    adapter.session_control_authority(),
-                )
-                .await
-            {
-                let mut cleanup_failures = Vec::new();
-                if let Err(cleanup_error) =
-                    adapter.retire_runtime(&created_bridge_session_id).await
-                {
-                    cleanup_failures.push(format!("retire runtime: {cleanup_error}"));
-                }
-                if let Err(cleanup_error) =
-                    adapter.unregister_session(&created_bridge_session_id).await
-                {
-                    cleanup_failures.push(format!("unregister runtime: {cleanup_error}"));
-                }
-                if let Err(cleanup_error) = self
-                    .session_service
-                    .discard_live_session(&created_bridge_session_id)
-                    .await
-                {
-                    cleanup_failures.push(format!("discard live session: {cleanup_error}"));
-                }
-                let cleanup_suffix = if cleanup_failures.is_empty() {
-                    String::new()
-                } else {
-                    format!("; additionally cleanup failed: {}", cleanup_failures.join("; "))
-                };
-                return Err(MobError::Internal(format!(
-                    "failed to promote revived durable session document '{created_bridge_session_id}': {error}{cleanup_suffix}"
-                )));
-            }
-            if let Err(error) = adapter.reset_runtime(&created_bridge_session_id).await {
-                // The document is active now, so restore the exact
-                // archived+retired pair before returning failure.  This path
-                // is deliberately authority-backed and retryable; it never
-                // leaves an Active document pointing at a Retired runtime.
-                let restore_error = self
-                    .archive_with_authority_then_unregister(&created_bridge_session_id)
-                    .await
-                    .err();
-                return Err(MobError::Internal(format!(
-                    "failed to promote revived durable session '{created_bridge_session_id}' to idle: {error}{}",
-                    restore_error
-                        .map(|restore_error| format!(
-                            "; restoring archived+retired lifecycle also failed: {restore_error}"
-                        ))
-                        .unwrap_or_default()
-                )));
-            }
-            session_origin = ProvisionSessionOrigin::RevivedRetired;
-        }
         tracing::debug!(
             bridge_session_id = %created_bridge_session_id,
             operation_id = %operation_id,

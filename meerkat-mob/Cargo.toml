@@ -60,6 +60,14 @@ meerkat-session = { workspace = true, features = ["session-store"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The persistent cold-restart integration harness uses FactoryAgentBuilder,
+# whose durable live-session synchronization is gated by the facade's
+# session-store feature. jsonl-store keeps the facade feature view coherent
+# with the direct JsonlStore dev dependency below; neither feature is imposed
+# on production meerkat-mob consumers.
+meerkat = { workspace = true, features = ["jsonl-store", "session-store"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 serde_json = { workspace = true }

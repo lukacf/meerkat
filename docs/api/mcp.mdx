@@ -85,6 +85,9 @@ source of truth for tool names and availability.
 | `meerkat_mob_wait_kickoff` | Wait for autonomous kickoff completion (mob feature) |
 | `meerkat_mob_wait_ready` | Wait for mob startup readiness (mob feature) |
 | `meerkat_mob_profile_*` tools | Realm-scoped mob profile create/get/list/update/delete (mob feature) |
+| `meerkat_mob_member_history` | Read a mob member transcript page by identity, local or placed (mob feature) |
+| `meerkat_mob_hosts` | List bound member hosts with capabilities (mob feature) |
+| `meerkat_mob_route_installs` | Read outstanding cross-host route-install obligations (mob feature) |
 | `meerkat_mob_event_stream_open` | Open a mob-level event stream (mob feature) |
 | `meerkat_mob_event_stream_read` | Read the next event from an open mob stream (mob feature) |
 | `meerkat_mob_event_stream_close` | Close a previously opened mob event stream (mob feature) |
@@ -104,6 +107,17 @@ When the `mob` feature is enabled, the public MCP host surface uses typed
 still agent-side and comes from composing a mob tools factory into
 `SessionBuildOptions.mob_tools`, which provides `mob_*` tools to the
 model. Public host MCP surfaces should not re-export that raw dispatcher.
+</Note>
+
+<Note>
+The multi-host console family adds the three **observation tools only**.
+Existing `meerkat_mob_spawn` and `meerkat_mob_spawn_many` mutations may carry
+`placement` for an already-bound host. Host admin (`bind_host`/`revoke_host`),
+grant admin (`grant_scopes`/`revoke_scopes`/`grants`), hard cancel, and member
+live-channel verbs remain deliberately absent — MCP servers are routinely
+wired into agent tool contexts, and an LLM-reachable admin mutation would be a
+privilege-escalation vector. Host/grant/live admin lives on JSON-RPC/SDK plus
+CLI; hard cancel is JSON-RPC/SDK-only. Unknown tool names fail closed.
 </Note>
 
 ## Use MCP servers as tools (client)

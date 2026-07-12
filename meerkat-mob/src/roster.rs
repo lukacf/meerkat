@@ -221,6 +221,20 @@ impl Roster {
                     self.remove_by_identity(agent_identity);
                 }
             }
+            MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
+                // A stale abandonment marker can replay after a successor
+                // spawn. Presence is therefore the fence: keep all topology
+                // when any current incarnation is projected. Once the member
+                // is absent, prune every remaining incident projection,
+                // including an external descriptor keyed by the same stable
+                // identity.
+                if !self.entries.contains_key(agent_identity) {
+                    for entry in self.entries.values_mut() {
+                        entry.wired_to.remove(agent_identity);
+                        entry.external_peer_specs.remove(agent_identity);
+                    }
+                }
+            }
             MobEventKind::MemberReset {
                 agent_identity,
                 new_generation,
@@ -954,6 +968,169 @@ mod tests {
         assert_eq!(a_entry.wired_to.len(), 2);
         assert!(b_entry.wired_to.contains(&a));
         assert!(c_entry.wired_to.contains(&a));
+    }
+
+    #[test]
+    fn test_respawn_topology_abandoned_prunes_incident_topology_when_member_absent() {
+        let abandoned = AgentIdentity::from("abandoned");
+        let survivor = AgentIdentity::from("survivor");
+        let pubkey = [9u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let abandoned_external_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            abandoned.as_str(),
+            peer_id.to_string(),
+            pubkey,
+            "inproc://abandoned",
+        )
+        .expect("valid abandoned external peer spec");
+        let events = vec![
+            make_event(
+                1,
+                spawned_kind(
+                    abandoned.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                2,
+                spawned_kind(
+                    survivor.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(3, retired_kind(abandoned.as_str(), "worker")),
+            // Model stale topology observations that land after terminal
+            // membership removal but before the canonical abandonment marker.
+            make_event(
+                4,
+                MobEventKind::MembersWired {
+                    a: abandoned.clone(),
+                    b: survivor.clone(),
+                },
+            ),
+            make_event(
+                5,
+                MobEventKind::ExternalPeerWired {
+                    local: survivor.clone(),
+                    spec: abandoned_external_spec,
+                },
+            ),
+            make_event(
+                6,
+                MobEventKind::RespawnTopologyAbandoned {
+                    agent_identity: abandoned.clone(),
+                    generation: Generation::INITIAL,
+                    agent_runtime_id: Some(AgentRuntimeId::initial(abandoned.clone())),
+                    fence_token: Some(FenceToken::new(0)),
+                },
+            ),
+        ];
+
+        let roster = Roster::project(&events);
+        let survivor_entry = roster
+            .get_by_identity(&survivor)
+            .expect("survivor remains projected");
+        assert!(!survivor_entry.wired_to.contains(&abandoned));
+        assert!(!survivor_entry.external_peer_specs.contains_key(&abandoned));
+    }
+
+    #[test]
+    fn test_respawn_topology_abandoned_retains_graph_when_successor_is_present() {
+        let respawned = AgentIdentity::from("respawned");
+        let peer = AgentIdentity::from("peer");
+        let external = AgentIdentity::from("remote-mob/worker/external");
+        let replacement_generation = Generation::new(1);
+        let mut replacement = match spawned_kind(
+            respawned.as_str(),
+            "worker",
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_bridge_session_id(session_id()),
+            BTreeMap::new(),
+        ) {
+            MobEventKind::MemberSpawned(event) => event,
+            _ => unreachable!("spawned_kind always returns MemberSpawned"),
+        };
+        replacement.generation = replacement_generation;
+        replacement.fence_token = FenceToken::new(11);
+        replacement.agent_runtime_id =
+            AgentRuntimeId::new(respawned.clone(), replacement_generation);
+        let pubkey = [10u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let external_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            external.as_str(),
+            peer_id.to_string(),
+            pubkey,
+            "inproc://remote-mob/worker/external",
+        )
+        .expect("valid external peer spec");
+        let events = vec![
+            make_event(
+                1,
+                spawned_kind(
+                    respawned.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                2,
+                spawned_kind(
+                    peer.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(3, retired_kind(respawned.as_str(), "worker")),
+            make_event(4, MobEventKind::MemberSpawned(replacement)),
+            make_event(
+                5,
+                MobEventKind::MembersWired {
+                    a: respawned.clone(),
+                    b: peer.clone(),
+                },
+            ),
+            make_event(
+                6,
+                MobEventKind::ExternalPeerWired {
+                    local: respawned.clone(),
+                    spec: external_spec,
+                },
+            ),
+            // Delayed terminal marker for generation zero must not erase the
+            // replacement's projected graph.
+            make_event(
+                7,
+                MobEventKind::RespawnTopologyAbandoned {
+                    agent_identity: respawned.clone(),
+                    generation: Generation::INITIAL,
+                    agent_runtime_id: Some(AgentRuntimeId::initial(respawned.clone())),
+                    fence_token: Some(FenceToken::new(0)),
+                },
+            ),
+        ];
+
+        let roster = Roster::project(&events);
+        let replacement = roster
+            .get_by_identity(&respawned)
+            .expect("successor remains projected");
+        let peer_entry = roster
+            .get_by_identity(&peer)
+            .expect("peer remains projected");
+        assert_eq!(replacement.generation, replacement_generation);
+        assert!(replacement.wired_to.contains(&peer));
+        assert!(peer_entry.wired_to.contains(&respawned));
+        assert!(replacement.wired_to.contains(&external));
+        assert!(replacement.external_peer_specs.contains_key(&external));
     }
 
     #[test]

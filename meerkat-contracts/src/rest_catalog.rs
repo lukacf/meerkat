@@ -505,6 +505,37 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
                 REST_SCHEMA_JSON_VALUE,
             )],
         ),
+        // NOTE (SD-2, phase 7): REST serves multi-host OBSERVATION only —
+        // the three GETs below. Host bind/revoke, hard-cancel, the member
+        // live family, and grant administration are deliberately NOT served
+        // by REST; they are exposed via JSON-RPC (`mob/bind_host` etc.) and
+        // the CLI. Re-adding an admin path here without a matching axum
+        // `router()` arm will fail `verify-rest-surface-alignment`
+        // (phantom-404 precedent above).
+        RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/history",
+            vec![RestOperationDescriptor::json(
+                "get",
+                "Read a mob member transcript page by identity",
+                "MobMemberHistoryResult",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/mob/{id}/hosts",
+            vec![RestOperationDescriptor::json(
+                "get",
+                "List tracked member hosts with bind phase and declared capabilities",
+                "MobHostsResult",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/mob/{id}/route-installs",
+            vec![RestOperationDescriptor::json(
+                "get",
+                "Outstanding cross-host route-install obligations",
+                "MobRouteInstallsResult",
+            )],
+        ),
         RestPathDescriptor::new(
             "/health",
             vec![RestOperationDescriptor::text(
@@ -699,6 +730,9 @@ mod tests {
             "/mob/{id}/members/{agent_identity}/status",
             "/mob/{id}/members/{agent_identity}/cancel",
             "/mob/{id}/members/{agent_identity}/respawn",
+            "/mob/{id}/members/{agent_identity}/history",
+            "/mob/{id}/hosts",
+            "/mob/{id}/route-installs",
         ] {
             assert!(paths.iter().any(|path| path == &expected));
         }

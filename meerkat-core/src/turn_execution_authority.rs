@@ -404,6 +404,14 @@ pub enum TurnExecutionInput {
         run_id: RunId,
         tool_count: u32,
     },
+    /// A dispatched tool requires an externally supplied callback result.
+    ///
+    /// The current core turn has durably reached a continuation boundary, so
+    /// generated turn authority must close it before the public
+    /// `CallbackPending` terminal is returned to the runtime.
+    CallbackPending {
+        run_id: RunId,
+    },
     LlmReturnedTerminal {
         run_id: RunId,
     },

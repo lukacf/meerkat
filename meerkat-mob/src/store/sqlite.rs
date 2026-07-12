@@ -5,10 +5,19 @@
 
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
-    ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
-    MobSpecStore, MobStoreError, SupervisorAuthorityDeletionAuthority,
-    SupervisorAuthorityPersistenceAuthority, SupervisorAuthorityRecord, private,
-    terminal_event_identity, validate_mob_event_write_authority,
+    BeginPlacedSpawnResult, CommitPlacedSpawnResult, DeletePlacedSpawnResult,
+    ExternalBindingOverlayRecord, MobEventStore, MobHostAuthorityDeletionAuthority,
+    MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobMemberEventCursorRecord,
+    MobMemberLiveCleanupRecord, MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin,
+    MobMemberOperatorRequestKey, MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
+    MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord,
+    MobPlacedSpawnBindingPromotionAuthority, MobPlacedSpawnCarrierRecord,
+    MobPlacedSpawnCleanupAuthority, MobPlacedSpawnCommitPersistenceAuthority,
+    MobPlacedSpawnPendingPersistenceAuthority, MobRunStore, MobRuntimeMetadataStore, MobSpecStore,
+    MobStoreError, PlacedSpawnCarrierPhase, PromotePlacedSpawnBindingResult,
+    SupervisorAuthorityDeletionAuthority, SupervisorAuthorityPersistenceAuthority,
+    SupervisorAuthorityRecord, private, step_failed_event_identity, terminal_event_identity,
+    validate_mob_event_write_authority,
 };
 use crate::definition::MobDefinition;
 use crate::error::MobError;
@@ -21,7 +30,8 @@ use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
-    MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry, mob_machine_run_status_is_terminal,
+    MobRunProvenanceAuthority, MobRunRemoteTurnIntent, MobRunRemoteTurnReceipt, MobRunStatus,
+    StepLedgerEntry, mob_machine_run_status_is_terminal,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -53,6 +63,18 @@ CREATE TABLE IF NOT EXISTS mob_runs (
     run_id TEXT PRIMARY KEY,
     run_json BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mob_run_remote_turn_intents (
+    run_id TEXT NOT NULL,
+    dispatch_sequence BLOB NOT NULL,
+    intent_json BLOB NOT NULL,
+    PRIMARY KEY (run_id, dispatch_sequence)
+);
+CREATE TABLE IF NOT EXISTS mob_run_remote_turn_receipts (
+    run_id TEXT NOT NULL,
+    dispatch_sequence BLOB NOT NULL,
+    receipt_json BLOB NOT NULL,
+    PRIMARY KEY (run_id, dispatch_sequence)
+);
 CREATE TABLE IF NOT EXISTS mob_specs (
     mob_id TEXT PRIMARY KEY,
     spec_json BLOB NOT NULL
@@ -60,6 +82,54 @@ CREATE TABLE IF NOT EXISTS mob_specs (
 CREATE TABLE IF NOT EXISTS mob_runtime_supervisors (
     mob_id TEXT PRIMARY KEY,
     record_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_host_authorities (
+    mob_id TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, host_id)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_host_binding_generation_highwaters (
+    mob_id TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    binding_generation BLOB NOT NULL,
+    PRIMARY KEY (mob_id, host_id)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_member_operator_requests (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    generation BLOB NOT NULL,
+    fence_token BLOB NOT NULL,
+    host_id TEXT NOT NULL,
+    binding_generation BLOB NOT NULL,
+    member_session_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity, generation, fence_token, host_id, binding_generation, member_session_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_placed_spawns (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_operator_grants (
+    mob_id TEXT NOT NULL,
+    principal TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, principal)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_member_event_cursors (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_member_live_cleanups (
+    mob_id TEXT NOT NULL,
+    cleanup_id TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, cleanup_id)
 );
 CREATE TABLE IF NOT EXISTS mob_runtime_binding_overlays (
     mob_id TEXT NOT NULL,
@@ -88,9 +158,55 @@ fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MobStoreError> {
     serde_json::from_slice(bytes).map_err(|e| MobStoreError::Serialization(e.to_string()))
 }
 
+fn validate_member_operator_request_row(
+    record: &MobMemberOperatorRequestRecord,
+    key: &MobMemberOperatorRequestKey,
+) -> Result<(), MobStoreError> {
+    record.validate()?;
+    if record.key().eq(key) {
+        return Ok(());
+    }
+    Err(MobStoreError::Internal(format!(
+        "member operator request row key does not match record identity/generation/fence/host/binding_generation/session/request_id: row=({},{},{},{},{},{},{}) record=({},{},{},{},{},{},{})",
+        key.agent_identity,
+        key.generation,
+        key.fence_token,
+        key.host_id,
+        key.host_binding_generation,
+        key.member_session_id,
+        key.request_id,
+        record.agent_identity,
+        record.generation,
+        record.fence_token,
+        record.host_id,
+        record.host_binding_generation,
+        record.member_session_id,
+        record.request_id
+    )))
+}
+
 fn cursor_to_i64(value: u64) -> Result<i64, MobStoreError> {
     i64::try_from(value)
         .map_err(|_| MobStoreError::Internal(format!("cursor value {value} exceeds i64::MAX")))
+}
+
+/// Full-domain, order-preserving SQLite key for newly introduced u64
+/// identity/sequence columns. SQLite INTEGER is signed and would reject the
+/// upper half of the public u64 domain; fixed-width big-endian blobs compare
+/// lexicographically in the same order as the source integers.
+fn u64_to_sql_key(value: u64) -> Vec<u8> {
+    value.to_be_bytes().to_vec()
+}
+
+fn sql_key_to_u64(bytes: &[u8], field: &str) -> Result<u64, MobStoreError> {
+    let encoded: [u8; std::mem::size_of::<u64>()] = bytes.try_into().map_err(|_| {
+        MobStoreError::Internal(format!(
+            "{field} SQLite key has {} bytes; expected {}",
+            bytes.len(),
+            std::mem::size_of::<u64>()
+        ))
+    })?;
+    Ok(u64::from_be_bytes(encoded))
 }
 
 fn i64_to_cursor(value: i64) -> u64 {
@@ -99,11 +215,100 @@ fn i64_to_cursor(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
+fn ensure_member_operator_execution_fence_schema(
+    conn: &mut Connection,
+) -> Result<(), MobStoreError> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(se)?;
+    let (has_host_id, has_binding_generation, has_member_session_id, primary_key) = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(mob_runtime_member_operator_requests)")
+            .map_err(se)?;
+        let columns = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })
+            .map_err(se)?;
+        let mut found_host_id = false;
+        let mut found_binding_generation = false;
+        let mut found_member_session_id = false;
+        let mut primary_key = Vec::new();
+        for column in columns {
+            let (name, key_position) = column.map_err(se)?;
+            match name.as_str() {
+                "host_id" => found_host_id = true,
+                "binding_generation" => found_binding_generation = true,
+                "member_session_id" => found_member_session_id = true,
+                _ => {}
+            }
+            if key_position > 0 {
+                primary_key.push((key_position, name));
+            }
+        }
+        primary_key.sort_by_key(|(position, _)| *position);
+        (
+            found_host_id,
+            found_binding_generation,
+            found_member_session_id,
+            primary_key
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let expected_primary_key = [
+        "mob_id",
+        "agent_identity",
+        "generation",
+        "fence_token",
+        "host_id",
+        "binding_generation",
+        "member_session_id",
+        "request_id",
+    ];
+    if !has_host_id
+        || !has_binding_generation
+        || !has_member_session_id
+        || !primary_key
+            .iter()
+            .map(String::as_str)
+            .eq(expected_primary_key)
+    {
+        // Pre-fence rows cannot be attributed to a host generation. The wire
+        // now rejects every pre-fence request before ledger access, so keeping
+        // those rows would only create ambiguous replay keys; rebuild this
+        // bounded negative-memory table empty under the exact residency key.
+        tx.execute_batch(
+            "ALTER TABLE mob_runtime_member_operator_requests
+                 RENAME TO mob_runtime_member_operator_requests_pre_execution_fence;
+             CREATE TABLE mob_runtime_member_operator_requests (
+                 mob_id TEXT NOT NULL,
+                 agent_identity TEXT NOT NULL,
+                 generation BLOB NOT NULL,
+                 fence_token BLOB NOT NULL,
+                 host_id TEXT NOT NULL,
+                 binding_generation BLOB NOT NULL,
+                 member_session_id TEXT NOT NULL,
+                 request_id TEXT NOT NULL,
+                 record_json BLOB NOT NULL,
+                 PRIMARY KEY (
+                     mob_id, agent_identity, generation, fence_token, host_id,
+                     binding_generation, member_session_id, request_id
+                 )
+             );
+             DROP TABLE mob_runtime_member_operator_requests_pre_execution_fence;",
+        )
+        .map_err(se)?;
+    }
+    tx.commit().map_err(se)
+}
+
 fn open_connection(path: &Path) -> Result<Connection, MobStoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(se)?;
     }
-    let conn = Connection::open(path).map_err(se)?;
+    let mut conn = Connection::open(path).map_err(se)?;
     conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
         .map_err(se)?;
     conn.pragma_update(None, "journal_mode", "WAL")
@@ -111,6 +316,7 @@ fn open_connection(path: &Path) -> Result<Connection, MobStoreError> {
     conn.pragma_update(None, "synchronous", "FULL")
         .map_err(se)?;
     conn.execute_batch(CREATE_SCHEMA_SQL).map_err(se)?;
+    ensure_member_operator_execution_fence_schema(&mut conn)?;
     Ok(conn)
 }
 
@@ -648,6 +854,1233 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         .await
     }
 
+    async fn load_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        host_id: &str,
+    ) -> Result<Option<MobHostAuthorityRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let host_id = host_id.to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_host_authorities
+                     WHERE mob_id = ?1 AND host_id = ?2",
+                    params![mob_id.as_str(), host_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            row.map(|bytes| decode_json(&bytes)).transpose()
+        })
+        .await
+    }
+
+    async fn list_mob_host_authorities(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobHostAuthorityRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json FROM mob_runtime_host_authorities
+                     WHERE mob_id = ?1
+                     ORDER BY host_id",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let bytes = row.map_err(se)?;
+                records.push(decode_json(&bytes)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn put_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        record: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityPersistenceAuthority,
+    ) -> Result<(), MobStoreError> {
+        authority.verify_record(record)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "INSERT INTO mob_runtime_host_authorities (mob_id, host_id, record_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mob_id, host_id) DO UPDATE SET record_json = excluded.record_json",
+                params![mob_id.as_str(), record.host_id, encode_json(&record)?],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn put_mob_host_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityPersistenceAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_record(record)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mob_runtime_host_authorities (mob_id, host_id, record_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![mob_id.as_str(), record.host_id, encode_json(&record)?],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn compare_and_put_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &MobHostAuthorityRecord,
+        record: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityPersistenceAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_record(record)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "UPDATE mob_runtime_host_authorities
+                     SET record_json = ?3
+                     WHERE mob_id = ?1 AND host_id = ?2 AND record_json = ?4",
+                    params![
+                        mob_id.as_str(),
+                        record.host_id,
+                        encode_json(&record)?,
+                        encode_json(&expected)?
+                    ],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn delete_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityDeletionAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_record(expected)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_runtime_host_authorities
+                     WHERE mob_id = ?1 AND host_id = ?2 AND record_json = ?3",
+                    params![mob_id.as_str(), expected.host_id, encode_json(&expected)?],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn put_mob_host_binding_generation_highwater(
+        &self,
+        mob_id: &MobId,
+        expected: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityDeletionAuthority,
+    ) -> Result<(), MobStoreError> {
+        authority.verify_record(expected)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let host_id = expected.host_id.clone();
+        let binding_generation = u64_to_sql_key(expected.binding_generation);
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "INSERT INTO mob_runtime_host_binding_generation_highwaters
+                    (mob_id, host_id, binding_generation)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mob_id, host_id) DO UPDATE SET binding_generation =
+                    CASE
+                        WHEN excluded.binding_generation > mob_runtime_host_binding_generation_highwaters.binding_generation
+                        THEN excluded.binding_generation
+                        ELSE mob_runtime_host_binding_generation_highwaters.binding_generation
+                    END",
+                params![mob_id.as_str(), host_id, binding_generation],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn list_mob_host_binding_generation_highwaters(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<(String, u64)>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT host_id, binding_generation
+                     FROM mob_runtime_host_binding_generation_highwaters
+                     WHERE mob_id = ?1
+                     ORDER BY host_id",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(se)?;
+            let mut highwaters = Vec::new();
+            for row in rows {
+                let (host_id, encoded) = row.map_err(se)?;
+                highwaters.push((host_id, sql_key_to_u64(&encoded, "binding_generation")?));
+            }
+            Ok(highwaters)
+        })
+        .await
+    }
+
+    async fn begin_member_operator_request(
+        &self,
+        mob_id: &MobId,
+        record: &MobMemberOperatorRequestRecord,
+    ) -> Result<MobMemberOperatorRequestBegin, MobStoreError> {
+        record.validate_pending()?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let generation = u64_to_sql_key(record.generation);
+            let fence_token = u64_to_sql_key(record.fence_token);
+            let binding_generation = u64_to_sql_key(record.host_binding_generation);
+            let existing_bytes: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_member_operator_requests
+                     WHERE mob_id = ?1 AND agent_identity = ?2
+                       AND generation = ?3 AND fence_token = ?4
+                       AND host_id = ?5 AND binding_generation = ?6
+                       AND member_session_id = ?7 AND request_id = ?8",
+                    params![
+                        mob_id.as_str(),
+                        &record.agent_identity,
+                        generation,
+                        fence_token,
+                        &record.host_id,
+                        binding_generation,
+                        &record.member_session_id,
+                        &record.request_id,
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let result = if let Some(bytes) = existing_bytes {
+                let existing: MobMemberOperatorRequestRecord = decode_json(&bytes)?;
+                validate_member_operator_request_row(&existing, &record.key())?;
+                MobMemberOperatorRequestBegin::Existing(existing)
+            } else {
+                let incarnation_rows: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM mob_runtime_member_operator_requests
+                         WHERE mob_id = ?1 AND agent_identity = ?2
+                           AND generation = ?3 AND fence_token = ?4
+                           AND host_id = ?5 AND binding_generation = ?6
+                           AND member_session_id = ?7",
+                        params![
+                            mob_id.as_str(),
+                            &record.agent_identity,
+                            generation,
+                            fence_token,
+                            &record.host_id,
+                            binding_generation,
+                            &record.member_session_id,
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(se)?;
+                if incarnation_rows
+                    >= i64::try_from(super::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION)
+                        .unwrap_or(i64::MAX)
+                {
+                    return Err(MobStoreError::WriteFailed(format!(
+                        "member operator request quota exhausted for '{}' generation {} fence {} host '{}' binding generation {} session '{}' (max {})",
+                        record.agent_identity,
+                        record.generation,
+                        record.fence_token,
+                        record.host_id,
+                        record.host_binding_generation,
+                        record.member_session_id,
+                        super::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION,
+                    )));
+                }
+                let mob_rows: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM mob_runtime_member_operator_requests
+                         WHERE mob_id = ?1",
+                        params![mob_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(se)?;
+                if mob_rows
+                    >= i64::try_from(super::MEMBER_OPERATOR_REQUEST_MAX_PER_MOB)
+                        .unwrap_or(i64::MAX)
+                {
+                    return Err(MobStoreError::WriteFailed(format!(
+                        "member operator request quota exhausted for mob '{}' (max {})",
+                        mob_id,
+                        super::MEMBER_OPERATOR_REQUEST_MAX_PER_MOB,
+                    )));
+                }
+                tx.execute(
+                    "INSERT INTO mob_runtime_member_operator_requests
+                     (mob_id, agent_identity, generation, fence_token, host_id, binding_generation, member_session_id, request_id, record_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        mob_id.as_str(),
+                        &record.agent_identity,
+                        generation,
+                        fence_token,
+                        &record.host_id,
+                        binding_generation,
+                        &record.member_session_id,
+                        &record.request_id,
+                        encode_json(&record)?,
+                    ],
+                )
+                .map_err(se)?;
+                MobMemberOperatorRequestBegin::Started
+            };
+            tx.commit().map_err(se)?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn load_member_operator_request(
+        &self,
+        mob_id: &MobId,
+        key: &MobMemberOperatorRequestKey,
+    ) -> Result<Option<MobMemberOperatorRequestRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let key = key.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_member_operator_requests
+                     WHERE mob_id = ?1 AND agent_identity = ?2
+                       AND generation = ?3 AND fence_token = ?4
+                       AND host_id = ?5 AND binding_generation = ?6
+                       AND member_session_id = ?7 AND request_id = ?8",
+                    params![
+                        mob_id.as_str(),
+                        &key.agent_identity,
+                        u64_to_sql_key(key.generation),
+                        u64_to_sql_key(key.fence_token),
+                        &key.host_id,
+                        u64_to_sql_key(key.host_binding_generation),
+                        &key.member_session_id,
+                        &key.request_id,
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let record: Option<MobMemberOperatorRequestRecord> =
+                row.map(|bytes| decode_json(&bytes)).transpose()?;
+            if let Some(record) = &record {
+                validate_member_operator_request_row(record, &key)?;
+            }
+            Ok(record)
+        })
+        .await
+    }
+
+    async fn compare_and_put_member_operator_request(
+        &self,
+        mob_id: &MobId,
+        expected: &MobMemberOperatorRequestRecord,
+        record: &MobMemberOperatorRequestRecord,
+    ) -> Result<bool, MobStoreError> {
+        expected.validate_terminal_transition(record)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "UPDATE mob_runtime_member_operator_requests
+                     SET record_json = ?1
+                     WHERE mob_id = ?2 AND agent_identity = ?3
+                       AND generation = ?4 AND fence_token = ?5
+                       AND host_id = ?6 AND binding_generation = ?7
+                       AND member_session_id = ?8 AND request_id = ?9
+                       AND record_json = ?10",
+                    params![
+                        encode_json(&record)?,
+                        mob_id.as_str(),
+                        expected.agent_identity,
+                        u64_to_sql_key(expected.generation),
+                        u64_to_sql_key(expected.fence_token),
+                        expected.host_id,
+                        u64_to_sql_key(expected.host_binding_generation),
+                        expected.member_session_id,
+                        expected.request_id,
+                        encode_json(&expected)?,
+                    ],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn list_member_operator_requests(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobMemberOperatorRequestRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT agent_identity, generation, fence_token, host_id, binding_generation, member_session_id, request_id, record_json
+                     FROM mob_runtime_member_operator_requests
+                     WHERE mob_id = ?1
+                     ORDER BY agent_identity, generation, fence_token, host_id, binding_generation, member_session_id, request_id",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                    ))
+                })
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (
+                    agent_identity,
+                    generation,
+                    fence_token,
+                    host_id,
+                    binding_generation,
+                    member_session_id,
+                    request_id,
+                    bytes,
+                ) =
+                    row.map_err(se)?;
+                let generation = sql_key_to_u64(
+                    &generation,
+                    &format!("member operator request '{request_id}' generation"),
+                )?;
+                let fence_token = sql_key_to_u64(
+                    &fence_token,
+                    &format!("member operator request '{request_id}' fence token"),
+                )?;
+                let binding_generation = sql_key_to_u64(
+                    &binding_generation,
+                    &format!(
+                        "member operator request '{request_id}' binding generation"
+                    ),
+                )?;
+                let record: MobMemberOperatorRequestRecord = decode_json(&bytes)?;
+                let key = MobMemberOperatorRequestKey::new(
+                    agent_identity,
+                    generation,
+                    fence_token,
+                    host_id,
+                    binding_generation,
+                    member_session_id,
+                    request_id,
+                );
+                validate_member_operator_request_row(&record, &key)?;
+                records.push(record);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn prune_stale_member_operator_requests(
+        &self,
+        mob_id: &MobId,
+        authority: &MobMemberOperatorPruneAuthority,
+    ) -> Result<u64, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let authority = authority.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let stale = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT agent_identity, generation, fence_token, host_id,
+                                binding_generation, member_session_id, request_id, record_json
+                         FROM mob_runtime_member_operator_requests
+                         WHERE mob_id = ?1",
+                    )
+                    .map_err(se)?;
+                let rows = stmt
+                    .query_map(params![mob_id.as_str()], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Vec<u8>>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, Vec<u8>>(7)?,
+                        ))
+                    })
+                    .map_err(se)?;
+                let mut stale = Vec::new();
+                for row in rows {
+                    let (
+                        agent_identity,
+                        generation,
+                        fence_token,
+                        host_id,
+                        binding_generation,
+                        member_session_id,
+                        request_id,
+                        bytes,
+                    ) = row.map_err(se)?;
+                    let generation = sql_key_to_u64(
+                        &generation,
+                        &format!("member operator request '{request_id}' generation"),
+                    )?;
+                    let fence_token = sql_key_to_u64(
+                        &fence_token,
+                        &format!("member operator request '{request_id}' fence token"),
+                    )?;
+                    let binding_generation = sql_key_to_u64(
+                        &binding_generation,
+                        &format!("member operator request '{request_id}' binding generation"),
+                    )?;
+                    let record: MobMemberOperatorRequestRecord = decode_json(&bytes)?;
+                    let key = MobMemberOperatorRequestKey::new(
+                        agent_identity,
+                        generation,
+                        fence_token,
+                        host_id,
+                        binding_generation,
+                        member_session_id,
+                        request_id,
+                    );
+                    validate_member_operator_request_row(&record, &key)?;
+                    if !authority.preserves(&record) {
+                        stale.push(record);
+                    }
+                }
+                stale
+            };
+
+            let mut deleted = 0usize;
+            for record in stale {
+                deleted += tx
+                    .execute(
+                        "DELETE FROM mob_runtime_member_operator_requests
+                         WHERE mob_id = ?1 AND agent_identity = ?2
+                           AND generation = ?3 AND fence_token = ?4
+                           AND host_id = ?5 AND binding_generation = ?6
+                           AND member_session_id = ?7 AND request_id = ?8",
+                        params![
+                            mob_id.as_str(),
+                            record.agent_identity,
+                            u64_to_sql_key(record.generation),
+                            u64_to_sql_key(record.fence_token),
+                            record.host_id,
+                            u64_to_sql_key(record.host_binding_generation),
+                            record.member_session_id,
+                            record.request_id,
+                        ],
+                    )
+                    .map_err(se)?;
+            }
+            tx.commit().map_err(se)?;
+            u64::try_from(deleted).map_err(|_| {
+                MobStoreError::Internal(
+                    "member operator request SQLite prune count overflow".to_string(),
+                )
+            })
+        })
+        .await
+    }
+
+    async fn delete_member_operator_requests(&self, mob_id: &MobId) -> Result<u64, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM mob_runtime_member_operator_requests WHERE mob_id = ?1",
+                    params![mob_id.as_str()],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            u64::try_from(deleted).map_err(|_| {
+                MobStoreError::Internal("member operator request delete count overflow".to_string())
+            })
+        })
+        .await
+    }
+
+    async fn load_placed_spawn(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &str,
+    ) -> Result<Option<MobPlacedSpawnCarrierRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let agent_identity = agent_identity.to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_placed_spawns
+                     WHERE mob_id = ?1 AND agent_identity = ?2",
+                    params![mob_id.as_str(), agent_identity],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let record: Option<MobPlacedSpawnCarrierRecord> =
+                row.map(|bytes| decode_json(&bytes)).transpose()?;
+            if let Some(record) = &record {
+                record.validate_for_store_key(&mob_id, &agent_identity)?;
+            }
+            Ok(record)
+        })
+        .await
+    }
+
+    async fn list_placed_spawns(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobPlacedSpawnCarrierRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT agent_identity, record_json FROM mob_runtime_placed_spawns
+                     WHERE mob_id = ?1 ORDER BY agent_identity",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (agent_identity, bytes) = row.map_err(se)?;
+                let record: MobPlacedSpawnCarrierRecord = decode_json(&bytes)?;
+                record.validate_for_store_key(&mob_id, &agent_identity)?;
+                records.push(record);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn begin_placed_spawn_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnPendingPersistenceAuthority,
+    ) -> Result<BeginPlacedSpawnResult, MobStoreError> {
+        record.validate_for_mob(mob_id)?;
+        authority.verify_record(record)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let row: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_placed_spawns
+                     WHERE mob_id = ?1 AND agent_identity = ?2",
+                    params![mob_id.as_str(), record.agent_identity],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let result = if let Some(bytes) = row {
+                let existing: MobPlacedSpawnCarrierRecord = decode_json(&bytes)?;
+                existing.validate_for_store_key(&mob_id, &record.agent_identity)?;
+                if !existing.same_attempt_as(&record) {
+                    BeginPlacedSpawnResult::Conflict
+                } else {
+                    match existing.phase {
+                        PlacedSpawnCarrierPhase::Pending => {
+                            BeginPlacedSpawnResult::ExistingExactPending
+                        }
+                        PlacedSpawnCarrierPhase::Committed(_) => {
+                            BeginPlacedSpawnResult::ExistingExactCommitted
+                        }
+                    }
+                }
+            } else {
+                tx.execute(
+                    "INSERT INTO mob_runtime_placed_spawns
+                     (mob_id, agent_identity, record_json) VALUES (?1, ?2, ?3)",
+                    params![
+                        mob_id.as_str(),
+                        record.agent_identity,
+                        encode_json(&record)?
+                    ],
+                )
+                .map_err(se)?;
+                BeginPlacedSpawnResult::Inserted
+            };
+            tx.commit().map_err(se)?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn compare_and_commit_placed_spawn(
+        &self,
+        mob_id: &MobId,
+        expected_pending: &MobPlacedSpawnCarrierRecord,
+        committed: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnCommitPersistenceAuthority,
+    ) -> Result<CommitPlacedSpawnResult, MobStoreError> {
+        expected_pending.validate_for_mob(mob_id)?;
+        committed.validate_for_mob(mob_id)?;
+        authority.verify_record(committed)?;
+        if !matches!(expected_pending.phase, PlacedSpawnCarrierPhase::Pending)
+            || !expected_pending.same_attempt_as(committed)
+        {
+            return Err(MobStoreError::Internal(
+                "placed-spawn commit CAS changed its attempt tuple or expected non-pending state"
+                    .to_string(),
+            ));
+        }
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected_pending = expected_pending.clone();
+        let committed = committed.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let row: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_placed_spawns
+                     WHERE mob_id = ?1 AND agent_identity = ?2",
+                    params![mob_id.as_str(), expected_pending.agent_identity],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let result = match row {
+                None => CommitPlacedSpawnResult::Conflict,
+                Some(bytes) => {
+                    let existing: MobPlacedSpawnCarrierRecord = decode_json(&bytes)?;
+                    existing.validate_for_store_key(&mob_id, &expected_pending.agent_identity)?;
+                    if existing == committed {
+                        CommitPlacedSpawnResult::AlreadyCommittedExact
+                    } else if existing == expected_pending {
+                        tx.execute(
+                            "UPDATE mob_runtime_placed_spawns SET record_json = ?3
+                             WHERE mob_id = ?1 AND agent_identity = ?2",
+                            params![
+                                mob_id.as_str(),
+                                expected_pending.agent_identity,
+                                encode_json(&committed)?
+                            ],
+                        )
+                        .map_err(se)?;
+                        CommitPlacedSpawnResult::Committed
+                    } else if existing.same_attempt_as(&expected_pending)
+                        && matches!(existing.phase, PlacedSpawnCarrierPhase::Pending)
+                    {
+                        CommitPlacedSpawnResult::StillPending
+                    } else {
+                        CommitPlacedSpawnResult::Conflict
+                    }
+                }
+            };
+            tx.commit().map_err(se)?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn compare_and_promote_placed_spawn_binding(
+        &self,
+        mob_id: &MobId,
+        expected: &MobPlacedSpawnCarrierRecord,
+        promoted: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnBindingPromotionAuthority,
+    ) -> Result<PromotePlacedSpawnBindingResult, MobStoreError> {
+        expected.validate_for_mob(mob_id)?;
+        promoted.validate_for_mob(mob_id)?;
+        authority.verify_records(expected, promoted)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        let promoted = promoted.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let row: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_placed_spawns
+                     WHERE mob_id = ?1 AND agent_identity = ?2",
+                    params![mob_id.as_str(), expected.agent_identity],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let result = match row {
+                None => PromotePlacedSpawnBindingResult::Conflict,
+                Some(bytes) => {
+                    let existing: MobPlacedSpawnCarrierRecord = decode_json(&bytes)?;
+                    existing.validate_for_store_key(&mob_id, &expected.agent_identity)?;
+                    if existing == promoted {
+                        PromotePlacedSpawnBindingResult::AlreadyPromotedExact
+                    } else if existing == expected {
+                        tx.execute(
+                            "UPDATE mob_runtime_placed_spawns SET record_json = ?3
+                             WHERE mob_id = ?1 AND agent_identity = ?2",
+                            params![
+                                mob_id.as_str(),
+                                expected.agent_identity,
+                                encode_json(&promoted)?
+                            ],
+                        )
+                        .map_err(se)?;
+                        PromotePlacedSpawnBindingResult::Promoted
+                    } else {
+                        PromotePlacedSpawnBindingResult::Conflict
+                    }
+                }
+            };
+            tx.commit().map_err(se)?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn compare_and_delete_placed_spawn(
+        &self,
+        mob_id: &MobId,
+        expected: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnCleanupAuthority,
+    ) -> Result<DeletePlacedSpawnResult, MobStoreError> {
+        expected.validate_for_mob(mob_id)?;
+        authority.verify_record(expected)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let row: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_placed_spawns
+                     WHERE mob_id = ?1 AND agent_identity = ?2",
+                    params![mob_id.as_str(), expected.agent_identity],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let result = match row {
+                None => DeletePlacedSpawnResult::AlreadyAbsent,
+                Some(bytes) => {
+                    let existing: MobPlacedSpawnCarrierRecord = decode_json(&bytes)?;
+                    existing.validate_for_store_key(&mob_id, &expected.agent_identity)?;
+                    if existing != expected {
+                        DeletePlacedSpawnResult::Conflict
+                    } else {
+                        tx.execute(
+                            "DELETE FROM mob_runtime_placed_spawns
+                             WHERE mob_id = ?1 AND agent_identity = ?2",
+                            params![mob_id.as_str(), expected.agent_identity],
+                        )
+                        .map_err(se)?;
+                        DeletePlacedSpawnResult::Deleted
+                    }
+                }
+            };
+            tx.commit().map_err(se)?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn list_mob_operator_grants(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobOperatorGrantRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json FROM mob_runtime_operator_grants
+                     WHERE mob_id = ?1
+                     ORDER BY principal",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let bytes = row.map_err(se)?;
+                records.push(decode_json(&bytes)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn put_mob_operator_grant(
+        &self,
+        mob_id: &MobId,
+        record: &MobOperatorGrantRecord,
+        authority: &MobOperatorGrantPersistenceAuthority,
+    ) -> Result<(), MobStoreError> {
+        authority.verify_record(record)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "INSERT INTO mob_runtime_operator_grants (mob_id, principal, record_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mob_id, principal) DO UPDATE SET record_json = excluded.record_json",
+                params![mob_id.as_str(), record.principal, encode_json(&record)?],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_mob_operator_grant(
+        &self,
+        mob_id: &MobId,
+        principal: &str,
+        authority: &MobOperatorGrantDeletionAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_principal(principal)?;
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let principal = principal.to_string();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_runtime_operator_grants
+                     WHERE mob_id = ?1 AND principal = ?2",
+                    params![mob_id.as_str(), principal],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn delete_mob_operator_grants(&self, mob_id: &MobId) -> Result<u64, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_runtime_operator_grants WHERE mob_id = ?1",
+                    params![mob_id.as_str()],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed as u64)
+        })
+        .await
+    }
+
+    async fn list_member_event_cursors(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobMemberEventCursorRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json FROM mob_runtime_member_event_cursors
+                     WHERE mob_id = ?1
+                     ORDER BY agent_identity",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let bytes = row.map_err(se)?;
+                records.push(decode_json(&bytes)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn put_member_event_cursor(
+        &self,
+        mob_id: &MobId,
+        record: &MobMemberEventCursorRecord,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "INSERT INTO mob_runtime_member_event_cursors (mob_id, agent_identity, record_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(mob_id, agent_identity) DO UPDATE SET record_json = excluded.record_json",
+                params![mob_id.as_str(), record.agent_identity, encode_json(&record)?],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_member_event_cursor(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &str,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let agent_identity = agent_identity.to_string();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_runtime_member_event_cursors
+                     WHERE mob_id = ?1 AND agent_identity = ?2",
+                    params![mob_id.as_str(), agent_identity],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn delete_member_event_cursors(&self, mob_id: &MobId) -> Result<u64, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_runtime_member_event_cursors WHERE mob_id = ?1",
+                    params![mob_id.as_str()],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed as u64)
+        })
+        .await
+    }
+
+    async fn list_member_live_cleanup_records(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobMemberLiveCleanupRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json FROM mob_runtime_member_live_cleanups
+                     WHERE mob_id = ?1 ORDER BY cleanup_id",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                records.push(decode_json(&row.map_err(se)?)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn put_member_live_cleanup_record_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &MobMemberLiveCleanupRecord,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let encoded = encode_json(&record)?;
+            let changed = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mob_runtime_member_live_cleanups
+                     (mob_id, cleanup_id, record_json) VALUES (?1, ?2, ?3)",
+                    params![mob_id.as_str(), record.cleanup_id.as_str(), encoded],
+                )
+                .map_err(se)?;
+            if changed == 0 {
+                let existing: Vec<u8> = tx
+                    .query_row(
+                        "SELECT record_json FROM mob_runtime_member_live_cleanups
+                         WHERE mob_id = ?1 AND cleanup_id = ?2",
+                        params![mob_id.as_str(), record.cleanup_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(se)?;
+                let existing: MobMemberLiveCleanupRecord = decode_json(&existing)?;
+                if existing != record {
+                    return Err(MobStoreError::Internal(format!(
+                        "member-live cleanup id '{}' was reused for a conflicting record",
+                        record.cleanup_id
+                    )));
+                }
+            }
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn delete_member_live_cleanup_record(
+        &self,
+        mob_id: &MobId,
+        expected: &MobMemberLiveCleanupRecord,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let expected = expected.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let expected_encoded = encode_json(&expected)?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM mob_runtime_member_live_cleanups
+                     WHERE mob_id = ?1 AND cleanup_id = ?2 AND record_json = ?3",
+                    params![
+                        mob_id.as_str(),
+                        expected.cleanup_id.as_str(),
+                        expected_encoded.as_slice()
+                    ],
+                )
+                .map_err(se)?;
+            if changed == 0 {
+                let existing: Option<Vec<u8>> = tx
+                    .query_row(
+                        "SELECT record_json FROM mob_runtime_member_live_cleanups
+                         WHERE mob_id = ?1 AND cleanup_id = ?2",
+                        params![mob_id.as_str(), expected.cleanup_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(se)?;
+                if existing.is_some_and(|bytes| bytes != expected_encoded) {
+                    return Err(MobStoreError::Internal(format!(
+                        "member-live cleanup id '{}' no longer matches its expected immutable record",
+                        expected.cleanup_id
+                    )));
+                }
+            }
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
     async fn list_external_binding_overlays(
         &self,
         mob_id: &MobId,
@@ -891,6 +2324,82 @@ impl MobEventStore for SqliteMobEventStore {
                 }
             }
             drop(stmt);
+
+            let cursor = next_event_cursor(&tx)?;
+            let stored = MobEvent {
+                cursor,
+                timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: event.mob_id,
+                kind: event.kind,
+            };
+            let encoded = encode_stored_mob_event(&stored)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
+                params![cursor_to_i64(cursor)?, encoded],
+            )
+            .map_err(se)?;
+            set_next_cursor(&tx, cursor.saturating_add(1))?;
+            tx.commit().map_err(se)?;
+            Ok(Some(stored))
+        })
+        .await?;
+        if let Some(stored) = stored.as_ref() {
+            self.event_bus.publish_committed(stored.clone());
+        }
+        Ok(stored)
+    }
+
+    async fn append_step_failed_event_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        validate_mob_event_write_authority(&event.kind)?;
+        let Some((run_id, step_id, _)) = step_failed_event_identity(&event.kind) else {
+            return Err(MobStoreError::Internal(
+                "append_step_failed_event_if_absent requires a StepFailed event".to_string(),
+            ));
+        };
+        let run_id = run_id.clone();
+        let step_id = step_id.clone();
+        let mob_id = event.mob_id.clone();
+
+        let path = self.path.clone();
+        let stored = run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let mut stmt = tx
+                .prepare("SELECT event_json FROM mob_events ORDER BY cursor")
+                .map_err(se)?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut exact_replay = false;
+            for row in rows {
+                let bytes = row.map_err(se)?;
+                let existing = decode_stored_mob_event(&bytes)
+                    .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
+                if existing.mob_id != mob_id {
+                    continue;
+                }
+                let Some((existing_run_id, existing_step_id, _)) =
+                    step_failed_event_identity(&existing.kind)
+                else {
+                    continue;
+                };
+                if existing_run_id == &run_id && existing_step_id == &step_id {
+                    if existing.kind != event.kind {
+                        return Err(MobStoreError::Internal(format!(
+                            "StepFailed event conflict for run '{run_id}' step '{step_id}'"
+                        )));
+                    }
+                    exact_replay = true;
+                }
+            }
+            drop(stmt);
+            if exact_replay {
+                return Ok(None);
+            }
 
             let cursor = next_event_cursor(&tx)?;
             let stored = MobEvent {
@@ -1223,6 +2732,252 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    async fn put_remote_turn_intent(
+        &self,
+        run_id: &RunId,
+        intent: &MobRunRemoteTurnIntent,
+    ) -> Result<bool, MobStoreError> {
+        if &intent.obligation.run_id != run_id || intent.obligation.dispatch_sequence == 0 {
+            return Err(MobStoreError::Internal(format!(
+                "remote-turn intent does not match run '{run_id}' or has sequence zero"
+            )));
+        }
+        let path = self.path.clone();
+        let run_key = run_id.to_string();
+        let sequence = u64_to_sql_key(intent.obligation.dispatch_sequence);
+        let intent = intent.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let run_json: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
+                    params![run_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let Some(run_json) = run_json else {
+                return Err(MobStoreError::NotFound(format!(
+                    "run not found: {}",
+                    intent.obligation.run_id
+                )));
+            };
+            let run: MobRun = decode_json(&run_json)?;
+            intent
+                .validate_for(&run.run_id, &run.mob_id)
+                .map_err(MobStoreError::Internal)?;
+            let existing: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT intent_json FROM mob_run_remote_turn_intents \
+                     WHERE run_id = ?1 AND dispatch_sequence = ?2",
+                    params![run_key, sequence],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            if let Some(bytes) = existing {
+                let existing: MobRunRemoteTurnIntent = decode_json(&bytes)?;
+                if existing != intent {
+                    return Err(MobStoreError::Internal(format!(
+                        "remote-turn intent sequence {} conflicts for run '{}'",
+                        intent.obligation.dispatch_sequence, intent.obligation.run_id
+                    )));
+                }
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO mob_run_remote_turn_intents \
+                 (run_id, dispatch_sequence, intent_json) VALUES (?1, ?2, ?3)",
+                params![run_key, sequence, encode_json(&intent)?],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn delete_remote_turn_intent(
+        &self,
+        run_id: &RunId,
+        dispatch_sequence: u64,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let run_key = run_id.to_string();
+        let sequence = u64_to_sql_key(dispatch_sequence);
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            Ok(conn
+                .execute(
+                    "DELETE FROM mob_run_remote_turn_intents \
+                     WHERE run_id = ?1 AND dispatch_sequence = ?2",
+                    params![run_key, sequence],
+                )
+                .map_err(se)?
+                > 0)
+        })
+        .await
+    }
+
+    async fn list_remote_turn_intents(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<MobRunRemoteTurnIntent>, MobStoreError> {
+        let path = self.path.clone();
+        let run_key = run_id.to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT intent_json FROM mob_run_remote_turn_intents \
+                     WHERE run_id = ?1 ORDER BY dispatch_sequence ASC",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![run_key], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut intents = Vec::new();
+            for row in rows {
+                intents.push(decode_json(&row.map_err(se)?)?);
+            }
+            Ok(intents)
+        })
+        .await
+    }
+
+    async fn put_remote_turn_receipt(
+        &self,
+        run_id: &RunId,
+        receipt: &MobRunRemoteTurnReceipt,
+    ) -> Result<bool, MobStoreError> {
+        if &receipt.obligation.run_id != run_id || receipt.obligation.dispatch_sequence == 0 {
+            return Err(MobStoreError::Internal(format!(
+                "remote-turn receipt does not match run '{run_id}' or has sequence zero"
+            )));
+        }
+        let path = self.path.clone();
+        let run_key = run_id.to_string();
+        let sequence = u64_to_sql_key(receipt.obligation.dispatch_sequence);
+        let receipt = receipt.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let run_json: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
+                    params![run_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let Some(run_json) = run_json else {
+                return Err(MobStoreError::NotFound(format!(
+                    "run not found: {}",
+                    receipt.obligation.run_id
+                )));
+            };
+            let run: MobRun = decode_json(&run_json)?;
+            let intent_json: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT intent_json FROM mob_run_remote_turn_intents \
+                     WHERE run_id = ?1 AND dispatch_sequence = ?2",
+                    params![run_key, sequence],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let intent: MobRunRemoteTurnIntent = intent_json
+                .map(|bytes| decode_json(&bytes))
+                .transpose()?
+                .ok_or_else(|| {
+                    MobStoreError::Internal(
+                        "remote-turn receipt has no exact durable intent".to_string(),
+                    )
+                })?;
+            receipt
+                .validate_for(&run.run_id, &run.mob_id, &intent)
+                .map_err(MobStoreError::Internal)?;
+            let existing: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT receipt_json FROM mob_run_remote_turn_receipts \
+                     WHERE run_id = ?1 AND dispatch_sequence = ?2",
+                    params![run_key, sequence],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            if let Some(bytes) = existing {
+                let existing: MobRunRemoteTurnReceipt = decode_json(&bytes)?;
+                if existing != receipt {
+                    return Err(MobStoreError::Internal(format!(
+                        "remote-turn receipt sequence {} conflicts for run '{}'",
+                        receipt.obligation.dispatch_sequence, receipt.obligation.run_id
+                    )));
+                }
+                return Ok(false);
+            }
+            let bytes = encode_json(&receipt)?;
+            tx.execute(
+                "INSERT INTO mob_run_remote_turn_receipts \
+                 (run_id, dispatch_sequence, receipt_json) VALUES (?1, ?2, ?3)",
+                params![run_key, sequence, bytes],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn list_remote_turn_receipts(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<MobRunRemoteTurnReceipt>, MobStoreError> {
+        let path = self.path.clone();
+        let run_key = run_id.to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT receipt_json FROM mob_run_remote_turn_receipts \
+                     WHERE run_id = ?1 ORDER BY dispatch_sequence ASC",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![run_key], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut receipts = Vec::new();
+            for row in rows {
+                receipts.push(decode_json(&row.map_err(se)?)?);
+            }
+            Ok(receipts)
+        })
+        .await
+    }
+
+    async fn delete_remote_turn_receipt(
+        &self,
+        run_id: &RunId,
+        dispatch_sequence: u64,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let run_key = run_id.to_string();
+        let sequence = u64_to_sql_key(dispatch_sequence);
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            Ok(conn
+                .execute(
+                    "DELETE FROM mob_run_remote_turn_receipts \
+                     WHERE run_id = ?1 AND dispatch_sequence = ?2",
+                    params![run_key, sequence],
+                )
+                .map_err(se)?
+                > 0)
+        })
+        .await
+    }
+
     async fn cas_flow_state_with_authority(
         &self,
         run_id: &RunId,
@@ -1501,6 +3256,64 @@ impl MobRunStore for SqliteMobRunStore {
             .map_err(se)?;
             tx.commit().map_err(se)?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn append_failure_entry_if_absent_with_authority(
+        &self,
+        run_id: &RunId,
+        entry: FailureLedgerEntry,
+        authority: MobRunProvenanceAuthority,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let key = run_id.to_string();
+        let run_id = run_id.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let bytes: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let Some(bytes) = bytes else {
+                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
+            };
+            let mut run: MobRun = decode_json(&bytes)?;
+            authority
+                .validate_failure_entry(&run, &entry)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            if let Some(existing) = run
+                .failure_ledger
+                .iter()
+                .find(|existing| existing.step_id == entry.step_id)
+            {
+                if existing.reason == entry.reason
+                    && existing.error_report == entry.error_report
+                    && existing.error == entry.error
+                {
+                    return Ok(false);
+                }
+                return Err(MobStoreError::Internal(format!(
+                    "failure ledger conflict for run '{run_id}' step '{}'",
+                    entry.step_id
+                )));
+            }
+            run.failure_ledger.push(entry);
+            run.validate_flow_authority_projection()
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            let encoded = encode_json(&run)?;
+            tx.execute(
+                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
+                params![encoded, key],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
         })
         .await
     }
@@ -2303,6 +4116,72 @@ mod tests {
         (dir, path)
     }
 
+    fn operator_request(
+        identity: &str,
+        generation: u64,
+        sequence: usize,
+    ) -> MobMemberOperatorRequestRecord {
+        MobMemberOperatorRequestRecord::pending(
+            MobMemberOperatorRequestKey::new(
+                identity,
+                generation,
+                1,
+                "host-a",
+                1,
+                "member-session-a",
+                format!("request-{sequence}"),
+            ),
+            "0".repeat(64),
+        )
+    }
+
+    fn seed_operator_requests(
+        path: &Path,
+        mob_id: &MobId,
+        records: &[MobMemberOperatorRequestRecord],
+    ) {
+        let mut conn = open_connection(path).expect("open quota seed connection");
+        let tx = begin_immediate(&mut conn).expect("begin quota seed transaction");
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO mob_runtime_member_operator_requests
+                     (mob_id, agent_identity, generation, fence_token, host_id, binding_generation, member_session_id, request_id, record_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .expect("prepare quota seed insert");
+            for record in records {
+                record.validate_pending().expect("valid quota seed row");
+                insert
+                    .execute(params![
+                        mob_id.as_str(),
+                        &record.agent_identity,
+                        u64_to_sql_key(record.generation),
+                        u64_to_sql_key(record.fence_token),
+                        &record.host_id,
+                        u64_to_sql_key(record.host_binding_generation),
+                        &record.member_session_id,
+                        &record.request_id,
+                        encode_json(record).expect("encode quota seed row"),
+                    ])
+                    .expect("insert quota seed row");
+            }
+        }
+        tx.commit().expect("commit quota seed transaction");
+    }
+
+    fn operator_request_count(path: &Path, mob_id: &MobId) -> usize {
+        let conn = open_connection(path).expect("open quota count connection");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mob_runtime_member_operator_requests WHERE mob_id = ?1",
+                params![mob_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("count operator request rows");
+        usize::try_from(count).expect("non-negative operator request count")
+    }
+
     fn sample_definition() -> MobDefinition {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
@@ -2855,6 +4734,591 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sqlite_member_operator_request_ledger_survives_reopen_and_replays_terminal() {
+        use meerkat_contracts::wire::supervisor_bridge::{
+            MemberOperatorOp, MemberOperatorOutcome, MemberOperatorReply, WireOpaqueJson,
+        };
+
+        let (_dir, path) = temp_db_path();
+        let mob_id = MobId::from("mob-upcall-ledger");
+        let op = MemberOperatorOp::MobRunFlow {
+            flow_id: "release".to_string(),
+            params: None,
+        };
+        let pending = MobMemberOperatorRequestRecord::pending(
+            MobMemberOperatorRequestKey::new(
+                "worker-1",
+                u64::MAX - 1,
+                u64::MAX,
+                "host-a",
+                u64::MAX - 2,
+                "member-session-a",
+                "req-reopen-1",
+            ),
+            crate::store::member_operator_op_digest(&op).expect("operation digest"),
+        );
+
+        {
+            let store = SqliteMobStores::open(&path)
+                .expect("open initial store")
+                .runtime_metadata_store();
+            assert_eq!(
+                store
+                    .begin_member_operator_request(&mob_id, &pending)
+                    .await
+                    .expect("persist Pending"),
+                MobMemberOperatorRequestBegin::Started
+            );
+        }
+
+        let terminal_reply = MemberOperatorReply {
+            request_id: pending.request_id.clone(),
+            outcome: MemberOperatorOutcome::Completed {
+                result: WireOpaqueJson::from_value(&serde_json::json!({"ok": true})),
+            },
+        };
+        let terminal = pending
+            .terminal(terminal_reply.clone())
+            .expect("legal terminal transition");
+        {
+            let reopened = SqliteMobStores::open(&path)
+                .expect("reopen after Pending")
+                .runtime_metadata_store();
+            assert_eq!(
+                reopened
+                    .load_member_operator_request(&mob_id, &pending.key())
+                    .await
+                    .expect("load reopened Pending"),
+                Some(pending.clone())
+            );
+            assert!(
+                reopened
+                    .compare_and_put_member_operator_request(&mob_id, &pending, &terminal)
+                    .await
+                    .expect("terminal CAS")
+            );
+        }
+
+        let reopened = SqliteMobStores::open(&path)
+            .expect("reopen after Terminal")
+            .runtime_metadata_store();
+        let loaded = reopened
+            .load_member_operator_request(&mob_id, &pending.key())
+            .await
+            .expect("load reopened Terminal")
+            .expect("terminal row survives");
+        assert_eq!(loaded, terminal);
+        assert_eq!(loaded.terminal_reply(), Some(&terminal_reply));
+        assert_eq!(
+            reopened
+                .list_member_operator_requests(&mob_id)
+                .await
+                .expect("list full-domain terminal row"),
+            vec![terminal.clone()]
+        );
+        assert_eq!(
+            reopened
+                .begin_member_operator_request(&mob_id, &pending)
+                .await
+                .expect("duplicate begin reads terminal"),
+            MobMemberOperatorRequestBegin::Existing(loaded)
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_member_operator_request_key_separates_host_generation_and_member_session() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path)
+            .expect("open execution-fence key store")
+            .runtime_metadata_store();
+        let mob_id = MobId::from("sqlite-operator-execution-fence-key");
+        let base = MobMemberOperatorRequestRecord::pending(
+            MobMemberOperatorRequestKey::new(
+                "member-a",
+                7,
+                11,
+                "host-a",
+                1,
+                "member-session-a",
+                "same-request-id",
+            ),
+            "0".repeat(64),
+        );
+        let mut host_generation_two = base.clone();
+        host_generation_two.host_binding_generation = 2;
+        let mut replacement_session = host_generation_two.clone();
+        replacement_session.member_session_id = "member-session-b".to_string();
+
+        for record in [&base, &host_generation_two, &replacement_session] {
+            assert_eq!(
+                store
+                    .begin_member_operator_request(&mob_id, record)
+                    .await
+                    .expect("insert exact SQLite execution-fence key"),
+                MobMemberOperatorRequestBegin::Started,
+            );
+        }
+        assert!(matches!(
+            store
+                .begin_member_operator_request(&mob_id, &base)
+                .await
+                .expect("exact SQLite duplicate replays"),
+            MobMemberOperatorRequestBegin::Existing(existing) if existing == base
+        ));
+
+        let reopened = SqliteMobStores::open(&path)
+            .expect("reopen execution-fence key store")
+            .runtime_metadata_store();
+        for record in [&base, &host_generation_two, &replacement_session] {
+            assert_eq!(
+                reopened
+                    .load_member_operator_request(&mob_id, &record.key())
+                    .await
+                    .expect("load exact SQLite execution-fence key"),
+                Some(record.clone()),
+            );
+        }
+        assert_eq!(
+            reopened
+                .list_member_operator_requests(&mob_id)
+                .await
+                .expect("list distinct SQLite execution-fence rows")
+                .len(),
+            3,
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_migrates_pre_execution_fence_ledger_by_dropping_ambiguous_rows() {
+        let (_dir, path) = temp_db_path();
+        {
+            let conn = Connection::open(&path).expect("open legacy member-operator database");
+            conn.execute_batch(
+                "CREATE TABLE mob_runtime_member_operator_requests (
+                     mob_id TEXT NOT NULL,
+                     agent_identity TEXT NOT NULL,
+                     generation BLOB NOT NULL,
+                     fence_token BLOB NOT NULL,
+                     request_id TEXT NOT NULL,
+                     record_json BLOB NOT NULL,
+                     PRIMARY KEY (
+                         mob_id, agent_identity, generation, fence_token, request_id
+                     )
+                 );",
+            )
+            .expect("create pre-execution-fence ledger");
+            conn.execute(
+                "INSERT INTO mob_runtime_member_operator_requests
+                 (mob_id, agent_identity, generation, fence_token, request_id, record_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "legacy-mob",
+                    "member-a",
+                    u64_to_sql_key(7),
+                    u64_to_sql_key(11),
+                    "ambiguous-request",
+                    b"{}".as_slice(),
+                ],
+            )
+            .expect("seed ambiguous pre-fence row");
+        }
+
+        let stores = SqliteMobStores::open(&path).expect("open and migrate legacy ledger");
+        assert!(
+            stores
+                .runtime_metadata_store()
+                .list_member_operator_requests(&MobId::from("legacy-mob"))
+                .await
+                .expect("list migrated ledger")
+                .is_empty(),
+            "a pre-fence row cannot be safely attributed and must not replay"
+        );
+
+        let conn = Connection::open(&path).expect("inspect migrated ledger schema");
+        let mut statement = conn
+            .prepare("PRAGMA table_info(mob_runtime_member_operator_requests)")
+            .expect("prepare table-info inspection");
+        let columns = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })
+            .expect("read migrated table info")
+            .map(|row| row.expect("read migrated column"))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(columns.get("host_id"), Some(&5));
+        assert_eq!(columns.get("binding_generation"), Some(&6));
+        assert_eq!(columns.get("member_session_id"), Some(&7));
+        assert_eq!(columns.get("request_id"), Some(&8));
+    }
+
+    #[tokio::test]
+    async fn sqlite_rebuilds_execution_fence_columns_when_they_are_not_in_the_primary_key() {
+        let (_dir, path) = temp_db_path();
+        {
+            let conn = Connection::open(&path).expect("open malformed member-operator database");
+            conn.execute_batch(
+                "CREATE TABLE mob_runtime_member_operator_requests (
+                     mob_id TEXT NOT NULL,
+                     agent_identity TEXT NOT NULL,
+                     generation BLOB NOT NULL,
+                     fence_token BLOB NOT NULL,
+                     host_id TEXT NOT NULL,
+                     binding_generation BLOB NOT NULL,
+                     member_session_id TEXT NOT NULL,
+                     request_id TEXT NOT NULL,
+                     record_json BLOB NOT NULL,
+                     PRIMARY KEY (
+                         mob_id, agent_identity, generation, fence_token, request_id
+                     )
+                 );",
+            )
+            .expect("create ledger whose fence columns are not key columns");
+            conn.execute(
+                "INSERT INTO mob_runtime_member_operator_requests
+                 (mob_id, agent_identity, generation, fence_token, host_id,
+                  binding_generation, member_session_id, request_id, record_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "malformed-key-mob",
+                    "member-a",
+                    u64_to_sql_key(7),
+                    u64_to_sql_key(11),
+                    "host-a",
+                    u64_to_sql_key(3),
+                    "member-session-a",
+                    "ambiguous-request",
+                    b"{}".as_slice(),
+                ],
+            )
+            .expect("seed row under malformed execution-fence key");
+        }
+
+        let stores = SqliteMobStores::open(&path).expect("open and rebuild malformed ledger");
+        assert!(
+            stores
+                .runtime_metadata_store()
+                .list_member_operator_requests(&MobId::from("malformed-key-mob"))
+                .await
+                .expect("list rebuilt malformed ledger")
+                .is_empty(),
+            "rows written without the full tuple in the primary key are ambiguous and must drop"
+        );
+
+        let conn = Connection::open(&path).expect("inspect rebuilt malformed ledger schema");
+        let mut statement = conn
+            .prepare("PRAGMA table_info(mob_runtime_member_operator_requests)")
+            .expect("prepare rebuilt table-info inspection");
+        let primary_key = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+            })
+            .expect("read rebuilt table info")
+            .map(|row| row.expect("read rebuilt column"))
+            .filter(|(position, _)| *position > 0)
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            primary_key.into_values().collect::<Vec<_>>(),
+            vec![
+                "mob_id",
+                "agent_identity",
+                "generation",
+                "fence_token",
+                "host_id",
+                "binding_generation",
+                "member_session_id",
+                "request_id",
+            ],
+        );
+    }
+
+    #[test]
+    fn sqlite_u64_blob_keys_round_trip_and_sort_the_full_domain() {
+        let (_dir, path) = temp_db_path();
+        let conn = open_connection(&path).expect("open full-domain key store");
+        let expected = [1, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX];
+        for value in expected {
+            conn.execute(
+                "INSERT INTO mob_run_remote_turn_intents \
+                 (run_id, dispatch_sequence, intent_json) VALUES (?1, ?2, ?3)",
+                params!["full-domain-run", u64_to_sql_key(value), Vec::<u8>::new()],
+            )
+            .expect("insert full-domain dispatch key");
+        }
+        let mut statement = conn
+            .prepare(
+                "SELECT dispatch_sequence FROM mob_run_remote_turn_intents \
+                 WHERE run_id = ?1 ORDER BY dispatch_sequence ASC",
+            )
+            .expect("prepare ordered full-domain key query");
+        let rows = statement
+            .query_map(params!["full-domain-run"], |row| row.get::<_, Vec<u8>>(0))
+            .expect("query full-domain keys");
+        let actual = rows
+            .map(|row| {
+                let key = row.expect("read full-domain key");
+                sql_key_to_u64(&key, "test dispatch sequence").expect("decode full-domain key")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_sqlite_member_operator_incarnation_quota_is_atomic_and_replays_at_ceiling() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).expect("open SQLite quota store");
+        let mob_id = MobId::from("operator-incarnation-quota");
+        let oversized = MobMemberOperatorRequestRecord::pending(
+            MobMemberOperatorRequestKey::new(
+                "member-a",
+                1,
+                1,
+                "host-a",
+                1,
+                "member-session-a",
+                "x".repeat(crate::store::MEMBER_OPERATOR_REQUEST_ID_MAX_BYTES + 1),
+            ),
+            "0".repeat(64),
+        );
+        assert!(
+            stores
+                .runtime_metadata_store()
+                .begin_member_operator_request(&mob_id, &oversized)
+                .await
+                .is_err(),
+            "SQLite must reject oversized untrusted idempotency keys before persistence"
+        );
+        assert_eq!(operator_request_count(&path, &mob_id), 0);
+        let seed = (0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION - 1)
+            .map(|sequence| operator_request("member-a", 1, sequence))
+            .collect::<Vec<_>>();
+        seed_operator_requests(&path, &mob_id, &seed);
+
+        let candidate_a = operator_request(
+            "member-a",
+            1,
+            crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION - 1,
+        );
+        let candidate_b = operator_request(
+            "member-a",
+            1,
+            crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION,
+        );
+        let store_a = stores.runtime_metadata_store();
+        let store_b = stores.runtime_metadata_store();
+        let (result_a, result_b) = tokio::join!(
+            store_a.begin_member_operator_request(&mob_id, &candidate_a),
+            store_b.begin_member_operator_request(&mob_id, &candidate_b),
+        );
+
+        assert_eq!(
+            [&result_a, &result_b]
+                .into_iter()
+                .filter(|result| matches!(result, Ok(MobMemberOperatorRequestBegin::Started)))
+                .count(),
+            1,
+            "BEGIN IMMEDIATE must serialize the count+insert so only one contender owns execution"
+        );
+        assert_eq!(
+            [&result_a, &result_b]
+                .into_iter()
+                .filter(|result| matches!(result, Err(MobStoreError::WriteFailed(_))))
+                .count(),
+            1,
+            "the serialized loser must observe the committed ceiling and fail closed"
+        );
+        assert_eq!(
+            operator_request_count(&path, &mob_id),
+            crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION,
+            "concurrent begins must not oversubscribe the incarnation ceiling"
+        );
+
+        let winner = if matches!(result_a, Ok(MobMemberOperatorRequestBegin::Started)) {
+            &candidate_a
+        } else {
+            &candidate_b
+        };
+        assert_eq!(
+            stores
+                .runtime_metadata_store()
+                .begin_member_operator_request(&mob_id, winner)
+                .await
+                .expect("the winning key must replay at the ceiling"),
+            MobMemberOperatorRequestBegin::Existing(winner.clone()),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_sqlite_member_operator_global_quota_is_atomic_and_replays_at_ceiling() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).expect("open SQLite quota store");
+        let mob_id = MobId::from("operator-global-quota");
+        let seed = (0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_MOB - 1)
+            .map(|sequence| {
+                let incarnation =
+                    sequence / crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION;
+                let request = sequence % crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION;
+                operator_request(&format!("member-{incarnation}"), 1, request)
+            })
+            .collect::<Vec<_>>();
+        seed_operator_requests(&path, &mob_id, &seed);
+
+        let candidate_a = operator_request("member-overflow-a", 1, 0);
+        let candidate_b = operator_request("member-overflow-b", 1, 0);
+        let store_a = stores.runtime_metadata_store();
+        let store_b = stores.runtime_metadata_store();
+        let (result_a, result_b) = tokio::join!(
+            store_a.begin_member_operator_request(&mob_id, &candidate_a),
+            store_b.begin_member_operator_request(&mob_id, &candidate_b),
+        );
+
+        assert_eq!(
+            [&result_a, &result_b]
+                .into_iter()
+                .filter(|result| matches!(result, Ok(MobMemberOperatorRequestBegin::Started)))
+                .count(),
+            1,
+            "only one concurrent contender may claim the final per-mob slot"
+        );
+        assert_eq!(
+            [&result_a, &result_b]
+                .into_iter()
+                .filter(|result| matches!(result, Err(MobStoreError::WriteFailed(_))))
+                .count(),
+            1,
+            "the other contender must observe the committed global ceiling"
+        );
+        assert_eq!(
+            operator_request_count(&path, &mob_id),
+            crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_MOB,
+            "concurrent begins must not oversubscribe the per-mob ceiling"
+        );
+
+        let winner = if matches!(result_a, Ok(MobMemberOperatorRequestBegin::Started)) {
+            &candidate_a
+        } else {
+            &candidate_b
+        };
+        assert_eq!(
+            stores
+                .runtime_metadata_store()
+                .begin_member_operator_request(&mob_id, winner)
+                .await
+                .expect("the globally winning key must replay at the ceiling"),
+            MobMemberOperatorRequestBegin::Existing(winner.clone()),
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_recovery_prune_frees_stale_global_capacity_and_preserves_current_rows() {
+        use meerkat_contracts::wire::supervisor_bridge::{
+            MemberOperatorOutcome, MemberOperatorReply, WireOpaqueJson,
+        };
+
+        let (_dir, path) = temp_db_path();
+        let mob_id = MobId::from("sqlite-operator-recovery-prune");
+        let current = (0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION)
+            .map(|sequence| operator_request("member-current", 1, sequence));
+        let stale = (0..3).flat_map(|incarnation| {
+            (0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION).map(move |sequence| {
+                operator_request(&format!("member-stale-{incarnation}"), 1, sequence)
+            })
+        });
+        let rows = current.chain(stale).collect::<Vec<_>>();
+        seed_operator_requests(&path, &mob_id, &rows);
+
+        let current_pending = operator_request("member-current", 1, 0);
+        let current_terminal = current_pending
+            .terminal(MemberOperatorReply {
+                request_id: current_pending.request_id.clone(),
+                outcome: MemberOperatorOutcome::Completed {
+                    result: WireOpaqueJson::from_value(&serde_json::json!({"ok": true})),
+                },
+            })
+            .expect("terminalize current SQLite replay row");
+        {
+            let store = SqliteMobStores::open(&path)
+                .expect("open before simulated crash")
+                .runtime_metadata_store();
+            assert!(
+                store
+                    .compare_and_put_member_operator_request(
+                        &mob_id,
+                        &current_pending,
+                        &current_terminal,
+                    )
+                    .await
+                    .expect("persist current SQLite terminal")
+            );
+            assert!(
+                store
+                    .begin_member_operator_request(&mob_id, &operator_request("member-new", 1, 0),)
+                    .await
+                    .is_err(),
+                "the recovered store starts at the global fail-closed ceiling"
+            );
+        }
+
+        let recovered = SqliteMobStores::open(&path)
+            .expect("reopen after simulated crash")
+            .runtime_metadata_store();
+        let authority = MobMemberOperatorPruneAuthority::from_actor_current_residencies(
+            std::collections::BTreeSet::from([
+                crate::store::MobMemberOperatorResidency {
+                    agent_identity: "member-current".to_string(),
+                    generation: 1,
+                    fence_token: 1,
+                    host_id: "host-a".to_string(),
+                    host_binding_generation: 1,
+                    member_session_id: "member-session-a".to_string(),
+                },
+                crate::store::MobMemberOperatorResidency {
+                    agent_identity: "member-new".to_string(),
+                    generation: 1,
+                    fence_token: 1,
+                    host_id: "host-a".to_string(),
+                    host_binding_generation: 1,
+                    member_session_id: "member-session-a".to_string(),
+                },
+            ]),
+        );
+        assert_eq!(
+            recovered
+                .prune_stale_member_operator_requests(&mob_id, &authority)
+                .await
+                .expect("recovered actor-authorized SQLite prune"),
+            3 * crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION as u64,
+        );
+        assert_eq!(
+            recovered
+                .begin_member_operator_request(&mob_id, &current_pending)
+                .await
+                .expect("current SQLite terminal still replays"),
+            MobMemberOperatorRequestBegin::Existing(current_terminal),
+        );
+        assert!(
+            recovered
+                .begin_member_operator_request(
+                    &mob_id,
+                    &operator_request(
+                        "member-current",
+                        1,
+                        crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION,
+                    ),
+                )
+                .await
+                .is_err(),
+            "recovery pruning must preserve the current incarnation ceiling"
+        );
+        assert_eq!(
+            recovered
+                .begin_member_operator_request(&mob_id, &operator_request("member-new", 1, 0))
+                .await
+                .expect("recovery pruning frees global SQLite capacity"),
+            MobMemberOperatorRequestBegin::Started,
+        );
+    }
+
+    #[tokio::test]
     async fn test_sqlite_runtime_metadata_store_roundtrips_supervisor_and_overlay_records() {
         let (_dir, path) = temp_db_path();
         let store = SqliteMobStores::open(&path)
@@ -3030,6 +5494,152 @@ mod tests {
         assert_eq!(
             store.load_supervisor_authority(&mob_id).await.unwrap(),
             Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_runtime_metadata_store_roundtrips_mob_host_authority_records() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path)
+            .unwrap()
+            .runtime_metadata_store();
+        let mob_id = MobId::from("mob-hosts");
+        let other_mob = MobId::from("mob-other");
+        let host_b = crate::store::sample_mob_host_authority_record("host-peer-b", 1);
+        let host_c = crate::store::sample_mob_host_authority_record("host-peer-c", 2);
+        let host_b_authority =
+            crate::store::mob_host_authority_persistence_authority_for_record(&host_b).unwrap();
+        let host_c_authority =
+            crate::store::mob_host_authority_persistence_authority_for_record(&host_c).unwrap();
+
+        assert!(
+            store
+                .put_mob_host_authority_if_absent(&mob_id, &host_b, &host_b_authority)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_mob_host_authority_if_absent(&mob_id, &host_b, &host_b_authority)
+                .await
+                .unwrap(),
+            "duplicate (mob, host) insert must be ignored"
+        );
+        store
+            .put_mob_host_authority(&mob_id, &host_c, &host_c_authority)
+            .await
+            .unwrap();
+        store
+            .put_mob_host_authority(&other_mob, &host_b, &host_b_authority)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_mob_host_authority(&mob_id, "host-peer-b")
+                .await
+                .unwrap(),
+            Some(host_b.clone())
+        );
+        assert_eq!(
+            store.list_mob_host_authorities(&mob_id).await.unwrap(),
+            vec![host_b.clone(), host_c.clone()],
+            "listing is mob-scoped and host-id ordered"
+        );
+
+        // Rebind CAS to the next epoch under a rebind-witnessed authority.
+        let host_b_rebound = MobHostAuthorityRecord {
+            authority_epoch: 2,
+            live_endpoint: None,
+            ..host_b.clone()
+        };
+        let rebound_authority =
+            crate::store::mob_host_authority_persistence_authority_for_record(&host_b_rebound)
+                .unwrap();
+        assert!(
+            !store
+                .compare_and_put_mob_host_authority(
+                    &mob_id,
+                    &host_b_rebound,
+                    &host_b_rebound,
+                    &rebound_authority
+                )
+                .await
+                .unwrap(),
+            "mismatched expected record must not update"
+        );
+        assert!(
+            store
+                .compare_and_put_mob_host_authority(
+                    &mob_id,
+                    &host_b,
+                    &host_b_rebound,
+                    &rebound_authority
+                )
+                .await
+                .unwrap()
+        );
+
+        // Durable across reopen (the controlling-restart fact FLAG-3 exists
+        // for).
+        drop(store);
+        let reopened = SqliteMobStores::open(&path)
+            .unwrap()
+            .runtime_metadata_store();
+        assert_eq!(
+            reopened.list_mob_host_authorities(&mob_id).await.unwrap(),
+            vec![host_b_rebound.clone(), host_c],
+            "host bindings must survive a store reopen"
+        );
+
+        // Revoke: delete requires the exact expected record + revoke
+        // witness; the other mob's row survives (A14 isolation).
+        let deletion =
+            crate::store::mob_host_authority_deletion_authority_for_record(&host_b_rebound)
+                .unwrap();
+        reopened
+            .put_mob_host_binding_generation_highwater(&mob_id, &host_b_rebound, &deletion)
+            .await
+            .unwrap();
+        assert!(
+            !reopened
+                .delete_mob_host_authority(&mob_id, &host_b, &deletion)
+                .await
+                .unwrap(),
+            "stale expected record must not delete"
+        );
+        assert!(
+            reopened
+                .delete_mob_host_authority(&mob_id, &host_b_rebound, &deletion)
+                .await
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .load_mob_host_authority(&mob_id, "host-peer-b")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(reopened);
+        let reopened = SqliteMobStores::open(&path)
+            .unwrap()
+            .runtime_metadata_store();
+        assert_eq!(
+            reopened
+                .list_mob_host_binding_generation_highwaters(&mob_id)
+                .await
+                .unwrap(),
+            vec![("host-peer-b".to_string(), host_b_rebound.binding_generation)],
+            "the generation tombstone survives both active-row deletion and reopen",
+        );
+        assert_eq!(
+            reopened
+                .list_mob_host_authorities(&other_mob)
+                .await
+                .unwrap(),
+            vec![host_b],
+            "another mob's binding for the same host must survive"
         );
     }
 

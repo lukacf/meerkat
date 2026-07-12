@@ -126,6 +126,21 @@ pub(crate) struct MobDslT2Snapshot {
     // Dogma row R044: machine-owned trust-install-before-terminality
     // obligation window for supervisor-bridge recipients.
     pub pending_recipient_trust: std::collections::BTreeSet<crate::machines::mob_machine::PeerId>,
+    // Exact host-binding authority and retained revoke/replacement state.
+    // These are projected from MobMachine directly so runtime parity never
+    // substitutes an empty shell-side shadow for a live host generation.
+    pub host_binding_generations:
+        std::collections::BTreeMap<crate::machines::mob_machine::HostId, u64>,
+    pub host_binding_generation_highwater:
+        std::collections::BTreeMap<crate::machines::mob_machine::HostId, u64>,
+    pub confirmed_host_binding_revocations:
+        std::collections::BTreeSet<crate::machines::mob_machine::HostBindingGenerationTombstone>,
+    pub replacement_host_bind_endpoints: std::collections::BTreeMap<
+        crate::machines::mob_machine::HostId,
+        crate::machines::mob_machine::PeerAddress,
+    >,
+    pub replacement_host_binding_generations:
+        std::collections::BTreeMap<crate::machines::mob_machine::HostId, u64>,
     pub member_state_markers: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentRuntimeId,
         crate::machines::mob_machine::MobMemberState,
@@ -136,6 +151,12 @@ pub(crate) struct MobDslT2Snapshot {
     pub external_peer_edges_by_key: std::collections::BTreeMap<
         crate::machines::mob_machine::ExternalPeerKey,
         crate::machines::mob_machine::ExternalPeerEdge,
+    >,
+    pub pending_respawn_topology:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub abandoned_respawn_topology: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::Generation,
     >,
     pub identity_to_runtime: std::collections::BTreeMap<
         crate::machines::mob_machine::AgentIdentity,
@@ -274,10 +295,63 @@ pub(crate) struct MobDslT2Snapshot {
     pub desired_members: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
     pub members_to_spawn: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
     pub members_to_retire: std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub pending_placed_spawn_ids: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::PlacedSpawnId,
+    >,
+    pub pending_placed_spawn_generations: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::Generation,
+    >,
+    pub pending_placed_spawn_fence_tokens: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::FenceToken,
+    >,
+    pub pending_placed_spawn_hosts: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::HostId,
+    >,
+    pub pending_autonomous_placed_spawns:
+        std::collections::BTreeSet<crate::machines::mob_machine::AgentIdentity>,
+    pub pending_placed_spawn_host_binding_generations:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
+    pub pending_placed_spawn_spec_digests:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub pending_placed_spawn_provision_operation_ids:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub pending_placed_spawn_operation_owner_session_ids: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::SessionId,
+    >,
+    pub current_placed_spawn_ids: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::PlacedSpawnId,
+    >,
+    pub current_placed_spawn_host_binding_generations:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, u64>,
+    pub current_placed_spawn_provision_operation_ids:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    pub current_placed_spawn_operation_owner_session_ids: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::SessionId,
+    >,
+    pub pending_placed_carrier_cleanup:
+        std::collections::BTreeSet<crate::machines::mob_machine::PlacedCarrierCleanupObligation>,
+    pub remote_turn_dispatch_sequence: u64,
+    pub committed_remote_turn_outcomes:
+        std::collections::BTreeSet<crate::machines::mob_machine::RemoteTurnObligation>,
+    pub resolved_remote_turn_outcomes:
+        std::collections::BTreeSet<crate::machines::mob_machine::RemoteTurnObligation>,
+    pub pending_placed_kickoff_outcomes:
+        std::collections::BTreeSet<crate::machines::mob_machine::PlacedKickoffObligation>,
+    pub resolved_placed_kickoff_outcomes:
+        std::collections::BTreeSet<crate::machines::mob_machine::PlacedKickoffObligation>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MobStartupKickoffSnapshot {
+    /// Kickoffs whose one-shot completion handle has not reached a terminal.
+    /// `CallbackPending` remains projected on the member but is settled here.
     pub pending_kickoff_member_ids: std::collections::BTreeSet<String>,
     pub ready_runtime_ids: std::collections::BTreeSet<String>,
 }
@@ -319,7 +393,56 @@ pub(super) struct SubmitWorkPayload {
 // MobCommand
 // ---------------------------------------------------------------------------
 
+/// Exact volatile correlation for one detached orphan-release operation.
+///
+/// This is mechanical in-flight state, not lifecycle truth: the host's
+/// durable release receipt remains authoritative, and an actor restart drops
+/// the set so the next status poll retries. The fields carry the exact
+/// `ReleaseMember` idempotency authority plus the actor-local host binding
+/// incarnation; the protocol forbids a different session/spec at the same
+/// generation/fence tuple within one incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct HostOrphanReleaseKey {
+    pub(super) host_id: mob_dsl::HostId,
+    /// Volatile actor-owned binding incarnation. This is deliberately
+    /// independent from the supervisor authority epoch: revoke followed by a
+    /// fresh bind may reuse that epoch while targeting a different host
+    /// process/route.
+    pub(super) binding_incarnation: u64,
+    pub(super) agent_identity: mob_dsl::AgentIdentity,
+    pub(super) generation: mob_dsl::Generation,
+    pub(super) fence_token: mob_dsl::FenceToken,
+}
+
+/// Internal delivery handshake for one successful member-live Open. The
+/// actor retains exact cleanup custody until the handle acknowledges receipt;
+/// dropping this value anywhere between the oneshot send and the public
+/// method return closes the ack sender and triggers exact channel cleanup.
+pub(super) struct MemberLiveOpenDelivery {
+    pub(super) open: super::bridge_protocol::LiveOpenResult,
+    /// The handle sends a confirmation channel and waits for the actor to
+    /// delete durable cleanup custody before it returns the public Open.
+    pub(super) delivery_ack: oneshot::Sender<oneshot::Sender<Result<(), MobError>>>,
+}
+
 /// Commands sent from [`MobHandle`] to the [`MobActor`] for serialized processing.
+pub(super) enum PlacedBehaviorCompletion {
+    MemberHistory {
+        result: Result<super::member_history_proxy::MemberHistoryPageDomain, MobError>,
+        reply_tx:
+            oneshot::Sender<Result<super::member_history_proxy::MemberHistoryPageDomain, MobError>>,
+    },
+    LiveClose {
+        result: Result<super::bridge_protocol::LiveCloseStatus, MobError>,
+        reply_tx: oneshot::Sender<Result<super::bridge_protocol::LiveCloseStatus, MobError>>,
+    },
+    LiveStatus {
+        result: Result<super::member_live_proxy::MemberLiveStatusDomain, MobError>,
+        reply_tx:
+            oneshot::Sender<Result<super::member_live_proxy::MemberLiveStatusDomain, MobError>>,
+    },
+}
+
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
@@ -331,6 +454,45 @@ pub(super) enum MobCommand {
     SpawnProvisioned {
         spawn_ticket: u64,
         result: Result<super::handle::MemberSpawnReceipt, MobError>,
+    },
+    /// Internal trigger (multi-host §9, W-D.2): a delivery to a PLACED
+    /// member failed on the bridge, or a `HostStatus` sweep reported it
+    /// unhealthy/missing. The actor feeds the raw observation to the
+    /// machine's `ClassifyMemberLiveMaterialization` ladder; there is no
+    /// public caller and no reply — the outcome lands in machine state
+    /// (`member_revival_pending`/Broken) and the restore diagnostics.
+    RevivePlacedMember {
+        agent_identity: AgentIdentity,
+        reason: String,
+    },
+    /// Completion of one detached periodic `HostStatus` observation.
+    ///
+    /// The network wait never runs on the serialized actor task. The
+    /// `binding_epoch` is checked again when this command is consumed so a
+    /// late response from a revoked/rebound host cannot reconcile current
+    /// machine state.
+    HostStatusPollCompleted {
+        host_id: String,
+        binding_epoch: u64,
+        binding_generation: u64,
+        binding_incarnation: u64,
+        result: Result<super::bridge_protocol::BridgeHostStatusResponse, crate::MobError>,
+    },
+    /// Typed completion of one exact detached orphan release. The actor keeps
+    /// the key reserved until this command is absorbed, suppressing overlap
+    /// from periodic and rebind-triggered status observations.
+    HostOrphanReleaseCompleted {
+        key: HostOrphanReleaseKey,
+        result: Result<crate::machines::mob_machine::MemberSessionDisposal, crate::MobError>,
+    },
+    /// Completion of a detached placed-member behavior. The actor compares
+    /// the captured exact host/member incarnation immediately before sending
+    /// any success to the caller, linearizing response attribution against
+    /// host revoke/rebind/promotion.
+    PlacedBehaviorCompleted {
+        agent_identity: AgentIdentity,
+        expected_member: super::bridge_protocol::BridgeMemberIncarnation,
+        completion: PlacedBehaviorCompletion,
     },
     Retire {
         agent_identity: AgentIdentity,
@@ -446,6 +608,108 @@ pub(super) enum MobCommand {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<Vec<mob_dsl::MobMachineEffect>, MobError>>,
     },
+    /// Actor-linearized no-op used by fenced member-operator execution before
+    /// any operation whose implementation may otherwise be projection-only.
+    /// The command gate performs the exact residency validation; the handler
+    /// has no machine or shell effect.
+    ValidateCommandAuthority {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Actor-linearized operator admission for composite/projection paths
+    /// whose first semantic action is not itself a scoped MobCommand.
+    AdmitControlScope {
+        required: mob_dsl::ControlScope,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Actor-authorized capacity reclamation for the durable member-operator
+    /// ledger. The handler snapshots exact current placed residencies from
+    /// MobMachine and lets the store delete only rows outside that closed set.
+    PruneStaleMemberOperatorRequests {
+        reply_tx: oneshot::Sender<Result<u64, MobError>>,
+    },
+    /// Actor-serialized remote-turn sequence reservation. The caller supplies
+    /// every exact obligation field except `dispatch_sequence`; the actor
+    /// mints the next sequence and records custody in one authority turn.
+    ReserveRemoteTurnObligation {
+        intent: Box<crate::run::MobRunRemoteTurnIntent>,
+        reply_tx: oneshot::Sender<
+            Result<super::remote_flow_ticket::ReservedRemoteTurnIntent, MobError>,
+        >,
+    },
+    /// Atomically persist a replay-complete run receipt, then commit the exact
+    /// controller custody transition. Store-first ordering makes a crash
+    /// between IO and in-memory commit recoverable from the receipt.
+    CommitRemoteTurnReceipt {
+        receipt: Box<crate::run::MobRunRemoteTurnReceipt>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Lifecycle recovery received an authenticated exact tracked-input
+    /// cancellation receipt. Persist the canonical step terminal and close
+    /// this one remote-turn obligation through actor-owned machine custody.
+    CloseRemoteTurnAfterTrackedCancel {
+        receipt: Box<crate::run::MobRunRemoteTurnReceipt>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    EnsureRemoteTurnRecord {
+        obligation: Box<crate::event::RemoteTurnObligationEvent>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    FinalizeRemoteTurnPrivacyCleanup {
+        cleanup: Box<super::remote_turn_reconciler::FinalizedRemoteTurnPrivacyCleanup>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ConvergeRecoveredFlowRun {
+        run_id: RunId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ResolveRemoteTurnOutcome {
+        obligation: Box<mob_dsl::RemoteTurnObligation>,
+        record: super::bridge_protocol::BridgeTurnOutcomeRecord,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    AcknowledgeRemoteTurnOutcome {
+        obligation: Box<mob_dsl::RemoteTurnObligation>,
+        ack: super::bridge_protocol::BridgeTurnOutcomeAck,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    RequestPlacedCompletionCancellation {
+        obligation: Box<crate::event::PlacedCompletionObligationEvent>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ResolvePlacedCompletionOutcome {
+        obligation: Box<crate::event::PlacedCompletionObligationEvent>,
+        record: super::bridge_protocol::BridgeTurnOutcomeRecord,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ClosePlacedCompletionOutcome {
+        obligation: Box<crate::event::PlacedCompletionObligationEvent>,
+        closure: crate::event::PlacedCompletionClosureEvent,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    AcknowledgePlacedCompletionOutcome {
+        obligation: Box<crate::event::PlacedCompletionObligationEvent>,
+        ack: super::bridge_protocol::BridgeTurnOutcomeAck,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ResolvePlacedKickoffOutcome {
+        obligation: Box<crate::event::PlacedKickoffObligationEvent>,
+        record: super::bridge_protocol::BridgeTurnOutcomeRecord,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ResolvePlacedKickoffCancelled {
+        obligation: Box<crate::event::PlacedKickoffObligationEvent>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    AcknowledgePlacedKickoffOutcome {
+        obligation: Box<crate::event::PlacedKickoffObligationEvent>,
+        ack: super::bridge_protocol::BridgeTurnOutcomeAck,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    RejectPlacedKickoffBeforeAdmission {
+        obligation: Box<crate::event::PlacedKickoffObligationEvent>,
+        error: String,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     PreviewMachineInput {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<mob_dsl::MobMachineState, MobError>>,
@@ -531,7 +795,7 @@ pub(super) enum MobCommand {
     },
     ProjectMemberList {
         include_retiring: bool,
-        reply_tx: oneshot::Sender<Vec<super::MobMemberListEntry>>,
+        reply_tx: oneshot::Sender<Result<Vec<super::MobMemberListEntry>, crate::MobError>>,
     },
     ProjectMemberStatus {
         agent_identity: crate::ids::AgentIdentity,
@@ -550,7 +814,93 @@ pub(super) enum MobCommand {
     },
     MemberMachineProjection {
         agent_identity: crate::ids::AgentIdentity,
-        reply_tx: oneshot::Sender<MobMemberMachineProjection>,
+        reply_tx: oneshot::Sender<Result<MobMemberMachineProjection, crate::MobError>>,
+    },
+    /// Read one member's transcript page through the placement-switched
+    /// history proxy (§19.L2 / §7.4 phase 6). Local members serve the local
+    /// session read; placed members proxy `ReadMemberHistory` over the
+    /// supervisor bridge. `ReadHistory`-scoped at chokepoint (a).
+    MemberHistory {
+        agent_identity: crate::ids::AgentIdentity,
+        from_index: Option<u64>,
+        limit: Option<u32>,
+        reply_tx: oneshot::Sender<
+            Result<super::member_history_proxy::MemberHistoryPageDomain, crate::MobError>,
+        >,
+    },
+    /// Hard-cancel a member's in-flight run (§7.4 phase 6). Distinct from
+    /// [`Self::ForceCancel`] (cooperative boundary cancel) by design: this is
+    /// bounded exact-run convergence over the immediate user-interrupt
+    /// authority. A placed-member reply is successful only after the observed
+    /// run is unbound/terminal, and retrying that operation cannot interrupt a
+    /// newer run. `Cancel`-scoped at chokepoint (a); placed members are
+    /// capability-gated on the recorded host `hard_cancel_member` fact BEFORE
+    /// any bridge dispatch.
+    HardCancelMember {
+        agent_identity: AgentIdentity,
+        reason: String,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Open a live channel on a member (§16 phase 6b, DEC-P6B-C2).
+    /// Identity-addressed and placement-blind (DL3); `Live`-scoped at
+    /// chokepoint (a). There is deliberately NO MobMachine input for the
+    /// live family: controlling-side admission is scope gate + roster +
+    /// placement/capability gate, and channel-binding admission is the
+    /// OWNING session's MeerkatMachine authority (§16.3) — the MobMachine
+    /// holds zero live-channel facts (DL2).
+    MemberLiveOpen {
+        agent_identity: AgentIdentity,
+        turning_mode: Option<super::bridge_protocol::RealtimeTurningMode>,
+        transport: Option<super::bridge_protocol::LiveOpenTransport>,
+        reply_tx: oneshot::Sender<Result<MemberLiveOpenDelivery, MobError>>,
+    },
+    /// Close one NAMED live channel (DEC-P6B-C9: close-what-you-name is the
+    /// CAS-like property that keeps a reconciling console from race-killing
+    /// a concurrently re-minted channel). `Live`-scoped.
+    MemberLiveClose {
+        agent_identity: AgentIdentity,
+        channel_id: String,
+        reply_tx: oneshot::Sender<Result<super::bridge_protocol::LiveCloseStatus, MobError>>,
+    },
+    /// The dedicated live point read (§16.9 / DEC-P6B-C10): `channel_id:
+    /// None` = "the member's active channel" (ADJ-P6B-2) — the reply-loss
+    /// discovery primitive. `member_status` stays live-free and bridge-free;
+    /// this is the ONLY remote channel-state path. `Live`-scoped.
+    MemberLiveStatus {
+        agent_identity: AgentIdentity,
+        channel_id: Option<String>,
+        reply_tx: oneshot::Sender<
+            Result<super::member_live_proxy::MemberLiveStatusDomain, MobError>,
+        >,
+    },
+    /// Drive one turn-level live control verb (DL10's closed vocabulary:
+    /// commit_input / interrupt / truncate / refresh — frame-level input
+    /// rides the direct WS, never the bridge). `Live`-scoped.
+    MemberLiveControl {
+        agent_identity: AgentIdentity,
+        channel_id: String,
+        verb: super::bridge_protocol::BridgeLiveControlVerb,
+        reply_tx:
+            oneshot::Sender<Result<super::bridge_protocol::BridgeLiveControlOutcome, MobError>>,
+    },
+    /// Internal pump-liveness poke (A17): ensure the member-event pump for a
+    /// placed member is running because a remote-turn obligation is
+    /// outstanding. Named cross-lane seam realization
+    /// (`ensure_pump_for_obligation`); internal lane, no principal semantics.
+    EnsureMemberEventPump {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Internal realization of a MACHINE-authorized external event
+    /// subscription (the `AuthorizeExternalAgentEventSubscription` third
+    /// outcome / `external_members` fan-out): ensure the pump and open an
+    /// `AttributedEvent` tap. Authorization already happened at the machine
+    /// input — this command is pure realization.
+    EnsureMemberEventTap {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<
+            Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError>,
+        >,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -571,6 +921,54 @@ pub(super) enum MobCommand {
     },
     RotateSupervisor {
         reply_tx: oneshot::Sender<Result<super::handle::SupervisorRotationReport, MobError>>,
+    },
+    /// §7.2 step 2: bind a member-host daemon to this mob's supervisor
+    /// authority. Boxed: the request carries descriptor-derived identity and
+    /// ceremony material that would widen every command variant.
+    BindHost {
+        request: Box<super::handle::HostBindRequest>,
+        reply_tx: oneshot::Sender<Result<super::handle::HostBindReport, MobError>>,
+    },
+    /// Revoke a bound (or bind-requested) member host. Bound hosts must first
+    /// complete the authenticated remote revoke terminal; the local machine
+    /// and durable authority row clear only after the host's durable receipt
+    /// is validated. Replies with the typed [`HostRevokeReport`] naming the
+    /// member identities whose placements pointed at the revoked host
+    /// (ADJ-P7-2 — never fabricated surface-side).
+    ///
+    /// [`HostRevokeReport`]: super::handle::HostRevokeReport
+    RevokeHost {
+        host_id: String,
+        reply_tx: oneshot::Sender<Result<super::handle::HostRevokeReport, MobError>>,
+    },
+    /// Record (full-replace) a principal's control-scope grant (§8). The
+    /// actor arm gates `caller` on `AdminGrants` via the sealed
+    /// `ResolvedControlPolicy` BEFORE the machine input is built, then runs
+    /// the prepare → durable-record → commit choreography under the
+    /// `GrantRecorded` transition witness.
+    GrantScopes {
+        caller: crate::control_policy::MobControlPrincipal,
+        principal: meerkat_core::auth::PrincipalId,
+        scopes: std::collections::BTreeSet<mob_dsl::ControlScope>,
+        expires_at_ms: Option<u64>,
+        reply_tx: oneshot::Sender<Result<crate::control_policy::OperatorGrant, MobError>>,
+    },
+    /// Revoke scopes (`None` = the entire grant). The actor computes the
+    /// `(revoked, remaining)` partition from recorded machine state (the
+    /// machine revalidates it), gated on `AdminGrants` like its siblings.
+    /// Replies whether the principal's grant record was removed entirely.
+    RevokeScopes {
+        caller: crate::control_policy::MobControlPrincipal,
+        principal: meerkat_core::auth::PrincipalId,
+        scopes: Option<std::collections::BTreeSet<mob_dsl::ControlScope>>,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
+    },
+    /// List raw grant records from machine state (expired rows included,
+    /// verbatim `expires_at_ms`, no expired flag — one clock, one evaluator,
+    /// at the enforcement seam only). `AdminGrants`-gated like its siblings.
+    Grants {
+        caller: crate::control_policy::MobControlPrincipal,
+        reply_tx: oneshot::Sender<Result<Vec<crate::control_policy::OperatorGrant>, MobError>>,
     },
     PollEvents {
         after_cursor: u64,
@@ -614,6 +1012,18 @@ pub(super) enum MobCommand {
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Drain outstanding cross-host route-install obligations (multi-host
+    /// §10.4, ADJ-P4-9b): the ONE canonical drain verb — DRAIN-ONLY
+    /// (ADJ-P4-15). Re-derivation from durable `wiring_edges` ×
+    /// `member_placement` belongs to the rebind/recovery/revival triggers,
+    /// never to this verb: an idle drive sends nothing (T-W3 depends on
+    /// that idempotency). Realizes every already-pending Install as an
+    /// `InstallPeerTrust` bridge send. Per-install failures leave the row
+    /// pending (fail closed, observable via the route-installs projection)
+    /// and never fail the drain; a non-Install row is an invariant error.
+    DriveRouteInstalls {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     SetSpawnPolicy {
         policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -621,12 +1031,18 @@ pub(super) enum MobCommand {
     Shutdown {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-support-only process-death simulation. Unlike `Shutdown`, this
+    /// stops volatile actor work without committing lifecycle/run terminals.
+    #[cfg(any(test, feature = "test-support"))]
+    CrashStopPreservingDurableWorkForTest {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Read the current lifecycle phase directly from the DSL authority.
     /// Routes through the command channel so the actor returns the single
     /// canonical DSL-authority value; there is no atomic shadow (dogma #1,
     /// #13, #17).
     QueryPhase {
-        reply_tx: oneshot::Sender<MobState>,
+        reply_tx: oneshot::Sender<Result<MobState, MobError>>,
     },
 }
 
@@ -635,11 +1051,16 @@ impl MobCommand {
         match self {
             Self::Spawn { .. } => "Spawn",
             Self::SpawnProvisioned { .. } => "SpawnProvisioned",
+            Self::RevivePlacedMember { .. } => "RevivePlacedMember",
+            Self::HostStatusPollCompleted { .. } => "HostStatusPollCompleted",
+            Self::HostOrphanReleaseCompleted { .. } => "HostOrphanReleaseCompleted",
+            Self::PlacedBehaviorCompleted { .. } => "PlacedBehaviorCompleted",
             Self::Retire { .. } => "Retire",
             Self::Respawn { .. } => "Respawn",
             Self::RetireAll { .. } => "RetireAll",
             Self::SubmitWork { .. } => "SubmitWork",
             Self::SendPeerMessage { .. } => "SendPeerMessage",
+            Self::DriveRouteInstalls { .. } => "DriveRouteInstalls",
             Self::DeclareMemberOutboundTaint { .. } => "DeclareMemberOutboundTaint",
             Self::CancelAllWork { .. } => "CancelAllWork",
             #[cfg(feature = "runtime-adapter")]
@@ -653,6 +1074,27 @@ impl MobCommand {
             Self::CommitFlowFrameStorePlan { .. } => "CommitFlowFrameStorePlan",
             Self::ProjectMachineInput { .. } => "ProjectMachineInput",
             Self::ApplyMachineInputEffects { .. } => "ApplyMachineInputEffects",
+            Self::ValidateCommandAuthority { .. } => "ValidateCommandAuthority",
+            Self::AdmitControlScope { .. } => "AdmitControlScope",
+            Self::PruneStaleMemberOperatorRequests { .. } => "PruneStaleMemberOperatorRequests",
+            Self::ReserveRemoteTurnObligation { .. } => "ReserveRemoteTurnObligation",
+            Self::CommitRemoteTurnReceipt { .. } => "CommitRemoteTurnReceipt",
+            Self::CloseRemoteTurnAfterTrackedCancel { .. } => "CloseRemoteTurnAfterTrackedCancel",
+            Self::EnsureRemoteTurnRecord { .. } => "EnsureRemoteTurnRecord",
+            Self::FinalizeRemoteTurnPrivacyCleanup { .. } => "FinalizeRemoteTurnPrivacyCleanup",
+            Self::ConvergeRecoveredFlowRun { .. } => "ConvergeRecoveredFlowRun",
+            Self::ResolveRemoteTurnOutcome { .. } => "ResolveRemoteTurnOutcome",
+            Self::AcknowledgeRemoteTurnOutcome { .. } => "AcknowledgeRemoteTurnOutcome",
+            Self::RequestPlacedCompletionCancellation { .. } => {
+                "RequestPlacedCompletionCancellation"
+            }
+            Self::ResolvePlacedCompletionOutcome { .. } => "ResolvePlacedCompletionOutcome",
+            Self::ClosePlacedCompletionOutcome { .. } => "ClosePlacedCompletionOutcome",
+            Self::AcknowledgePlacedCompletionOutcome { .. } => "AcknowledgePlacedCompletionOutcome",
+            Self::ResolvePlacedKickoffOutcome { .. } => "ResolvePlacedKickoffOutcome",
+            Self::ResolvePlacedKickoffCancelled { .. } => "ResolvePlacedKickoffCancelled",
+            Self::AcknowledgePlacedKickoffOutcome { .. } => "AcknowledgePlacedKickoffOutcome",
+            Self::RejectPlacedKickoffBeforeAdmission { .. } => "RejectPlacedKickoffBeforeAdmission",
             Self::PreviewMachineInput { .. } => "PreviewMachineInput",
             Self::QueryMachineState { .. } => "QueryMachineState",
             #[cfg(test)]
@@ -686,15 +1128,32 @@ impl MobCommand {
             Self::Destroy { .. } => "Destroy",
             Self::Reset { .. } => "Reset",
             Self::RotateSupervisor { .. } => "RotateSupervisor",
+            Self::BindHost { .. } => "BindHost",
+            Self::RevokeHost { .. } => "RevokeHost",
+            Self::GrantScopes { .. } => "GrantScopes",
+            Self::RevokeScopes { .. } => "RevokeScopes",
+            Self::Grants { .. } => "Grants",
             Self::PollEvents { .. } => "PollEvents",
             Self::ReplayAllEvents { .. } => "ReplayAllEvents",
             Self::RecordOperatorActionProvenance { .. } => "RecordOperatorActionProvenance",
             Self::ForceCancel { .. } => "ForceCancel",
+            Self::HardCancelMember { .. } => "HardCancelMember",
+            Self::MemberHistory { .. } => "MemberHistory",
+            Self::MemberLiveOpen { .. } => "MemberLiveOpen",
+            Self::MemberLiveClose { .. } => "MemberLiveClose",
+            Self::MemberLiveStatus { .. } => "MemberLiveStatus",
+            Self::MemberLiveControl { .. } => "MemberLiveControl",
+            Self::EnsureMemberEventPump { .. } => "EnsureMemberEventPump",
+            Self::EnsureMemberEventTap { .. } => "EnsureMemberEventTap",
             Self::Wire { .. } => "Wire",
             Self::WireMembersBatch { .. } => "WireMembersBatch",
             Self::Unwire { .. } => "Unwire",
             Self::SetSpawnPolicy { .. } => "SetSpawnPolicy",
             Self::Shutdown { .. } => "Shutdown",
+            #[cfg(any(test, feature = "test-support"))]
+            Self::CrashStopPreservingDurableWorkForTest { .. } => {
+                "CrashStopPreservingDurableWorkForTest"
+            }
             Self::QueryPhase { .. } => "QueryPhase",
         }
     }

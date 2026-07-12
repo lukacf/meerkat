@@ -1605,7 +1605,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreSystemContextSnapshot {
-        pub active_keys_have_known_pending_or_seen: bool,
+        pub active_turn_membership_is_consistent: bool,
         pub seen_keys_match_known_appends: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

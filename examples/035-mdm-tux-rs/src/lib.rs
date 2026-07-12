@@ -116,6 +116,8 @@ pub fn direct_control_request(
         intent: DIRECT_CONTROL_INTENT.into(),
         params,
         blocks: None,
+        reply_endpoint: None,
+        content_taint: None,
         handling_mode: None,
         content_taint: None,
     })

@@ -1027,6 +1027,7 @@ describe("Typed Events", () => {
               },
             },
           ],
+          stop_reason: "end_turn",
         },
       ],
     });
@@ -1350,6 +1351,22 @@ describe("WorkGraph parsers", () => {
     assert.equal(item.owner?.key.kind, "agent");
     assert.equal(item.claim?.owner.key.id, "homecore-kapellmeister");
     assert.deepEqual(item.completion_policy, { kind: "host_confirmed" });
+  });
+
+  it("accepts the largest lossless integer and rejects the first unsafe integer", () => {
+    const item = parseWorkItem({
+      ...claimedItem,
+      revision: Number.MAX_SAFE_INTEGER,
+    });
+    assert.equal(item.revision, Number.MAX_SAFE_INTEGER);
+
+    assert.throws(
+      () => parseWorkItem({ ...claimedItem, revision: 2 ** 53 }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("safe integer"),
+    );
   });
 
   it("rejects malformed WorkGraph lifecycle truth", () => {
@@ -2989,7 +3006,7 @@ describe("Parity wrappers", () => {
       autoWireParent: true,
       launchMode: { mode: "fresh" },
       toolAccessPolicy: { type: "allow_list", value: ["grep"] },
-      budgetSplitPolicy: { type: "remaining" },
+      placement: "host-b-peer",
       inheritedToolFilter: { Allow: ["grep"] },
       overrideProfile: {
         model: "claude-sonnet-4-6",
@@ -3000,6 +3017,7 @@ describe("Parity wrappers", () => {
     const spawned = await client.spawnMobMembers("mob-1", [{
       profile: "worker",
       agentIdentity: "worker-1",
+      placement: "host-c-peer",
       authBinding: { realm: "dev", binding: "default_anthropic" },
     }]);
     await client.mobTurnStart(
@@ -3076,7 +3094,7 @@ describe("Parity wrappers", () => {
       auto_wire_parent: true,
       launch_mode: { mode: "fresh" },
       tool_access_policy: { type: "allow_list", value: ["grep"] },
-      budget_split_policy: { type: "remaining" },
+      placement: "host-b-peer",
       inherited_tool_filter: { Allow: ["grep"] },
       override_profile: {
         model: "claude-sonnet-4-6",
@@ -3088,6 +3106,7 @@ describe("Parity wrappers", () => {
       realm: "dev",
       binding: "default_anthropic",
     });
+    assert.equal(calls[1].params.specs[0].placement, "host-c-peer");
     assert.deepEqual(calls[2].params, {
       mob_id: "mob-1",
       agent_identity: "worker-1",
@@ -3494,6 +3513,29 @@ describe("Parity wrappers", () => {
     );
     await assert.rejects(
       () => client.forkMobHelper("mob-1", "source", "help"),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        /tokens_used must be a non-negative integer/.test(String(error.message)),
+    );
+  });
+
+  it("accepts the largest lossless u64 projection and rejects the first unsafe integer", async () => {
+    const client = new MeerkatClient();
+    let tokensUsed = Number.MAX_SAFE_INTEGER;
+    client.request = async () => ({
+      output: "ok",
+      tokens_used: tokensUsed,
+      agent_identity: "helper-1",
+      member_ref: makeMemberRef("mob-1", "helper-1"),
+    });
+
+    const result = await client.spawnMobHelper("mob-1", "help");
+    assert.equal(result.tokensUsed, Number.MAX_SAFE_INTEGER);
+
+    tokensUsed = 2 ** 53;
+    await assert.rejects(
+      () => client.spawnMobHelper("mob-1", "help"),
       (error) =>
         error instanceof MeerkatError &&
         error.code === "INVALID_RESPONSE" &&
@@ -4788,6 +4830,46 @@ describe("Member-send handling-mode parse boundary (row 357)", () => {
 });
 
 describe("Session fork result parse boundary (row 88)", () => {
+  it("serializes fork-only tool policy on both fork request shapes", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        source_session_id: "src-1",
+        session_id: "fork-1",
+        message_count: 1,
+      };
+    };
+    const options = {
+      runningBehavior: "reject",
+      toolAccessPolicy: { type: "allow_list", value: ["grep"] },
+    };
+
+    await client.forkSessionAt("src-1", 2, options);
+    await client.forkSessionReplace(
+      "src-1",
+      2,
+      { type: "message", message: { role: "user", content: "replacement" } },
+      options,
+    );
+
+    assert.deepEqual(calls[0], {
+      method: "session/fork_at",
+      params: {
+        session_id: "src-1",
+        message_index: 2,
+        running_behavior: "reject",
+        tool_access_policy: { type: "allow_list", value: ["grep"] },
+      },
+    });
+    assert.equal(calls[1].method, "session/fork_replace");
+    assert.deepEqual(calls[1].params.tool_access_policy, {
+      type: "allow_list",
+      value: ["grep"],
+    });
+  });
+
   it("parses a well-formed fork result", () => {
     const result = MeerkatClient.parseSessionForkResult({
       source_session_id: "src-1",

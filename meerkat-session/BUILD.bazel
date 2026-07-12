@@ -83,7 +83,10 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//meerkat:__pkg__",
+        "//meerkat-cli:__pkg__",
+        "//meerkat-mcp-server:__pkg__",
         "//meerkat-mob:__pkg__",
+        "//meerkat-mob-mcp:__pkg__",
         "//meerkat-session:__pkg__",
         "//meerkat-web-runtime:__pkg__",
         "//tests/integration:__pkg__",

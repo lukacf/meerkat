@@ -8,7 +8,7 @@
 //! The `#[must_use]` attribute on the type ensures the compiler warns if the
 //! value is discarded.
 
-use super::provisioner::{MobProvisioner, ProvisionSessionOrigin};
+use super::provisioner::{MobProvisioner, ProvisionSessionOrigin, ResumedMemberRollbackAuthority};
 use crate::error::MobError;
 use crate::event::MemberRef;
 use crate::ids::AgentIdentity;
@@ -26,6 +26,7 @@ pub(super) struct PendingProvision {
     provisioner: Arc<dyn MobProvisioner>,
     operation_id: meerkat_core::ops::OperationId,
     session_origin: ProvisionSessionOrigin,
+    rollback_authority: Option<ResumedMemberRollbackAuthority>,
     committed: bool,
     rollback_attempted: bool,
 }
@@ -37,6 +38,7 @@ impl PendingProvision {
         provisioner: Arc<dyn MobProvisioner>,
         operation_id: meerkat_core::ops::OperationId,
         session_origin: ProvisionSessionOrigin,
+        rollback_authority: Option<ResumedMemberRollbackAuthority>,
     ) -> Self {
         Self {
             member_ref: Some(member_ref),
@@ -44,6 +46,7 @@ impl PendingProvision {
             provisioner,
             operation_id,
             session_origin,
+            rollback_authority,
             committed: false,
             rollback_attempted: false,
         }
@@ -58,15 +61,40 @@ impl PendingProvision {
         self.take_member_ref("commit")
     }
 
+    /// Consume the provision for a FAILED host-materialized spawn without
+    /// local retire traffic: the member on the host is a documented orphan
+    /// seed reclaimed by the HostStatus sweep at stale fence (§4.4), and the
+    /// member ref addresses a remote peer a local `retire_member` must not
+    /// dial. The caller aborts the local ops-provision record separately.
+    pub(super) fn disarm_remote_orphan_seed(mut self) -> Result<MemberRef, MobError> {
+        self.committed = true;
+        self.take_member_ref("disarm_remote_orphan_seed")
+    }
+
     /// Roll back the provision. Fresh sessions are retired/archived; resumed
     /// durable sessions are detached and restored to durable idle.
     pub(super) async fn rollback(mut self) -> Result<(), MobError> {
         let member_ref = self.take_member_ref("rollback")?;
         let rollback = match self.session_origin {
-            ProvisionSessionOrigin::Fresh => self.provisioner.retire_member(&member_ref).await,
+            ProvisionSessionOrigin::Fresh => self
+                .provisioner
+                .retire_member(&member_ref)
+                .await
+                .map(|_| ()),
             ProvisionSessionOrigin::ResumedDurable | ProvisionSessionOrigin::RevivedRetired => {
+                let rollback_authority = self.rollback_authority.as_ref().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "resumed provision '{}' lost its exact rollback attachment authority",
+                        self.agent_identity
+                    ))
+                })?;
                 self.provisioner
-                    .restore_resumed_member(&member_ref, &self.operation_id, self.session_origin)
+                    .restore_resumed_member(
+                        &member_ref,
+                        &self.operation_id,
+                        self.session_origin,
+                        rollback_authority,
+                    )
                     .await
             }
         };
@@ -84,13 +112,16 @@ impl PendingProvision {
     }
 
     /// Access the member ref without consuming.
-    pub(super) fn member_ref(&self) -> &MemberRef {
+    pub(super) fn member_ref(&self) -> Result<&MemberRef, MobError> {
         // `member_ref` is `Some` from construction until `commit()` or
         // `rollback()` consume `self`. Borrowing through `&self` cannot happen
         // after consumption.
-        self.member_ref
-            .as_ref()
-            .unwrap_or_else(|| unreachable!("PendingProvision::member_ref consumed before access"))
+        self.member_ref.as_ref().ok_or_else(|| {
+            MobError::Internal(format!(
+                "PendingProvision::member_ref called after prior consumption for '{}'",
+                self.agent_identity
+            ))
+        })
     }
 
     /// The meerkat ID associated with this provision.
@@ -153,6 +184,7 @@ mod tests {
     struct MockProvisioner {
         retired: AtomicBool,
         restored: AtomicBool,
+        started: AtomicBool,
         fail_retire: bool,
     }
 
@@ -161,6 +193,7 @@ mod tests {
             Self {
                 retired: AtomicBool::new(false),
                 restored: AtomicBool::new(false),
+                started: AtomicBool::new(false),
                 fail_retire: false,
             }
         }
@@ -169,6 +202,7 @@ mod tests {
             Self {
                 retired: AtomicBool::new(false),
                 restored: AtomicBool::new(false),
+                started: AtomicBool::new(false),
                 fail_retire: true,
             }
         }
@@ -184,6 +218,9 @@ mod tests {
                 member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
                 operation_id: meerkat_core::ops::OperationId::new(),
                 session_origin: ProvisionSessionOrigin::Fresh,
+                rollback_authority: None,
+                materialized_ack: None,
+                failed_restore_peer_ids: Vec::new(),
             })
         }
 
@@ -197,25 +234,40 @@ mod tests {
             Ok(())
         }
 
+        async fn capture_resumed_member_rollback_authority(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<ResumedMemberRollbackAuthority, MobError> {
+            Ok(ResumedMemberRollbackAuthority::for_test())
+        }
+
         async fn restore_resumed_member(
             &self,
             _member_ref: &MemberRef,
             _operation_id: &OperationId,
             _original_origin: ProvisionSessionOrigin,
+            _rollback_authority: &ResumedMemberRollbackAuthority,
         ) -> Result<(), MobError> {
             self.restored.store(true, Ordering::Release);
             Ok(())
         }
 
-        async fn retire_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
+        async fn retire_member(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<crate::machines::mob_machine::MemberSessionDisposal, MobError> {
             self.retired.store(true, Ordering::Release);
             if self.fail_retire {
                 return Err(MobError::Internal("retire failed".to_string()));
             }
-            Ok(())
+            Ok(crate::machines::mob_machine::MemberSessionDisposal::Archived)
         }
 
-        async fn interrupt_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
+        async fn interrupt_member(
+            &self,
+            _member_ref: &MemberRef,
+            _expected_member: Option<&super::super::bridge_protocol::BridgeMemberIncarnation>,
+        ) -> Result<(), MobError> {
             Ok(())
         }
 
@@ -232,6 +284,7 @@ mod tests {
             _member_ref: &MemberRef,
             _req: StartTurnRequest,
         ) -> Result<(), MobError> {
+            self.started.store(true, Ordering::Release);
             Ok(())
         }
 
@@ -299,6 +352,62 @@ mod tests {
         }
     }
 
+    fn start_turn_request() -> StartTurnRequest {
+        StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt: meerkat_core::types::ContentInput::Text("work".to_string()),
+            system_prompt: None,
+            event_tx: None,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_correlation_lane_rejects_placed_context_without_starting() {
+        let provisioner = MockProvisioner::new();
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
+        let error = provisioner
+            .start_turn_with_correlation(
+                &member_ref,
+                start_turn_request(),
+                Some(crate::runtime::provisioner::PlacedTurnDeliveryContext {
+                    input_id: uuid::Uuid::new_v4().to_string(),
+                    transcript_interaction_id: Some(uuid::Uuid::new_v4().to_string()),
+                    expected_member: crate::runtime::bridge_protocol::BridgeMemberIncarnation {
+                        mob_id: "mob".to_string(),
+                        agent_identity: "member".to_string(),
+                        host_id: "host".to_string(),
+                        binding_generation: 1,
+                        member_session_id: SessionId::new().to_string(),
+                        generation: 1,
+                        fence_token: 1,
+                    },
+                    outcome_tracking: Some(
+                        crate::runtime::bridge_protocol::BridgeOutcomeTracking::Interaction,
+                    ),
+                }),
+            )
+            .await
+            .expect_err("default provisioner must reject placed correlation authority");
+
+        assert!(matches!(error, MobError::UnsupportedForMode { .. }));
+        assert!(!provisioner.started.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn default_correlation_lane_delegates_only_without_placed_context() {
+        let provisioner = MockProvisioner::new();
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
+
+        let receipt = provisioner
+            .start_turn_with_correlation(&member_ref, start_turn_request(), None)
+            .await
+            .expect("unplaced default lane delegates to start_turn");
+
+        assert_eq!(receipt, None);
+        assert!(provisioner.started.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn commit_returns_member_ref() {
         let provisioner = Arc::new(MockProvisioner::new());
@@ -312,6 +421,7 @@ mod tests {
             provisioner.clone(),
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
+            None,
         );
         let committed_ref = guard.commit().unwrap();
         assert_eq!(committed_ref, member_ref);
@@ -330,6 +440,7 @@ mod tests {
             provisioner.clone(),
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
+            None,
         );
         guard.rollback().await.unwrap();
         assert!(provisioner.retired.load(Ordering::Acquire));
@@ -344,6 +455,7 @@ mod tests {
             provisioner.clone(),
             OperationId::new(),
             ProvisionSessionOrigin::ResumedDurable,
+            Some(ResumedMemberRollbackAuthority::for_test()),
         );
 
         guard.rollback().await.unwrap();
@@ -364,6 +476,7 @@ mod tests {
             provisioner.clone(),
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
+            None,
         );
         let error = guard
             .rollback()
@@ -386,8 +499,12 @@ mod tests {
             provisioner,
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
+            None,
         );
-        assert_eq!(guard.member_ref(), &member_ref);
+        assert_eq!(
+            guard.member_ref().expect("live provision member ref"),
+            &member_ref
+        );
         let _ = guard.commit(); // consume to avoid Drop panic
     }
 
@@ -403,6 +520,7 @@ mod tests {
             provisioner,
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
+            None,
         );
         assert_eq!(guard.member_identity(), &member_identity);
         let _ = guard.commit(); // consume
@@ -422,6 +540,7 @@ mod tests {
             provisioner,
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
+            None,
         );
         // dropped without commit or rollback
     }

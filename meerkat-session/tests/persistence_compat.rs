@@ -1,15 +1,16 @@
 //! Fail-closed persistence-version contract.
 //!
-//! There is no migrating-read lane: every store read path deserializes
-//! persisted rows through typed serde, and the generated
-//! `session_persistence_version_authority` accepts exactly the current
-//! version. A stored row with a missing, legacy (v0/v1), or future version
-//! byte FAILS CLOSED with a typed rejection — it never silently defaults,
-//! upgrades, or partially salvages on read.
+//! Every store read path deserializes persisted rows through typed serde and
+//! the generated `session_persistence_version_authority`. Session envelopes
+//! and metadata accept exactly the current version. Stored input state also
+//! admits the explicitly modeled v3-to-v4 migration; every other missing,
+//! legacy, or future version FAILS CLOSED with a typed rejection.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use meerkat_core::generated::session_persistence_version_authority::STORED_INPUT_STATE_VERSION;
+use meerkat_core::generated::session_persistence_version_authority::{
+    STORED_INPUT_STATE_VERSION, restore_stored_input_state_version,
+};
 use meerkat_core::{SESSION_METADATA_SCHEMA_VERSION, SESSION_VERSION, Session, SessionMetadata};
 use serde_json::{Value, json};
 
@@ -155,9 +156,12 @@ fn future_session_metadata_schema_version_fails_closed_on_session_read() {
 fn stored_input_state_version_is_pinned_to_current() {
     // The runtime crate owns `StoredInputState` serde; this pins the shared
     // constant so the rejection tests there and the authority here agree.
-    // v3: persisted input content unified onto the single typed
-    // `ContentInput` carrier (dual text/body/instructions + blocks deleted).
-    assert_eq!(STORED_INPUT_STATE_VERSION, 3);
+    // v4 adds the durable interaction-terminal outbox. The generated
+    // authority deliberately accepts a v3 row and upgrades its version to v4;
+    // the runtime fixture test pins the corresponding shape migration.
+    assert_eq!(STORED_INPUT_STATE_VERSION, 4);
+    assert_eq!(restore_stored_input_state_version(3), Ok(4));
+    assert_eq!(restore_stored_input_state_version(4), Ok(4));
     assert_eq!(SESSION_VERSION, 2);
     assert_eq!(SESSION_METADATA_SCHEMA_VERSION, 2);
 }

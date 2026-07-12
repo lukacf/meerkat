@@ -29,8 +29,10 @@ Mob contract notes:
   `AgentMobToolSurfaceFactory`; `external_tools` remains for callback and
   MCP-backed dispatchers.
 
-For full mob behavior details (runtime model, flows, and surface matrix), also load:
-`references/mobs.md`
+For full mob behavior details (runtime model and flows), also load
+`references/mobs.md`. For the intentional multi-host exposure differences in
+particular, use its
+[multi-host surface matrix](mobs.md#multi-host-surface-matrix).
 
 ---
 
@@ -174,12 +176,17 @@ Primary CLI mob usage is tool-driven from `run`/`run --resume` prompts using `mo
 
 | Subcommand | Purpose |
 |------------|---------|
-| `spawn-helper <mob_id> <prompt> --agent-identity <id> [--profile <profile>] [--json]` | Spawn a short-lived helper, wait for completion, print the result |
-| `fork-helper <mob_id> <source_member> <prompt> --agent-identity <id> [--profile <profile>] [--fork-context full-history\|last-messages] [--last-messages N] [--json]` | Fork from an existing member's context and run a helper |
+| `spawn-helper <mob_id> <prompt> --agent-identity <id> [--profile <profile>] [--model <model>] [--auth-binding <REALM:BINDING[:PROFILE]>] [--json]` | Spawn a short-lived helper, wait for completion, print the result |
+| `fork-helper <mob_id> <source_member> <prompt> --agent-identity <id> [--profile <profile>] [--model <model>] [--auth-binding <REALM:BINDING[:PROFILE]>] [--fork-context full-history\|last-messages] [--last-messages N] [--json]` | Fork from an existing member's context and run a helper |
 | `member-status <mob_id> <agent_identity> [--json]` | Execution status snapshot for a mob member |
 | `force-cancel <mob_id> <agent_identity>` | Force-cancel a member's in-flight turn |
 | `respawn <mob_id> <agent_identity> [--initial-message]` | Retire and respawn a member with the same profile |
 | `wait-kickoff <mob_id> [--member ...] [--timeout-ms] [--json]` | Wait for autonomous-host kickoff turns to complete |
+| `host [--listen-tcp ...] [--advertise-tcp ...] [--descriptor-out ...]` | Run the member-host daemon and write its single-use binding descriptor |
+| `bind-host <mob_id> --descriptor <path>` / `revoke-host <mob_id> <host_id>` / `hosts <mob_id>` | Bind, revoke, and observe managed member hosts |
+| `grant <mob_id> <principal> --scope ...` / `revoke-grant ...` / `grants <mob_id>` | Manage remote-console control scopes |
+| `member-history <mob_id> <agent_identity>` / `route-installs <mob_id>` | Read placed-member history and route-install obligations |
+| `live open\|close\|status\|control ...` | Operate a member live channel; there is intentionally no `live send` verb |
 | `run <pack_or_mob_id> [--flow] [--param] [--prompt] [--detach] [--json]` | Invoke a mobpack or installed mob as a typed callable run; `--prompt` binds `params.prompt` |
 | `runs <mob_id> [--flow] [--json]` | List persisted run resources for a mob |
 | `status <mob_id> <run_id> [--json]` | Read one run resource status |
@@ -240,9 +247,13 @@ Core endpoints:
 - `GET /mob/{id}/events` — SSE stream for mob events (feature-gated)
 - `POST /mob/{id}/spawn-helper`, `POST /mob/{id}/fork-helper`
 - `POST /mob/{id}/wait-kickoff`
+- `POST /mob/{id}/wire-members-batch`
 - `GET /mob/{id}/members/{agent_identity}/status`
 - `POST /mob/{id}/members/{agent_identity}/cancel`
 - `POST /mob/{id}/members/{agent_identity}/respawn`
+- `GET /mob/{id}/members/{agent_identity}/history`
+- `GET /mob/{id}/hosts`
+- `GET /mob/{id}/route-installs`
 - `GET|POST /auth/profiles`
 - `GET|DELETE /auth/bindings/{binding_id}`
 - `POST /auth/bindings/{binding_id}/test`
@@ -422,6 +433,13 @@ Waits and observation:
 
 - `mob/wait_kickoff`, `mob/wait_ready`
 - `mob/events`, `mob/stream_open`, `mob/stream_close`
+- `mob/member_history`, `mob/hosts`, `mob/route_installs`
+
+Multi-host operator control:
+
+- `mob/grant_scopes`, `mob/revoke_scopes`, `mob/grants`
+- `mob/bind_host`, `mob/revoke_host`, `mob/hard_cancel_member`
+- `mob/member_live_open`, `mob/member_live_close`, `mob/member_live_status`, `mob/member_live_control`
 
 Flows:
 

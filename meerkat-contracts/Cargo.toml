@@ -33,6 +33,11 @@ strum = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
+# Spec-digest canonicalization (wire/spec_digest.rs). Workspace-pinned: the
+# digest byte-domain must stay identical to meerkat-comms' envelope
+# canonicalization, so both crates must resolve the same ciborium.
+ciborium = { workspace = true }
+sha2 = { workspace = true }
 uuid = { workspace = true }
 
 # Feature-gated

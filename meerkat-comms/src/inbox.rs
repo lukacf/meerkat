@@ -9,6 +9,7 @@
 use crate::tokio;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Notify;
@@ -694,6 +695,35 @@ impl InboxSender {
         self.record_drop(DropReason::ClassificationRejected)
     }
 
+    /// Admit one envelope received on a TCP connection together with the
+    /// kernel-observed remote socket address.
+    ///
+    /// Transport evidence stays out-of-band from [`InboxItem`] so it cannot be
+    /// serialized, replayed, or sender-forged. Open-auth listeners deliberately
+    /// discard the source metadata for callback-routing purposes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_tcp_connection_ingress(
+        &self,
+        envelope: Envelope,
+        require_peer_auth: bool,
+        observed_source: SocketAddr,
+    ) -> AdmissionOutcome {
+        if self.classification_context.is_some() {
+            let observed_source = require_peer_auth.then_some(observed_source);
+            return self.send_classified_with_observed_tcp_source(
+                InboxItem::External { envelope },
+                observed_source,
+            );
+        }
+
+        tracing::warn!(
+            peer_id = %envelope.from.to_peer_id(),
+            reason = ?DropReason::ClassificationRejected,
+            "raw inbox rejected external TCP peer ingress because no machine classification context is installed"
+        );
+        self.record_drop(DropReason::ClassificationRejected)
+    }
+
     /// Send an item to the inbox.
     ///
     /// On classified runtimes, delegates to `send_classified()` so the item
@@ -729,6 +759,14 @@ impl InboxSender {
     /// Classified items are enqueued only on the classified queue, then the
     /// appropriate notify is fired.
     pub fn send_classified(&self, item: InboxItem) -> AdmissionOutcome {
+        self.send_classified_with_observed_tcp_source(item, None)
+    }
+
+    fn send_classified_with_observed_tcp_source(
+        &self,
+        item: InboxItem,
+        observed_tcp_source: Option<SocketAddr>,
+    ) -> AdmissionOutcome {
         let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
         else {
@@ -739,7 +777,7 @@ impl InboxSender {
             return self.record_drop(DropReason::ClassificationRejected);
         };
 
-        let result = match ctx.prepare(item) {
+        let result = match ctx.prepare_with_observed_tcp_source(item, observed_tcp_source) {
             Some(r) => r,
             None => {
                 // Classification rejected the item before admission (e.g.
@@ -965,6 +1003,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
                 blocks: None,
+                reply_endpoint: None,
                 handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),
@@ -1318,6 +1357,7 @@ mod tests {
             intent: "review".to_string(),
             params: serde_json::json!({}),
             blocks: None,
+            reply_endpoint: None,
             handling_mode: None,
         };
 
@@ -1427,6 +1467,7 @@ mod tests {
             intent: "mob.peer_added".to_string(),
             params: serde_json::json!({"peer": "new-agent"}),
             blocks: None,
+            reply_endpoint: None,
             handling_mode: None,
         };
 
@@ -2161,6 +2202,7 @@ mod tests {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),

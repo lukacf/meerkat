@@ -17,8 +17,7 @@ use crate::tokio;
 
 use super::MobHandle;
 use futures::stream::{SelectAll, StreamExt};
-use meerkat_core::comms::EventStream;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -46,6 +45,11 @@ pub(super) struct AuthorizedMobEventRouter {
     pub initial_cursor: u64,
     pub config: MobEventRouterConfig,
     pub session_bound_runtimes: BTreeSet<crate::machines::mob_machine::AgentRuntimeId>,
+    /// Placed members whose events fan in through pump taps (phase 6,
+    /// DEC-P6E-12 kill site 4 — the mob-wide stream INCLUDES remote
+    /// members). Built from the machine's placement facts at the
+    /// subscribe call site.
+    pub external_members: BTreeSet<crate::machines::mob_machine::AgentIdentity>,
 }
 
 #[derive(Clone)]
@@ -101,7 +105,10 @@ async fn run_event_router(
     cancel: CancellationToken,
 ) {
     let mut merged: SelectAll<TaggedStream> = SelectAll::new();
-    let mut tracked_ids: HashSet<AgentIdentity> = HashSet::new();
+    // Track the SUBSCRIBED incarnation per identity: a respawn (ADJ-24)
+    // replaces the member's stream, so re-subscription keys on the runtime
+    // id, never on bare identity presence.
+    let mut tracked_ids: HashMap<AgentIdentity, AgentRuntimeId> = HashMap::new();
     let mut mob_cursor: u64 = authority.initial_cursor;
 
     {
@@ -109,11 +116,26 @@ async fn run_event_router(
             .authorized_mob_event_router_members(&authority.session_bound_runtimes)
             .await
         {
-            if tracked_ids.contains(&member.agent_identity) {
+            if tracked_ids.contains_key(&member.agent_identity) {
                 continue;
             }
             if let Some(stream) = subscribe_member(&handle, member.clone()).await {
-                tracked_ids.insert(member.agent_identity);
+                tracked_ids.insert(member.agent_identity, member.runtime_id);
+                merged.push(stream);
+            }
+        }
+        // Placed members fan in through pump taps — shape-identical items
+        // in the SAME merge (phase 6).
+        for dsl_identity in &authority.external_members {
+            let member_identity = AgentIdentity::from(dsl_identity.0.as_str());
+            if tracked_ids.contains_key(&member_identity) {
+                continue;
+            }
+            let Some(runtime_id) = handle.member_runtime_id_observation(&member_identity) else {
+                continue;
+            };
+            if let Some(stream) = subscribe_external_member(&handle, &member_identity).await {
+                tracked_ids.insert(member_identity, runtime_id);
                 merged.push(stream);
             }
         }
@@ -153,7 +175,27 @@ async fn run_event_router(
                         crate::event::MobEventKind::MemberSpawned(ref event) => {
                             let member_identity =
                                 crate::ids::AgentIdentity::from(event.agent_identity.as_str());
-                            if !tracked_ids.contains(&member_identity) {
+                            // A respawned identity (ADJ-24) arrives with a
+                            // NEW runtime id: replace the subscription; the
+                            // old stream ends with its torn-down source.
+                            let already_current = tracked_ids
+                                .get(&member_identity)
+                                .is_some_and(|tracked| tracked == &event.agent_runtime_id);
+                            if !already_current {
+                                // Phase 6 roster-delta placement switch: a
+                                // placed spawn fans in through its pump tap.
+                                if handle.member_placement_present(&member_identity) {
+                                    if let Some(stream) =
+                                        subscribe_external_member(&handle, &member_identity).await
+                                    {
+                                        tracked_ids.insert(
+                                            member_identity,
+                                            event.agent_runtime_id.clone(),
+                                        );
+                                        merged.push(stream);
+                                    }
+                                    continue;
+                                }
                                 match handle
                                     .authorize_mob_event_router_member_subscription(
                                         &member_identity,
@@ -165,7 +207,8 @@ async fn run_event_router(
                                 {
                                     Ok(member) => {
                                         if let Some(stream) = subscribe_member(&handle, member.clone()).await {
-                                            tracked_ids.insert(member.agent_identity);
+                                            tracked_ids
+                                                .insert(member.agent_identity, member.runtime_id);
                                             merged.push(stream);
                                         }
                                     }
@@ -217,13 +260,9 @@ type TaggedItem = (
     ProfileName,
     meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
 );
-type TaggedStream = futures::stream::Map<
-    EventStream,
-    Box<
-        dyn FnMut(meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>) -> TaggedItem
-            + Send,
-    >,
->;
+/// Boxed so local session streams and remote pump-tap streams merge in the
+/// SAME `SelectAll` (phase 6 — DEC-P6E-12).
+type TaggedStream = std::pin::Pin<Box<dyn futures::Stream<Item = TaggedItem> + Send>>;
 
 async fn subscribe_member(
     handle: &MobHandle,
@@ -246,18 +285,47 @@ async fn subscribe_member(
     let prof = member.role;
     let source_runtime_id = member.runtime_id;
     let source_fence_token = member.fence_token;
-    Some(stream.map(Box::new(move |envelope| {
+    Some(Box::pin(stream.map(move |envelope| {
         (
             source_runtime_id.clone(),
             source_fence_token,
             prof.clone(),
             envelope,
         )
-    })
-        as Box<
-            dyn FnMut(
-                    meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
-                ) -> TaggedItem
-                + Send,
-        >))
+    })))
+}
+
+/// Pump-tap stream for one placed member: the tap already carries full
+/// attribution, so the mapping is a field re-shape.
+async fn subscribe_external_member(
+    handle: &MobHandle,
+    member_identity: &AgentIdentity,
+) -> Option<TaggedStream> {
+    let tap = match handle.external_member_event_tap(member_identity).await {
+        Ok(tap) => tap,
+        Err(error) => {
+            tracing::warn!(
+                agent_identity = %member_identity,
+                error = %error,
+                "mob event router: failed to open external member event tap",
+            );
+            return None;
+        }
+    };
+    Some(Box::pin(futures::stream::unfold(
+        tap,
+        |mut tap| async move {
+            tap.recv().await.map(|attributed| {
+                (
+                    (
+                        attributed.source,
+                        attributed.source_fence_token,
+                        attributed.role,
+                        attributed.envelope,
+                    ),
+                    tap,
+                )
+            })
+        },
+    )))
 }

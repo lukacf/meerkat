@@ -148,6 +148,7 @@ fn build_app_inner(
         session_service.clone(),
         Some(runtime_adapter.clone()),
         None,
+        meerkat_mob::MobControlPrincipal::Owner,
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
         config.clone(),

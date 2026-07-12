@@ -7,7 +7,9 @@ use super::terminalization::{
     FlowFailureCause, FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
 };
 use super::topology::{MobTopologyService, PolicyDecision};
-use super::turn_executor::{FlowTurnExecutor, FlowTurnOutcome, TimeoutDisposition};
+use super::turn_executor::{
+    FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, TimeoutDisposition,
+};
 use crate::definition::{
     CollectionPolicy, DispatchMode, FlowSchemaRef, FlowStepSpec, PolicyMode, StepOutputFormat,
 };
@@ -812,6 +814,94 @@ impl FlowEngine {
         Ok(StepGuardOutcome::Completed(aggregate))
     }
 
+    async fn persist_target_completed_for_ticket(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        target: &AgentIdentity,
+        value: &Value,
+        ticket: &super::turn_executor::FlowTurnTicket,
+    ) -> Result<(), MobError> {
+        let obligation = ticket.remote_obligation();
+        if let Some(obligation) = obligation.clone() {
+            self.handle
+                .commit_remote_turn_receipt(crate::run::MobRunRemoteTurnReceipt {
+                    obligation,
+                    outcome: crate::run::MobRunRemoteTurnReceiptOutcome::Completed {
+                        value: value.clone(),
+                    },
+                })
+                .await?;
+            return Ok(());
+        }
+        self.emitter
+            .step_target_completed_with_obligation(
+                run_id.clone(),
+                step_id.clone(),
+                target.clone(),
+                obligation,
+                Some(value.clone()),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn persist_target_failed_for_ticket(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        target: &AgentIdentity,
+        reason: String,
+        ticket: &super::turn_executor::FlowTurnTicket,
+    ) -> Result<(), MobError> {
+        self.persist_target_failed_for_ticket_with_disposition(
+            run_id,
+            step_id,
+            target,
+            reason,
+            ticket,
+            FlowTurnFailureDisposition::ObservedTerminal,
+        )
+        .await
+    }
+
+    async fn persist_target_failed_for_ticket_with_disposition(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        target: &AgentIdentity,
+        reason: String,
+        ticket: &super::turn_executor::FlowTurnTicket,
+        disposition: FlowTurnFailureDisposition,
+    ) -> Result<(), MobError> {
+        let obligation = ticket.remote_obligation();
+        if let Some(obligation) = obligation.clone() {
+            self.handle
+                .commit_remote_turn_receipt(crate::run::MobRunRemoteTurnReceipt {
+                    obligation,
+                    outcome: crate::run::MobRunRemoteTurnReceiptOutcome::Failed {
+                        reason: reason.clone(),
+                        no_effect_proof: match disposition {
+                            FlowTurnFailureDisposition::CertifiedNoEffect { cause } => Some(cause),
+                            FlowTurnFailureDisposition::ObservedTerminal => None,
+                        },
+                    },
+                })
+                .await?;
+            return Ok(());
+        }
+        self.emitter
+            .step_target_failed_with_obligation(
+                run_id.clone(),
+                step_id.clone(),
+                target.clone(),
+                reason,
+                obligation,
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Single-target dispatch with retry loop. Used by both the single-target path
     /// in `execute_step_with_all_guards` and the parallel multi-target path in
     /// `dispatch_multi_target_canonical`. Returns `Ok(Ok(value))` on success,
@@ -861,9 +951,23 @@ impl FlowEngine {
                         () = cancel_token.cancelled() => {
                             match self.executor.on_timeout(ticket.clone()).await {
                                 Ok(TimeoutDisposition::Detached | TimeoutDisposition::Canceled) => {
+                                    self.persist_target_failed_for_ticket(
+                                        run_id,
+                                        step_id,
+                                        target,
+                                        "run canceled while remote turn was in flight".to_string(),
+                                        &ticket,
+                                    ).await?;
                                     return Err(MobError::RunCanceled(run_id.clone()));
                                 }
                                 Err(e) => {
+                                    self.persist_target_failed_for_ticket(
+                                        run_id,
+                                        step_id,
+                                        target,
+                                        format!("timeout disposition failed during cancellation: {e}"),
+                                        &ticket,
+                                    ).await?;
                                     return Err(MobError::FlowFailed {
                                         run_id: run_id.clone(),
                                         reason: e.to_string(),
@@ -894,13 +998,10 @@ impl FlowEngine {
                     );
                     match output_value {
                         Ok(value) => {
-                            self.emitter
-                                .step_target_completed(
-                                    run_id.clone(),
-                                    step_id.clone(),
-                                    target.clone(),
-                                )
-                                .await?;
+                            self.persist_target_completed_for_ticket(
+                                run_id, step_id, target, &value, &ticket,
+                            )
+                            .await?;
                             return Ok(Ok(value));
                         }
                         Err(fault) => {
@@ -922,71 +1023,80 @@ impl FlowEngine {
                             match disposition {
                                 mob_dsl::StepFaultDispositionKind::Retry => {
                                     attempt += 1;
-                                    self.emitter
-                                        .step_target_failed(
-                                            run_id.clone(),
-                                            step_id.clone(),
-                                            target.clone(),
-                                            reason,
-                                        )
-                                        .await?;
+                                    self.persist_target_failed_for_ticket(
+                                        run_id, step_id, target, reason, &ticket,
+                                    )
+                                    .await?;
                                     continue;
                                 }
                                 mob_dsl::StepFaultDispositionKind::Terminal => {
-                                    self.emitter
-                                        .step_target_failed(
-                                            run_id.clone(),
-                                            step_id.clone(),
-                                            target.clone(),
-                                            reason.clone(),
-                                        )
-                                        .await?;
+                                    self.persist_target_failed_for_ticket(
+                                        run_id,
+                                        step_id,
+                                        target,
+                                        reason.clone(),
+                                        &ticket,
+                                    )
+                                    .await?;
                                     return Ok(Err(StepTargetFailure::unrecorded(reason)));
                                 }
                             }
                         }
                     }
                 }
-                Ok(FlowTurnOutcome::Failed { reason }) => {
+                Ok(FlowTurnOutcome::Failed {
+                    reason,
+                    disposition,
+                }) => {
                     if attempt < max_retries {
                         attempt += 1;
-                        self.emitter
-                            .step_target_failed(
-                                run_id.clone(),
-                                step_id.clone(),
-                                target.clone(),
-                                reason.clone(),
-                            )
-                            .await?;
-                        continue;
-                    }
-                    self.emitter
-                        .step_target_failed(
-                            run_id.clone(),
-                            step_id.clone(),
-                            target.clone(),
+                        self.persist_target_failed_for_ticket_with_disposition(
+                            run_id,
+                            step_id,
+                            target,
                             reason.clone(),
+                            &ticket,
+                            disposition,
                         )
                         .await?;
+                        continue;
+                    }
+                    self.persist_target_failed_for_ticket_with_disposition(
+                        run_id,
+                        step_id,
+                        target,
+                        reason.clone(),
+                        &ticket,
+                        disposition,
+                    )
+                    .await?;
                     return Ok(Err(StepTargetFailure::unrecorded(reason)));
                 }
                 Ok(FlowTurnOutcome::Canceled) => {
                     if cancel.is_some_and(CancellationToken::is_cancelled) {
+                        self.persist_target_failed_for_ticket(
+                            run_id,
+                            step_id,
+                            target,
+                            "run canceled while remote turn completed".to_string(),
+                            &ticket,
+                        )
+                        .await?;
                         return Err(MobError::RunCanceled(run_id.clone()));
                     }
                     let cancel_reason = "canceled".to_string();
-                    self.emitter
-                        .step_target_failed(
-                            run_id.clone(),
-                            step_id.clone(),
-                            target.clone(),
-                            cancel_reason.clone(),
-                        )
-                        .await?;
+                    self.persist_target_failed_for_ticket(
+                        run_id,
+                        step_id,
+                        target,
+                        cancel_reason.clone(),
+                        &ticket,
+                    )
+                    .await?;
                     return Ok(Err(StepTargetFailure::unrecorded(cancel_reason)));
                 }
                 Err(MobError::FlowTurnTimedOut) => {
-                    let timeout_reason = match self.executor.on_timeout(ticket).await {
+                    let timeout_reason = match self.executor.on_timeout(ticket.clone()).await {
                         Ok(TimeoutDisposition::Detached) => {
                             format!("timeout after {}ms", step_timeout.as_millis())
                         }
@@ -994,6 +1104,14 @@ impl FlowEngine {
                             format!("timeout + canceled after {}ms", step_timeout.as_millis())
                         }
                         Err(e) => {
+                            self.persist_target_failed_for_ticket(
+                                run_id,
+                                step_id,
+                                target,
+                                format!("timeout disposition failed: {e}"),
+                                &ticket,
+                            )
+                            .await?;
                             return Err(MobError::FlowFailed {
                                 run_id: run_id.clone(),
                                 reason: e.to_string(),
@@ -1001,31 +1119,31 @@ impl FlowEngine {
                         }
                     };
                     if let StepTimeoutOutcome::FailFlow { reason } = &step_timeout_outcome {
+                        self.persist_target_failed_for_ticket(
+                            run_id,
+                            step_id,
+                            target,
+                            timeout_reason,
+                            &ticket,
+                        )
+                        .await?;
                         return Err(MobError::FlowFailed {
                             run_id: run_id.clone(),
                             reason: reason.clone(),
                         });
                     }
-                    if attempt < max_retries {
-                        attempt += 1;
-                        self.emitter
-                            .step_target_failed(
-                                run_id.clone(),
-                                step_id.clone(),
-                                target.clone(),
-                                timeout_reason,
-                            )
-                            .await?;
-                        continue;
-                    }
-                    self.emitter
-                        .step_target_failed(
-                            run_id.clone(),
-                            step_id.clone(),
-                            target.clone(),
-                            timeout_reason.clone(),
-                        )
-                        .await?;
+                    // Timeout dispositions are terminal for this logical
+                    // attempt. In particular Detached means the SAME durable
+                    // input remains live under reconciliation; minting a new
+                    // input here could duplicate the remote side effect.
+                    self.persist_target_failed_for_ticket(
+                        run_id,
+                        step_id,
+                        target,
+                        timeout_reason.clone(),
+                        &ticket,
+                    )
+                    .await?;
                     return Ok(Err(StepTargetFailure::unrecorded(timeout_reason)));
                 }
                 Err(other) => return Err(other),
@@ -1162,7 +1280,7 @@ impl FlowEngine {
         Ok(effects.escalate_supervisor)
     }
 
-    async fn apply_fail_step_projection(
+    pub(super) async fn apply_fail_step_projection(
         &self,
         effects: Option<Vec<flow_run::Effect>>,
         run_id: &RunId,
@@ -1183,9 +1301,36 @@ impl FlowEngine {
                 step_notice.status
             )));
         }
+        if !has_effect(
+            &effects,
+            FlowRunEffectKind::AppendFailureLedger,
+            Some(step_id),
+            None,
+        ) {
+            return Err(MobError::Internal(format!(
+                "fail-step projection for run '{run_id}' step '{step_id}' emitted no failure-ledger authority"
+            )));
+        }
         let authority = flow_run_effects_provenance_authority(run_id, &effects, step_id)?;
+        self.persist_fail_step_projection_if_absent(run_id, step_id, reason, authority)
+            .await?;
+        Ok(has_effect(
+            &effects,
+            FlowRunEffectKind::EscalateSupervisor,
+            Some(step_id),
+            None,
+        ))
+    }
+
+    async fn persist_fail_step_projection_if_absent(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        reason: &str,
+        authority: MobRunProvenanceAuthority,
+    ) -> Result<(), MobError> {
         self.run_store
-            .append_step_entry_with_authority(
+            .append_step_entry_if_absent_with_authority(
                 run_id,
                 StepLedgerEntry {
                     step_id: step_id.clone(),
@@ -1197,35 +1342,100 @@ impl FlowEngine {
                 authority.clone(),
             )
             .await?;
-        if has_effect(
-            &effects,
-            FlowRunEffectKind::AppendFailureLedger,
-            Some(step_id),
-            None,
-        ) {
-            self.run_store
-                .append_failure_entry_with_authority(
-                    run_id,
-                    FailureLedgerEntry {
-                        step_id: step_id.clone(),
-                        reason: reason.to_owned(),
-                        error_report: None,
-                        error: None,
-                        timestamp: Utc::now(),
-                    },
-                    authority,
-                )
+        self.run_store
+            .append_failure_entry_if_absent_with_authority(
+                run_id,
+                FailureLedgerEntry {
+                    step_id: step_id.clone(),
+                    reason: reason.to_owned(),
+                    error_report: None,
+                    error: None,
+                    timestamp: Utc::now(),
+                },
+                authority,
+            )
+            .await?;
+        self.emitter
+            .step_failed_if_absent(run_id.clone(), step_id.clone(), reason.to_owned())
+            .await?;
+        Ok(())
+    }
+
+    /// Repair every crash window left by recovered failure convergence after
+    /// a `FailStep` CAS persisted but before one or more of its
+    /// step/failure/event projections committed.
+    pub(super) async fn repair_persisted_fail_step_projections(
+        &self,
+        run_id: &RunId,
+        required_step_id: &StepId,
+        recovered_reason: &str,
+    ) -> Result<(), MobError> {
+        let run = self.run_snapshot(run_id).await?;
+        let required_status = run
+            .flow_state
+            .step_status
+            .get(required_step_id)
+            .and_then(|status| *status);
+        if required_status != Some(flow_run::StepRunStatus::Failed) {
+            return Err(MobError::Internal(format!(
+                "cannot repair FailStep projection for run '{run_id}' step '{required_step_id}' from persisted status {required_status:?}"
+            )));
+        }
+
+        let mut repairs = Vec::new();
+        let mut required_authority_present = false;
+        for step_id in run.ordered_steps()? {
+            if run
+                .flow_state
+                .step_status
+                .get(&step_id)
+                .and_then(|status| *status)
+                != Some(flow_run::StepRunStatus::Failed)
+            {
+                continue;
+            }
+            let Some(authority) = run.persisted_fail_step_provenance_authority(&step_id)? else {
+                continue;
+            };
+            let mut persisted_reasons = run
+                .failure_ledger
+                .iter()
+                .filter(|entry| entry.step_id == step_id)
+                .map(|entry| entry.reason.as_str());
+            let persisted_reason = persisted_reasons.next();
+            if persisted_reasons.next().is_some() {
+                return Err(MobError::Internal(format!(
+                    "run '{run_id}' contains duplicate failure-ledger rows for step '{step_id}'"
+                )));
+            }
+            let is_required = &step_id == required_step_id;
+            let reason = match (is_required, persisted_reason) {
+                (true, Some(reason)) if reason != recovered_reason => {
+                    return Err(MobError::Internal(format!(
+                        "run '{run_id}' exact recovered failure reason conflicts for step '{step_id}'"
+                    )));
+                }
+                (_, Some(reason)) => reason.to_owned(),
+                (true, None) => recovered_reason.to_owned(),
+                (false, None) => {
+                    return Err(MobError::Internal(format!(
+                        "run '{run_id}' preexisting Failed step '{step_id}' has no durable failure reason; recovery refuses to invent one"
+                    )));
+                }
+            };
+            required_authority_present |= is_required;
+            repairs.push((step_id, reason, authority));
+        }
+        if !required_authority_present {
+            return Err(MobError::Internal(format!(
+                "run '{run_id}' step '{required_step_id}' is Failed without exact persisted FailStep provenance authority"
+            )));
+        }
+        for (step_id, reason, authority) in repairs {
+            self.persist_fail_step_projection_if_absent(run_id, &step_id, &reason, authority)
                 .await?;
         }
-        self.emitter
-            .step_failed(run_id.clone(), step_id.clone(), reason.to_owned())
-            .await?;
-        Ok(has_effect(
-            &effects,
-            FlowRunEffectKind::EscalateSupervisor,
-            Some(step_id),
-            None,
-        ))
+        Ok(())
     }
 
     async fn apply_skip_projection(
@@ -2144,6 +2354,20 @@ fn completed_output_value(
         (StepOutputFormat::Json, Some(value)) => Ok(value),
         _ => parse_output_value(raw, step_id, target, format),
     }
+}
+
+/// Recovery adopter projection through the same parse boundary as a live
+/// FlowEngine waiter. Keeping this wrapper string-errors the private typed
+/// fault without duplicating JSON/code-fence semantics in the reconciler.
+pub(super) fn recovered_completed_output_value(
+    raw: &str,
+    structured_output: Option<Value>,
+    step_id: &StepId,
+    target: &AgentIdentity,
+    format: &StepOutputFormat,
+) -> Result<Value, String> {
+    completed_output_value(raw, structured_output, step_id, target, format)
+        .map_err(|error| error.to_string())
 }
 
 fn flow_structured_output_from_outputs(outputs: &IndexMap<StepId, Value>) -> Option<Value> {

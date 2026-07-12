@@ -2266,8 +2266,8 @@ fn file_contains_call(file: &syn::File, callee: &str) -> bool {
 }
 
 /// True when the named fn exists and contains a match arm over
-/// `InteractionContent::Message { blocks, .. }` — the structural shape that
-/// preserves multimodal message blocks.
+/// `InteractionContent::Message { blocks, .. }`, including as one case in an
+/// or-pattern — the structural shape that preserves multimodal message blocks.
 fn fn_has_message_arm_binding_blocks(file: Option<&syn::File>, fn_name: &str) -> bool {
     file.is_some_and(|file| {
         find_named_fn(file, fn_name).is_some_and(|item| {
@@ -2442,22 +2442,31 @@ impl<'ast> Visit<'ast> for ClassComparisonDetector {
     }
 }
 
-/// AST detector for a match arm whose pattern is
+/// AST detector for a match arm whose pattern contains
 /// `InteractionContent::Message { blocks, .. }` (the block-preserving shape).
 #[derive(Default)]
 struct MessageArmBindsBlocksDetector {
     found: bool,
 }
 
+impl MessageArmBindsBlocksDetector {
+    fn pattern_binds_message_blocks(pattern: &syn::Pat) -> bool {
+        match pattern {
+            syn::Pat::Struct(pattern) => {
+                path_ends_with(&pattern.path, &["InteractionContent", "Message"])
+                    && pattern.fields.iter().any(
+                        |field| matches!(&field.member, Member::Named(ident) if ident == "blocks"),
+                    )
+            }
+            syn::Pat::Or(pattern) => pattern.cases.iter().any(Self::pattern_binds_message_blocks),
+            _ => false,
+        }
+    }
+}
+
 impl<'ast> Visit<'ast> for MessageArmBindsBlocksDetector {
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
-        if let syn::Pat::Struct(pat) = &node.pat
-            && path_ends_with(&pat.path, &["InteractionContent", "Message"])
-            && pat
-                .fields
-                .iter()
-                .any(|field| matches!(&field.member, Member::Named(ident) if ident == "blocks"))
-        {
+        if Self::pattern_binds_message_blocks(&node.pat) {
             self.found = true;
         }
         visit::visit_arm(self, node);
@@ -2792,7 +2801,8 @@ mod tests {
 
             fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<ContentBlock>> {
                 match &interaction.content {
-                    InteractionContent::Message { blocks, .. } => blocks.clone(),
+                    InteractionContent::Message { blocks, .. }
+                    | InteractionContent::IncarnationFencedMessage { blocks, .. } => blocks.clone(),
                     _ => None,
                 }
             }
@@ -2880,7 +2890,8 @@ mod tests {
 
             fn external_event_blocks(interaction: &InboxInteraction) -> Option<Vec<ContentBlock>> {
                 match &interaction.content {
-                    InteractionContent::Message { blocks, .. } => blocks.clone(),
+                    InteractionContent::Message { blocks, .. }
+                    | InteractionContent::IncarnationFencedMessage { blocks, .. } => blocks.clone(),
                     _ => None,
                 }
             }

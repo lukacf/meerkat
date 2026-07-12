@@ -81,6 +81,7 @@ pub mod tool_execution_policy;
 pub mod tool_scope;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
+pub mod turn_terminal;
 pub mod types;
 pub mod web_search;
 
@@ -237,10 +238,13 @@ pub use lifecycle::run_primitive::{
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
-    CoreApplyFailureCauseKind, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
-    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
-    CoreExecutorTeardownReason, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
-    RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
+    CoreApplyFailureCauseKind, CoreBoundaryStageError, CoreBoundaryStageOutput,
+    CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle,
+    CoreExecutorError, CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle,
+    CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
+    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
+    CoreInteractionTerminalPublicationReceipt, CoreRenderable, InputId, RunApplyBoundary,
+    RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use model_defaults::ModelOperationalDefaultsResolver;
@@ -298,12 +302,13 @@ pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,
     DeferredToolLoadAuthority, InheritedToolVisibilityAuthority, PendingDeferredPrompt,
     PendingSystemContextAppend, PendingToolResultsMessage, PersistedSessionMetadataView,
-    RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON, ResumedSystemPromptReconciliation,
-    SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
-    SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
-    SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_VERSION,
-    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
-    SessionBuildState, SessionDeferredTurnState, SessionLifecycleTerminal, SessionLlmIdentity,
+    PreparedSystemContextBoundary, RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON,
+    ResumedSystemPromptReconciliation, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
+    SESSION_LIFECYCLE_TERMINAL_KEY, SESSION_METADATA_SCHEMA_VERSION,
+    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_TOOL_VISIBILITY_STATE_KEY,
+    SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
+    SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
+    SessionDeferredTurnState, SessionLifecycleTerminal, SessionLlmIdentity,
     SessionLlmIdentityOverride, SessionLlmIdentityOverrideError, SessionLlmRequestPolicy,
     SessionMeta, SessionMetadata, SessionMetadataDocument, SessionSystemContextState,
     SessionToolVisibilityState, SessionTooling, SystemContextStageError, SystemContextStateHandle,
@@ -348,6 +353,11 @@ pub use turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnPhase,
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
+// NOTE: `turn_terminal::TurnTerminalOutcome` (the classifier payload) is
+// deliberately NOT re-exported at the root — `turn_execution_authority::
+// TurnTerminalOutcome` already owns that root name; classifier consumers
+// path-reference `turn_terminal::TurnTerminalOutcome`.
+pub use turn_terminal::{ClassifiedTurnTerminal, TurnTerminalClassifier, TurnTerminalKind};
 pub use types::{
     ArtifactRef, AssistantBlock, BlockAssistantMessage, CommsNoticeKind, ContentBlock,
     ContentInput, ExtractionError, HandlingMode, ImageData, MemoryIndexExclusion,

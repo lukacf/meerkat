@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 /// Unique identifier for an operation
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct OperationId(pub Uuid);
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OperationId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
 
 /// Wait policy for async operations.
 ///

@@ -10,6 +10,13 @@
 mod cli_parse;
 #[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(all(
+    feature = "mob",
+    feature = "comms",
+    feature = "schedule",
+    feature = "rpc-surface"
+))]
+mod mob_host;
 #[cfg(feature = "comms")]
 mod stdin_events;
 mod stream_renderer;
@@ -2796,6 +2803,9 @@ enum MobCommands {
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
+        /// Field-scoped model override for this helper incarnation.
+        #[arg(long)]
+        model: Option<String>,
         /// Auth binding to use (REALM:BINDING[:PROFILE]).
         #[arg(long)]
         auth_binding: Option<String>,
@@ -2818,6 +2828,9 @@ enum MobCommands {
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
+        /// Field-scoped model override for this helper incarnation.
+        #[arg(long)]
+        model: Option<String>,
         /// Auth binding to use (REALM:BINDING[:PROFILE]).
         #[arg(long)]
         auth_binding: Option<String>,
@@ -2848,6 +2861,46 @@ enum MobCommands {
         /// Agent identity of the member to cancel
         agent_identity: String,
     },
+    /// Record (full-replace) a principal's control-scope grant.
+    Grant {
+        /// Mob ID
+        mob_id: String,
+        /// Principal id the grant is for
+        principal: String,
+        /// Control scope to grant (repeatable): list, read_history,
+        /// subscribe_events, send_command, cancel, retire, wire_topology,
+        /// live, admin_host, admin_grants
+        #[arg(long = "scope", required = true)]
+        scopes: Vec<String>,
+        /// Absolute expiry (UNIX epoch milliseconds); stored verbatim
+        #[arg(long, conflicts_with = "expires_in")]
+        expires_at_ms: Option<u64>,
+        /// Relative expiry sugar (e.g. "30m", "2h"); the CLI reads the
+        /// clock ONCE and sends the absolute timestamp — expiry is data by
+        /// the time it reaches the machine
+        #[arg(long, conflicts_with = "expires_at_ms")]
+        expires_in: Option<String>,
+    },
+    /// Revoke control scopes from a principal's grant (no --scope = revoke
+    /// the entire grant). Revoking never-granted scopes is a no-op.
+    RevokeGrant {
+        /// Mob ID
+        mob_id: String,
+        /// Principal id the grant is for
+        principal: String,
+        /// Control scope to revoke (repeatable); omit to revoke all
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+    },
+    /// List raw control-scope grant records (expired rows appear verbatim
+    /// with their expires_at_ms; the enforcement seam evaluates expiry).
+    Grants {
+        /// Mob ID
+        mob_id: String,
+        /// Output as JSON (wire WireGrantRecord shape)
+        #[arg(long)]
+        json: bool,
+    },
     /// Retire and respawn a mob member with the same profile.
     Respawn {
         /// Mob ID
@@ -2872,11 +2925,228 @@ enum MobCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Bind a member-host daemon to a mob using its binding descriptor
+    /// (multi-host mobs §7.2 step 2).
+    BindHost {
+        /// Mob ID
+        mob_id: String,
+        /// Path to the host binding descriptor JSON written by
+        /// `rkat mob host --descriptor-out`
+        #[arg(long)]
+        descriptor: PathBuf,
+    },
+    /// Revoke a bound (or bind-requested) member host and release its
+    /// materialized members.
+    RevokeHost {
+        /// Mob ID
+        mob_id: String,
+        /// Canonical host peer id (from the bind report / `rkat mob hosts`)
+        host_id: String,
+    },
+    /// List bound member hosts with capabilities.
+    Hosts {
+        /// Mob ID
+        mob_id: String,
+        /// Output as JSON (wire MobHostsResult shape)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a mob member transcript page by identity (local or placed).
+    MemberHistory {
+        /// Mob ID
+        mob_id: String,
+        /// Agent identity of the member
+        agent_identity: String,
+        /// First transcript index to read from
+        #[arg(long)]
+        from_index: Option<u64>,
+        /// Maximum transcript rows to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Read outstanding cross-host route-install obligations.
+    RouteInstalls {
+        /// Mob ID
+        mob_id: String,
+    },
+    /// Member live-channel console verbs (§16.9).
+    Live {
+        #[command(subcommand)]
+        command: MobLiveCommands,
+    },
     /// Web deployment commands.
     Web {
         #[command(subcommand)]
         command: MobWebCommands,
     },
+    /// Run this process as a mob member host daemon (multi-host mobs).
+    ///
+    /// Binds the host acceptor, writes the host binding descriptor (0600),
+    /// and serves supervisor bind/rebind ceremonies until interrupted.
+    /// Realm selection is workspace-derived by default; `--isolated` is a
+    /// typed startup rejection for the daemon.
+    #[cfg(all(feature = "comms", feature = "schedule", feature = "rpc-surface"))]
+    Host {
+        /// Host acceptor TCP bind address (default: 127.0.0.1:0).
+        #[arg(long)]
+        listen_tcp: Option<String>,
+        /// TCP address advertised in the binding descriptor as
+        /// `tcp://host:port` (REQUIRED for non-loopback binds).
+        #[arg(long)]
+        advertise_tcp: Option<String>,
+        /// Live WebSocket bind address (requires --live-ws-advertise).
+        #[arg(long)]
+        live_ws: Option<String>,
+        /// Advertised ws/wss absolute base URL for the live plane.
+        #[arg(long)]
+        live_ws_advertise: Option<String>,
+        /// Host Ed25519 identity directory (default: <state-root>/host-identity).
+        #[arg(long)]
+        identity_dir: Option<PathBuf>,
+        /// Where to write the host binding descriptor (default: ./host-binding.json).
+        #[arg(long)]
+        descriptor_out: Option<PathBuf>,
+        /// Allow non-loopback TCP binds (transport exposure opt-in, not auth).
+        #[arg(long)]
+        allow_remote: bool,
+        /// Runtime-only pairing secret enabling the acceptor pairing branch.
+        #[arg(
+            long,
+            value_name = "PASSWORD",
+            conflicts_with_all = ["pairing_password_env", "pairing_password_file"]
+        )]
+        pairing_password: Option<String>,
+        /// Read the runtime-only host pairing secret from an environment variable.
+        #[arg(
+            long,
+            value_name = "ENV",
+            conflicts_with_all = ["pairing_password", "pairing_password_file"]
+        )]
+        pairing_password_env: Option<String>,
+        /// Read the runtime-only host pairing secret from a file.
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = ["pairing_password", "pairing_password_env"]
+        )]
+        pairing_password_file: Option<PathBuf>,
+    },
+}
+
+/// Member live-channel console verbs (§16.9). The vocabulary is the closed
+/// DL10 set: open | close | status | control(commit-input | interrupt |
+/// truncate | refresh). There is deliberately NO `send` verb — the returned
+/// WebSocket is the input plane.
+#[cfg(feature = "mob")]
+#[derive(Subcommand)]
+enum MobLiveCommands {
+    /// Open a live realtime channel on a member. Prints the wire
+    /// LiveOpenResult JSON (URL + single-use token) to stdout VERBATIM —
+    /// stdout is the delivery channel, not a log; stderr stays token-free
+    /// (DEC-P6B-C7/C8).
+    Open {
+        /// Mob ID
+        mob_id: String,
+        /// Agent identity of the member
+        agent_identity: String,
+        /// Turning mode (omitted = the owning host's provider-managed default)
+        #[arg(long, value_enum)]
+        turning_mode: Option<CliRealtimeTurningMode>,
+        /// Requested live transport
+        #[arg(long, value_enum)]
+        transport: Option<CliLiveOpenTransport>,
+    },
+    /// Close one NAMED live channel (close-what-you-name, DEC-P6B-C9).
+    Close {
+        /// Mob ID
+        mob_id: String,
+        /// Agent identity of the member
+        agent_identity: String,
+        /// Channel id to close
+        channel_id: String,
+    },
+    /// Read live channel status. Omit --channel-id for the reply-loss
+    /// discovery read of the member's active channel (ADJ-P6B-2).
+    Status {
+        /// Mob ID
+        mob_id: String,
+        /// Agent identity of the member
+        agent_identity: String,
+        /// Channel id (omitted = discover the active channel)
+        #[arg(long)]
+        channel_id: Option<String>,
+    },
+    /// Drive one live control verb on a member's channel.
+    Control {
+        /// Mob ID
+        mob_id: String,
+        /// Agent identity of the member
+        agent_identity: String,
+        /// Channel id to control
+        channel_id: String,
+        /// Control verb (closed DL10 vocabulary)
+        #[arg(value_enum)]
+        verb: CliMobLiveControlVerb,
+        /// Truncate only: provider item id
+        #[arg(long, required_if_eq("verb", "truncate"))]
+        item_id: Option<String>,
+        /// Truncate only: content index
+        #[arg(long, required_if_eq("verb", "truncate"))]
+        content_index: Option<u32>,
+        /// Truncate only: audio played milliseconds
+        #[arg(long, required_if_eq("verb", "truncate"))]
+        audio_played_ms: Option<u64>,
+    },
+}
+
+/// CLI mirror of `wire::realtime::RealtimeTurningMode`.
+#[cfg(feature = "mob")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliRealtimeTurningMode {
+    ProviderManaged,
+    ExplicitCommit,
+}
+
+#[cfg(feature = "mob")]
+impl CliRealtimeTurningMode {
+    fn into_wire(self) -> meerkat_mob::runtime::bridge_protocol::RealtimeTurningMode {
+        match self {
+            Self::ProviderManaged => {
+                meerkat_mob::runtime::bridge_protocol::RealtimeTurningMode::ProviderManaged
+            }
+            Self::ExplicitCommit => {
+                meerkat_mob::runtime::bridge_protocol::RealtimeTurningMode::ExplicitCommit
+            }
+        }
+    }
+}
+
+/// CLI mirror of `wire::live::LiveOpenTransport`.
+#[cfg(feature = "mob")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliLiveOpenTransport {
+    Websocket,
+    Webrtc,
+}
+
+#[cfg(feature = "mob")]
+impl CliLiveOpenTransport {
+    fn into_wire(self) -> meerkat_mob::runtime::bridge_protocol::LiveOpenTransport {
+        match self {
+            Self::Websocket => meerkat_mob::runtime::bridge_protocol::LiveOpenTransport::Websocket,
+            Self::Webrtc => meerkat_mob::runtime::bridge_protocol::LiveOpenTransport::Webrtc,
+        }
+    }
+}
+
+/// CLI mirror of the closed DL10 `BridgeLiveControlVerb` vocabulary.
+#[cfg(feature = "mob")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliMobLiveControlVerb {
+    CommitInput,
+    Interrupt,
+    Truncate,
+    Refresh,
 }
 
 #[cfg(feature = "mob")]
@@ -3215,6 +3485,19 @@ async fn main() -> anyhow::Result<ExitCode> {
                 // Budget exhausted - this is a graceful termination
                 eprintln!("Budget exhausted: {agent_err}");
                 return Ok(ExitCode::from(EXIT_BUDGET_EXHAUSTED));
+            }
+            // §17.4 typed exit path (mob verb family only): the four
+            // console codes exit 45-48 with one typed `detail:` line
+            // rendered from the typed fields, never a display string.
+            #[cfg(feature = "mob")]
+            if let Some(code) = mob_exit_code(&e) {
+                eprintln!("Error: {e}");
+                if let Some(detail) = mob_wire_detail(&e)
+                    && let Ok(json) = detail.detail_value()
+                {
+                    eprintln!("detail: {json}");
+                }
+                return Ok(ExitCode::from(code));
             }
             eprintln!("Error: {e}");
             ExitCode::from(EXIT_ERROR)
@@ -3561,6 +3844,39 @@ async fn handle_run_command(
 /// Parse a duration string like "5m", "1h30m", "30s"
 fn parse_duration(s: &str) -> anyhow::Result<Duration> {
     humantime::parse_duration(s).map_err(|e| anyhow::anyhow!("Invalid duration '{s}': {e}"))
+}
+
+/// Parse a control-scope string through the ONE wire vocabulary
+/// (`WireControlScope` serde snake_case names) — no CLI-local scope enum.
+#[cfg(feature = "mob")]
+fn parse_cli_control_scope(
+    raw: &str,
+) -> anyhow::Result<meerkat_mob::machines::mob_machine::ControlScope> {
+    let wire: meerkat_contracts::WireControlScope =
+        serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|_| {
+            anyhow::anyhow!(
+                "invalid scope '{raw}' (expected one of: list, read_history,                  subscribe_events, send_command, cancel, retire, wire_topology,                  live, admin_host, admin_grants)"
+            )
+        })?;
+    Ok(meerkat_mob::machines::mob_machine::ControlScope::from(wire))
+}
+
+#[cfg(feature = "mob")]
+fn parse_cli_control_scopes(
+    raw: &[String],
+) -> anyhow::Result<std::collections::BTreeSet<meerkat_mob::machines::mob_machine::ControlScope>> {
+    raw.iter()
+        .map(|scope| parse_cli_control_scope(scope))
+        .collect()
+}
+
+/// Validate a principal string through the ONE fail-closed boundary type;
+/// an unresolvable principal is an ordinary CLI arg error, never a scope
+/// denial.
+#[cfg(feature = "mob")]
+fn parse_cli_principal_id(raw: &str) -> anyhow::Result<meerkat_core::auth::PrincipalId> {
+    meerkat_core::auth::PrincipalId::new(raw)
+        .map_err(|e| anyhow::anyhow!("invalid principal '{raw}': {e}"))
 }
 
 /// Parse --param KEY=VALUE flags into a JSON object
@@ -8294,6 +8610,7 @@ struct CliRuntimeBoundaryHandle {
 impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryHandle {
     async fn cancel_after_boundary(
         &self,
+        expected_run_id: &meerkat_core::RunId,
         _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         #[cfg(feature = "session-store")]
@@ -8301,6 +8618,7 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
             return persistent
                 .cancel_after_boundary_with_machine_authority(
                     &self.session_id,
+                    expected_run_id,
                     self.runtime_adapter.session_control_authority(),
                 )
                 .await
@@ -8315,7 +8633,7 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
                 });
         }
         self.service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_for_run(&self.session_id, expected_run_id)
             .await
             .or_else(|err| match err {
                 meerkat::SessionError::NotRunning { .. } => Ok(()),
@@ -8326,6 +8644,23 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
                     err.to_string(),
                 )
             })
+    }
+
+    async fn prepare_system_context_at_boundary(
+        &self,
+        expected_run_id: &meerkat_core::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
+        #[cfg(feature = "session-store")]
+        if let Some(persistent) = self.persistent_service.as_ref() {
+            return persistent
+                .prepare_live_system_context_boundary(&self.session_id, expected_run_id, appends)
+                .await;
+        }
+        let _ = (expected_run_id, appends);
+        Err(meerkat_core::CoreBoundaryStageError::unavailable(
+            "CLI session service has no persistent exact-boundary authority",
+        ))
     }
 }
 
@@ -8400,6 +8735,59 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             runtime_adapter: Arc::clone(&self.runtime_adapter),
             session_id: self.session_id.clone(),
         }))
+    }
+
+    #[cfg(feature = "session-store")]
+    fn publication_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>> {
+        self.persistent_service.as_ref().map(|persistent| {
+            meerkat::surface::persistent_runtime_publication_handle(
+                Arc::clone(persistent),
+                self.session_id.clone(),
+            )
+        })
+    }
+
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        true
+    }
+
+    fn post_stop_cleanup_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::core_executor::CoreExecutorPostStopCleanupHandle>>
+    {
+        #[cfg(feature = "session-store")]
+        {
+            self.persistent_service.as_ref().map(|persistent| {
+                meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+                    Arc::clone(persistent),
+                    self.session_id.clone(),
+                )
+            })
+        }
+        #[cfg(not(feature = "session-store"))]
+        {
+            None
+        }
+    }
+
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationBoundaryHandle>> {
+        #[cfg(feature = "session-store")]
+        {
+            self.persistent_service.as_ref().map(|persistent| {
+                meerkat::surface::persistent_runtime_turn_finalization_boundary_handle(
+                    Arc::clone(persistent),
+                    self.session_id.clone(),
+                )
+            })
+        }
+        #[cfg(not(feature = "session-store"))]
+        {
+            None
+        }
     }
 
     async fn apply(
@@ -8528,6 +8916,52 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             })
     }
 
+    #[cfg(feature = "session-store")]
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        let Some(persistent) = self.persistent_service.as_ref() else {
+            return Ok(());
+        };
+        persistent
+            .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
+                &self.session_id,
+                session_snapshot,
+            )
+            .await
+            .map_err(
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_from_session_error,
+            )
+    }
+
+    #[cfg(feature = "session-store")]
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        meerkat_core::lifecycle::core_executor::CoreExecutorError,
+    > {
+        let Some(persistent) = self.persistent_service.as_ref() else {
+            if events.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Err(
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::Internal(
+                    "exact interaction terminal publication is unsupported by this executor"
+                        .to_string(),
+                ),
+            );
+        };
+        persistent
+            .publish_interaction_terminals_exact_batch(&self.session_id, events)
+            .await
+            .map_err(
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_from_session_error,
+            )
+    }
+
     async fn cancel_after_boundary(
         &mut self,
         _reason: String,
@@ -8535,7 +8969,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         #[cfg(feature = "session-store")]
         if let Some(persistent) = self.persistent_service.as_ref() {
             return persistent
-                .cancel_after_boundary_with_machine_authority(
+                .cancel_current_after_boundary_with_machine_authority(
                     &self.session_id,
                     self.runtime_adapter.session_control_authority(),
                 )
@@ -8566,19 +9000,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     async fn cleanup_after_runtime_stop_terminalized(
         &mut self,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
-        // Discard live session state via concrete type (not on SessionService trait).
-        #[cfg(feature = "session-store")]
-        if let Some(ref persistent) = self.persistent_service {
-            match persistent.discard_live_session(&self.session_id).await {
-                Ok(()) | Err(meerkat_core::SessionError::NotFound { .. }) => {}
-                Err(error) => {
-                    return Err(
-                        meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
-                            error.to_string(),
-                        ),
-                    );
-                }
-            }
+        if let Some(cleanup) = self.post_stop_cleanup_handle() {
+            cleanup.cleanup_after_runtime_stop_terminalized().await?;
         }
         Ok(())
     }
@@ -8762,6 +9185,40 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    async fn create_session_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_under_runtime_turn_boundary(&self.inner, req).await
+    }
+
+    async fn create_session_with_actor_witness_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        actor_witness_slot: &meerkat::LiveSessionActorWitnessSlot,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_actor_witness_under_runtime_turn_boundary(
+            &self.inner,
+            req,
+            actor_witness_slot,
+        )
+        .await
+    }
+
+    async fn archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(&self.inner, session_id).await
+    }
+
+    async fn discard_live_session_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_under_runtime_turn_boundary(&self.inner, session_id).await
+    }
+
     async fn subscribe_session_events(
         &self,
         session_id: &SessionId,
@@ -8802,9 +9259,24 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn cancel_after_boundary_with_machine_authority(
         &self,
         session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
         authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::cancel_after_boundary_with_machine_authority(
+            &self.inner,
+            session_id,
+            expected_run_id,
+            authority,
+        )
+        .await
+    }
+
+    async fn cancel_current_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::cancel_current_after_boundary_with_machine_authority(
             &self.inner,
             session_id,
             authority,
@@ -8817,6 +9289,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::archive_with_mob_lifecycle_authority(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
             &self.inner,
             session_id,
         )
@@ -8949,6 +9432,84 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::acquire_runtime_turn_finalization_guard(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot(
+        &self,
+        session_id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot(
+            &self.inner,
+            session_id,
+            session_snapshot,
+        )
+        .await
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
+            &self.inner,
+            session_id,
+            session_snapshot,
+        )
+        .await
+    }
+
+    async fn discard_live_session_after_runtime_stop_terminalized(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_after_runtime_stop_terminalized(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn discard_live_session_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn publish_interaction_terminals(
+        &self,
+        session_id: &SessionId,
+        events: &[meerkat_core::event::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::publish_interaction_terminals(
+            &self.inner,
+            session_id,
+            events,
+        )
+        .await
+    }
+
     async fn discard_live_session(
         &self,
         session_id: &SessionId,
@@ -8956,6 +9517,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session(
             &self.inner,
             session_id,
+        )
+        .await
+    }
+
+    async fn discard_live_session_actor_under_runtime_turn_boundary(
+        &self,
+        witness: &meerkat::LiveSessionActorWitness,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_actor_under_runtime_turn_boundary(
+            &self.inner,
+            witness,
         )
         .await
     }
@@ -9633,6 +10205,8 @@ async fn run_agent(
             mcp_servers: Vec::new(),
             recoverable_tool_defs: None,
             llm_client_override: None,
+            session_comms_runtime_override: None,
+            host_prompt_sections: Default::default(),
             agent_llm_client_decorator: None,
             override_builtins: meerkat_core::ToolCategoryOverride::from_effective(enable_builtins),
             override_shell: meerkat_core::ToolCategoryOverride::from_effective(enable_shell),
@@ -11168,6 +11742,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             keep_alive: None,
             skill_references: scheduled_skill_keys(&dispatch.skill_refs)?,
             turn_tool_overlay: None,
+            directed_interaction_ids: Vec::new(),
             // Post-wave-a: `RuntimeTurnMetadata.additional_instructions`
             // is typed `Vec<TurnInstruction>`; project the scheduled
             // dispatch's `Vec<String>` into typed instructions with
@@ -11557,6 +12132,97 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    async fn create_session_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_under_runtime_turn_boundary(&self.inner, req).await
+    }
+
+    async fn create_session_with_actor_witness_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        actor_witness_slot: &meerkat::LiveSessionActorWitnessSlot,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_actor_witness_under_runtime_turn_boundary(
+            &self.inner,
+            req,
+            actor_witness_slot,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_machine_archived_resume_authority(
+            &self.inner,
+            req,
+            authorization,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_machine_archived_resume_authority_under_runtime_turn_boundary(
+            &self.inner,
+            req,
+            authorization,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority_and_actor_witness_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+        actor_witness_slot: &meerkat::LiveSessionActorWitnessSlot,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_machine_archived_resume_authority_and_actor_witness_under_runtime_turn_boundary(
+            &self.inner,
+            req,
+            authorization,
+            actor_witness_slot,
+        )
+        .await
+    }
+
+    async fn promote_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
+    ) -> Result<
+        meerkat_runtime::PromotedArchivedResumeCommitLease,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::promote_revivable_retired_session(
+            &self.inner,
+            session_id,
+            authority,
+        )
+        .await
+    }
+
+    async fn archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(&self.inner, session_id).await
+    }
+
+    async fn discard_live_session_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_under_runtime_turn_boundary(&self.inner, session_id).await
+    }
+
     async fn subscribe_session_events(
         &self,
         session_id: &SessionId,
@@ -11595,9 +12261,24 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     async fn cancel_after_boundary_with_machine_authority(
         &self,
         session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
         authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::cancel_after_boundary_with_machine_authority(
+            &self.inner,
+            session_id,
+            expected_run_id,
+            authority,
+        )
+        .await
+    }
+
+    async fn cancel_current_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::cancel_current_after_boundary_with_machine_authority(
             &self.inner,
             session_id,
             authority,
@@ -11627,6 +12308,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn load_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_revivable_retired_session(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn load_persisted_session_metadata(
         &self,
         session_id: &SessionId,
@@ -11635,6 +12327,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         meerkat_core::service::SessionError,
     > {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session_metadata(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn session_known_to_archive_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::session_known_to_archive_authority(
             &self.inner,
             session_id,
         )
@@ -11767,11 +12470,111 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::acquire_runtime_turn_finalization_guard(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot(
+        &self,
+        session_id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot(
+            &self.inner,
+            session_id,
+            session_snapshot,
+        )
+        .await
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
+            &self.inner,
+            session_id,
+            session_snapshot,
+        )
+        .await
+    }
+
+    async fn discard_live_session_after_runtime_stop_terminalized(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_after_runtime_stop_terminalized(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn discard_live_session_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn publish_interaction_terminals(
+        &self,
+        session_id: &SessionId,
+        events: &[meerkat_core::event::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::publish_interaction_terminals(
+            &self.inner,
+            session_id,
+            events,
+        )
+        .await
+    }
+
     async fn discard_live_session(
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn discard_live_session_actor_under_runtime_turn_boundary(
+        &self,
+        witness: &meerkat::LiveSessionActorWitness,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_actor_under_runtime_turn_boundary(
+            &self.inner,
+            witness,
+        )
+        .await
+    }
+
+    async fn await_event_projection_drain(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::await_event_projection_drain(
             &self.inner,
             session_id,
         )
@@ -12798,6 +13601,9 @@ async fn hydrate_mob_state(
         meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
             session_service.clone(),
             runtime_adapter.clone(),
+            // A16: the in-process CLI console is the owning operator
+            // (explicit mint, DEC-P5E-8).
+            meerkat_mob::MobControlPrincipal::Owner,
         )
         .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
         .with_workgraph_service(Some(workgraph_service))
@@ -12864,6 +13670,383 @@ fn render_helper_result_json(
     .map_err(|e| anyhow::anyhow!("failed to encode helper result: {e}"))
 }
 
+/// Preserve the typed mob error for the single exit mapper (§17.4,
+/// DEC-P7B-11): anyhow's Display renders the source identically to the old
+/// `anyhow!("{e}")` laundering, but the concrete type survives for the
+/// downcast at exit.
+#[cfg(feature = "mob")]
+fn mob_anyhow<E>(err: E) -> anyhow::Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    anyhow::Error::new(err)
+}
+
+/// The four-code console projection carried by a mob verb failure, when the
+/// error chain bottoms out in a mob-family error (§17.4).
+#[cfg(feature = "mob")]
+fn mob_wire_detail(e: &anyhow::Error) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
+    e.downcast_ref::<meerkat_mob::MobError>()
+        .and_then(meerkat_mob::MobError::wire_detail)
+        .or_else(|| {
+            e.downcast_ref::<meerkat_mob::MobRespawnError>()
+                .and_then(meerkat_mob::MobRespawnError::wire_detail)
+        })
+        .or_else(|| {
+            e.downcast_ref::<meerkat_mob_mcp::MobMcpDestroyError>()
+                .and_then(meerkat_mob_mcp::MobMcpDestroyError::wire_detail)
+        })
+}
+
+/// §17.4 typed exit path (DEC-P7B-11, ADJ-P7-7): exit codes 45-48 for the
+/// mob verb family ONLY — scoping is by construction, since only mob
+/// handler arms put mob-family errors into the chain via [`mob_anyhow`].
+/// Unmapped mob errors keep `EXIT_ERROR`. The pre-existing
+/// `EXIT_BUDGET_EXHAUSTED=2` vs `cli_exit_code(BudgetExhausted)=21`
+/// inconsistency is recorded and deliberately NOT changed (plan-pinned).
+#[cfg(feature = "mob")]
+fn mob_exit_code(e: &anyhow::Error) -> Option<u8> {
+    let detail = mob_wire_detail(e)?;
+    // 45..=48 always fit; try_from is the no-panic guard.
+    u8::try_from(detail.code().cli_exit_code()).ok()
+}
+
+/// Human host-roster row (grants-verb rendering precedent): the wire enum
+/// owns the snake_case phase spelling — rendered via serde, never a
+/// CLI-local vocabulary copy.
+#[cfg(feature = "mob")]
+fn render_mob_host_row(host: &meerkat_contracts::wire::MobHostStatus) -> String {
+    let phase = serde_json::to_value(host.bind_phase)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    // FLAG-WA-1: a Requested-phase host has committed no bind facts —
+    // epoch/capabilities are honestly absent, never fabricated empties.
+    let epoch = host
+        .authority_epoch
+        .map_or_else(|| "-".to_string(), |epoch| epoch.to_string());
+    let durable_sessions = host.capabilities.as_ref().map_or_else(
+        || "-".to_string(),
+        |capabilities| capabilities.durable_sessions.to_string(),
+    );
+    format!(
+        "{}\tphase={phase}\tepoch={epoch}\tdurable_sessions={durable_sessions}\tmembers={}",
+        host.host_id.0, host.materialized_member_count
+    )
+}
+
+/// DEC-P7B-13: `rkat mob live open` output shape. stdout is EXACTLY one
+/// JSON document — the wire `LiveOpenResult` verbatim (URL + single-use
+/// token; stdout is the delivery channel, not a log). The human note goes
+/// to stderr and is token-free. No tracing on this path carries the token
+/// or the result's Debug; the CLI retains nothing.
+#[cfg(feature = "mob")]
+fn render_live_open_streams(
+    result: &meerkat_contracts::wire::LiveOpenResult,
+    agent_identity: &str,
+) -> anyhow::Result<(String, String)> {
+    let stdout_doc = serde_json::to_string(result)
+        .map_err(|err| anyhow::anyhow!("failed to encode live open result: {err}"))?;
+    let stderr_note = format!(
+        "live channel {} opened for {agent_identity}; the single-use token on stdout \
+         expires shortly — connect now",
+        result.channel_id
+    );
+    Ok((stdout_doc, stderr_note))
+}
+
+/// Boundary conversion for the closed DL10 control vocabulary: the three
+/// truncate flags are required with `truncate` (clap-enforced) and rejected
+/// with every other verb.
+#[cfg(feature = "mob")]
+fn cli_live_control_verb(
+    verb: CliMobLiveControlVerb,
+    item_id: Option<String>,
+    content_index: Option<u32>,
+    audio_played_ms: Option<u64>,
+) -> anyhow::Result<meerkat_mob::runtime::bridge_protocol::BridgeLiveControlVerb> {
+    use meerkat_mob::runtime::bridge_protocol::BridgeLiveControlVerb;
+    if verb != CliMobLiveControlVerb::Truncate
+        && (item_id.is_some() || content_index.is_some() || audio_played_ms.is_some())
+    {
+        return Err(anyhow::anyhow!(
+            "--item-id/--content-index/--audio-played-ms apply only to the truncate verb"
+        ));
+    }
+    Ok(match verb {
+        CliMobLiveControlVerb::CommitInput => BridgeLiveControlVerb::CommitInput,
+        CliMobLiveControlVerb::Interrupt => BridgeLiveControlVerb::Interrupt,
+        CliMobLiveControlVerb::Refresh => BridgeLiveControlVerb::Refresh,
+        CliMobLiveControlVerb::Truncate => {
+            let (Some(item_id), Some(content_index), Some(audio_played_ms)) =
+                (item_id, content_index, audio_played_ms)
+            else {
+                // clap `required_if_eq` already enforces presence; this is
+                // the typed backstop, never a panic.
+                return Err(anyhow::anyhow!(
+                    "truncate requires --item-id, --content-index, and --audio-played-ms"
+                ));
+            };
+            BridgeLiveControlVerb::Truncate {
+                item_id,
+                content_index,
+                audio_played_ms,
+            }
+        }
+    })
+}
+
+/// Thin shims over the `MobMcpState` phase-7 live wrappers (§16.9). A CLI
+/// live open against an UNPLACED (local) member surfaces the owning host's
+/// typed live-unavailable error — the one-shot CLI process composes no
+/// controlling-side live listener, by construction.
+#[cfg(feature = "mob")]
+async fn handle_mob_live_command(
+    command: MobLiveCommands,
+    state: &meerkat_mob_mcp::MobMcpState,
+) -> anyhow::Result<()> {
+    match command {
+        MobLiveCommands::Open {
+            mob_id,
+            agent_identity,
+            turning_mode,
+            transport,
+        } => {
+            let result = state
+                .mob_member_live_open(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
+                    turning_mode.map(CliRealtimeTurningMode::into_wire),
+                    transport.map(CliLiveOpenTransport::into_wire),
+                )
+                .await
+                .map_err(mob_anyhow)?;
+            let (stdout_doc, stderr_note) = render_live_open_streams(&result, &agent_identity)?;
+            println!("{stdout_doc}");
+            eprintln!("{stderr_note}");
+            Ok(())
+        }
+        MobLiveCommands::Close {
+            mob_id,
+            agent_identity,
+            channel_id,
+        } => {
+            let status = state
+                .mob_member_live_close(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity),
+                    channel_id,
+                )
+                .await
+                .map_err(mob_anyhow)?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            Ok(())
+        }
+        MobLiveCommands::Status {
+            mob_id,
+            agent_identity,
+            channel_id,
+        } => {
+            let status = state
+                .mob_member_live_status(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity),
+                    channel_id,
+                )
+                .await
+                .map_err(mob_anyhow)?;
+            // Field-identical wire projection (design V-8); token-free by
+            // construction — status never carries a bootstrap token.
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&meerkat_contracts::wire::LiveStatusResult {
+                    channel_id: status.channel_id,
+                    status: status.status,
+                })?
+            );
+            Ok(())
+        }
+        MobLiveCommands::Control {
+            mob_id,
+            agent_identity,
+            channel_id,
+            verb,
+            item_id,
+            content_index,
+            audio_played_ms,
+        } => {
+            let verb = cli_live_control_verb(verb, item_id, content_index, audio_played_ms)?;
+            let outcome = state
+                .mob_member_live_control(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity),
+                    channel_id,
+                    verb,
+                )
+                .await
+                .map_err(mob_anyhow)?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(all(test, feature = "mob"))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod mob_typed_exit_tests {
+    use super::*;
+
+    /// T-B11: `mob_exit_code` maps exactly the four console codes —
+    /// ScopeDenied→45, HostUnavailable→46, StaleCursor→47, StaleFence→48 —
+    /// and nothing else; the typed `detail:` line renders
+    /// `{required, presented}` from the typed fields.
+    #[test]
+    fn mob_exit_code_maps_four_codes_only() {
+        let denied = mob_anyhow(meerkat_mob::MobError::ScopeDenied(
+            meerkat_mob::ScopeDenial {
+                required: meerkat_mob::machines::mob_machine::ControlScope::AdminHost,
+                presented: std::collections::BTreeSet::from([
+                    meerkat_mob::machines::mob_machine::ControlScope::List,
+                ]),
+            },
+        ));
+        assert_eq!(mob_exit_code(&denied), Some(45));
+
+        let timed_out = mob_anyhow(meerkat_mob::MobError::BridgeRequestTimedOut {
+            request_envelope_id: "env".to_string(),
+            timeout_ms: 30_000,
+        });
+        assert_eq!(mob_exit_code(&timed_out), Some(46));
+
+        let stale_cursor = mob_anyhow(meerkat_mob::MobError::StaleEventCursor {
+            after_cursor: 9,
+            latest_cursor: 4,
+        });
+        assert_eq!(mob_exit_code(&stale_cursor), Some(47));
+
+        let stale_fence = mob_anyhow(meerkat_mob::MobError::StaleFenceToken {
+            runtime_id: meerkat_mob::AgentRuntimeId::initial(meerkat_mob::AgentIdentity::from(
+                "worker",
+            )),
+            expected: meerkat_mob::FenceToken::new(2),
+            actual: meerkat_mob::FenceToken::new(1),
+        });
+        assert_eq!(mob_exit_code(&stale_fence), Some(48));
+
+        // Unmapped mob errors keep EXIT_ERROR (None here ⇒ 1 at the mapper).
+        let not_found = mob_anyhow(meerkat_mob::MobError::MobNotFound(
+            meerkat_mob::MobId::from("missing"),
+        ));
+        assert_eq!(mob_exit_code(&not_found), None);
+
+        // PeerOffline ≠ HostUnavailable — pinned non-mapping (§17.4).
+        let peer_offline = mob_anyhow(meerkat_mob::MobError::CommsError(
+            meerkat_core::comms::SendError::PeerOffline,
+        ));
+        assert_eq!(mob_exit_code(&peer_offline), None);
+
+        // Non-mob chains (incl. the budget path's AgentError) never route
+        // through the mob exit path.
+        assert_eq!(mob_exit_code(&anyhow::anyhow!("boom")), None);
+
+        // The respawn wrapper delegates.
+        let respawn = mob_anyhow(meerkat_mob::MobRespawnError::Mob(
+            meerkat_mob::MobError::BridgeRequestTimedOut {
+                request_envelope_id: "env-2".to_string(),
+                timeout_ms: 15_000,
+            },
+        ));
+        assert_eq!(mob_exit_code(&respawn), Some(46));
+
+        // The `detail:` line renders the typed pair, not a display string.
+        let detail = mob_wire_detail(&denied).expect("scope denial detail");
+        assert_eq!(
+            detail.detail_value().expect("detail serializes"),
+            serde_json::json!({ "required": "admin_host", "presented": ["list"] })
+        );
+    }
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Ok(mut sink) = self.0.lock() {
+                sink.extend_from_slice(buf);
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// T-B10 (DEC-P7B-13): `rkat mob live open` prints the verbatim
+    /// `LiveOpenResult` JSON on stdout only; the single-use token appears
+    /// in NEITHER the stderr note NOR captured tracing output.
+    #[test]
+    fn live_open_prints_verbatim_json_and_never_logs_token() {
+        const TOKEN: &str = "SECRET-LIVE-TOKEN-42";
+        let result = meerkat_contracts::wire::LiveOpenResult {
+            channel_id: "chan-1".to_string(),
+            transport: meerkat_contracts::wire::WireLiveTransportBootstrap::Websocket {
+                url: "wss://member-host.example/live".to_string(),
+                token: TOKEN.to_string(),
+            },
+            capabilities: meerkat_contracts::wire::WireLiveChannelCapabilities {
+                audio_in: true,
+                audio_out: true,
+                text_in: true,
+                text_out: true,
+                image_in: false,
+                video_in: false,
+                transcript_supported: true,
+                barge_in_supported: true,
+                provider_native_resume: false,
+            },
+            continuity: meerkat_contracts::wire::WireLiveContinuityMode::Fresh,
+        };
+
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = CaptureWriter(Arc::clone(&captured));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let (stdout_doc, stderr_note) = tracing::subscriber::with_default(subscriber, || {
+            // Probe event proves the capture pipeline works — the token
+            // absence below is then a real assertion, not a vacuous pass.
+            tracing::info!("live-open-capture-probe");
+            render_live_open_streams(&result, "singer").expect("render live open streams")
+        });
+
+        // stdout: exactly the verbatim wire LiveOpenResult.
+        let round: meerkat_contracts::wire::LiveOpenResult =
+            serde_json::from_str(&stdout_doc).expect("stdout parses as LiveOpenResult");
+        assert_eq!(round, result, "stdout must be the verbatim wire result");
+        assert!(stdout_doc.contains(TOKEN), "stdout IS the delivery channel");
+
+        // stderr: human, token-free, names the channel.
+        assert!(!stderr_note.contains(TOKEN), "stderr must be token-free");
+        assert!(stderr_note.contains("chan-1"));
+
+        // tracing: probe present, token absent.
+        let logs =
+            String::from_utf8_lossy(captured.lock().expect("capture lock poisoned").as_slice())
+                .to_string();
+        assert!(
+            logs.contains("live-open-capture-probe"),
+            "capture pipeline must observe tracing output"
+        );
+        assert!(
+            !logs.contains(TOKEN),
+            "no tracing output on the live-open path may carry the token"
+        );
+    }
+}
+
 #[cfg(feature = "mob")]
 async fn wait_for_terminal_flow_run(
     state: &meerkat_mob_mcp::MobMcpState,
@@ -12877,14 +14060,14 @@ async fn wait_for_terminal_flow_run(
                 run_id.clone(),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .map_err(mob_anyhow)?
         else {
             return Err(anyhow::anyhow!(
                 "run '{run_id}' disappeared before reaching terminal state"
             ));
         };
-        let terminal = mob_machine_run_status_is_terminal(&run.run_id, run.status())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let terminal =
+            mob_machine_run_status_is_terminal(&run.run_id, run.status()).map_err(mob_anyhow)?;
         if terminal {
             return Ok(run);
         }
@@ -13075,6 +14258,38 @@ async fn await_pack_flow_terminal(
 
 #[cfg(feature = "mob")]
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+    #[cfg(all(feature = "comms", feature = "schedule", feature = "rpc-surface"))]
+    if let MobCommands::Host {
+        listen_tcp,
+        advertise_tcp,
+        live_ws,
+        live_ws_advertise,
+        identity_dir,
+        descriptor_out,
+        allow_remote,
+        pairing_password,
+        pairing_password_env,
+        pairing_password_file,
+    } = &command
+    {
+        return mob_host::run_mob_host(
+            mob_host::MobHostArgs {
+                listen_tcp: listen_tcp.clone(),
+                advertise_tcp: advertise_tcp.clone(),
+                live_ws: live_ws.clone(),
+                live_ws_advertise: live_ws_advertise.clone(),
+                identity_dir: identity_dir.clone(),
+                descriptor_out: descriptor_out.clone(),
+                allow_remote: *allow_remote,
+                pairing_password: pairing_password.clone(),
+                pairing_password_env: pairing_password_env.clone(),
+                pairing_password_file: pairing_password_file.clone(),
+            },
+            scope,
+        )
+        .await;
+    }
+
     if let MobCommands::Pack {
         dir,
         output,
@@ -13235,7 +14450,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     scoped_event_tx.clone(),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             wait_for_terminal_flow_run(state.as_ref(), &mob_id, &run_id).await?;
             drop(scoped_event_tx);
             if let Some(task) = stream_task {
@@ -13274,7 +14489,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let run_id = state
                 .mob_run_flow(&mob_id, flow_id.clone(), activation_params)
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             if detach {
                 if json {
                     println!(
@@ -13303,7 +14518,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let resolved = state
                 .mob_flow_status(&meerkat_mob::MobId::from(mob_id.clone()), parsed_run_id)
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             println!("{}", render_flow_status_json(resolved)?);
             Ok(())
         }
@@ -13312,7 +14527,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let runs = state
                 .mob_list_runs(&meerkat_mob::MobId::from(mob_id), flow_id.as_ref())
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             println!("{}", render_mob_runs(runs, json)?);
             Ok(())
         }
@@ -13325,7 +14540,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let resolved = state
                 .mob_flow_status(&meerkat_mob::MobId::from(mob_id), parsed_run_id)
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             if json {
                 println!("{}", render_flow_status_json(resolved)?);
             } else if let Some(run) = resolved {
@@ -13350,7 +14565,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let events = state
                 .mob_events(&meerkat_mob::MobId::from(mob_id), after_cursor, limit)
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             println!("{}", render_mob_events(events, json)?);
             Ok(())
         }
@@ -13369,6 +14584,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             prompt,
             agent_identity,
             profile,
+            model,
             auth_binding,
             json,
         } => {
@@ -13379,6 +14595,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             if let Some(p) = profile {
                 options.role_name = Some(meerkat_mob::ProfileName::from(p));
             }
+            options.model_override = model;
             options.auth_binding = auth_binding
                 .as_deref()
                 .map(cli_parse::parse_auth_binding_user_input)
@@ -13392,7 +14609,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     options,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             if json {
                 println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
@@ -13406,6 +14623,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             prompt,
             agent_identity,
             profile,
+            model,
             auth_binding,
             fork_context,
             last_messages,
@@ -13426,6 +14644,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             if let Some(p) = profile {
                 options.role_name = Some(meerkat_mob::ProfileName::from(p));
             }
+            options.model_override = model;
             options.auth_binding = auth_binding
                 .as_deref()
                 .map(cli_parse::parse_auth_binding_user_input)
@@ -13441,7 +14660,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     options,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             if json {
                 println!("{}", render_helper_result_json(&mob_id, &result)?);
             } else if let Some(output) = &result.output {
@@ -13454,24 +14673,19 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             agent_identity,
             json,
         } => {
+            let member_ref = meerkat_contracts::WireMemberRef::encode(&mob_id, &agent_identity);
             let snapshot = state
                 .mob_member_status(
                     &meerkat_mob::MobId::from(mob_id),
                     &meerkat_mob::AgentIdentity::from(agent_identity),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": format!("{:?}", snapshot.status),
-                        "output_preview": snapshot.output_preview,
-                        "tokens_used": snapshot.tokens_used,
-                        "is_final": snapshot.is_final,
-                        "error": snapshot.error,
-                    }))?
-                );
+                let result = snapshot
+                    .to_member_status_result(member_ref)
+                    .map_err(mob_anyhow)?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!("status: {:?}", snapshot.status);
                 println!("tokens_used: {}", snapshot.tokens_used);
@@ -13481,6 +14695,101 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 }
                 if let Some(error) = &snapshot.error {
                     println!("error: {error}");
+                }
+            }
+            Ok(())
+        }
+        MobCommands::Grant {
+            mob_id,
+            principal,
+            scopes,
+            expires_at_ms,
+            expires_in,
+        } => {
+            let principal = parse_cli_principal_id(&principal)?;
+            let scopes = parse_cli_control_scopes(&scopes)?;
+            if scopes.is_empty() {
+                return Err(anyhow::anyhow!("at least one --scope is required"));
+            }
+            // --expires-in is shell sugar: one clock read, absolute ms out.
+            let expires_at_ms = match (expires_at_ms, expires_in) {
+                (Some(absolute), None) => Some(absolute),
+                (None, Some(relative)) => {
+                    let duration = parse_duration(&relative)?;
+                    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+                        .map_err(|_| anyhow::anyhow!("system clock before UNIX epoch"))?;
+                    Some(
+                        now_ms.saturating_add(
+                            u64::try_from(duration.as_millis())
+                                .map_err(|_| anyhow::anyhow!("--expires-in duration overflows"))?,
+                        ),
+                    )
+                }
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!("clap conflicts_with enforces exclusivity"),
+            };
+            let record = state
+                .mob_grant_scopes(
+                    &meerkat_mob::MobId::from(mob_id),
+                    principal,
+                    scopes,
+                    expires_at_ms,
+                )
+                .await
+                .map_err(mob_anyhow)?;
+            println!("{}", serde_json::to_string_pretty(&record.to_wire())?);
+            Ok(())
+        }
+        MobCommands::RevokeGrant {
+            mob_id,
+            principal,
+            scopes,
+        } => {
+            let principal = parse_cli_principal_id(&principal)?;
+            let scopes = if scopes.is_empty() {
+                None
+            } else {
+                Some(parse_cli_control_scopes(&scopes)?)
+            };
+            let removed = state
+                .mob_revoke_scopes(&meerkat_mob::MobId::from(mob_id), principal, scopes)
+                .await
+                .map_err(mob_anyhow)?;
+            println!("{}", serde_json::json!({ "removed": removed }));
+            Ok(())
+        }
+        MobCommands::Grants { mob_id, json } => {
+            let grants = state
+                .mob_grants(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .map_err(mob_anyhow)?;
+            if json {
+                let wire: Vec<meerkat_contracts::WireGrantRecord> = grants
+                    .iter()
+                    .map(meerkat_mob::OperatorGrant::to_wire)
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&wire)?);
+            } else {
+                for record in &grants {
+                    let wire = record.to_wire();
+                    let scopes = wire
+                        .scopes
+                        .iter()
+                        .map(|scope| {
+                            serde_json::to_value(scope)
+                                .ok()
+                                .and_then(|value| value.as_str().map(str::to_string))
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    match wire.expires_at_ms {
+                        Some(expiry) => println!(
+                            "{}\tscopes={scopes}\texpires_at_ms={expiry}",
+                            wire.principal
+                        ),
+                        None => println!("{}\tscopes={scopes}", wire.principal),
+                    }
                 }
             }
             Ok(())
@@ -13495,7 +14804,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     meerkat_mob::AgentIdentity::from(agent_identity),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
             println!("cancelled");
             Ok(())
         }
@@ -13539,7 +14848,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     );
                     Ok(())
                 }
-                Err(err) => Err(anyhow::anyhow!("{err}")),
+                Err(err) => Err(mob_anyhow(err)),
             }
         }
         MobCommands::WaitKickoff {
@@ -13561,7 +14870,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     timeout_ms,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                .map_err(mob_anyhow)?;
 
             if json {
                 println!(
@@ -13578,6 +14887,85 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             }
             Ok(())
         }
+        MobCommands::BindHost { mob_id, descriptor } => {
+            let raw = tokio::fs::read(&descriptor).await.map_err(|err| {
+                anyhow::anyhow!(
+                    "failed reading host binding descriptor '{}': {err}",
+                    descriptor.display()
+                )
+            })?;
+            let descriptor: meerkat_mob::runtime::bridge_protocol::WireHostBindingDescriptor =
+                serde_json::from_slice(&raw)
+                    .map_err(|err| anyhow::anyhow!("invalid host binding descriptor: {err}"))?;
+            let request =
+                meerkat_mob::HostBindRequest::from_descriptor(&descriptor).map_err(mob_anyhow)?;
+            let report = state
+                .mob_bind_host(&meerkat_mob::MobId::from(mob_id), request)
+                .await
+                .map_err(mob_anyhow)?;
+            let result = meerkat_contracts::wire::MobBindHostResult {
+                host_id: meerkat_contracts::wire::WireHostRef(report.host_id),
+                capabilities: report.capabilities.to_wire(),
+                authority_epoch: report.epoch,
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        MobCommands::RevokeHost { mob_id, host_id } => {
+            let report = state
+                .mob_revoke_host(&meerkat_mob::MobId::from(mob_id), &host_id)
+                .await
+                .map_err(mob_anyhow)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "host_id": report.host_id,
+                    "released_members": report.released_members,
+                }))?
+            );
+            Ok(())
+        }
+        MobCommands::Hosts { mob_id, json } => {
+            let hosts = state
+                .mob_hosts(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .map_err(mob_anyhow)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hosts)?);
+            } else {
+                for host in &hosts.hosts {
+                    println!("{}", render_mob_host_row(host));
+                }
+            }
+            Ok(())
+        }
+        MobCommands::MemberHistory {
+            mob_id,
+            agent_identity,
+            from_index,
+            limit,
+        } => {
+            let result = state
+                .mob_member_history(
+                    &meerkat_mob::MobId::from(mob_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity),
+                    from_index,
+                    limit,
+                )
+                .await
+                .map_err(mob_anyhow)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        MobCommands::RouteInstalls { mob_id } => {
+            let result = state
+                .mob_route_installs(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .map_err(mob_anyhow)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        MobCommands::Live { command } => handle_mob_live_command(command, state.as_ref()).await,
         MobCommands::Pack { .. }
         | MobCommands::Inspect { .. }
         | MobCommands::Validate { .. }
@@ -13586,6 +14974,10 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             unreachable!(
                 "pack/inspect/validate/deploy/web handled before runtime mob state initialization"
             )
+        }
+        #[cfg(all(feature = "comms", feature = "schedule", feature = "rpc-surface"))]
+        MobCommands::Host { .. } => {
+            unreachable!("mob host daemon handled before runtime mob state initialization")
         }
     };
 
@@ -14129,6 +15521,12 @@ async fn execute_mob_run_pack(
         return render_mob_run_pack_with_warnings(rendered, warnings);
     }
 
+    // ADJ-2: remote (placed) spawns of skill-less profiles resolve their
+    // base prompt from the controlling host's factory chain.
+    let spawn_base_prompt_source = Arc::new(meerkat_mob::FactoryChainSpawnBasePromptSource::new(
+        Arc::new(effective_config.clone()),
+        scope.context_root.clone(),
+    ));
     let session_service = build_deploy_mob_session_service(scope, effective_config).await?;
     let run_spec = archive.mob_run_spec();
     let mut builder = meerkat_mob::MobBuilder::from_mobpack(
@@ -14138,6 +15536,7 @@ async fn execute_mob_run_pack(
     )
     .map_err(|err| anyhow::anyhow!("mob run failed: {err}"))?
     .with_session_service(session_service.clone())
+    .with_spawn_base_prompt_source(spawn_base_prompt_source)
     .with_workgraph_service(Some(open_workgraph_service(scope).await?));
     if let Some(adapter) = session_service.runtime_adapter() {
         builder = builder.with_runtime_adapter(adapter);
@@ -14322,6 +15721,13 @@ async fn execute_mob_deploy_internal(
         )
         .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
         .with_session_service(session_service.clone())
+        // ADJ-2: base-prompt source for remote (placed) skill-less spawns.
+        .with_spawn_base_prompt_source(Arc::new(
+            meerkat_mob::FactoryChainSpawnBasePromptSource::new(
+                Arc::new(effective_config.clone()),
+                scope.context_root.clone(),
+            ),
+        ))
         .with_workgraph_service(Some(open_workgraph_service(scope).await?));
         if let Some(adapter) = session_service.runtime_adapter() {
             builder = builder.with_runtime_adapter(adapter);
@@ -14833,6 +16239,13 @@ where
     )
     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
     .with_session_service(session_service.clone())
+    // ADJ-2: base-prompt source for remote (placed) skill-less spawns.
+    .with_spawn_base_prompt_source(Arc::new(
+        meerkat_mob::FactoryChainSpawnBasePromptSource::new(
+            Arc::new(config.clone()),
+            scope.context_root.clone(),
+        ),
+    ))
     .with_workgraph_service(Some(open_workgraph_service(scope).await?))
     .with_default_external_tools_provider(external_tools_provider.clone());
     builder = builder.with_runtime_adapter(runtime_adapter.clone());
@@ -17119,8 +18532,15 @@ default_model = "gemma"
         }
     }
 
+    struct TestMobSessionActor {
+        witness: meerkat_session::LiveSessionActorWitness,
+        comms: Arc<TestCommsRuntime>,
+    }
+
     struct TestMobSessionService {
-        sessions: RwLock<HashMap<SessionId, Arc<TestCommsRuntime>>>,
+        sessions: RwLock<HashMap<SessionId, TestMobSessionActor>>,
+        actor_registry: meerkat_session::LiveSessionActorRegistry,
+        runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
         counter: std::sync::atomic::AtomicU64,
     }
 
@@ -17128,16 +18548,16 @@ default_model = "gemma"
         fn new() -> Self {
             Self {
                 sessions: RwLock::new(HashMap::new()),
+                actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
+                runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
                 counter: std::sync::atomic::AtomicU64::new(0),
             }
         }
-    }
 
-    #[async_trait]
-    impl SessionService for TestMobSessionService {
-        async fn create_session(
+        async fn create_session_with_actor_witness(
             &self,
             req: CreateSessionRequest,
+            actor_witness_slot: &meerkat_session::LiveSessionActorWitnessSlot,
         ) -> Result<RunResult, SessionError> {
             let sid = req
                 .build
@@ -17148,14 +18568,83 @@ default_model = "gemma"
             let n = self
                 .counter
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let actor_materialization_permit = match req.build.as_ref().and_then(|build| {
+                match &build.runtime_build_mode {
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => Some(bindings),
+                    meerkat_core::RuntimeBuildMode::StandaloneEphemeral => None,
+                }
+            }) {
+                Some(bindings) => {
+                    match meerkat_runtime::begin_session_runtime_actor_materialization(bindings) {
+                        Ok(permit) => Some(permit),
+                        Err(
+                            meerkat_runtime::RuntimeActorMaterializationError::RegistrationClosed,
+                        ) => {
+                            return Err(SessionError::NotFound {
+                                id: bindings.session_id().clone(),
+                            });
+                        }
+                        Err(
+                            meerkat_runtime::RuntimeActorMaterializationError::InvalidAuthority(
+                                reason,
+                            ),
+                        ) => {
+                            return Err(SessionError::Agent(
+                                meerkat_core::error::AgentError::InternalError(reason),
+                            ));
+                        }
+                    }
+                }
+                None => None,
+            };
             let name = req
                 .build
-                .and_then(|b| b.comms_name)
+                .as_ref()
+                .and_then(|build| build.comms_name.clone())
                 .unwrap_or_else(|| format!("test-session-{n}"));
-            self.sessions
-                .write()
-                .await
-                .insert(sid.clone(), Arc::new(TestCommsRuntime::new(&name)));
+            let system_context_state = meerkat_core::SystemContextStateHandle::new(
+                meerkat_core::SessionSystemContextState::default(),
+            )
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "test mob actor system-context restore failed: {error}"
+                )))
+            })?;
+
+            let actor_witness = {
+                let mut sessions = self.sessions.write().await;
+                if sessions.contains_key(&sid) {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "test mob session actor is already registered: {sid}"
+                        )),
+                    ));
+                }
+                let witness = self.actor_registry.insert_and_publish(
+                    actor_witness_slot,
+                    sid.clone(),
+                    system_context_state,
+                )?;
+                sessions.insert(
+                    sid.clone(),
+                    TestMobSessionActor {
+                        witness: witness.clone(),
+                        comms: Arc::new(TestCommsRuntime::new(&name)),
+                    },
+                );
+                witness
+            };
+            if let Some(permit) = actor_materialization_permit
+                && let Err(error) = permit.commit()
+            {
+                let removed = self.compare_remove_actor(&actor_witness).await;
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "runtime actor materialization commit failed for session {sid}: {error}; exact actor removed: {removed}"
+                    )),
+                ));
+            }
+
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: sid,
@@ -17170,12 +18659,50 @@ default_model = "gemma"
             })
         }
 
+        async fn remove_current_actor(&self, session_id: &SessionId) {
+            let mut sessions = self.sessions.write().await;
+            if let Some(actor) = sessions.remove(session_id) {
+                self.actor_registry.compare_remove(&actor.witness);
+            }
+            self.actor_registry.remove_current(session_id);
+        }
+
+        async fn compare_remove_actor(
+            &self,
+            witness: &meerkat_session::LiveSessionActorWitness,
+        ) -> bool {
+            let mut sessions = self.sessions.write().await;
+            if !sessions
+                .get(witness.session_id())
+                .is_some_and(|actor| actor.witness.eq(witness))
+            {
+                return false;
+            }
+            if !self.actor_registry.compare_remove(witness) {
+                return false;
+            }
+            sessions.remove(witness.session_id());
+            true
+        }
+    }
+
+    #[async_trait]
+    impl SessionService for TestMobSessionService {
+        async fn create_session(
+            &self,
+            req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            let actor_witness_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
+            self.create_session_with_actor_witness(req, &actor_witness_slot)
+                .await
+        }
+
         async fn start_turn(
             &self,
             id: &SessionId,
             _req: StartTurnRequest,
         ) -> Result<RunResult, SessionError> {
-            if !self.sessions.read().await.contains_key(id) {
+            if !self.actor_registry.contains(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(RunResult {
@@ -17197,7 +18724,7 @@ default_model = "gemma"
         }
 
         async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
-            if !self.sessions.read().await.contains_key(id) {
+            if !self.actor_registry.contains(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(SessionView {
@@ -17238,7 +18765,7 @@ default_model = "gemma"
         }
 
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-            self.sessions.write().await.remove(id);
+            self.remove_current_actor(id).await;
             Ok(())
         }
     }
@@ -17246,11 +18773,15 @@ default_model = "gemma"
     #[async_trait]
     impl SessionServiceCommsExt for TestMobSessionService {
         async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
+            let current = self.actor_registry.current(session_id)?;
             self.sessions
                 .read()
                 .await
                 .get(session_id)
-                .map(|session| session.clone() as Arc<dyn CoreCommsRuntime>)
+                .and_then(|actor| {
+                    (actor.witness == current)
+                        .then(|| Arc::clone(&actor.comms) as Arc<dyn CoreCommsRuntime>)
+                })
         }
 
         async fn event_injector(
@@ -17271,7 +18802,7 @@ default_model = "gemma"
             meerkat_core::service::AppendSystemContextResult,
             meerkat_core::service::SessionControlError,
         > {
-            if !self.sessions.read().await.contains_key(id) {
+            if !self.actor_registry.contains(id) {
                 return Err(meerkat_core::SessionError::NotFound { id: id.clone() }.into());
             }
             Ok(meerkat_core::service::AppendSystemContextResult {
@@ -17288,7 +18819,7 @@ default_model = "gemma"
             query: meerkat_core::service::SessionHistoryQuery,
         ) -> Result<meerkat_core::service::SessionHistoryPage, meerkat_core::service::SessionError>
         {
-            if !self.sessions.read().await.contains_key(id) {
+            if !self.actor_registry.contains(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(meerkat_core::service::SessionHistoryPage::from_messages(
@@ -17302,12 +18833,57 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        async fn create_session_under_runtime_turn_boundary(
+            &self,
+            req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            <Self as SessionService>::create_session(self, req).await
+        }
+
+        async fn create_session_with_actor_witness_under_runtime_turn_boundary(
+            &self,
+            req: CreateSessionRequest,
+            actor_witness_slot: &meerkat_session::LiveSessionActorWitnessSlot,
+        ) -> Result<RunResult, SessionError> {
+            self.create_session_with_actor_witness(req, actor_witness_slot)
+                .await
+        }
+
+        async fn archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.archive_with_mob_lifecycle_authority(session_id).await
+        }
+
+        async fn discard_live_session_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.remove_current_actor(session_id).await;
+            Ok(())
+        }
+
+        async fn discard_live_session_actor_under_runtime_turn_boundary(
+            &self,
+            witness: &meerkat_session::LiveSessionActorWitness,
+        ) -> Result<bool, SessionError> {
+            Ok(self.compare_remove_actor(witness).await)
+        }
+
         fn supports_persistent_sessions(&self) -> bool {
             true
         }
 
         fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()))
+            Some(Arc::clone(&self.runtime_adapter))
+        }
+
+        async fn live_session_actor_registered(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<bool, SessionError> {
+            Ok(self.actor_registry.contains(session_id))
         }
 
         async fn session_belongs_to_mob(
@@ -17323,6 +18899,11 @@ default_model = "gemma"
             session_id: &SessionId,
         ) -> Result<(), SessionError> {
             <Self as SessionService>::archive(self, session_id).await
+        }
+
+        async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+            self.remove_current_actor(session_id).await;
+            Ok(())
         }
     }
 
@@ -18892,6 +20473,49 @@ default_model = "gemma"
 
     #[cfg(feature = "mob")]
     #[test]
+    fn test_mob_helper_model_overrides_parse() {
+        let spawn = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "spawn-helper",
+            "mob-1",
+            "inspect",
+            "--agent-identity",
+            "reviewer",
+            "--model",
+            "openai/gpt-5.4",
+        ])
+        .expect("mob spawn-helper --model should parse");
+        match spawn.command {
+            Some(Commands::Mob {
+                command: MobCommands::SpawnHelper { model, .. },
+            }) => assert_eq!(model.as_deref(), Some("openai/gpt-5.4")),
+            _ => unreachable!("expected mob spawn-helper command"),
+        }
+
+        let fork = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "fork-helper",
+            "mob-1",
+            "source",
+            "inspect",
+            "--agent-identity",
+            "reviewer",
+            "--model",
+            "anthropic/claude-opus-4-6",
+        ])
+        .expect("mob fork-helper --model should parse");
+        match fork.command {
+            Some(Commands::Mob {
+                command: MobCommands::ForkHelper { model, .. },
+            }) => assert_eq!(model.as_deref(), Some("anthropic/claude-opus-4-6")),
+            _ => unreachable!("expected mob fork-helper command"),
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
     fn test_cli_mob_run_resource_commands_parse() {
         let runs =
             Cli::try_parse_from(["rkat", "mob", "runs", "mob-1", "--flow", "main", "--json"])
@@ -19544,6 +21168,94 @@ url = "https://user.example/mcp"
                 assert!(json);
             }
             _ => unreachable!("expected mob wait-kickoff command"),
+        }
+    }
+
+    #[cfg(all(
+        feature = "mob",
+        feature = "comms",
+        feature = "schedule",
+        feature = "rpc-surface"
+    ))]
+    #[test]
+    fn test_cli_mob_host_pairing_secret_sources_parse_and_conflict() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "host",
+            "--pairing-password-env",
+            "RKAT_MOB_HOST_PAIRING_PASSWORD",
+        ])
+        .expect("mob host environment-backed pairing secret should parse");
+        match cli.command.expect("test invocation parses a subcommand") {
+            Commands::Mob {
+                command:
+                    MobCommands::Host {
+                        pairing_password,
+                        pairing_password_env,
+                        pairing_password_file,
+                        ..
+                    },
+            } => {
+                assert_eq!(pairing_password, None);
+                assert_eq!(
+                    pairing_password_env.as_deref(),
+                    Some("RKAT_MOB_HOST_PAIRING_PASSWORD")
+                );
+                assert_eq!(pairing_password_file, None);
+            }
+            _ => unreachable!("expected mob host command"),
+        }
+
+        let file_cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "host",
+            "--pairing-password-file",
+            "/run/secrets/rkat-mob-host",
+        ])
+        .expect("mob host file-backed pairing secret should parse");
+        match file_cli
+            .command
+            .expect("test invocation parses a subcommand")
+        {
+            Commands::Mob {
+                command:
+                    MobCommands::Host {
+                        pairing_password_file,
+                        ..
+                    },
+            } => assert_eq!(
+                pairing_password_file.as_deref(),
+                Some(Path::new("/run/secrets/rkat-mob-host"))
+            ),
+            _ => unreachable!("expected mob host command"),
+        }
+
+        for conflicting in [
+            vec![
+                "rkat",
+                "mob",
+                "host",
+                "--pairing-password",
+                "raw-secret",
+                "--pairing-password-env",
+                "SECRET_ENV",
+            ],
+            vec![
+                "rkat",
+                "mob",
+                "host",
+                "--pairing-password-env",
+                "SECRET_ENV",
+                "--pairing-password-file",
+                "/run/secrets/host",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(conflicting).is_err(),
+                "clap must reject multiple mob-host pairing secret sources"
+            );
         }
     }
 
@@ -21146,7 +22858,10 @@ capabilities = ["rpc"]
         // Create mob tools factory (new pattern: factory instead of external_tools)
         let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
             Arc::new(RunMobSessionService::new(service.clone()));
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+            mob_service,
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
         let mob_factory: Arc<dyn meerkat_core::service::MobToolsFactory> =
             Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(mob_state));
 
@@ -22142,7 +23857,7 @@ capabilities = ["rpc"]
         .await;
         let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
 
-        call_tool_json(
+        let spawned = call_tool_json(
             &dispatcher,
             "t-spawn-turn",
             "mob_spawn_member",
@@ -22152,6 +23867,11 @@ capabilities = ["rpc"]
             }),
         )
         .await;
+        assert_eq!(
+            spawned["results"][0]["status"].as_str(),
+            Some("spawned"),
+            "turn-driven member spawn should succeed: {spawned}"
+        );
 
         let listed = call_tool_json(
             &dispatcher,
@@ -23407,5 +25127,87 @@ mod no_cli_alias_tables {
                 "CLI must not infer auth modes from method strings (K18): {line}"
             );
         }
+    }
+    /// Phase 5 (DEC-P5E-11): the grant verbs parse through the ONE wire
+    /// scope vocabulary, and the two expiry flags are mutually exclusive.
+    #[cfg(feature = "mob")]
+    #[test]
+    fn mob_grant_verbs_parse_scope_vocabulary_and_expiry_conflict() {
+        use super::{Cli, parse_cli_control_scope, parse_cli_principal_id};
+        use clap::Parser as _;
+
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "grant",
+            "mob-1",
+            "console:auditor",
+            "--scope",
+            "wire_topology",
+            "--scope",
+            "admin_host",
+            "--expires-at-ms",
+            "12345",
+        ])
+        .expect("grant verb parses");
+        drop(cli);
+
+        assert!(
+            Cli::try_parse_from([
+                "rkat",
+                "mob",
+                "grant",
+                "mob-1",
+                "p",
+                "--scope",
+                "list",
+                "--expires-at-ms",
+                "1",
+                "--expires-in",
+                "30m",
+            ])
+            .is_err(),
+            "--expires-at-ms and --expires-in are mutually exclusive"
+        );
+
+        assert!(
+            Cli::try_parse_from(["rkat", "mob", "grant", "mob-1", "p"]).is_err(),
+            "--scope is required for grant"
+        );
+
+        // revoke-grant: no --scope = revoke-all form still parses.
+        Cli::try_parse_from(["rkat", "mob", "revoke-grant", "mob-1", "p"])
+            .expect("revoke-grant parses without scopes");
+        Cli::try_parse_from(["rkat", "mob", "grants", "mob-1", "--json"])
+            .expect("grants verb parses");
+
+        // Scope strings resolve through WireControlScope's serde names only.
+        for name in [
+            "list",
+            "read_history",
+            "subscribe_events",
+            "send_command",
+            "cancel",
+            "retire",
+            "wire_topology",
+            "live",
+            "admin_host",
+            "admin_grants",
+        ] {
+            assert!(
+                parse_cli_control_scope(name).is_ok(),
+                "scope '{name}' must parse"
+            );
+        }
+        assert!(
+            parse_cli_control_scope("admin").is_err(),
+            "unknown scope strings fail closed"
+        );
+        assert!(
+            parse_cli_control_scope("AdminHost").is_err(),
+            "PascalCase spellings are not the wire vocabulary"
+        );
+        assert!(parse_cli_principal_id("").is_err());
+        assert!(parse_cli_principal_id("ok-principal").is_ok());
     }
 }

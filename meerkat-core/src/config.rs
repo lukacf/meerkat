@@ -49,6 +49,8 @@ pub struct Config {
     pub shell: ShellDefaults,
     pub store: StoreConfig,
     pub comms: CommsRuntimeConfig,
+    /// `rkat mob host` daemon composition knobs (multi-host mobs §21.3).
+    pub mob_host: MobHostConfig,
     pub compaction: CompactionRuntimeConfig,
     pub limits: LimitsConfig,
     pub rest: RestServerConfig,
@@ -85,6 +87,7 @@ impl Default for Config {
             shell: ShellDefaults::default(),
             store: StoreConfig::default(),
             comms: CommsRuntimeConfig::default(),
+            mob_host: MobHostConfig::default(),
             compaction: CompactionRuntimeConfig::default(),
             limits: LimitsConfig::default(),
             rest: RestServerConfig::default(),
@@ -1570,6 +1573,76 @@ impl Default for CommsRuntimeConfig {
     }
 }
 
+/// `[mob_host]` — `rkat mob host` daemon composition (multi-host mobs §21.3).
+///
+/// Every knob here is a startup-composition fact for the member-host daemon;
+/// CLI flags override file values. The daemon's full posture reconstructs
+/// from this block plus the realm-local `runtime_mob_host_bindings` rows —
+/// nothing identity/binding-shaped lives in process memory only.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct MobHostConfig {
+    /// Explicit realm for the daemon. Absent = workspace-derived (R2).
+    /// `--isolated` is a typed startup reject for the daemon, never a
+    /// silently-generated throwaway realm.
+    pub realm: Option<String>,
+    /// Host acceptor TCP bind address (`host:port`).
+    pub listen_tcp: Option<String>,
+    /// Address advertised in the host binding descriptor. REQUIRED for
+    /// non-loopback binds — never derived from a wildcard bind.
+    pub advertise_tcp: Option<String>,
+    /// Live WebSocket bind address; presence declares live-capable intent.
+    pub live_ws: Option<String>,
+    /// Advertised ws/wss absolute base URL. REQUIRED with `live_ws` (DL6);
+    /// never derived from `scheme://local_addr` on a multi-host daemon.
+    pub live_ws_advertise: Option<String>,
+    /// Host Ed25519 identity directory (created 0700; key file 0600).
+    /// Default: `<state_root>/host-identity`.
+    pub identity_dir: Option<PathBuf>,
+    /// Where the host binding descriptor is written (0600).
+    /// Default: `./host-binding.json`.
+    pub descriptor_out: Option<PathBuf>,
+    /// Acceptor concurrent-connection cap (§21.2 pre-auth bounds).
+    pub max_connections: Option<usize>,
+    /// Acceptor pre-auth read deadline in milliseconds (§21.2).
+    pub read_deadline_ms: Option<u64>,
+    /// Pairing attempts per minute per source IP (§21.2).
+    pub pairing_rate: Option<u32>,
+    /// Per-session ephemeral member-event ring size (§21.2). Used when the
+    /// host realm has no durable event projection; overrun remains the typed
+    /// `StaleCursor` degradation declared at bind.
+    pub live_buffer_events: Option<usize>,
+    /// Runtime-only pairing secret for the host acceptor pairing branch.
+    ///
+    /// Deliberately skipped by serde (the `[comms].pairing_password`
+    /// precedent) so a bootstrap secret is never persisted into realm
+    /// config or session metadata.
+    #[serde(skip)]
+    pub pairing_password: Option<String>,
+}
+
+impl std::fmt::Debug for MobHostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MobHostConfig")
+            .field("realm", &self.realm)
+            .field("listen_tcp", &self.listen_tcp)
+            .field("advertise_tcp", &self.advertise_tcp)
+            .field("live_ws", &self.live_ws)
+            .field("live_ws_advertise", &self.live_ws_advertise)
+            .field("identity_dir", &self.identity_dir)
+            .field("descriptor_out", &self.descriptor_out)
+            .field("max_connections", &self.max_connections)
+            .field("read_deadline_ms", &self.read_deadline_ms)
+            .field("pairing_rate", &self.pairing_rate)
+            .field("live_buffer_events", &self.live_buffer_events)
+            .field(
+                "pairing_password",
+                &self.pairing_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
 /// Runtime compaction configuration (portable across interfaces).
 ///
 /// This config is serialized/deserialized in realm config and mapped to
@@ -2580,6 +2653,82 @@ pub mod dirs {
 mod tests {
     use super::*;
     use crate::Provider;
+
+    #[test]
+    fn mob_host_config_toml_roundtrip() {
+        let toml_src = r#"
+[mob_host]
+realm = "ws-abc"
+listen_tcp = "127.0.0.1:7801"
+advertise_tcp = "tcp://198.51.100.7:7801"
+live_ws = "127.0.0.1:7802"
+live_ws_advertise = "wss://host.example:7802"
+identity_dir = "/var/lib/rkat/host-identity"
+descriptor_out = "/var/lib/rkat/host-binding.json"
+max_connections = 128
+read_deadline_ms = 5000
+pairing_rate = 6
+live_buffer_events = 2048
+"#;
+        let config: Config = toml::from_str(toml_src).expect("mob_host block parses");
+        assert_eq!(config.mob_host.realm.as_deref(), Some("ws-abc"));
+        assert_eq!(
+            config.mob_host.listen_tcp.as_deref(),
+            Some("127.0.0.1:7801")
+        );
+        assert_eq!(
+            config.mob_host.advertise_tcp.as_deref(),
+            Some("tcp://198.51.100.7:7801")
+        );
+        assert_eq!(config.mob_host.live_ws.as_deref(), Some("127.0.0.1:7802"));
+        assert_eq!(
+            config.mob_host.live_ws_advertise.as_deref(),
+            Some("wss://host.example:7802")
+        );
+        assert_eq!(config.mob_host.max_connections, Some(128));
+        assert_eq!(config.mob_host.read_deadline_ms, Some(5000));
+        assert_eq!(config.mob_host.pairing_rate, Some(6));
+        assert_eq!(config.mob_host.live_buffer_events, Some(2048));
+
+        let rendered = toml::to_string(&config).expect("config renders");
+        let reparsed: Config = toml::from_str(&rendered).expect("rendered config reparses");
+        assert_eq!(reparsed.mob_host, config.mob_host);
+    }
+
+    #[test]
+    fn mob_host_config_defaults_when_absent() {
+        let config: Config = toml::from_str("").expect("empty config parses");
+        assert_eq!(config.mob_host, MobHostConfig::default());
+    }
+
+    #[test]
+    fn mob_host_config_rejects_unknown_fields() {
+        let toml_src = r#"
+[mob_host]
+listen = "127.0.0.1:7801"
+"#;
+        assert!(
+            toml::from_str::<Config>(toml_src).is_err(),
+            "unknown [mob_host] keys must fail closed"
+        );
+    }
+
+    #[test]
+    fn mob_host_pairing_password_never_serializes() {
+        let mut config = Config::default();
+        config.mob_host.pairing_password = Some("super-secret-pairing-material".to_string());
+        let rendered = toml::to_string(&config).expect("config renders");
+        assert!(
+            !rendered.contains("super-secret-pairing-material"),
+            "pairing secret must never persist into rendered config"
+        );
+        let debug = format!("{:?}", config.mob_host);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(
+            !debug.contains("super-secret-pairing-material"),
+            "pairing secret must never appear in MobHostConfig debug output"
+        );
+    }
 
     #[test]
     fn test_config_default() {

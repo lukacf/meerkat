@@ -62,9 +62,12 @@ pub enum PromptAssemblyError {
 /// Assemble the final system prompt. Single canonical path.
 ///
 /// `prompt_override` is the typed per-request policy from
-/// `AgentBuildConfig.system_prompt`. `extra_sections` is a forward-compatible
-/// slot for additional content (e.g., skill inventory in Phase 3). For now
-/// callers pass `&[]`.
+/// `AgentBuildConfig.system_prompt`. `extra_sections` carries the factory's
+/// appended content (skill inventory, preloaded skills, additional
+/// instructions); the factory gates the skill-inventory section on
+/// `AgentBuildConfig.host_prompt_sections` (A1/ADJ-17 — `SpecPinned`
+/// mob-materialized builds suppress it so spec-built prompts stay
+/// byte-pinned across placements).
 ///
 /// Returns [`PromptAssemblyError`] when an explicitly-configured prompt source
 /// is present but unusable (e.g. an unreadable `system_prompt_file`). Optional

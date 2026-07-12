@@ -35,7 +35,7 @@ import type {
   SessionTranscriptRevisionList,
   SessionTranscriptRewriteResult,
   SkillRef,
-  TranscriptEditOptions,
+  TranscriptForkOptions,
   TranscriptReplacement,
   TranscriptRewriteInputMessage,
   TranscriptRewriteOptions,
@@ -140,7 +140,7 @@ export class Session {
 
   async forkAt(
     messageIndex: number,
-    options?: TranscriptEditOptions,
+    options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
     return this._client.forkSessionAt(this._id, messageIndex, options);
   }
@@ -148,7 +148,7 @@ export class Session {
   async forkReplace(
     messageIndex: number,
     replacement: TranscriptReplacement,
-    options?: TranscriptEditOptions,
+    options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
     return this._client.forkSessionReplace(this._id, messageIndex, replacement, options);
   }
@@ -339,7 +339,7 @@ export class DeferredSession {
 
   async forkAt(
     messageIndex: number,
-    options?: TranscriptEditOptions,
+    options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
     return this._client.forkSessionAt(this._id, messageIndex, options);
   }
@@ -347,7 +347,7 @@ export class DeferredSession {
   async forkReplace(
     messageIndex: number,
     replacement: TranscriptReplacement,
-    options?: TranscriptEditOptions,
+    options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
     return this._client.forkSessionReplace(this._id, messageIndex, replacement, options);
   }

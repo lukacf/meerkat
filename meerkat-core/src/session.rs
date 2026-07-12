@@ -12,6 +12,7 @@
 use crate::Provider;
 use crate::generated::{session_document, session_persistence_version_authority};
 use crate::lifecycle::run_primitive::TurnMetadataOverride;
+use crate::lifecycle::{CoreBoundaryStageError, RunId};
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeUserContentIdentity,
@@ -21,6 +22,8 @@ use crate::realtime_transcript_revision::{self, SessionRealtimeTranscriptState};
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::session_durable_config_authority;
 use crate::time_compat::SystemTime;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use crate::tool_scope::ToolFilter;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, SessionId,
@@ -1549,29 +1552,903 @@ fn fail_closed_generated_restore(authority: &'static str, err: serde_json::Error
 #[derive(Clone)]
 pub struct SystemContextStateHandle {
     inner: Arc<std::sync::Mutex<SessionSystemContextState>>,
+    boundary: Arc<SystemContextBoundaryCoordinator>,
+}
+
+struct SystemContextBoundaryCoordinator {
+    incarnation_id: uuid::Uuid,
+    lifecycle: std::sync::Mutex<SystemContextBoundaryLifecycle>,
+    notify: tokio::sync::Notify,
+}
+
+struct SystemContextBoundaryLifecycle {
+    actor_live: bool,
+    next_generation: u64,
+    next_request_id: u64,
+    window: SystemContextBoundaryWindow,
+}
+
+enum SystemContextBoundaryWindow {
+    Closed,
+    Open {
+        run_id: RunId,
+        generation: u64,
+        request: Option<RegisteredSystemContextBoundaryRequest>,
+    },
+    Parked {
+        run_id: RunId,
+        generation: u64,
+        request_id: u64,
+        candidate_state: SessionSystemContextState,
+    },
+    Resolved {
+        run_id: RunId,
+        generation: u64,
+        request_id: u64,
+        resolution: SystemContextBoundaryResolution,
+    },
+    /// The external prepare authority has resolved (or runner-first won), and
+    /// the runner is preprocessing the exact request immediately before the
+    /// model call. Canonical pending state remains unapplied until the runner
+    /// consumes this witness synchronously at that final call seam.
+    Consuming {
+        run_id: RunId,
+        generation: u64,
+        request_id: Option<u64>,
+    },
+}
+
+struct RegisteredSystemContextBoundaryRequest {
+    request_id: u64,
+    appends: Vec<(AppendSystemContextRequest, SystemTime)>,
+}
+
+#[derive(Clone)]
+enum SystemContextBoundaryResolution {
+    Committed,
+    Aborted,
+    Failed(CoreBoundaryStageError),
+}
+
+impl Default for SystemContextBoundaryCoordinator {
+    fn default() -> Self {
+        Self {
+            incarnation_id: uuid::Uuid::new_v4(),
+            lifecycle: std::sync::Mutex::new(SystemContextBoundaryLifecycle {
+                actor_live: true,
+                next_generation: 0,
+                next_request_id: 0,
+                window: SystemContextBoundaryWindow::Closed,
+            }),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl SystemContextBoundaryCoordinator {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SystemContextBoundaryLifecycle> {
+        self.lifecycle.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "system-context boundary coordinator lock poisoned; retaining exact authority"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    fn abort_request(&self, request_id: u64) -> Result<(), CoreBoundaryStageError> {
+        let mut lifecycle = self.lock();
+        let parked_owner = match &lifecycle.window {
+            SystemContextBoundaryWindow::Parked {
+                run_id,
+                generation,
+                request_id: current_request_id,
+                ..
+            } if *current_request_id == request_id => Some((run_id.clone(), *generation)),
+            _ => None,
+        };
+        if let Some((run_id, generation)) = parked_owner {
+            lifecycle.window = SystemContextBoundaryWindow::Resolved {
+                run_id,
+                generation,
+                request_id,
+                resolution: SystemContextBoundaryResolution::Aborted,
+            };
+            drop(lifecycle);
+            self.notify.notify_waiters();
+            return Ok(());
+        }
+        match &mut lifecycle.window {
+            SystemContextBoundaryWindow::Open { request, .. }
+                if request
+                    .as_ref()
+                    .is_some_and(|request| request.request_id == request_id) =>
+            {
+                *request = None;
+            }
+            SystemContextBoundaryWindow::Resolved {
+                request_id: current_request_id,
+                ..
+            } if *current_request_id == request_id => return Ok(()),
+            _ => {
+                return Err(CoreBoundaryStageError::stale(format!(
+                    "boundary request {request_id} no longer owns its actor window"
+                )));
+            }
+        }
+        drop(lifecycle);
+        self.notify.notify_waiters();
+        Ok(())
+    }
+
+    fn close_run(&self, run_id: &RunId) {
+        let mut lifecycle = self.lock();
+        let owns_window = match &lifecycle.window {
+            SystemContextBoundaryWindow::Open {
+                run_id: current, ..
+            }
+            | SystemContextBoundaryWindow::Parked {
+                run_id: current, ..
+            }
+            | SystemContextBoundaryWindow::Resolved {
+                run_id: current, ..
+            }
+            | SystemContextBoundaryWindow::Consuming {
+                run_id: current, ..
+            } => current == run_id,
+            SystemContextBoundaryWindow::Closed => false,
+        };
+        if owns_window {
+            lifecycle.window = SystemContextBoundaryWindow::Closed;
+            drop(lifecycle);
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn revoke_actor(&self) {
+        let mut lifecycle = self.lock();
+        lifecycle.actor_live = false;
+        lifecycle.window = SystemContextBoundaryWindow::Closed;
+        drop(lifecycle);
+        self.notify.notify_waiters();
+    }
+}
+
+/// Run-scoped closure guard for the exact actor's cooperative model boundary.
+/// Every normal return, error, hard-cancel drop, and task abort closes any
+/// registered or parked request for this run.
+#[must_use]
+pub(crate) struct SystemContextBoundaryRunGuard {
+    boundary: Arc<SystemContextBoundaryCoordinator>,
+    run_id: RunId,
+}
+
+impl Drop for SystemContextBoundaryRunGuard {
+    fn drop(&mut self) {
+        self.boundary.close_run(&self.run_id);
+    }
+}
+
+struct PendingSystemContextBoundaryPreparation {
+    boundary: Arc<SystemContextBoundaryCoordinator>,
+    request_id: u64,
+    armed: bool,
+}
+
+impl Drop for PendingSystemContextBoundaryPreparation {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.boundary.abort_request(self.request_id);
+        }
+    }
+}
+
+/// Runner-owned witness for the exact model request currently being prepared.
+///
+/// External commit only publishes the candidate as canonical pending state; it
+/// does not claim that the model has consumed it. The runner retains this
+/// second, actor-local witness across fallible/async request preprocessing and
+/// marks the pending state applied synchronously at the final LLM call seam.
+/// Dropping the witness closes the generation without marking anything applied.
+#[must_use = "model-boundary context must be consumed or dropped before opening another boundary"]
+pub(crate) struct ModelBoundarySystemContext {
+    state: SystemContextStateHandle,
+    run_id: RunId,
+    generation: u64,
+    request_id: Option<u64>,
+    appends: Vec<PendingSystemContextAppend>,
+    armed: bool,
+}
+
+impl ModelBoundarySystemContext {
+    pub(crate) fn appends(&self) -> &[PendingSystemContextAppend] {
+        &self.appends
+    }
+
+    /// Pre-serialize the exact post-consumption metadata state while failure is
+    /// still harmless. The consuming window rejects concurrent mutation, so
+    /// this projection remains exact until [`Self::consume`].
+    pub(crate) fn projected_state_after_consume(&self) -> SessionSystemContextState {
+        let mut projected = self.state.snapshot();
+        projected.mark_pending_applied();
+        projected
+    }
+
+    pub(crate) fn consume(
+        mut self,
+    ) -> Result<Vec<PendingSystemContextAppend>, CoreBoundaryStageError> {
+        self.state.finish_model_boundary_consumption(
+            &self.run_id,
+            self.generation,
+            self.request_id,
+            true,
+        )?;
+        self.armed = false;
+        Ok(std::mem::take(&mut self.appends))
+    }
+}
+
+impl Drop for ModelBoundarySystemContext {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.state.finish_model_boundary_consumption(
+                &self.run_id,
+                self.generation,
+                self.request_id,
+                false,
+            );
+            self.armed = false;
+        }
+    }
+}
+
+/// Unforgeable exact `{actor incarnation, run, boundary generation}`
+/// preparation. It is created only by the shared system-context authority
+/// after the runner has parked at the named boundary.
+///
+/// ```compile_fail
+/// use meerkat_core::PreparedSystemContextBoundary;
+/// fn cannot_duplicate(authority: &PreparedSystemContextBoundary) {
+///     let _duplicate = authority.clone();
+/// }
+/// ```
+#[must_use = "prepared system context must be committed or aborted"]
+pub struct PreparedSystemContextBoundary {
+    state: SystemContextStateHandle,
+    expected_run_id: RunId,
+    generation: u64,
+    request_id: u64,
+    candidate_state: SessionSystemContextState,
+    armed: bool,
+    // The unique resolution authority may move to an owned commit task, but
+    // sharing one authority by reference across threads is unnecessary and
+    // obscures its exactly-once ownership contract.
+    _not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
+}
+
+impl std::fmt::Debug for PreparedSystemContextBoundary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedSystemContextBoundary")
+            .field("actor_incarnation", &self.state.boundary.incarnation_id)
+            .field("expected_run_id", &self.expected_run_id)
+            .field("generation", &self.generation)
+            .field("request_id", &self.request_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedSystemContextBoundary {
+    #[must_use]
+    pub fn expected_run_id(&self) -> &RunId {
+        &self.expected_run_id
+    }
+
+    #[must_use]
+    pub fn boundary_generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn candidate_state(&self) -> &SessionSystemContextState {
+        &self.candidate_state
+    }
+
+    /// Bind the unforgeable parked authority to its optional durable session
+    /// snapshot. Surfaces cannot manufacture a successful output without this
+    /// core-minted preparation value.
+    pub fn into_stage_output(
+        self,
+        session_snapshot: Option<Vec<u8>>,
+    ) -> crate::lifecycle::CoreBoundaryStageOutput {
+        crate::lifecycle::CoreBoundaryStageOutput::prepared(session_snapshot, Box::new(self))
+    }
+
+    fn resolve(
+        &mut self,
+        resolution: SystemContextBoundaryResolution,
+    ) -> Result<(), CoreBoundaryStageError> {
+        if !self.armed {
+            return Err(CoreBoundaryStageError::stale(
+                "prepared boundary authority was already resolved",
+            ));
+        }
+        let mut lifecycle = self.state.boundary.lock();
+        if !lifecycle.actor_live {
+            self.armed = false;
+            return Err(CoreBoundaryStageError::stale(format!(
+                "actor incarnation {} was revoked",
+                self.state.boundary.incarnation_id
+            )));
+        }
+        let matches_exact = matches!(
+            &lifecycle.window,
+            SystemContextBoundaryWindow::Parked {
+                run_id,
+                generation,
+                request_id,
+                ..
+            } if run_id == &self.expected_run_id
+                && *generation == self.generation
+                && *request_id == self.request_id
+        );
+        if !matches_exact {
+            self.armed = false;
+            return Err(CoreBoundaryStageError::stale(format!(
+                "actor/run/boundary witness no longer matches request {}",
+                self.request_id
+            )));
+        }
+        if matches!(&resolution, SystemContextBoundaryResolution::Committed) {
+            let mut state = self
+                .state
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *state = self.candidate_state.clone();
+        }
+        lifecycle.window = SystemContextBoundaryWindow::Resolved {
+            run_id: self.expected_run_id.clone(),
+            generation: self.generation,
+            request_id: self.request_id,
+            resolution,
+        };
+        self.armed = false;
+        drop(lifecycle);
+        self.state.boundary.notify.notify_waiters();
+        Ok(())
+    }
+}
+
+impl crate::lifecycle::core_executor::CoreBoundaryStageCommitAuthority
+    for PreparedSystemContextBoundary
+{
+    fn commit(&mut self) -> Result<(), CoreBoundaryStageError> {
+        self.resolve(SystemContextBoundaryResolution::Committed)
+    }
+
+    fn abort(&mut self) -> Result<(), CoreBoundaryStageError> {
+        self.resolve(SystemContextBoundaryResolution::Aborted)
+    }
+}
+
+impl Drop for PreparedSystemContextBoundary {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.state.boundary.abort_request(self.request_id);
+            self.armed = false;
+        }
+    }
 }
 
 impl std::fmt::Debug for SystemContextStateHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SystemContextStateHandle")
             .field("inner", &"<Arc<Mutex<SessionSystemContextState>>>")
+            .field("actor_incarnation", &self.boundary.incarnation_id)
             .finish()
     }
 }
 
 impl SystemContextStateHandle {
+    fn boundary_reserves_state(lifecycle: &SystemContextBoundaryLifecycle) -> bool {
+        matches!(
+            &lifecycle.window,
+            SystemContextBoundaryWindow::Parked { .. }
+                | SystemContextBoundaryWindow::Resolved { .. }
+                | SystemContextBoundaryWindow::Consuming { .. }
+        )
+    }
+
     pub fn new(state: SessionSystemContextState) -> Result<Self, serde_json::Error> {
         let state = system_context_authority::restore_system_context_state(state)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         Ok(Self {
             inner: Arc::new(std::sync::Mutex::new(state)),
+            boundary: Arc::new(SystemContextBoundaryCoordinator::default()),
         })
     }
 
-    pub fn from_shared_authority_state(
-        inner: Arc<std::sync::Mutex<SessionSystemContextState>>,
-    ) -> Self {
-        Self { inner }
+    /// Open the first exact cooperative model-boundary window for `run_id` and
+    /// return a guard that closes it on every exit, including future drop.
+    pub(crate) fn begin_boundary_run(
+        &self,
+        run_id: RunId,
+    ) -> Result<SystemContextBoundaryRunGuard, CoreBoundaryStageError> {
+        self.open_next_boundary(&run_id)?;
+        Ok(SystemContextBoundaryRunGuard {
+            boundary: Arc::clone(&self.boundary),
+            run_id,
+        })
+    }
+
+    /// Ensure an exact next-boundary window is open for the active run. Calling
+    /// this twice before consumption is idempotent; after consumption it mints
+    /// the next monotonically increasing actor-local generation.
+    pub(crate) fn open_next_boundary(&self, run_id: &RunId) -> Result<u64, CoreBoundaryStageError> {
+        let mut lifecycle = self.boundary.lock();
+        if !lifecycle.actor_live {
+            return Err(CoreBoundaryStageError::stale(format!(
+                "actor incarnation {} was revoked",
+                self.boundary.incarnation_id
+            )));
+        }
+        match &lifecycle.window {
+            SystemContextBoundaryWindow::Open {
+                run_id: current,
+                generation,
+                ..
+            } if current == run_id => return Ok(*generation),
+            SystemContextBoundaryWindow::Parked { .. }
+            | SystemContextBoundaryWindow::Resolved { .. }
+            | SystemContextBoundaryWindow::Consuming { .. } => {
+                return Err(CoreBoundaryStageError::fault(
+                    "runner attempted to open a new boundary while the prior boundary was unresolved",
+                ));
+            }
+            SystemContextBoundaryWindow::Open {
+                run_id: current, ..
+            } => {
+                return Err(CoreBoundaryStageError::stale(format!(
+                    "run {run_id} cannot replace still-open boundary owned by {current}"
+                )));
+            }
+            SystemContextBoundaryWindow::Closed => {}
+        }
+        lifecycle.next_generation = lifecycle
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| CoreBoundaryStageError::fault("boundary generation overflow"))?;
+        let generation = lifecycle.next_generation;
+        lifecycle.window = SystemContextBoundaryWindow::Open {
+            run_id: run_id.clone(),
+            generation,
+            request: None,
+        };
+        drop(lifecycle);
+        self.boundary.notify.notify_waiters();
+        Ok(generation)
+    }
+
+    /// Register context for the exact currently-open generation, then wait
+    /// until the runner is parked immediately before consuming it. The lock
+    /// linearization makes runner-first return `Unavailable` and prepare-first
+    /// park; no snapshot/boolean sampling participates in the verdict.
+    pub async fn prepare_active_turn_boundary(
+        &self,
+        expected_run_id: &RunId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<PreparedSystemContextBoundary, CoreBoundaryStageError> {
+        if appends.is_empty() {
+            return Err(CoreBoundaryStageError::fault(
+                "boundary preparation requires at least one context append",
+            ));
+        }
+        let stage_inputs = appends
+            .into_iter()
+            .map(|append| {
+                (
+                    AppendSystemContextRequest {
+                        content: append.content,
+                        source: append.source,
+                        idempotency_key: append.idempotency_key,
+                        source_kind: append.source_kind,
+                        peer_response_terminal: append.peer_response_terminal,
+                    },
+                    append.accepted_at,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let request_id = {
+            let mut lifecycle = self.boundary.lock();
+            if !lifecycle.actor_live {
+                return Err(CoreBoundaryStageError::stale(format!(
+                    "actor incarnation {} was revoked",
+                    self.boundary.incarnation_id
+                )));
+            }
+            let (run_id, request) = match &mut lifecycle.window {
+                SystemContextBoundaryWindow::Open {
+                    run_id, request, ..
+                } => (run_id, request),
+                SystemContextBoundaryWindow::Closed => {
+                    return Err(CoreBoundaryStageError::unavailable(format!(
+                        "run {expected_run_id} has no open cooperative model boundary"
+                    )));
+                }
+                SystemContextBoundaryWindow::Parked { .. }
+                | SystemContextBoundaryWindow::Resolved { .. }
+                | SystemContextBoundaryWindow::Consuming { .. } => {
+                    return Err(CoreBoundaryStageError::unavailable(format!(
+                        "the open boundary for run {expected_run_id} was already claimed or consumed"
+                    )));
+                }
+            };
+            if run_id != expected_run_id {
+                return Err(CoreBoundaryStageError::stale(format!(
+                    "open boundary belongs to run {run_id}, not {expected_run_id}"
+                )));
+            }
+            if request.is_some() {
+                return Err(CoreBoundaryStageError::unavailable(format!(
+                    "the next boundary for run {expected_run_id} already has a preparation"
+                )));
+            }
+            // Validate idempotency/conflict semantics against the exact state
+            // observed at registration without publishing the candidate.
+            let state = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut candidate = state.clone();
+            for (append, accepted_at) in &stage_inputs {
+                candidate
+                    .stage_active_turn_append(append, *accepted_at)
+                    .map_err(|error| CoreBoundaryStageError::fault(error.to_string()))?;
+            }
+            drop(state);
+            lifecycle.next_request_id = lifecycle
+                .next_request_id
+                .checked_add(1)
+                .ok_or_else(|| CoreBoundaryStageError::fault("boundary request id overflow"))?;
+            let request_id = lifecycle.next_request_id;
+            let SystemContextBoundaryWindow::Open { request, .. } = &mut lifecycle.window else {
+                return Err(CoreBoundaryStageError::fault(
+                    "boundary window changed while registering preparation",
+                ));
+            };
+            *request = Some(RegisteredSystemContextBoundaryRequest {
+                request_id,
+                appends: stage_inputs,
+            });
+            request_id
+        };
+
+        let mut pending = PendingSystemContextBoundaryPreparation {
+            boundary: Arc::clone(&self.boundary),
+            request_id,
+            armed: true,
+        };
+        self.boundary.notify.notify_waiters();
+
+        loop {
+            let notified = self.boundary.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let poll = {
+                let lifecycle = self.boundary.lock();
+                if lifecycle.actor_live {
+                    match &lifecycle.window {
+                        SystemContextBoundaryWindow::Parked {
+                            run_id,
+                            generation,
+                            request_id: parked_request_id,
+                            candidate_state,
+                        } if *parked_request_id == request_id => {
+                            Ok(Some(PreparedSystemContextBoundary {
+                                state: self.clone(),
+                                expected_run_id: run_id.clone(),
+                                generation: *generation,
+                                request_id,
+                                candidate_state: candidate_state.clone(),
+                                armed: true,
+                                _not_sync: std::marker::PhantomData,
+                            }))
+                        }
+                        SystemContextBoundaryWindow::Open { request, .. }
+                            if request
+                                .as_ref()
+                                .is_some_and(|request| request.request_id == request_id) =>
+                        {
+                            Ok(None)
+                        }
+                        SystemContextBoundaryWindow::Resolved {
+                            request_id: resolved_request_id,
+                            resolution,
+                            ..
+                        } if *resolved_request_id == request_id => match resolution {
+                            SystemContextBoundaryResolution::Failed(error) => Err(error.clone()),
+                            SystemContextBoundaryResolution::Committed
+                            | SystemContextBoundaryResolution::Aborted => {
+                                Err(CoreBoundaryStageError::stale(format!(
+                                    "boundary request {request_id} resolved before its authority was delivered"
+                                )))
+                            }
+                        },
+                        _ => Err(CoreBoundaryStageError::unavailable(format!(
+                            "run {expected_run_id} ended before boundary request {request_id} parked"
+                        ))),
+                    }
+                } else {
+                    Err(CoreBoundaryStageError::stale(format!(
+                        "actor incarnation {} was revoked while preparing boundary",
+                        self.boundary.incarnation_id
+                    )))
+                }
+            };
+            match poll {
+                Ok(Some(prepared)) => {
+                    pending.armed = false;
+                    return Ok(prepared);
+                }
+                Ok(None) => notified.as_mut().await,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Park at the exact model boundary and return a runner-owned consumption
+    /// witness. Once a preparation has registered, this future cannot return
+    /// until its authority commits, aborts, is dropped, or the run/actor closes.
+    /// Returned pending state is not marked applied until the witness is
+    /// synchronously consumed at the final LLM call seam.
+    pub(crate) async fn take_pending_at_exact_boundary(
+        &self,
+        run_id: &RunId,
+    ) -> Result<ModelBoundarySystemContext, CoreBoundaryStageError> {
+        let parked_request_id;
+        {
+            let mut lifecycle = self.boundary.lock();
+            if !lifecycle.actor_live {
+                return Err(CoreBoundaryStageError::stale(format!(
+                    "actor incarnation {} was revoked",
+                    self.boundary.incarnation_id
+                )));
+            }
+            let (generation, request) = match &mut lifecycle.window {
+                SystemContextBoundaryWindow::Open {
+                    run_id: current,
+                    generation,
+                    request,
+                } if current == run_id => (*generation, request.take()),
+                SystemContextBoundaryWindow::Open {
+                    run_id: current, ..
+                } => {
+                    return Err(CoreBoundaryStageError::stale(format!(
+                        "runner {run_id} reached boundary owned by {current}"
+                    )));
+                }
+                SystemContextBoundaryWindow::Closed => {
+                    return Err(CoreBoundaryStageError::unavailable(format!(
+                        "run {run_id} reached a boundary with no open generation"
+                    )));
+                }
+                SystemContextBoundaryWindow::Parked { .. }
+                | SystemContextBoundaryWindow::Resolved { .. }
+                | SystemContextBoundaryWindow::Consuming { .. } => {
+                    return Err(CoreBoundaryStageError::fault(
+                        "runner re-entered an unresolved model boundary",
+                    ));
+                }
+            };
+            if let Some(request) = request {
+                let RegisteredSystemContextBoundaryRequest {
+                    request_id,
+                    appends,
+                } = request;
+                let state = self
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut candidate_state = state.clone();
+                let candidate_result = appends.into_iter().try_for_each(|(append, accepted_at)| {
+                    candidate_state
+                        .stage_active_turn_append(&append, accepted_at)
+                        .map(|_| ())
+                });
+                if let Err(error) = candidate_result {
+                    drop(state);
+                    let error = CoreBoundaryStageError::fault(error.to_string());
+                    lifecycle.window = SystemContextBoundaryWindow::Resolved {
+                        run_id: run_id.clone(),
+                        generation,
+                        request_id,
+                        resolution: SystemContextBoundaryResolution::Failed(error.clone()),
+                    };
+                    drop(lifecycle);
+                    self.boundary.notify.notify_waiters();
+                    return Err(error);
+                }
+                drop(state);
+                parked_request_id = request_id;
+                lifecycle.window = SystemContextBoundaryWindow::Parked {
+                    run_id: run_id.clone(),
+                    generation,
+                    request_id,
+                    candidate_state,
+                };
+            } else {
+                let state = self
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let pending = state.pending().to_vec();
+                drop(state);
+                lifecycle.window = SystemContextBoundaryWindow::Consuming {
+                    run_id: run_id.clone(),
+                    generation,
+                    request_id: None,
+                };
+                return Ok(ModelBoundarySystemContext {
+                    state: self.clone(),
+                    run_id: run_id.clone(),
+                    generation,
+                    request_id: None,
+                    appends: pending,
+                    armed: true,
+                });
+            }
+        }
+        self.boundary.notify.notify_waiters();
+
+        let request_id = parked_request_id;
+        struct RunnerParkGuard {
+            boundary: Arc<SystemContextBoundaryCoordinator>,
+            request_id: u64,
+            armed: bool,
+        }
+        impl Drop for RunnerParkGuard {
+            fn drop(&mut self) {
+                if self.armed {
+                    let _ = self.boundary.abort_request(self.request_id);
+                }
+            }
+        }
+        let mut park_guard = RunnerParkGuard {
+            boundary: Arc::clone(&self.boundary),
+            request_id,
+            armed: true,
+        };
+
+        loop {
+            let notified = self.boundary.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let poll = {
+                let mut lifecycle = self.boundary.lock();
+                if lifecycle.actor_live {
+                    match &lifecycle.window {
+                        SystemContextBoundaryWindow::Parked {
+                            request_id: parked_request_id,
+                            ..
+                        } if *parked_request_id == request_id => Ok(None),
+                        SystemContextBoundaryWindow::Resolved {
+                            run_id: resolved_run_id,
+                            generation,
+                            request_id: resolved_request_id,
+                            resolution,
+                        } if resolved_run_id == run_id && *resolved_request_id == request_id => {
+                            let resolution = resolution.clone();
+                            let generation = *generation;
+                            if let SystemContextBoundaryResolution::Failed(error) = resolution {
+                                Err(error)
+                            } else {
+                                let pending = {
+                                    let state = self
+                                        .inner
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    state.pending().to_vec()
+                                };
+                                lifecycle.window = SystemContextBoundaryWindow::Consuming {
+                                    run_id: run_id.clone(),
+                                    generation,
+                                    request_id: Some(request_id),
+                                };
+                                Ok(Some((
+                                    ModelBoundarySystemContext {
+                                        state: self.clone(),
+                                        run_id: run_id.clone(),
+                                        generation,
+                                        request_id: Some(request_id),
+                                        appends: pending,
+                                        armed: true,
+                                    },
+                                    resolution,
+                                )))
+                            }
+                        }
+                        _ => Err(CoreBoundaryStageError::stale(format!(
+                            "parked boundary request {request_id} lost exact run/generation authority"
+                        ))),
+                    }
+                } else {
+                    Err(CoreBoundaryStageError::stale(format!(
+                        "actor incarnation {} was revoked while parked",
+                        self.boundary.incarnation_id
+                    )))
+                }
+            };
+            match poll {
+                Ok(Some((context, resolution))) => {
+                    park_guard.armed = false;
+                    self.boundary.notify.notify_waiters();
+                    if matches!(resolution, SystemContextBoundaryResolution::Aborted) {
+                        tracing::debug!(
+                            actor_incarnation = %self.boundary.incarnation_id,
+                            run_id = %run_id,
+                            request_id,
+                            "exact model-boundary preparation aborted; consuming ordinary pending context only"
+                        );
+                    }
+                    return Ok(context);
+                }
+                Ok(None) => notified.as_mut().await,
+                Err(error) => {
+                    park_guard.armed = false;
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn finish_model_boundary_consumption(
+        &self,
+        run_id: &RunId,
+        generation: u64,
+        request_id: Option<u64>,
+        apply: bool,
+    ) -> Result<(), CoreBoundaryStageError> {
+        let mut lifecycle = self.boundary.lock();
+        if !lifecycle.actor_live {
+            return Err(CoreBoundaryStageError::stale(format!(
+                "actor incarnation {} was revoked before model-boundary consumption",
+                self.boundary.incarnation_id
+            )));
+        }
+        let matches_exact = matches!(
+            &lifecycle.window,
+            SystemContextBoundaryWindow::Consuming {
+                run_id: current_run_id,
+                generation: current_generation,
+                request_id: current_request_id,
+            } if current_run_id == run_id
+                && *current_generation == generation
+                && *current_request_id == request_id
+        );
+        if !matches_exact {
+            return Err(CoreBoundaryStageError::stale(format!(
+                "runner model-boundary witness for run {run_id} generation {generation} is no longer current"
+            )));
+        }
+        if apply {
+            let mut state = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.mark_pending_applied();
+        }
+        lifecycle.window = SystemContextBoundaryWindow::Closed;
+        drop(lifecycle);
+        self.boundary.notify.notify_waiters();
+        Ok(())
+    }
+
+    /// Revoke this exact actor allocation. Existing prepared authorities can
+    /// no longer publish, and all runner/preparer waiters are synchronously
+    /// released before actor-registry removal awaits anything.
+    pub fn revoke_boundary_actor(&self) {
+        self.boundary.revoke_actor();
     }
 
     pub fn snapshot(&self) -> SessionSystemContextState {
@@ -1590,6 +2467,12 @@ impl SystemContextStateHandle {
     ) -> Result<(), serde_json::Error> {
         let state = system_context_authority::restore_system_context_state(state)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "system-context state is reserved by an exact parked boundary",
+            ));
+        }
         match self.inner.lock() {
             Ok(mut guard) => {
                 *guard = state;
@@ -1608,6 +2491,12 @@ impl SystemContextStateHandle {
     ) -> Result<bool, serde_json::Error> {
         let state = system_context_authority::restore_system_context_state(state)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "system-context state is reserved by an exact parked boundary",
+            ));
+        }
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -1631,6 +2520,12 @@ impl SystemContextStateHandle {
     ) -> Result<bool, serde_json::Error> {
         let replacement = system_context_authority::restore_system_context_state(replacement)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "system-context state is reserved by an exact parked boundary",
+            ));
+        }
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -1659,6 +2554,12 @@ impl SystemContextStateHandle {
         ),
         SystemContextStageError,
     > {
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(SystemContextStageError::InvalidRequest(
+                "system-context state is reserved by an exact parked boundary".to_string(),
+            ));
+        }
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -1677,6 +2578,12 @@ impl SystemContextStateHandle {
         appends: Vec<(AppendSystemContextRequest, SystemTime)>,
     ) -> Result<(SessionSystemContextState, SessionSystemContextState), SystemContextStageError>
     {
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(SystemContextStageError::InvalidRequest(
+                "system-context state is reserved by an exact parked boundary".to_string(),
+            ));
+        }
         let mut guard = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -1696,7 +2603,14 @@ impl SystemContextStateHandle {
         Ok((snapshot, staged))
     }
 
-    pub fn discard_unapplied_active_turn_pending(&self) -> usize {
+    pub fn discard_unapplied_active_turn_pending(&self) -> Result<usize, CoreBoundaryStageError> {
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(CoreBoundaryStageError::fault(format!(
+                "cannot discard active-turn system context while exact actor incarnation {} owns a parked or consuming boundary",
+                self.boundary.incarnation_id
+            )));
+        }
         let discarded = match self.inner.lock() {
             Ok(mut guard) => guard.discard_unapplied_active_turn_pending(),
             Err(poisoned) => {
@@ -1708,14 +2622,21 @@ impl SystemContextStateHandle {
                     .discard_unapplied_active_turn_pending()
             }
         };
-        discarded.len()
+        Ok(discarded.len())
     }
 
     pub fn discard_active_turn_pending_by_keys(
         &self,
         idempotency_keys: &[String],
-    ) -> Vec<PendingSystemContextAppend> {
-        match self.inner.lock() {
+    ) -> Result<Vec<PendingSystemContextAppend>, CoreBoundaryStageError> {
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(CoreBoundaryStageError::fault(format!(
+                "cannot discard keyed active-turn system context while exact actor incarnation {} owns a parked or consuming boundary",
+                self.boundary.incarnation_id
+            )));
+        }
+        let discarded = match self.inner.lock() {
             Ok(mut guard) => guard.discard_active_turn_pending_by_keys(idempotency_keys),
             Err(poisoned) => {
                 tracing::warn!(
@@ -1725,7 +2646,8 @@ impl SystemContextStateHandle {
                     .into_inner()
                     .discard_active_turn_pending_by_keys(idempotency_keys)
             }
-        }
+        };
+        Ok(discarded)
     }
 
     pub fn stage_active_turn_append(
@@ -1733,6 +2655,12 @@ impl SystemContextStateHandle {
         req: &AppendSystemContextRequest,
         accepted_at: SystemTime,
     ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
+        let boundary = self.boundary.lock();
+        if Self::boundary_reserves_state(&boundary) {
+            return Err(SystemContextStageError::InvalidRequest(
+                "system-context state is reserved by an exact parked boundary".to_string(),
+            ));
+        }
         match self.inner.lock() {
             Ok(mut guard) => guard.stage_active_turn_append(req, accepted_at),
             Err(poisoned) => {
@@ -1759,8 +2687,17 @@ pub struct SessionSystemContextState {
     pub(crate) applied: Vec<PendingSystemContextAppend>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub(crate) seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
+    /// Keyed projection used for idempotency-aware rollback. This is not the
+    /// lifetime owner because active-turn appends may be keyless.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub(crate) active_turn_pending_keys: std::collections::BTreeSet<String>,
+    /// Exact positions in `pending` that belong to the active turn.
+    ///
+    /// Idempotency keys are optional, so they cannot carry lifetime ownership.
+    /// The positional witness is durable and independent of deduplication;
+    /// every pending-queue mutation rebases it atomically with the queue.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub(crate) active_turn_pending_indices: std::collections::BTreeSet<u64>,
 }
 
 /// Typed provenance class for a runtime system-context append.
@@ -2273,7 +3210,20 @@ impl SessionSystemContextState {
     }
 
     pub fn active_turn_pending_len(&self) -> usize {
-        self.active_turn_pending_keys.len()
+        if self.active_turn_pending_indices.is_empty() && !self.active_turn_pending_keys.is_empty()
+        {
+            return self
+                .pending
+                .iter()
+                .filter(|append| {
+                    append
+                        .idempotency_key
+                        .as_ref()
+                        .is_some_and(|key| self.active_turn_pending_keys.contains(key))
+                })
+                .count();
+        }
+        self.active_turn_pending_indices.len()
     }
 
     pub fn realtime_projection_appends(&self) -> Vec<PendingSystemContextAppend> {
@@ -2953,17 +3903,94 @@ mod system_context_authority {
         }
     }
 
+    fn discard_pending_where(
+        state: &mut SessionSystemContextState,
+        mut should_discard: impl FnMut(&PendingSystemContextAppend, bool) -> bool,
+    ) -> Vec<PendingSystemContextAppend> {
+        reconstruct_legacy_active_turn_indices(state);
+        let active_indices = std::mem::take(&mut state.active_turn_pending_indices);
+        let pending = std::mem::take(&mut state.pending);
+        let mut retained = Vec::with_capacity(pending.len());
+        let mut retained_active_indices = BTreeSet::new();
+        let mut retained_active_keys = BTreeSet::new();
+        let mut discarded = Vec::new();
+
+        for (index, append) in pending.into_iter().enumerate() {
+            let is_active_turn = active_indices.contains(&usize_to_u64(index));
+            if should_discard(&append, is_active_turn) {
+                discarded.push(append);
+                continue;
+            }
+            if is_active_turn {
+                retained_active_indices.insert(usize_to_u64(retained.len()));
+                if let Some(key) = append.idempotency_key.as_ref() {
+                    retained_active_keys.insert(key.clone());
+                }
+            }
+            retained.push(append);
+        }
+
+        state.pending = retained;
+        state.active_turn_pending_indices = retained_active_indices;
+        state.active_turn_pending_keys = retained_active_keys;
+        discarded
+    }
+
+    fn reconstruct_legacy_active_turn_indices(state: &mut SessionSystemContextState) {
+        if !state.active_turn_pending_indices.is_empty()
+            || state.active_turn_pending_keys.is_empty()
+        {
+            return;
+        }
+        state.active_turn_pending_indices = state
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_index, append)| {
+                append
+                    .idempotency_key
+                    .as_ref()
+                    .is_some_and(|key| state.active_turn_pending_keys.contains(key))
+            })
+            .map(|(index, _append)| usize_to_u64(index))
+            .collect();
+    }
+
     pub(super) fn restore_system_context_state(
-        state: SessionSystemContextState,
+        mut state: SessionSystemContextState,
     ) -> Result<SessionSystemContextState, SystemContextStageError> {
-        let active_keys_have_known_pending_or_seen =
-            state.active_turn_pending_keys.iter().all(|key| {
-                state.seen.contains_key(key)
-                    || state
-                        .pending
-                        .iter()
-                        .any(|append| append.idempotency_key.as_ref() == Some(key))
+        // Backward compatibility for snapshots written before active-turn
+        // membership had an identity independent of idempotency. Keyed
+        // members can be reconstructed exactly from the pending queue.
+        reconstruct_legacy_active_turn_indices(&mut state);
+        let active_indices_are_in_bounds = state
+            .active_turn_pending_indices
+            .iter()
+            .all(|index| usize::try_from(*index).is_ok_and(|index| index < state.pending.len()));
+        let active_keys_have_indexed_pending = state.active_turn_pending_keys.iter().all(|key| {
+            state.active_turn_pending_indices.iter().any(|index| {
+                usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| state.pending.get(index))
+                    .and_then(|append| append.idempotency_key.as_ref())
+                    == Some(key)
+            })
+        });
+        let indexed_pending_keys_are_active =
+            state.active_turn_pending_indices.iter().all(|index| {
+                usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| state.pending.get(index))
+                    .is_some_and(|append| {
+                        append
+                            .idempotency_key
+                            .as_ref()
+                            .is_none_or(|key| state.active_turn_pending_keys.contains(key))
+                    })
             });
+        let active_turn_membership_is_consistent = active_indices_are_in_bounds
+            && active_keys_have_indexed_pending
+            && indexed_pending_keys_are_active;
         let seen_keys_match_known_appends = state.seen.iter().all(|(key, seen)| {
             state
                 .pending
@@ -2978,7 +4005,7 @@ mod system_context_authority {
         let mut authority = document_authority();
         authority
             .restore_system_context_snapshot(
-                active_keys_have_known_pending_or_seen,
+                active_turn_membership_is_consistent,
                 seen_keys_match_known_appends,
             )
             .map_err(|err| SystemContextStageError::InvalidRequest(err.to_string()))?;
@@ -3065,8 +4092,13 @@ mod system_context_authority {
                 },
             );
         }
-        if active_turn_scoped && let Some(key) = req.idempotency_key.as_ref() {
-            state.active_turn_pending_keys.insert(key.clone());
+        if active_turn_scoped {
+            state
+                .active_turn_pending_indices
+                .insert(usize_to_u64(state.pending.len()));
+            if let Some(key) = req.idempotency_key.as_ref() {
+                state.active_turn_pending_keys.insert(key.clone());
+            }
         }
         state.pending.push(append);
         Ok(AppendSystemContextStatus::Staged)
@@ -3098,26 +4130,17 @@ mod system_context_authority {
             state.seen.remove(&key);
         }
         state.active_turn_pending_keys.clear();
+        state.active_turn_pending_indices.clear();
     }
 
     pub(super) fn discard_unapplied_active_turn_pending(
         state: &mut SessionSystemContextState,
     ) -> Vec<PendingSystemContextAppend> {
-        if state.active_turn_pending_keys.is_empty() {
+        reconstruct_legacy_active_turn_indices(state);
+        if state.active_turn_pending_indices.is_empty() {
             return Vec::new();
         }
-        let active_keys = std::mem::take(&mut state.active_turn_pending_keys);
-        let mut discarded = Vec::new();
-        state.pending.retain(|append| {
-            let should_discard = append
-                .idempotency_key
-                .as_ref()
-                .is_some_and(|key| active_keys.contains(key));
-            if should_discard {
-                discarded.push(append.clone());
-            }
-            !should_discard
-        });
+        let discarded = discard_pending_where(state, |_append, is_active_turn| is_active_turn);
 
         for append in &discarded {
             if let Some(key) = append.idempotency_key.as_ref()
@@ -3137,34 +4160,29 @@ mod system_context_authority {
         state: &mut SessionSystemContextState,
         idempotency_keys: &[String],
     ) -> Vec<PendingSystemContextAppend> {
-        if idempotency_keys.is_empty() || state.active_turn_pending_keys.is_empty() {
+        reconstruct_legacy_active_turn_indices(state);
+        if idempotency_keys.is_empty() || state.active_turn_pending_indices.is_empty() {
             return Vec::new();
         }
         let requested_keys: BTreeSet<&str> = idempotency_keys.iter().map(String::as_str).collect();
-        let mut discarded = Vec::new();
-        let mut discarded_keys = Vec::new();
-        state.pending.retain(|append| {
-            let should_discard = append.idempotency_key.as_ref().is_some_and(|key| {
-                requested_keys.contains(key.as_str())
-                    && state.active_turn_pending_keys.contains(key)
-            });
-            if should_discard {
-                if let Some(key) = append.idempotency_key.as_ref() {
-                    discarded_keys.push(key.clone());
-                }
-                discarded.push(append.clone());
-            }
-            !should_discard
+        let discarded = discard_pending_where(state, |append, is_active_turn| {
+            is_active_turn
+                && append
+                    .idempotency_key
+                    .as_ref()
+                    .is_some_and(|key| requested_keys.contains(key.as_str()))
         });
 
-        for key in discarded_keys {
-            state.active_turn_pending_keys.remove(&key);
+        for append in &discarded {
+            let Some(key) = append.idempotency_key.as_ref() else {
+                continue;
+            };
             if state
                 .seen
-                .get(&key)
+                .get(key)
                 .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
             {
-                state.seen.remove(&key);
+                state.seen.remove(key);
             }
         }
 
@@ -3176,11 +4194,11 @@ mod system_context_authority {
     ) -> usize {
         let mut removed = 0usize;
 
-        let before_pending = state.pending.len();
-        state
-            .pending
-            .retain(|append| !steer_cleanup_discards(append.source_kind));
-        removed += before_pending.saturating_sub(state.pending.len());
+        let before_active = state.active_turn_pending_keys.len();
+        removed += discard_pending_where(state, |append, _is_active_turn| {
+            steer_cleanup_discards(append.source_kind)
+        })
+        .len();
 
         let before_applied = state.applied.len();
         state
@@ -3194,22 +4212,6 @@ mod system_context_authority {
             .retain(|_key, seen| !steer_cleanup_discards(seen.source_kind));
         removed += before_seen.saturating_sub(state.seen.len());
 
-        // Active-turn keys are tracked only by idempotency key, so an active
-        // key is a runtime steer iff its seen entry (or pending append) was.
-        // Recompute the surviving steer keys from the typed seen markers.
-        let before_active = state.active_turn_pending_keys.len();
-        let steer_keys: BTreeSet<String> = state
-            .seen
-            .iter()
-            .filter(|(_key, seen)| steer_cleanup_discards(seen.source_kind))
-            .map(|(key, _seen)| key.clone())
-            .collect();
-        // Any active key whose seen entry was already removed above (because it
-        // was a steer) is no longer present in `seen`; drop those, plus any
-        // still-present steer keys.
-        state
-            .active_turn_pending_keys
-            .retain(|key| state.seen.contains_key(key) && !steer_keys.contains(key));
         removed += before_active.saturating_sub(state.active_turn_pending_keys.len());
 
         removed
@@ -5826,6 +6828,603 @@ mod tests {
         UserMessage,
     };
     use std::sync::Arc;
+
+    fn exact_boundary_append(key: &str, text: &str) -> PendingSystemContextAppend {
+        PendingSystemContextAppend {
+            content: crate::lifecycle::CoreRenderable::text(text.to_string()),
+            source: Some("test:exact-boundary".to_string()),
+            idempotency_key: Some(key.to_string()),
+            source_kind: SystemContextSource::RuntimeSteer,
+            accepted_at: SystemTime::now(),
+            peer_response_terminal: None,
+        }
+    }
+
+    async fn wait_for_exact_boundary_request(handle: &SystemContextStateHandle) {
+        for _ in 0..1_000 {
+            let registered = matches!(
+                &handle.boundary.lock().window,
+                SystemContextBoundaryWindow::Open {
+                    request: Some(_),
+                    ..
+                }
+            );
+            if registered {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("exact boundary request did not register");
+    }
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn prepared_boundary_authority_is_send_for_owned_commit_handoff() {
+        assert_send::<PreparedSystemContextBoundary>();
+        assert_send::<crate::lifecycle::CoreBoundaryStageOutput>();
+        assert_send::<ModelBoundarySystemContext>();
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_runner_first_is_typed_unavailable() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+
+        let consuming = state
+            .take_pending_at_exact_boundary(&run_id)
+            .await
+            .expect("runner claims open boundary");
+        assert!(consuming.appends().is_empty());
+        assert!(
+            consuming
+                .consume()
+                .expect("runner consumes open boundary")
+                .is_empty()
+        );
+        let error = state
+            .prepare_active_turn_boundary(
+                &run_id,
+                vec![exact_boundary_append("runner-first", "too late")],
+            )
+            .await
+            .expect_err("consumed generation cannot mint a preparation");
+        assert!(matches!(error, CoreBoundaryStageError::Unavailable { .. }));
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_wrong_run_is_stale_without_claiming_or_mutating_window() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let active_run_id = RunId::new();
+        let wrong_run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(active_run_id.clone())
+            .expect("open boundary");
+
+        let error = state
+            .prepare_active_turn_boundary(
+                &wrong_run_id,
+                vec![exact_boundary_append("wrong-run", "must not stage")],
+            )
+            .await
+            .expect_err("a different run cannot claim the active window");
+        assert!(matches!(error, CoreBoundaryStageError::Stale { .. }));
+        assert!(state.snapshot().seen().is_empty());
+
+        let consuming = state
+            .take_pending_at_exact_boundary(&active_run_id)
+            .await
+            .expect("the correct run still owns its unclaimed boundary");
+        assert!(
+            consuming
+                .consume()
+                .expect("consume unchanged active window")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_conflicting_batch_is_atomic_and_leaves_window_unclaimed() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+
+        let error = state
+            .prepare_active_turn_boundary(
+                &run_id,
+                vec![
+                    exact_boundary_append("conflict", "first"),
+                    exact_boundary_append("conflict", "different"),
+                ],
+            )
+            .await
+            .expect_err("a conflicting batch must fail before registration");
+        assert!(matches!(error, CoreBoundaryStageError::Fault { .. }));
+        assert!(state.snapshot().seen().is_empty());
+
+        let consuming = state
+            .take_pending_at_exact_boundary(&run_id)
+            .await
+            .expect("failed validation must leave the exact window unclaimed");
+        assert!(
+            consuming
+                .consume()
+                .expect("consume unchanged active window")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_prepare_first_parks_until_commit() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append("prepare-first", "parked context")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id)
+                .await
+        });
+        let prepared = prepare
+            .await
+            .expect("prepare task")
+            .expect("prepare must return only after park");
+        assert_eq!(prepared.expected_run_id(), &run_id);
+        assert!(prepared.boundary_generation() > 0);
+        assert!(state.snapshot().pending().is_empty());
+        assert!(
+            !runner.is_finished(),
+            "runner must remain parked before commit"
+        );
+
+        prepared
+            .into_stage_output(None)
+            .commit()
+            .expect("exact commit");
+        let consuming = runner
+            .await
+            .expect("runner task")
+            .expect("runner resumes after commit");
+        assert_eq!(state.snapshot().pending().len(), 1);
+        assert!(state.snapshot().applied().is_empty());
+        let consumed = consuming.consume().expect("consume at model call seam");
+        assert_eq!(consumed.len(), 1);
+        assert_eq!(consumed[0].content.render_text(), "parked context");
+        assert!(state.snapshot().pending().is_empty());
+        assert!(state.snapshot().applied().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_preprocessing_drop_does_not_claim_model_consumption() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append(
+                        "preprocess-drop",
+                        "retryable context",
+                    )],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id)
+                .await
+        });
+        prepare
+            .await
+            .expect("prepare task")
+            .expect("prepare parks")
+            .into_stage_output(None)
+            .commit()
+            .expect("publish pending candidate");
+
+        let consuming = runner
+            .await
+            .expect("runner task")
+            .expect("runner enters preprocessing");
+        assert_eq!(consuming.appends().len(), 1);
+        drop(consuming);
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.pending().len(), 1);
+        assert!(snapshot.applied().is_empty());
+        assert!(snapshot.seen().contains_key("preprocess-drop"));
+
+        // Commit publishes to the exact active turn; it does not claim model
+        // delivery. A later hard cancel/preprocessing drop owns the following
+        // cleanup linearization and must not leak the accepted steer to a
+        // successor run.
+        assert_eq!(
+            state
+                .discard_unapplied_active_turn_pending()
+                .expect("closed consuming window permits active-turn cleanup"),
+            1
+        );
+        assert!(state.snapshot().pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_drop_aborts_and_preserves_ordinary_pending() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        state
+            .stage_append_with_snapshot(
+                &AppendSystemContextRequest {
+                    content: crate::lifecycle::CoreRenderable::text("ordinary"),
+                    source: Some("test:ordinary".to_string()),
+                    idempotency_key: Some("ordinary".to_string()),
+                    source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
+                },
+                SystemTime::now(),
+            )
+            .expect("ordinary append");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append("drop-abort", "must not publish")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id)
+                .await
+        });
+        let prepared = prepare.await.expect("prepare task").expect("parked");
+        drop(prepared);
+        let consuming = runner
+            .await
+            .expect("runner task")
+            .expect("drop abort wakes runner");
+        let consumed = consuming
+            .consume()
+            .expect("consume ordinary pending context");
+        assert_eq!(consumed.len(), 1);
+        assert_eq!(consumed[0].content.render_text(), "ordinary");
+        assert!(!state.snapshot().seen().contains_key("drop-abort"));
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_duplicate_prepare_cannot_overwrite_generation() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let first_state = state.clone();
+        let first_run_id = run_id.clone();
+        let first = tokio::spawn(async move {
+            first_state
+                .prepare_active_turn_boundary(
+                    &first_run_id,
+                    vec![exact_boundary_append("first", "first")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+        let duplicate = state
+            .prepare_active_turn_boundary(&run_id, vec![exact_boundary_append("second", "second")])
+            .await
+            .expect_err("duplicate preparation must fail closed");
+        assert!(duplicate.is_unavailable());
+
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id)
+                .await
+        });
+        let prepared = first.await.expect("first task").expect("first parks");
+        prepared
+            .into_stage_output(None)
+            .abort()
+            .expect("explicit abort");
+        runner
+            .await
+            .expect("runner task")
+            .expect("runner resumes after abort")
+            .consume()
+            .expect("consume ordinary pending after abort");
+        assert!(!state.snapshot().seen().contains_key("second"));
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_concurrent_conflict_surfaces_fault_to_runner_and_preparer() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append("shared-key", "prepared context")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+
+        state
+            .stage_append_with_snapshot(
+                &AppendSystemContextRequest {
+                    content: crate::lifecycle::CoreRenderable::text("ordinary conflict"),
+                    source: Some("test:exact-boundary".to_string()),
+                    idempotency_key: Some("shared-key".to_string()),
+                    source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
+                },
+                SystemTime::now(),
+            )
+            .expect("ordinary mutation remains legal before the runner parks");
+
+        let runner_error = state
+            .take_pending_at_exact_boundary(&run_id)
+            .await
+            .err()
+            .expect("runner must surface candidate recomputation conflict");
+        assert!(matches!(runner_error, CoreBoundaryStageError::Fault { .. }));
+        let prepare_error = prepare
+            .await
+            .expect("prepare task")
+            .expect_err("preparer must receive the same typed failure class");
+        assert!(matches!(
+            prepare_error,
+            CoreBoundaryStageError::Fault { .. }
+        ));
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.pending().len(), 1);
+        assert_eq!(
+            snapshot.pending()[0].content.render_text(),
+            "ordinary conflict"
+        );
+        assert!(snapshot.applied().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_nonconflicting_open_mutation_is_preserved_in_candidate() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append("prepared", "prepared context")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+
+        state
+            .stage_append_with_snapshot(
+                &AppendSystemContextRequest {
+                    content: crate::lifecycle::CoreRenderable::text("ordinary context"),
+                    source: Some("test:ordinary".to_string()),
+                    idempotency_key: Some("ordinary".to_string()),
+                    source_kind: SystemContextSource::Normal,
+                    peer_response_terminal: None,
+                },
+                SystemTime::now(),
+            )
+            .expect("nonconflicting mutation remains legal before park");
+
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id)
+                .await
+        });
+        let prepared = prepare.await.expect("prepare task").expect("parked");
+        assert_eq!(prepared.candidate_state().pending().len(), 2);
+        prepared
+            .into_stage_output(None)
+            .commit()
+            .expect("commit exact candidate");
+        let consuming = runner
+            .await
+            .expect("runner task")
+            .expect("runner resumes after commit");
+        let consumed = consuming.consume().expect("consume exact candidate");
+        assert_eq!(consumed.len(), 2);
+        assert!(
+            consumed
+                .iter()
+                .any(|append| append.content.render_text() == "ordinary context")
+        );
+        assert!(
+            consumed
+                .iter()
+                .any(|append| append.content.render_text() == "prepared context")
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_actor_replacement_rejects_old_commit() {
+        let actor_a = SystemContextStateHandle::new(Default::default()).expect("actor A");
+        let run_id = RunId::new();
+        let _run_a = actor_a
+            .begin_boundary_run(run_id.clone())
+            .expect("open A boundary");
+        let prepare_state = actor_a.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append("actor-a", "stale A")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&actor_a).await;
+        let runner_state = actor_a.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id)
+                .await
+        });
+        let prepared_a = prepare.await.expect("prepare task").expect("A parked");
+
+        actor_a.revoke_boundary_actor();
+        let actor_b = SystemContextStateHandle::new(Default::default()).expect("actor B");
+        let _run_b = actor_b
+            .begin_boundary_run(run_id.clone())
+            .expect("replacement opens independently");
+        let error = prepared_a
+            .into_stage_output(None)
+            .commit()
+            .expect_err("A cannot commit after replacement revoke");
+        assert!(matches!(error, CoreBoundaryStageError::Stale { .. }));
+        assert!(runner.await.expect("A runner task").is_err());
+        assert!(actor_b.snapshot().seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_hard_interrupt_and_concurrent_append_fail_closed() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let _run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append("interrupt", "stale")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id)
+                .await
+        });
+        let prepared = prepare.await.expect("prepare task").expect("parked");
+        let concurrent = state.stage_append_with_snapshot(
+            &AppendSystemContextRequest {
+                content: crate::lifecycle::CoreRenderable::text("concurrent"),
+                source: Some("test:concurrent".to_string()),
+                idempotency_key: Some("concurrent".to_string()),
+                source_kind: SystemContextSource::Normal,
+                peer_response_terminal: None,
+            },
+            SystemTime::now(),
+        );
+        assert!(
+            concurrent.is_err(),
+            "parked candidate must not be overwritten"
+        );
+        let discard_error = state
+            .discard_unapplied_active_turn_pending()
+            .expect_err("parked authority must reject cleanup, not report an empty success");
+        assert!(matches!(
+            discard_error,
+            CoreBoundaryStageError::Fault { .. }
+        ));
+        let keyed_discard_error = state
+            .discard_active_turn_pending_by_keys(&["interrupt".to_string()])
+            .expect_err("parked authority must reject keyed rollback");
+        assert!(matches!(
+            keyed_discard_error,
+            CoreBoundaryStageError::Fault { .. }
+        ));
+
+        runner.abort();
+        let _ = runner.await;
+        let error = prepared
+            .into_stage_output(None)
+            .commit()
+            .expect_err("hard-interrupted parked request cannot commit later");
+        assert!(matches!(error, CoreBoundaryStageError::Stale { .. }));
+        assert!(state.snapshot().seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_boundary_run_exit_wakes_prepare_before_parking() {
+        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+        let run_id = RunId::new();
+        let run = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    vec![exact_boundary_append("run-exit", "never parks")],
+                )
+                .await
+        });
+        wait_for_exact_boundary_request(&state).await;
+        drop(run);
+        let error = prepare
+            .await
+            .expect("prepare task")
+            .expect_err("run exit must release preparer");
+        assert!(matches!(
+            error,
+            CoreBoundaryStageError::Unavailable { .. } | CoreBoundaryStageError::Stale { .. }
+        ));
+    }
 
     fn block_assistant_text(message: &BlockAssistantMessage) -> String {
         message
@@ -9930,10 +11529,38 @@ mod tests {
         assert!(state.pending.is_empty());
         assert!(state.applied.is_empty());
         assert!(state.active_turn_pending_keys.is_empty());
+        assert!(state.active_turn_pending_indices.is_empty());
         assert!(
             state.seen.is_empty(),
             "discarded active-turn context should not block later idempotency keys"
         );
+    }
+
+    #[test]
+    fn keyless_active_turn_system_context_is_owned_and_discarded() {
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_active_turn_append(
+                &AppendSystemContextRequest {
+                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
+                        "keyless active-turn context".to_string(),
+                    ),
+                    source: Some("test:keyless-active-turn".to_string()),
+                    idempotency_key: None,
+                    source_kind: SystemContextSource::RuntimeSteer,
+                    peer_response_terminal: None,
+                },
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("keyless active context should stage");
+
+        assert!(state.active_turn_pending_keys.is_empty());
+        assert_eq!(state.active_turn_pending_len(), 1);
+        let discarded = state.discard_unapplied_active_turn_pending();
+
+        assert_eq!(discarded.len(), 1);
+        assert!(state.pending.is_empty());
+        assert_eq!(state.active_turn_pending_len(), 0);
     }
 
     #[test]
@@ -10008,6 +11635,7 @@ mod tests {
         assert!(state.pending.is_empty());
         assert!(state.applied.is_empty());
         assert!(state.active_turn_pending_keys.is_empty());
+        assert!(state.active_turn_pending_indices.is_empty());
         assert_eq!(
             state.seen.get("runtime:steer:input-2"),
             None,
@@ -10092,6 +11720,7 @@ mod tests {
                     },
                 )]),
                 active_turn_pending_keys: BTreeSet::from(["steer-key-pending".to_string()]),
+                active_turn_pending_indices: BTreeSet::from([0]),
             })
             .expect("system context state should serialize");
 

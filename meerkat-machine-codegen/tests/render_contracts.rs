@@ -226,7 +226,13 @@ fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
         "mob__entry_packet__mob_machine_external_peer_key_matches_edge(key, edge) ==",
         "mob__mob_machine_external_peer_identity_absent(edges, agent_identity) ==",
         "mob__mob_machine_identity_has_session_binding(arg_member_session_bindings, agent_identity) ==",
+        "mob__mob_machine_remote_turn_custody_admits(pending, committed, resolved, candidate) ==",
+        "mob__entry_packet__mob_machine_remote_turn_custody_admits(pending, committed, resolved, candidate) ==",
         "mob__mob_machine_member_peer_endpoint_peer_id(endpoint) ==",
+        "mob__mob_machine_placed_cleanup_absent_for_identity(arg_obligations, arg_agent_identity) ==",
+        "mob__mob_machine_placed_cleanup_obligation(arg_agent_identity, arg_spawn_id, arg_generation, arg_fence_token, arg_provision_operation_id, arg_operation_owner_session_id, arg_expected_phase) ==",
+        "mob__entry_packet__mob_machine_placed_cleanup_absent_for_identity(arg_obligations, arg_agent_identity) ==",
+        "mob__entry_packet__mob_machine_placed_cleanup_obligation(arg_agent_identity, arg_spawn_id, arg_generation, arg_fence_token, arg_provision_operation_id, arg_operation_owner_session_id, arg_expected_phase) ==",
         "mob__mob_machine_run_step_status_after_set(",
         "mob__mob_machine_run_step_bool_after_set(",
         "mob__mob_machine_run_step_condition_result_after_set(",
@@ -248,6 +254,22 @@ fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
             "composition model must define namespaced MobMachine native helper `{helper}`"
         );
     }
+
+    assert!(
+        rendered.contains(
+            "Cardinality(pending) + Cardinality(committed) + Cardinality(resolved) < 4096"
+        ) && rendered.contains("same_member_host_count < 256")
+            && rendered.contains("row.dispatch_sequence # candidate.dispatch_sequence")
+            && rendered.contains(
+                "\\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+            ),
+        "composition model must preserve the Rust remote-turn custody admission limits and uniqueness check"
+    );
+    assert!(
+        rendered.contains("provision_operation_id |-> arg_provision_operation_id")
+            && rendered.contains("operation_owner_session_id |-> arg_operation_owner_session_id"),
+        "placed-cleanup TLA records must retain the full durable operation tuple"
+    );
 }
 
 #[test]

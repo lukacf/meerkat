@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
 use crate::connection::AuthBindingRef;
+use crate::interaction::InteractionId;
 use crate::model_profile::capabilities::{
     OpenAiPromptCacheMode, OpenAiPromptCacheTtl, OpenAiReasoningContext, OpenAiReasoningMode,
     OpenAiTextVerbosity,
@@ -1139,6 +1140,11 @@ pub struct RuntimeTurnMetadata {
     /// machine at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+    /// Exact interaction IDs for directed flow-step inputs whose terminal
+    /// outcome must be published independently. This is deliberately a
+    /// collection: one runtime turn may batch multiple directed inputs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directed_interaction_ids: Vec<InteractionId>,
     /// Stable transcript identity derived at runtime admission. Persisting this
     /// on transcript messages lets history readers join persisted frames with
     /// live frames without falling back to message text.
@@ -1162,6 +1168,7 @@ impl RuntimeTurnMetadata {
             && self.render_metadata.is_none()
             && self.execution_kind.is_none()
             && self.peer_response_terminal_apply_intent.is_none()
+            && self.directed_interaction_ids.is_empty()
             && self.transcript_identity.is_empty()
     }
 
@@ -1210,6 +1217,12 @@ impl RuntimeTurnMetadata {
             "peer_response_terminal_apply_intent",
         )?;
         merge_transcript_identity(&mut self.transcript_identity, other.transcript_identity)?;
+
+        for interaction_id in other.directed_interaction_ids {
+            if !self.directed_interaction_ids.contains(&interaction_id) {
+                self.directed_interaction_ids.push(interaction_id);
+            }
+        }
 
         // Collections: accumulate.
         if let Some(extra) = other.skill_references {

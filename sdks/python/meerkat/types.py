@@ -18,6 +18,23 @@ from .generated.types import (
     AttentionListRequest as AttentionListRequest,
     AttentionListResult as AttentionListResult,
     AttentionProjectionPolicy as AttentionProjectionPolicy,
+    BridgeBootstrapToken as BridgeBootstrapToken,
+    BridgeCommandCancelTrackedMemberInput as BridgeCommandCancelTrackedMemberInput,
+    BridgeCommandObserveSupervisorRotation as BridgeCommandObserveSupervisorRotation,
+    BridgeHostCapabilityRequirements as BridgeHostCapabilityRequirements,
+    BridgeLiveControlOutcome as BridgeLiveControlOutcome,
+    BridgeLiveControlOutcomeCommitInput as BridgeLiveControlOutcomeCommitInput,
+    BridgeLiveControlOutcomeInterrupt as BridgeLiveControlOutcomeInterrupt,
+    BridgeLiveControlOutcomeRefresh as BridgeLiveControlOutcomeRefresh,
+    BridgeLiveControlOutcomeTruncate as BridgeLiveControlOutcomeTruncate,
+    BridgeLiveControlVerb as BridgeLiveControlVerb,
+    BridgeLiveControlVerbCommitInput as BridgeLiveControlVerbCommitInput,
+    BridgeLiveControlVerbInterrupt as BridgeLiveControlVerbInterrupt,
+    BridgeLiveControlVerbRefresh as BridgeLiveControlVerbRefresh,
+    BridgeLiveControlVerbTruncate as BridgeLiveControlVerbTruncate,
+    BridgeTrackedInputCancelOutcome as BridgeTrackedInputCancelOutcome,
+    BridgeTurnOutcomeRecord as BridgeTurnOutcomeRecord,
+    CommsSendResult as CommsSendResult,
     GoalAttentionTarget as GoalAttentionTarget,
     GoalStatusRequest as GoalStatusRequest,
     GoalStatusResult as GoalStatusResult,
@@ -32,6 +49,8 @@ from .generated.types import (
     McpStdioConfig as McpStdioConfig,
     McpStdioServerConfig as McpStdioServerConfig,
     MobBackendConfigInput as MobBackendConfigInput,
+    MobBindHostParams as MobBindHostParams,
+    MobBindHostResult as MobBindHostResult,
     MobCreateParams as MobCreateParams,
     MobCreateResult as MobCreateResult,
     MobDefinitionInput as MobDefinitionInput,
@@ -43,8 +62,21 @@ from .generated.types import (
     MobFlowSpecInput as MobFlowSpecInput,
     MobFlowStepInput as MobFlowStepInput,
     MobFrameSpecInput as MobFrameSpecInput,
+    MobHostStatus as MobHostStatus,
+    MobHostsResult as MobHostsResult,
+    MobGrantScopesParams as MobGrantScopesParams,
+    MobGrantScopesResult as MobGrantScopesResult,
+    MobGrantsResult as MobGrantsResult,
+    MobHardCancelParams as MobHardCancelParams,
+    MobHardCancelResult as MobHardCancelResult,
     MobLimitsSpecInput as MobLimitsSpecInput,
     MobMemberListEntryWire as MobMemberListEntryWire,
+    MobMemberHistoryParams as MobMemberHistoryParams,
+    MobMemberHistoryResult as MobMemberHistoryResult,
+    MobMemberLiveChannelParams as MobMemberLiveChannelParams,
+    MobMemberLiveControlParams as MobMemberLiveControlParams,
+    MobMemberLiveOpenParams as MobMemberLiveOpenParams,
+    MobMemberLiveStatusParams as MobMemberLiveStatusParams,
     MobMemberSpecWire as MobMemberSpecWire,
     MobOrchestratorInput as MobOrchestratorInput,
     MobProfileBindingInput as MobProfileBindingInput,
@@ -52,6 +84,11 @@ from .generated.types import (
     MobReconcileParams as MobReconcileParams,
     MobReconcileReportWire as MobReconcileReportWire,
     MobReconcileResult as MobReconcileResult,
+    MobRevokeHostParams as MobRevokeHostParams,
+    MobRevokeHostResult as MobRevokeHostResult,
+    MobRevokeScopesParams as MobRevokeScopesParams,
+    MobRevokeScopesResult as MobRevokeScopesResult,
+    MobRouteInstallsResult as MobRouteInstallsResult,
     MobSpawnManyFailedResult as MobSpawnManyFailedResult,
     MobSpawnManyFailureCause as MobSpawnManyFailureCause,
     MobSpawnManyParams as MobSpawnManyParams,
@@ -74,6 +111,7 @@ from .generated.types import (
     MobWiringRulesInput as MobWiringRulesInput,
     PublicTurnToolOverlay as PublicTurnToolOverlay,
     LiveChannelParams as LiveChannelParams,
+    LiveCloseResult as LiveCloseResult,
     LiveCommitInputParams as LiveCommitInputParams,
     LiveInputChunkWire as LiveInputChunkWire,
     # R5-10: re-export typed `LiveInputChunkWire` variants so SDK consumers
@@ -85,6 +123,8 @@ from .generated.types import (
     LiveInputChunkWireVideoFrame as LiveInputChunkWireVideoFrame,
     LiveOpenParams as LiveOpenParams,
     LiveOpenResult as LiveOpenResult,
+    LiveRefreshResult as LiveRefreshResult,
+    LiveRefreshStatus as LiveRefreshStatus,
     LiveWebrtcAnswerParams as LiveWebrtcAnswerParams,
     LiveWebrtcAnswerResult as LiveWebrtcAnswerResult,
     LiveSendInputErrorData as LiveSendInputErrorData,
@@ -115,6 +155,10 @@ from .generated.types import (
     WireLiveContinuityModeTranscriptOnly as WireLiveContinuityModeTranscriptOnly,
     WireLiveContinuityModeDegraded as WireLiveContinuityModeDegraded,
     WireLiveContinuityModeProviderNativeResume as WireLiveContinuityModeProviderNativeResume,
+    WireControlScope as WireControlScope,
+    WireFlowFailureDetail as WireFlowFailureDetail,
+    WireFlowTurnOutcome as WireFlowTurnOutcome,
+    WireGrantRecord as WireGrantRecord,
     # FIX-SDK-OBS: typed live-adapter observation discriminated union and
     # its supporting wire mirrors. Browser/Python clients can type-narrow
     # on the `observation` discriminator and read R5-4 identity fields
@@ -201,25 +245,47 @@ from .generated.types import (
     WorkItemRef as WorkItemRef,
     WorkOwnerKey as WorkOwnerKey,
     WorkOwnerKind as WorkOwnerKind,
-    WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,
     WireAuthBindingRef as WireAuthBindingRef,
+    WireContentBlock as WireContentBlock,
+    WireContentInput as WireContentInput,
+    WireHistoryRow as WireHistoryRow,
+    WireHostBindPhase as WireHostBindPhase,
+    WireHostBindingDescriptor as WireHostBindingDescriptor,
+    WireHostBindingDescriptorKind as WireHostBindingDescriptorKind,
+    WireHostCapabilityFlags as WireHostCapabilityFlags,
+    WireHostRef as WireHostRef,
     WireGenerateImageExecutionPlan as WireGenerateImageExecutionPlan,
     WireGenerateImageRequest as WireGenerateImageRequest,
     WireImageGenerationToolResult as WireImageGenerationToolResult,
     WireImageOperationPhase as WireImageOperationPhase,
     WireInputState as WireInputState,
+    WireMemberHistoryPageBody as WireMemberHistoryPageBody,
+    WireMemberLifecycleCapabilities as WireMemberLifecycleCapabilities,
     WireMemberLaunchMode as WireMemberLaunchMode,
+    WireMemberProgressSnapshot as WireMemberProgressSnapshot,
     WireMemberRef as WireMemberRef,
     WireMobBackendKind as WireMobBackendKind,
     WireMobMemberStatus as WireMobMemberStatus,
     WireMobProfile as WireMobProfile,
     WireMobRuntimeMode as WireMobRuntimeMode,
     WireMobToolConfig as WireMobToolConfig,
+    WireNonPortableResourceKind as WireNonPortableResourceKind,
+    WireProjectionProvenance as WireProjectionProvenance,
+    WireReachability as WireReachability,
+    WireRouteInstallObligation as WireRouteInstallObligation,
     WireRuntimeBinding as WireRuntimeBinding,
     WireToolAccessPolicy as WireToolAccessPolicy,
     WireToolFilter as WireToolFilter,
+    WireTrustedPeerIdentity as WireTrustedPeerIdentity,
+    WireTrustedPeerIdentityEd25519PublicKey as WireTrustedPeerIdentityEd25519PublicKey,
 )
+
+# The request schema emits this literal inline on
+# ``MobMemberLiveOpenParams.transport``. Keep one public spelling for the
+# high-level client and mob wrappers; a conformance test pins it to the
+# generated field so schema drift cannot silently widen this alias.
+MobMemberLiveTransport = Literal["websocket", "webrtc"]
 
 PeerId = NewType("PeerId", str)
 """Canonical comms routing identity for a peer."""
@@ -234,6 +300,7 @@ from .events import Event, Usage as Usage  # noqa: F401
 # ---------------------------------------------------------------------------
 # Skill references (v2.1)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class SkillKey:
@@ -282,11 +349,25 @@ class UriVideoBlock(TypedDict):
     uri: str
 
 
-ContentBlock = Union[TextBlock, InlineImageBlock, BlobImageBlock, InlineVideoBlock, UriVideoBlock]
+ContentBlock = Union[
+    TextBlock, InlineImageBlock, BlobImageBlock, InlineVideoBlock, UriVideoBlock
+]
 """A multimodal content block accepted by input-bearing APIs."""
 
 ContentInput = str | list[ContentBlock]
-"""Canonical content input accepted by input-bearing APIs and returned by history surfaces."""
+"""Canonical content input accepted by input-bearing APIs."""
+
+# Transcript history uses the generated wire projection rather than the
+# input-bearing block union above. History may carry structured/unknown blocks
+# and server-owned provenance that an input constructor does not expose.
+SessionContentBlock = WireContentBlock
+SessionContentInput = WireContentInput
+
+TranscriptUserRole = Literal[
+    "conversational",
+    "compaction_summary",
+    "injected_context",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +382,7 @@ class BlobPayload:
 # ---------------------------------------------------------------------------
 # Domain types
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class SchemaWarning:
@@ -559,6 +641,30 @@ class MobEventsResult(TypedDict):
     events: list[MobEventCursorEntry]
 
 
+MobControlScope = Literal[
+    "list",
+    "read_history",
+    "subscribe_events",
+    "send_command",
+    "cancel",
+    "retire",
+    "wire_topology",
+    "live",
+    "admin_host",
+    "admin_grants",
+]
+
+
+MobGrantRecord = TypedDict(
+    "MobGrantRecord",
+    {
+        "principal": str,
+        "scopes": list[MobControlScope],
+        "expires_at_ms": NotRequired[int],
+    },
+)
+
+
 class MobProfileTools(TypedDict, total=False):
     builtins: bool
     shell: bool
@@ -657,7 +763,7 @@ class SessionToolResult:
     """Tool result captured in transcript history."""
 
     tool_use_id: str = ""
-    content: ContentInput = ""
+    content: SessionContentInput = ""
     is_error: bool = False
 
 
@@ -684,9 +790,9 @@ class SessionAssistantBlock:
     height: int | None = None
     revised_prompt: dict[str, Any] | None = None
     meta: dict[str, Any] | None = None
-    # Lane provenance for ``transcript`` blocks (e.g. ``"spoken"``).
-    # ``None`` for non-transcript block types.
-    source: str | None = None
+    # Lane provenance for ``transcript`` blocks. Unknown future provenance
+    # keeps its generated debug payload instead of being coerced to spoken.
+    source: WireTranscriptSource | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -698,7 +804,8 @@ class SessionMessage:
     created_at: str = ""
     kind: str | None = None
     body: str | None = None
-    content: ContentInput | None = None
+    content: SessionContentInput | None = None
+    transcript_role: TranscriptUserRole | None = None
     stop_reason: str | None = None
     interaction_id: str | None = None
     run_id: str | None = None
@@ -766,7 +873,7 @@ class TranscriptMessageReplacement(TypedDict):
 class TranscriptUserContentBlockReplacement(TypedDict):
     type: Literal["user_content_block"]
     block_index: int
-    block: ContentBlock
+    block: SessionContentBlock
 
 
 class TranscriptAssistantBlockReplacement(TypedDict):
@@ -779,7 +886,7 @@ class TranscriptToolResultContentBlockReplacement(TypedDict):
     type: Literal["tool_result_content_block"]
     result_index: int
     block_index: int
-    block: ContentBlock
+    block: SessionContentBlock
 
 
 TranscriptReplacement = (
@@ -803,7 +910,7 @@ TranscriptRewriteSelection = TranscriptMessageRangeSelection
 
 class TranscriptRewriteReason(TypedDict):
     kind: str
-    note: NotRequired[str]
+    note: NotRequired[str | None]
 
 
 class TranscriptRewriteSystemMessage(TypedDict):
@@ -815,7 +922,7 @@ class TranscriptRewriteSystemMessage(TypedDict):
 class TranscriptRewriteSystemNoticeMessage(TypedDict):
     role: Literal["system_notice"]
     kind: str
-    body: NotRequired[str]
+    body: NotRequired[str | None]
     content: NotRequired[str]
     blocks: NotRequired[list[dict[str, Any]]]
     created_at: NotRequired[str]
@@ -823,7 +930,8 @@ class TranscriptRewriteSystemNoticeMessage(TypedDict):
 
 class TranscriptRewriteUserMessage(TypedDict):
     role: Literal["user"]
-    content: ContentInput
+    content: SessionContentInput
+    transcript_role: NotRequired[TranscriptUserRole]
     created_at: NotRequired[str]
 
 

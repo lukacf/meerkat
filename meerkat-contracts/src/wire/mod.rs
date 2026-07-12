@@ -16,6 +16,7 @@ mod mcp_live;
 mod mob;
 mod models;
 mod params;
+mod portable_spec;
 mod realtime;
 mod rest;
 mod result;
@@ -24,6 +25,7 @@ pub mod runtime;
 mod schedule;
 mod session;
 pub mod skills;
+mod spec_digest;
 mod stream_read;
 pub mod supervisor_bridge;
 mod usage;
@@ -79,7 +81,10 @@ pub use auth::{
     ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalId, PrincipalKind, PrincipalRef,
     VisibilityClass,
 };
-pub use error::WireConversionError;
+pub use error::{
+    WireConversionError, WireHostUnavailableDetail, WireMobErrorDetail, WireStaleCursorDetail,
+    WireStaleFenceDetail,
+};
 pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,
     EventReplayScope, EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,
@@ -116,54 +121,69 @@ pub use mcp_live::{
 };
 pub use mob::{
     MobAppendSystemContextParams, MobAppendSystemContextResult, MobBackendConfigInput,
-    MobCancelAllWorkParams, MobCancelAllWorkResult, MobCancelWorkParams, MobCancelWorkResult,
-    MobCollectionPolicyInput, MobConcludeObjectiveParams, MobConcludeObjectiveResult,
-    MobConditionExprInput, MobCreateParams, MobCreateResult, MobDefinitionInput,
-    MobDependencyModeInput, MobDestroyResult, MobDispatchModeInput, MobEnsureMemberOutcomeWire,
-    MobEnsureMemberParams, MobEnsureMemberResult, MobEventRouterConfigInput, MobEventsParams,
-    MobEventsResult, MobExternalBackendConfigInput, MobFlowCancelParams, MobFlowCancelResult,
-    MobFlowNodeInput, MobFlowRunParams, MobFlowRunResult, MobFlowSpecInput, MobFlowStatusParams,
-    MobFlowStatusResult, MobFlowStepInput, MobFlowsResult, MobForceCancelResult,
-    MobForkHelperParams, MobFrameSpecInput, MobFrameStepInput, MobHelperResult, MobIdParams,
+    MobBindHostParams, MobBindHostResult, MobCancelAllWorkParams, MobCancelAllWorkResult,
+    MobCancelWorkParams, MobCancelWorkResult, MobCollectionPolicyInput, MobConcludeObjectiveParams,
+    MobConcludeObjectiveResult, MobConditionExprInput, MobCreateParams, MobCreateResult,
+    MobDefinitionInput, MobDependencyModeInput, MobDestroyResult, MobDispatchModeInput,
+    MobEnsureMemberOutcomeWire, MobEnsureMemberParams, MobEnsureMemberResult,
+    MobEventRouterConfigInput, MobEventsParams, MobEventsResult, MobExternalBackendConfigInput,
+    MobFlowCancelParams, MobFlowCancelResult, MobFlowNodeInput, MobFlowRunParams, MobFlowRunResult,
+    MobFlowSpecInput, MobFlowStatusParams, MobFlowStatusResult, MobFlowStepInput, MobFlowsResult,
+    MobForceCancelResult, MobForkHelperParams, MobFrameSpecInput, MobFrameStepInput,
+    MobGrantScopesParams, MobGrantScopesResult, MobGrantsResult, MobHardCancelParams,
+    MobHardCancelResult, MobHelperResult, MobHostStatus, MobHostsResult, MobIdParams,
     MobIngressInteractionParams, MobIngressInteractionResult, MobLifecycleParams,
     MobLifecycleResult, MobLimitsSpecInput, MobListMembersMatchingParams,
-    MobListMembersMatchingResult, MobListResult, MobMemberFilterWire, MobMemberListEntryWire,
+    MobListMembersMatchingResult, MobListResult, MobMemberFilterWire, MobMemberHistoryParams,
+    MobMemberHistoryResult, MobMemberListEntryWire, MobMemberLiveChannelParams,
+    MobMemberLiveControlParams, MobMemberLiveOpenParams, MobMemberLiveStatusParams,
     MobMemberParams, MobMemberSendParams, MobMemberSendResult, MobMemberSpecWire,
     MobMemberStatusResult, MobMembersResult, MobOrchestratorInput, MobPeerTarget,
     MobPolicyModeInput, MobProfileBindingInput, MobProfileCreateParams, MobProfileDeleteParams,
     MobProfileDeleteResult, MobProfileInput, MobProfileListResult, MobProfileLookupResult,
     MobProfileNameParams, MobProfileUpdateParams, MobReconcileFailureWire, MobReconcileOptionsWire,
     MobReconcileParams, MobReconcileReportWire, MobReconcileResult, MobRepeatUntilInput,
-    MobRespawnParams, MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRoleWiringRuleInput,
-    MobRotateSupervisorResult, MobRunParams, MobRunResult, MobRunResultParams, MobSkillSourceInput,
-    MobSnapshotResult, MobSpawnHelperParams, MobSpawnManyFailedResult, MobSpawnManyFailureCause,
-    MobSpawnManyParams, MobSpawnManyResult, MobSpawnManyResultEntry, MobSpawnManyResultPayload,
-    MobSpawnManyResultStatus, MobSpawnManySpawnedResult, MobSpawnParams, MobSpawnPolicyInput,
-    MobSpawnReceiptWire, MobSpawnResult, MobSpawnSpecParams, MobStatusResult,
-    MobStepOutputFormatInput, MobStreamCloseParams, MobStreamCloseResult, MobStreamOpenParams,
-    MobStreamOpenResult, MobSubmitWorkParams, MobSubmitWorkResult, MobSupervisorSpecInput,
-    MobToolConfigInput, MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams,
-    MobUnwireParams, MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
+    MobRespawnParams, MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRevokeHostParams,
+    MobRevokeHostResult, MobRevokeScopesParams, MobRevokeScopesResult, MobRoleWiringRuleInput,
+    MobRotateSupervisorResult, MobRouteInstallsResult, MobRunParams, MobRunResult,
+    MobRunResultParams, MobSkillSourceInput, MobSnapshotResult, MobSpawnHelperParams,
+    MobSpawnManyFailedResult, MobSpawnManyFailureCause, MobSpawnManyParams, MobSpawnManyResult,
+    MobSpawnManyResultEntry, MobSpawnManyResultPayload, MobSpawnManyResultStatus,
+    MobSpawnManySpawnedResult, MobSpawnParams, MobSpawnPolicyInput, MobSpawnReceiptWire,
+    MobSpawnResult, MobSpawnSpecParams, MobStatusResult, MobStepOutputFormatInput,
+    MobStreamCloseParams, MobStreamCloseResult, MobStreamOpenParams, MobStreamOpenResult,
+    MobSubmitWorkParams, MobSubmitWorkResult, MobSupervisorSpecInput, MobToolConfigInput,
+    MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams, MobUnwireParams,
+    MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
     MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireParams, MobWireResult,
     MobWiringRulesInput, SupervisorRotationIncompleteDataWire,
     SupervisorRotationIncompleteDetailsWire, SupervisorRotationIncompleteKind,
     SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
-    WireAgentRuntimeId, WireAppendSystemContextStatus, WireBudgetSplitPolicy, WireForkContext,
-    WireHandlingMode, WireMemberHealthClass, WireMemberLaunchMode, WireMemberProgressEvent,
-    WireMemberProgressSnapshot, WireMemberRef, WireMemberRefError, WireMemberRunState,
-    WireMobBackendKind, WireMobError, WireMobLifecycleAction, WireMobLifecycleStatus,
-    WireMobMemberStatus, WireMobProfile, WireMobReconcileStage, WireMobRespawnOutcome,
-    WireMobResumeOverrideField, WireMobRun, WireMobRunResultEnvelope, WireMobRunStatus,
-    WireMobRuntimeMode, WireMobToolConfig, WireMobWireAction, WirePeerConnectivity,
-    WirePeerConnectivitySnapshot, WireRenderClass, WireRenderMetadata, WireRenderSalience,
-    WireRuntimeBinding, WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity,
-    WireTrustedPeerSpec, WireUnreachablePeer, WireWorkOrigin,
+    WireAgentRuntimeId, WireAppendSystemContextStatus, WireControlScope, WireForkContext,
+    WireGrantRecord, WireHandlingMode, WireHistoryRow, WireHostBindPhase, WireHostCapabilityFlags,
+    WireHostRef, WireMemberHealthClass, WireMemberHistoryPageBody, WireMemberLaunchMode,
+    WireMemberLifecycleCapabilities, WireMemberProgressEvent, WireMemberProgressSnapshot,
+    WireMemberRef, WireMemberRefError, WireMemberRunState, WireMobBackendKind, WireMobError,
+    WireMobLifecycleAction, WireMobLifecycleStatus, WireMobMemberStatus, WireMobProfile,
+    WireMobReconcileStage, WireMobRespawnOutcome, WireMobResumeOverrideField, WireMobRun,
+    WireMobRunResultEnvelope, WireMobRunStatus, WireMobRuntimeMode, WireMobToolConfig,
+    WireMobWireAction, WirePeerConnectivity, WirePeerConnectivitySnapshot,
+    WireProjectionProvenance, WireReachability, WireRenderClass, WireRenderMetadata,
+    WireRenderSalience, WireRouteInstallObligation, WireRuntimeBinding, WireScopeDeniedDetail,
+    WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec,
+    WireUnreachablePeer, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
     WireModelProfile, WireModelTier, WireResolvedModelCapabilities,
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
+pub use portable_spec::{
+    PortableDefinitionExtract, PortableMcpDecl, PortableMemberSpec, PortableProfile,
+    PortableSkillSource, PortableSpawnOverlay, PortableSystemPrompt, PortableToolConfig,
+    WireMobToolAuthorityContext, WireMobToolCallerProvenance, WireNonPortableResourceKind,
+    WireResolvedToolAccessPolicy, WireSecretBearingFieldKind, WireSpawnContinuityIntent,
+};
 pub use realtime::{
     RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeImageChunk,
     RealtimeInputChunk, RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk,
@@ -211,24 +231,41 @@ pub use session::{
     WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
+pub use spec_digest::{SpecDigestError, portable_member_spec_digest};
 pub use stream_read::StreamReadStatus;
 pub use supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,
-    BridgeDeliveryRejectionCause, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeHardCancelPayload, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
-    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload,
-    BridgeProtocolVersion, BridgeReply, BridgeRetireResponse, BridgeSupervisorDelivery,
-    BridgeSupervisorPayload, BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
+    BridgeDeliveryRejectionCause, BridgeDeliveryResponse, BridgeDestroyResponse, BridgeEventCursor,
+    BridgeHardCancelPayload, BridgeHostBindPayload, BridgeHostBindResponse,
+    BridgeHostBootstrapProof, BridgeHostMemberRecord, BridgeHostRebindPayload,
+    BridgeHostReboundResponse, BridgeHostStatusPayload, BridgeHostStatusResponse,
+    BridgeInterruptPayload, BridgeLiveChannelPayload, BridgeLiveControlOutcome,
+    BridgeLiveControlPayload, BridgeLiveControlVerb, BridgeLiveControlledResponse,
+    BridgeLiveOpenPayload, BridgeLiveOpenedResponse, BridgeLiveStatusPayload,
+    BridgeMaterializePayload, BridgeMaterializedResponse, BridgeMemberEventsPage,
+    BridgeMemberHistoryPage, BridgeMemberIncarnation, BridgeMemberOperatorPayload,
+    BridgeMemberReleasedResponse, BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff,
+    BridgeObservationResponse, BridgeOutcomeTracking, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerTrustPayload, BridgePeerWiringPayload, BridgePollEventsPayload,
+    BridgeProtocolVersion, BridgeReadHistoryPayload, BridgeReleasePayload, BridgeReply,
+    BridgeRetireResponse, BridgeSupervisorDelivery, BridgeSupervisorPayload,
+    BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
     BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
     BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
     BridgeSupervisorRotationState, BridgeSupervisorRotationSubmit,
-    BridgeSupervisorRotationTargetReceipt, SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION,
+    BridgeSupervisorRotationTargetReceipt, BridgeTurnCorrelation, BridgeTurnDirective,
+    BridgeTurnOutcomeRecord, ConnectionTargetErrorKind, MaterializeLaunchMode,
+    MaterializeLaunchOutcome, MemberBuildRejection, MemberEventCursor, MemberOperatorOp,
+    MemberOperatorOutcome, MemberOperatorReply, MemberOperatorSpawnSpec, MemberSessionDisposal,
+    RuntimeReleaseCause, SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION,
     SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_INTENT,
     SUPERVISOR_BRIDGE_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS,
-    SupervisorRotationOperationId, UnsupportedBridgeProtocolVersion, decode_bridge_command,
-    supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
-    supervisor_bridge_protocol_version_supported, supervisor_bridge_supported_protocol_versions,
+    SupervisorRotationOperationId, UnsupportedBridgeProtocolVersion, WireEventRow,
+    WireFlowTurnOutcome, WireHostBindingDescriptor, WireHostBindingDescriptorKind, WireOpaqueJson,
+    decode_bridge_command, supervisor_bridge_current_protocol_version,
+    supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
+    supervisor_bridge_supported_protocol_versions,
 };
 pub use usage::WireUsage;
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

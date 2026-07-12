@@ -10,9 +10,9 @@
 #[cfg(feature = "schema")]
 use meerkat_contracts::emit::emit_all_schemas;
 use meerkat_contracts::{
-    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeImageChunk,
-    RealtimeInputChunk, WireError, WireEvent, WireRunResult, WireSessionHistory, WireSessionInfo,
-    WireSessionMessage, WireSessionSummary, WireUsage,
+    BridgeInterruptPayload, ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES,
+    RealtimeImageChunk, RealtimeInputChunk, WireError, WireEvent, WireRunResult,
+    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
@@ -1079,4 +1079,10 @@ fn realtime_image_chunk_is_a_named_public_contract() {
         Some("image_chunk")
     );
     assert_eq!(input_value["mime_type"], "image/png");
+}
+
+#[test]
+fn bridge_interrupt_payload_is_exported_from_the_crate_root() {
+    fn assert_root_export<T>() {}
+    assert_root_export::<BridgeInterruptPayload>();
 }

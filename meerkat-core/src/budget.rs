@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Resource limits for an agent run
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BudgetLimits {
     /// Maximum tokens to consume
     pub max_tokens: Option<u64>,

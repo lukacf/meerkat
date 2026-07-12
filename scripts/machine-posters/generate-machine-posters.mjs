@@ -508,8 +508,6 @@ const MACHINE_SPECS = [
             "CancelAllWork",
             "AdmitDestroyMemberRetire",
             "ObserveRuntimeRetired",
-            "ResetMember",
-            "RespawnMember",
             "DestroyMob",
             "ObserveRuntimeDestroyed",
           ],

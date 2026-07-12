@@ -22,9 +22,7 @@ pub(super) struct PendingSpawnSlot {
 
 pub(super) enum PendingSpawnInsertImpact {
     Added,
-    Collided {
-        replaced_identity: Option<AgentIdentity>,
-    },
+    Collided { replaced: Box<PendingSpawnSlot> },
 }
 
 impl PendingSpawnLineage {
@@ -72,19 +70,7 @@ impl PendingSpawnLineage {
     ) -> PendingSpawnInsertImpact {
         let replaced_pending = self.metadata.insert(spawn_ticket, pending);
         let replaced_task = self.tasks.insert(spawn_ticket, task);
-        let replaced_identity = replaced_pending
-            .as_ref()
-            .map(|pending| pending.agent_identity.clone());
         let replaced = replaced_pending.is_some() || replaced_task.is_some();
-
-        if let Some(prev) = replaced_pending {
-            let _ = prev.reply_tx.send(Err(MobError::Internal(format!(
-                "pending spawn slot collision for ticket {spawn_ticket}"
-            ))));
-        }
-        if let Some(task) = replaced_task {
-            task.abort();
-        }
 
         if replaced {
             warn!(
@@ -94,10 +80,21 @@ impl PendingSpawnLineage {
         }
 
         self.debug_assert_alignment();
-        if replaced {
-            PendingSpawnInsertImpact::Collided { replaced_identity }
-        } else {
-            PendingSpawnInsertImpact::Added
+        match (replaced_pending, replaced_task) {
+            (Some(spawn), task) => PendingSpawnInsertImpact::Collided {
+                replaced: Box::new(PendingSpawnSlot {
+                    ticket: spawn_ticket,
+                    spawn,
+                    task,
+                }),
+            },
+            (None, Some(task)) => {
+                // Alignment is a hard invariant. Avoid detaching an orphaned
+                // task even in release builds if a prior bug violated it.
+                task.abort();
+                PendingSpawnInsertImpact::Added
+            }
+            (None, None) => PendingSpawnInsertImpact::Added,
         }
     }
 

@@ -288,9 +288,9 @@ ResolveSystemContextSteerCleanupItemNormal(source_kind) ==
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-RestoreSystemContextSnapshot(active_keys_have_known_pending_or_seen, seen_keys_match_known_appends) ==
+RestoreSystemContextSnapshot(active_turn_membership_is_consistent, seen_keys_match_known_appends) ==
     /\ phase = "Ready"
-    /\ (active_keys_have_known_pending_or_seen /\ seen_keys_match_known_appends)
+    /\ (active_turn_membership_is_consistent /\ seen_keys_match_known_appends)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>

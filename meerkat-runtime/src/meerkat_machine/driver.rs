@@ -23,6 +23,7 @@ use crate::traits::{
 };
 use chrono::Utc;
 use meerkat_machine_kernels::generated::meerkat::command_capabilities as generated_kernel_command_capabilities;
+use sha2::{Digest, Sha256};
 
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
@@ -65,6 +66,71 @@ pub(crate) struct RuntimeCompletionResultAttempt {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeCompletionResultRealized {
     authority: RuntimeCompletionResultAuthority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractionTerminalOwnerBinding {
+    session_id: SessionId,
+    agent_runtime_id: Option<String>,
+    fence_token: Option<u64>,
+    runtime_generation: Option<u64>,
+    runtime_epoch_id: Option<String>,
+}
+
+impl InteractionTerminalOwnerBinding {
+    fn from_outbox(outbox: &crate::input_state::InteractionTerminalOutbox) -> Self {
+        Self {
+            session_id: outbox.owner_session_id.clone(),
+            agent_runtime_id: outbox.owner_agent_runtime_id.clone(),
+            fence_token: outbox.owner_fence_token,
+            runtime_generation: outbox.owner_runtime_generation,
+            runtime_epoch_id: outbox.owner_runtime_epoch_id.clone(),
+        }
+    }
+
+    fn write_to(&self, outbox: &mut crate::input_state::InteractionTerminalOutbox) {
+        outbox.owner_session_id = self.session_id.clone();
+        outbox.owner_agent_runtime_id = self.agent_runtime_id.clone();
+        outbox.owner_fence_token = self.fence_token;
+        outbox.owner_runtime_generation = self.runtime_generation;
+        outbox.owner_runtime_epoch_id = self.runtime_epoch_id.clone();
+    }
+}
+
+#[must_use = "authorized outbox adoption must be atomically realized"]
+struct AuthorizedInteractionTerminalOutboxAdoption {
+    generated_plan: generated_kernel_command_capabilities::CommandPlanKind,
+    batch_key: crate::input_state::InteractionTerminalBatchKey,
+    input_ids: Vec<InputId>,
+    candidate_digest: String,
+    previous: InteractionTerminalOwnerBinding,
+    next: InteractionTerminalOwnerBinding,
+}
+
+pub(crate) enum InteractionTerminalRecoveryPhase {
+    Candidate,
+    Finalized {
+        events: Vec<meerkat_core::event::AgentEvent>,
+        finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+        finalization_error: Option<meerkat_core::TurnErrorMetadata>,
+    },
+}
+
+pub(crate) struct InteractionTerminalRecoveryBatch {
+    pub(crate) batch_key: crate::input_state::InteractionTerminalBatchKey,
+    pub(crate) input_ids: Vec<InputId>,
+    pub(crate) interaction_ids: Vec<meerkat_core::interaction::InteractionId>,
+    pub(crate) terminal: Option<meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
+    pub(crate) terminal_observation:
+        crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation,
+    pub(crate) runtime_termination_reason: Option<String>,
+    pub(crate) completion_error_metadata: Option<meerkat_core::TurnErrorMetadata>,
+    pub(crate) phase: InteractionTerminalRecoveryPhase,
+}
+
+enum InteractionTerminalBatchScope<'a> {
+    Run(&'a RunId),
+    RuntimeTermination,
 }
 
 impl RuntimeCompletionResultAuthority {
@@ -121,6 +187,7 @@ impl RuntimeCompletionResultAttempt {
         drop(self);
     }
 
+    #[cfg(test)]
     pub(crate) fn abandon(self) {
         drop(self);
     }
@@ -422,12 +489,1424 @@ enum DriverRollbackSnapshot {
     Persistent(EphemeralDriverRollbackSnapshot),
 }
 
+#[must_use = "prepared runless terminal outboxes must be committed or rolled back"]
+pub(crate) struct PreparedRunlessInteractionTerminalOutboxes {
+    checkpoint: Option<DriverRollbackSnapshot>,
+    candidate_owner_input_id: Option<InputId>,
+}
+
 pub(crate) struct PreparedDestroy {
     pub(crate) report: DestroyReport,
     pub(crate) lifecycle: PreparedDestroyLifecycle,
 }
 
 impl DriverEntry {
+    fn shell_driver_mut(&mut self) -> &mut EphemeralRuntimeDriver {
+        match self {
+            DriverEntry::Ephemeral(driver) => driver,
+            DriverEntry::Persistent(driver) => driver.inner_mut(),
+        }
+    }
+
+    fn stage_interaction_terminal_outboxes(
+        &mut self,
+        outboxes: Vec<crate::input_state::InteractionTerminalOutbox>,
+    ) -> Result<(), RuntimeDriverError> {
+        let ledger = self.shell_driver_mut().ledger_mut();
+        for outbox in outboxes {
+            outbox.validate().map_err(RuntimeDriverError::Internal)?;
+            let state = ledger.get_mut(&outbox.input_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "directed terminal outbox input {} disappeared before commit",
+                    outbox.input_id
+                ))
+            })?;
+            match state.interaction_terminal_outbox.as_ref() {
+                Some(existing)
+                    if existing.interaction_id == outbox.interaction_id
+                        && existing.batch_ordinal == outbox.batch_ordinal
+                        && existing.batch_key == outbox.batch_key
+                        && existing.candidate_owner_input_id == outbox.candidate_owner_input_id
+                        && existing.candidate_digest == outbox.candidate_digest
+                        && existing.completion_input_ids_digest
+                            == outbox.completion_input_ids_digest =>
+                {
+                    // Exact boundary-commit retry: preserve any later
+                    // finalized/publication facts already attached.
+                }
+                Some(_) => {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "directed terminal outbox identity/payload conflict for input {}",
+                            outbox.input_id
+                        ),
+                    });
+                }
+                None => state.interaction_terminal_outbox = Some(outbox),
+            }
+        }
+        Ok(())
+    }
+
+    /// Stage one runless runtime-termination batch into the same in-memory
+    /// ledger snapshot that the caller will terminalize and persist. The
+    /// canonical candidate-owner input is the durable group key; no synthetic
+    /// run identity is minted for queued/staged inputs that never ran.
+    pub(crate) fn prepare_runless_runtime_terminated_interaction_outboxes(
+        &mut self,
+        input_ids: &[InputId],
+        reason: String,
+    ) -> Result<PreparedRunlessInteractionTerminalOutboxes, RuntimeDriverError> {
+        if let Some(candidate_owner_input_id) =
+            self.existing_exact_runless_runtime_termination_batch(input_ids, &reason)?
+        {
+            return Ok(PreparedRunlessInteractionTerminalOutboxes {
+                checkpoint: None,
+                candidate_owner_input_id: Some(candidate_owner_input_id),
+            });
+        }
+        let checkpoint = self.rollback_snapshot();
+        let outboxes = authorized_staged_directed_terminal_outboxes(
+            self,
+            InteractionTerminalBatchScope::RuntimeTermination,
+            input_ids,
+            crate::input_state::InteractionTerminalCandidate::RuntimeTerminated { reason },
+        )?;
+        let candidate_owner_input_id = outboxes
+            .first()
+            .map(|outbox| outbox.candidate_owner_input_id.clone());
+        if let Err(error) = self.stage_interaction_terminal_outboxes(outboxes) {
+            self.restore_rollback_snapshot(checkpoint);
+            return Err(error);
+        }
+        Ok(PreparedRunlessInteractionTerminalOutboxes {
+            checkpoint: Some(checkpoint),
+            candidate_owner_input_id,
+        })
+    }
+
+    /// Whether any currently non-terminal input requires an Interaction
+    /// terminal publication capability before it may be abandoned.
+    ///
+    /// Unregister uses this as a pre-Draining guard. Once generated Draining
+    /// is visible, attaching a missing executor publisher is forbidden, so
+    /// discovering this requirement only during terminalization would create
+    /// an unrecoverable teardown trap.
+    pub(crate) fn active_inputs_require_terminal_publication(
+        &self,
+    ) -> Result<bool, RuntimeDriverError> {
+        for input_id in self.as_driver().active_input_ids() {
+            let stored = self
+                .as_driver()
+                .stored_input_state(&input_id)
+                .ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "active input {input_id} disappeared while checking terminal publication capability"
+                    ))
+                })?;
+            if let Some(input) = stored.state.persisted_input.as_ref()
+                && let Some(interaction_id) = crate::input::validated_directed_interaction_id(input)
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
+            {
+                if input_id.0 != interaction_id.0 {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: "directed terminal input/interaction identity mismatch".to_string(),
+                    });
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn existing_exact_runless_runtime_termination_batch(
+        &self,
+        input_ids: &[InputId],
+        reason: &str,
+    ) -> Result<Option<InputId>, RuntimeDriverError> {
+        use crate::input_state::{
+            InteractionTerminalBatchKey, InteractionTerminalCandidate,
+            InteractionTerminalOutboxPhase, validate_interaction_terminal_outbox_batch_shape,
+            validate_unpublished_interaction_terminal_outbox_batch,
+        };
+
+        let mut grouped = std::collections::HashMap::<
+            InteractionTerminalBatchKey,
+            Vec<crate::input_state::InteractionTerminalOutbox>,
+        >::new();
+        for outbox in self
+            .as_driver()
+            .stored_input_states_snapshot()?
+            .into_iter()
+            .filter_map(|stored| stored.state.interaction_terminal_outbox)
+        {
+            if matches!(
+                outbox.batch_key,
+                InteractionTerminalBatchKey::RuntimeTermination { .. }
+            ) {
+                grouped
+                    .entry(outbox.batch_key.clone())
+                    .or_default()
+                    .push(outbox);
+            }
+        }
+
+        let requested = input_ids.iter().collect::<std::collections::HashSet<_>>();
+        let mut exact_owner = None;
+        for mut outboxes in grouped.into_values() {
+            outboxes.sort_by_key(|outbox| outbox.batch_ordinal);
+            validate_interaction_terminal_outbox_batch_shape(&outboxes)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            let published = outboxes
+                .iter()
+                .filter(|outbox| {
+                    matches!(
+                        outbox.phase,
+                        InteractionTerminalOutboxPhase::Published { .. }
+                    )
+                })
+                .count();
+            if published == outboxes.len() {
+                continue;
+            }
+            if published != 0 {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: "pending runless terminal lookup found a partially published batch"
+                        .to_string(),
+                });
+            }
+            let persisted_completion_input_ids =
+                validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
+                    .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            let owner = &outboxes[0];
+            let exact_reason = matches!(
+                owner.candidate.as_ref(),
+                Some(InteractionTerminalCandidate::RuntimeTerminated {
+                    reason: existing_reason,
+                }) if existing_reason == reason
+            );
+            let exact_recipients = persisted_completion_input_ids == input_ids;
+            let overlaps_requested = persisted_completion_input_ids
+                .iter()
+                .any(|input_id| requested.contains(input_id));
+
+            if exact_recipients && exact_reason {
+                if exact_owner
+                    .replace(owner.candidate_owner_input_id.clone())
+                    .is_some()
+                {
+                    return Err(RuntimeDriverError::RecoveryCorruption {
+                        reason: "multiple pending runless terminal batches matched one exact termination"
+                            .to_string(),
+                    });
+                }
+            } else if overlaps_requested {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "pending runless terminal batch overlaps the requested termination without matching it exactly"
+                        .to_string(),
+                });
+            }
+        }
+        Ok(exact_owner)
+    }
+
+    pub(crate) fn commit_prepared_runless_interaction_terminal_outboxes(
+        prepared: PreparedRunlessInteractionTerminalOutboxes,
+    ) -> Option<InputId> {
+        let PreparedRunlessInteractionTerminalOutboxes {
+            checkpoint: _,
+            candidate_owner_input_id,
+        } = prepared;
+        candidate_owner_input_id
+    }
+
+    pub(crate) fn rollback_prepared_runless_interaction_terminal_outboxes(
+        &mut self,
+        prepared: PreparedRunlessInteractionTerminalOutboxes,
+    ) {
+        if let Some(checkpoint) = prepared.checkpoint {
+            self.restore_rollback_snapshot(checkpoint);
+        }
+    }
+
+    pub(crate) fn interaction_terminal_batch_for_owner(
+        &self,
+        candidate_owner_input_id: &InputId,
+    ) -> Result<(Vec<InputId>, Vec<meerkat_core::interaction::InteractionId>), RuntimeDriverError>
+    {
+        let mut outboxes = self
+            .as_driver()
+            .stored_input_states_snapshot()?
+            .into_iter()
+            .filter_map(|stored| stored.state.interaction_terminal_outbox)
+            .filter(|outbox| &outbox.candidate_owner_input_id == candidate_owner_input_id)
+            .collect::<Vec<_>>();
+        if outboxes.is_empty() || outboxes.len() > 256 {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "interaction terminal owner {candidate_owner_input_id} names invalid batch size {}",
+                    outboxes.len()
+                ),
+            });
+        }
+        outboxes.sort_by_key(|outbox| outbox.batch_ordinal);
+        let completion_input_ids =
+            crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+        let mut interaction_ids = std::collections::BTreeSet::new();
+        for outbox in &outboxes {
+            self.validate_interaction_outbox_owner_binding(outbox)?;
+            if outbox.candidate_owner_input_id != *candidate_owner_input_id
+                || !matches!(
+                    outbox.phase,
+                    crate::input_state::InteractionTerminalOutboxPhase::Candidate
+                        | crate::input_state::InteractionTerminalOutboxPhase::Finalized { .. }
+                )
+            {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "interaction terminal owner {candidate_owner_input_id} does not name an unpublished runtime-termination batch"
+                    ),
+                });
+            }
+            if !interaction_ids.insert(outbox.interaction_id.0) {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: "interaction terminal batch repeats input/interaction identity"
+                        .to_string(),
+                });
+            }
+        }
+        Ok((
+            completion_input_ids,
+            outboxes
+                .iter()
+                .map(|outbox| outbox.interaction_id)
+                .collect(),
+        ))
+    }
+
+    /// Rebind one exact unpublished terminal batch to the driver's current
+    /// generated runtime owner before an immediate control-plane publication.
+    /// The realization is exact-CAS fenced, so a concurrent higher owner wins
+    /// without allowing this driver to overwrite it.
+    pub(crate) async fn adopt_interaction_terminal_batch_for_owner(
+        &mut self,
+        candidate_owner_input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        let mut outboxes = self
+            .as_driver()
+            .stored_input_states_snapshot()?
+            .into_iter()
+            .filter_map(|stored| stored.state.interaction_terminal_outbox)
+            .filter(|outbox| &outbox.candidate_owner_input_id == candidate_owner_input_id)
+            .collect::<Vec<_>>();
+        outboxes.sort_by_key(|outbox| outbox.batch_ordinal);
+        crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(&outboxes)
+            .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+        let adoption = self.authorize_interaction_terminal_outbox_adoption(&outboxes)?;
+        self.realize_interaction_terminal_outbox_adoption(adoption)
+            .await
+    }
+
+    fn interaction_outbox_owner_binding_matches_current(
+        &self,
+        outbox: &crate::input_state::InteractionTerminalOutbox,
+    ) -> bool {
+        let authority = self.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        let owner_session_id = outbox.owner_session_id.to_string();
+        state.session_id.as_ref().map(|value| value.0.as_str()) == Some(owner_session_id.as_str())
+            && state
+                .active_runtime_id
+                .as_ref()
+                .map(|value| value.0.as_str())
+                == outbox.owner_agent_runtime_id.as_deref()
+            && state.active_fence_token.map(|value| value.0) == outbox.owner_fence_token
+            && state.active_runtime_generation.map(|value| value.0)
+                == outbox.owner_runtime_generation
+            && state
+                .active_runtime_epoch_id
+                .as_ref()
+                .map(|value| value.0.as_str())
+                == outbox.owner_runtime_epoch_id.as_deref()
+    }
+
+    fn validate_interaction_outbox_owner_binding(
+        &self,
+        outbox: &crate::input_state::InteractionTerminalOutbox,
+    ) -> Result<(), RuntimeDriverError> {
+        if !self.interaction_outbox_owner_binding_matches_current(outbox) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "interaction terminal outbox owner binding no longer matches runtime authority for input {}",
+                    outbox.input_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn authorize_interaction_terminal_outbox_adoption(
+        &self,
+        outboxes: &[crate::input_state::InteractionTerminalOutbox],
+    ) -> Result<AuthorizedInteractionTerminalOutboxAdoption, RuntimeDriverError> {
+        let first = outboxes.first().ok_or_else(|| {
+            RuntimeDriverError::Internal(
+                "cannot authorize an empty interaction terminal outbox adoption".to_string(),
+            )
+        })?;
+        let previous = InteractionTerminalOwnerBinding::from_outbox(first);
+        if outboxes.iter().any(|outbox| {
+            outbox.batch_key != first.batch_key
+                || outbox.candidate_digest != first.candidate_digest
+                || InteractionTerminalOwnerBinding::from_outbox(outbox) != previous
+        }) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "interaction terminal recovery batch has split owner lineage or candidate digest"
+                    .to_string(),
+            });
+        }
+        let previous_agent_runtime_id = previous.agent_runtime_id.as_ref().ok_or_else(|| {
+            RuntimeDriverError::ValidationFailed {
+                reason: "interaction terminal recovery prior runtime id is missing".to_string(),
+            }
+        })?;
+        let previous_fence_token =
+            previous
+                .fence_token
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "interaction terminal recovery prior fence is missing".to_string(),
+                })?;
+        let previous_runtime_generation =
+            previous
+                .runtime_generation
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "interaction terminal recovery prior generation is missing".to_string(),
+                })?;
+        let batch_key = serde_json::to_string(&first.batch_key).map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "interaction terminal batch key failed to encode: {error}"
+            ))
+        })?;
+        let input = crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeInteractionTerminalOutboxAdoption {
+            batch_key: batch_key.clone(),
+            candidate_digest: first.candidate_digest.clone(),
+            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&previous.session_id),
+            previous_agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from(previous_agent_runtime_id.clone()),
+            previous_fence_token: crate::meerkat_machine::dsl::FenceToken::from(previous_fence_token),
+            previous_runtime_generation: crate::meerkat_machine::dsl::Generation::from(previous_runtime_generation),
+            previous_runtime_epoch_id: previous.runtime_epoch_id.clone().map(crate::meerkat_machine::dsl::RuntimeEpochId::from),
+        };
+        let authority = self.shared_dsl_authority();
+        let state = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone();
+        let mut preview =
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .map_err(|error| {
+                    RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+                        error,
+                        "AuthorizeInteractionTerminalOutboxAdoption",
+                    ))
+                })?;
+        let effects =
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut preview, input)
+                .map(|transition| transition.into_effects())
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: crate::meerkat_machine::dsl_authority::map_error(
+                        error,
+                        "AuthorizeInteractionTerminalOutboxAdoption",
+                    ),
+                })?;
+        let mut next = None;
+        for effect in effects {
+            let crate::meerkat_machine::dsl::MeerkatMachineEffect::InteractionTerminalOutboxAdoptionAuthorized {
+                batch_key: emitted_batch_key,
+                candidate_digest,
+                session_id,
+                previous_agent_runtime_id: emitted_previous_runtime_id,
+                previous_fence_token: emitted_previous_fence,
+                previous_runtime_generation: emitted_previous_generation,
+                previous_runtime_epoch_id: emitted_previous_epoch,
+                next_agent_runtime_id,
+                next_fence_token,
+                next_runtime_generation,
+                next_runtime_epoch_id,
+            } = effect
+            else {
+                continue;
+            };
+            if emitted_batch_key != batch_key
+                || candidate_digest != first.candidate_digest
+                || session_id.0 != previous.session_id.to_string()
+                || emitted_previous_runtime_id.0 != *previous_agent_runtime_id
+                || emitted_previous_fence.0 != previous_fence_token
+                || emitted_previous_generation.0 != previous_runtime_generation
+                || emitted_previous_epoch
+                    .as_ref()
+                    .map(|value| value.0.as_str())
+                    != previous.runtime_epoch_id.as_deref()
+            {
+                return Err(RuntimeDriverError::Internal(
+                    "generated interaction terminal adoption effect changed prior witnesses"
+                        .to_string(),
+                ));
+            }
+            let emitted_next = InteractionTerminalOwnerBinding {
+                session_id: previous.session_id.clone(),
+                agent_runtime_id: Some(next_agent_runtime_id.0),
+                fence_token: Some(next_fence_token.0),
+                runtime_generation: Some(next_runtime_generation.0),
+                runtime_epoch_id: next_runtime_epoch_id.map(|value| value.0),
+            };
+            if next.replace(emitted_next).is_some() {
+                return Err(RuntimeDriverError::Internal(
+                    "generated interaction terminal adoption emitted multiple authorities"
+                        .to_string(),
+                ));
+            }
+        }
+        let next = next.ok_or_else(|| {
+            RuntimeDriverError::Internal(
+                "generated interaction terminal adoption emitted no authority".to_string(),
+            )
+        })?;
+        Ok(AuthorizedInteractionTerminalOutboxAdoption {
+            generated_plan: generated_kernel_command_capabilities::CommandPlanKind::AuthorizedInteractionTerminalOutboxAdoption,
+            batch_key: first.batch_key.clone(),
+            input_ids: outboxes
+                .iter()
+                .map(|outbox| outbox.input_id.clone())
+                .collect(),
+            candidate_digest: first.candidate_digest.clone(),
+            previous,
+            next,
+        })
+    }
+
+    async fn realize_interaction_terminal_outbox_adoption(
+        &mut self,
+        adoption: AuthorizedInteractionTerminalOutboxAdoption,
+    ) -> Result<(), RuntimeDriverError> {
+        debug_assert_eq!(
+            adoption.generated_plan,
+            generated_kernel_command_capabilities::CommandPlanKind::AuthorizedInteractionTerminalOutboxAdoption,
+        );
+        let expected = adoption
+            .input_ids
+            .iter()
+            .map(|input_id| {
+                self.as_driver().stored_input_state(input_id).ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "interaction terminal adoption input {input_id} disappeared before CAS expectation"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let replacements = expected
+            .iter()
+            .cloned()
+            .map(|mut replacement| {
+                let input_id = replacement.state.input_id.clone();
+                let outbox = replacement
+                    .state
+                    .interaction_terminal_outbox
+                    .as_mut()
+                    .ok_or_else(|| {
+                        RuntimeDriverError::Internal(format!(
+                            "interaction terminal adoption input {input_id} lost its outbox"
+                        ))
+                    })?;
+                if outbox.batch_key != adoption.batch_key
+                    || outbox.candidate_digest != adoption.candidate_digest
+                    || InteractionTerminalOwnerBinding::from_outbox(outbox) != adoption.previous
+                {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "interaction terminal adoption authority became stale for input {input_id}"
+                        ),
+                    });
+                }
+                adoption.next.write_to(outbox);
+                outbox.validate().map_err(RuntimeDriverError::Internal)?;
+                crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(replacement)
+                    .map_err(RuntimeDriverError::Internal)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.commit_interaction_terminal_outbox_replacements(
+            &expected,
+            replacements,
+            "interaction terminal outbox adoption lost the exact durable CAS",
+        )
+        .await
+    }
+
+    fn interaction_terminal_outbox_phase_rank(
+        outbox: &crate::input_state::InteractionTerminalOutbox,
+    ) -> u8 {
+        match &outbox.phase {
+            crate::input_state::InteractionTerminalOutboxPhase::Candidate => 0,
+            crate::input_state::InteractionTerminalOutboxPhase::Finalized { .. } => 1,
+            crate::input_state::InteractionTerminalOutboxPhase::Published { .. } => 2,
+        }
+    }
+
+    fn interaction_terminal_outbox_identity_matches(
+        left: &crate::input_state::InteractionTerminalOutbox,
+        right: &crate::input_state::InteractionTerminalOutbox,
+    ) -> bool {
+        left.interaction_id == right.interaction_id
+            && left.input_id == right.input_id
+            && left.batch_ordinal == right.batch_ordinal
+            && left.batch_key == right.batch_key
+            && InteractionTerminalOwnerBinding::from_outbox(left)
+                == InteractionTerminalOwnerBinding::from_outbox(right)
+            && left.candidate_owner_input_id == right.candidate_owner_input_id
+            && left.candidate_digest == right.candidate_digest
+            && left.completion_input_ids_digest == right.completion_input_ids_digest
+    }
+
+    fn interaction_terminal_outbox_is_exact_phase_successor(
+        shell: &crate::input_state::InteractionTerminalOutbox,
+        durable: &crate::input_state::InteractionTerminalOutbox,
+    ) -> Result<bool, RuntimeDriverError> {
+        use crate::input_state::InteractionTerminalOutboxPhase;
+
+        let valid_transition = match (&shell.phase, &durable.phase) {
+            (
+                InteractionTerminalOutboxPhase::Candidate,
+                InteractionTerminalOutboxPhase::Finalized { .. },
+            ) => true,
+            (
+                InteractionTerminalOutboxPhase::Finalized {
+                    finalization_failed: shell_failed,
+                    finalized_payload_digest,
+                    ..
+                },
+                InteractionTerminalOutboxPhase::Published {
+                    finalization_failed: durable_failed,
+                    publication,
+                },
+            ) => {
+                shell_failed == durable_failed
+                    && finalized_payload_digest == &publication.payload_digest
+            }
+            _ => false,
+        };
+        if !valid_transition {
+            return Ok(false);
+        }
+
+        // Reconstruct the only image the corresponding store-first operation
+        // is allowed to write. Candidate -> Finalized changes only the phase;
+        // Finalized -> Published additionally compacts the owner payload and
+        // completion recipients. Exact JSON equality then rejects every other
+        // field mutation, including a forged receipt/class or torn compaction.
+        let mut expected = shell.clone();
+        if matches!(
+            &durable.phase,
+            InteractionTerminalOutboxPhase::Published { .. }
+        ) {
+            expected.candidate = None;
+            expected.completion_input_ids = None;
+        }
+        expected.phase = durable.phase.clone();
+        Ok(serde_json::to_vec(&expected)
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+            == serde_json::to_vec(durable)
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?)
+    }
+
+    fn validate_finalized_interaction_terminal_batch(
+        outboxes: &[crate::input_state::InteractionTerminalOutbox],
+    ) -> Result<(bool, Vec<meerkat_core::event::AgentEvent>), String> {
+        use crate::input_state::InteractionTerminalOutboxPhase;
+
+        let owner = outboxes
+            .first()
+            .ok_or_else(|| "finalized interaction terminal batch is empty".to_string())?;
+        let InteractionTerminalOutboxPhase::Finalized {
+            finalization_failed,
+            finalized_event: Some(owner_event),
+            ..
+        } = &owner.phase
+        else {
+            return Err("finalized interaction terminal owner lost its event".to_string());
+        };
+        let mut events = Vec::with_capacity(outboxes.len());
+        for outbox in outboxes {
+            let InteractionTerminalOutboxPhase::Finalized {
+                finalization_failed: row_failed,
+                finalized_payload_digest,
+                ..
+            } = &outbox.phase
+            else {
+                return Err("interaction terminal batch has mixed finalization phases".to_string());
+            };
+            if row_failed != finalization_failed {
+                return Err("interaction terminal finalization class split".to_string());
+            }
+            let event = crate::input_state::interaction_terminal_event_for_id(
+                owner_event,
+                outbox.interaction_id,
+            )
+            .ok_or_else(|| {
+                "interaction terminal finalized owner event was not terminal".to_string()
+            })?;
+            let digest = crate::input_state::interaction_terminal_payload_digest(&event)?;
+            if &digest != finalized_payload_digest {
+                return Err(format!(
+                    "interaction terminal finalized digest mismatch for input {}",
+                    outbox.input_id
+                ));
+            }
+            events.push(event);
+        }
+        Ok((*finalization_failed, events))
+    }
+
+    /// Reconcile only a durable, uniform one-phase advance that committed
+    /// before its caller lost the store acknowledgement. The store is the
+    /// canonical side of a store-first terminal transition, but it may hydrate
+    /// the shell only when every non-outbox byte and the exact prior owner
+    /// witness still match. A machine-owner replacement may then use the
+    /// ordinary generated adoption CAS; owner-only adoption acknowledgement
+    /// loss is likewise left to that idempotent retry below.
+    async fn reconcile_durable_interaction_terminal_phase(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        let durable = match self {
+            DriverEntry::Ephemeral(_) => return Ok(()),
+            DriverEntry::Persistent(driver) => {
+                driver.durable_input_states_for_terminal_recovery().await?
+            }
+        };
+        let shell = self.as_driver().stored_input_states_snapshot()?;
+        let durable_by_id = durable
+            .into_iter()
+            .map(|stored| (stored.state.input_id.clone(), stored))
+            .collect::<std::collections::HashMap<_, _>>();
+        let shell_outbox_ids = shell
+            .iter()
+            .filter(|stored| stored.state.interaction_terminal_outbox.is_some())
+            .map(|stored| stored.state.input_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for (input_id, stored) in &durable_by_id {
+            if stored.state.interaction_terminal_outbox.is_some()
+                && !shell_outbox_ids.contains(input_id)
+            {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "durable interaction terminal carrier {input_id} is absent from the live shell"
+                    ),
+                });
+            }
+        }
+
+        let mut prospective = shell
+            .iter()
+            .cloned()
+            .map(|stored| (stored.state.input_id.clone(), stored))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut replacements = Vec::new();
+        for shell_stored in &shell {
+            let Some(shell_outbox) = shell_stored.state.interaction_terminal_outbox.as_ref() else {
+                continue;
+            };
+            let input_id = &shell_stored.state.input_id;
+            let durable_stored = durable_by_id.get(input_id).ok_or_else(|| {
+                RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "live interaction terminal carrier {input_id} is absent from durable state"
+                    ),
+                }
+            })?;
+            let durable_outbox = durable_stored
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "live interaction terminal carrier {input_id} lost its durable outbox"
+                    ),
+                })?;
+            shell_outbox
+                .validate()
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            durable_outbox
+                .validate()
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+
+            let shell_json = serde_json::to_vec(shell_stored)
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+            let durable_json = serde_json::to_vec(durable_stored)
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+            if shell_json == durable_json {
+                continue;
+            }
+
+            let mut shell_without_outbox = shell_stored.clone();
+            shell_without_outbox.state.interaction_terminal_outbox = None;
+            let mut durable_without_outbox = durable_stored.clone();
+            durable_without_outbox.state.interaction_terminal_outbox = None;
+            if serde_json::to_vec(&shell_without_outbox)
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+                != serde_json::to_vec(&durable_without_outbox)
+                    .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+            {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "interaction terminal recovery found unrelated durable divergence for input {input_id}"
+                    ),
+                });
+            }
+
+            let shell_rank = Self::interaction_terminal_outbox_phase_rank(shell_outbox);
+            let durable_rank = Self::interaction_terminal_outbox_phase_rank(durable_outbox);
+            if shell_rank == durable_rank {
+                let mut owner_normalized = durable_outbox.clone();
+                InteractionTerminalOwnerBinding::from_outbox(shell_outbox)
+                    .write_to(&mut owner_normalized);
+                let owner_only_difference = serde_json::to_vec(shell_outbox)
+                    .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+                    == serde_json::to_vec(&owner_normalized)
+                        .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
+                if owner_only_difference
+                    && !self.interaction_outbox_owner_binding_matches_current(shell_outbox)
+                    && self.interaction_outbox_owner_binding_matches_current(durable_outbox)
+                {
+                    // Adoption committed durably and lost its acknowledgement.
+                    // Keep the old shell expectation so the exact idempotent
+                    // adoption CAS can acknowledge and hydrate it below.
+                    continue;
+                }
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "interaction terminal recovery found same-phase noncanonical divergence for input {input_id}"
+                    ),
+                });
+            }
+
+            if durable_rank != shell_rank + 1
+                || !Self::interaction_terminal_outbox_identity_matches(shell_outbox, durable_outbox)
+                || !Self::interaction_terminal_outbox_is_exact_phase_successor(
+                    shell_outbox,
+                    durable_outbox,
+                )?
+            {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "interaction terminal recovery rejected a noncanonical durable phase successor for input {input_id}"
+                    ),
+                });
+            }
+            prospective.insert(input_id.clone(), durable_stored.clone());
+            replacements.push(durable_stored.clone());
+        }
+
+        // Validate the complete prospective image before publishing any row
+        // into the shell. An atomic backend should never expose a mixed batch;
+        // treating one as corruption prevents row-order-dependent hydration.
+        let mut grouped = std::collections::HashMap::<
+            crate::input_state::InteractionTerminalBatchKey,
+            Vec<crate::input_state::InteractionTerminalOutbox>,
+        >::new();
+        for outbox in prospective
+            .into_values()
+            .filter_map(|stored| stored.state.interaction_terminal_outbox)
+        {
+            grouped
+                .entry(outbox.batch_key.clone())
+                .or_default()
+                .push(outbox);
+        }
+        for mut outboxes in grouped.into_values() {
+            outboxes.sort_by_key(|outbox| outbox.batch_ordinal);
+            crate::input_state::validate_interaction_terminal_outbox_batch_shape(&outboxes)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            let phase_rank = Self::interaction_terminal_outbox_phase_rank(&outboxes[0]);
+            if outboxes
+                .iter()
+                .any(|outbox| Self::interaction_terminal_outbox_phase_rank(outbox) != phase_rank)
+            {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: "durable interaction terminal reconciliation found a mixed-phase batch"
+                        .to_string(),
+                });
+            }
+            if phase_rank != 2 {
+                crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(
+                    &outboxes,
+                )
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            }
+            if phase_rank == 1 {
+                Self::validate_finalized_interaction_terminal_batch(&outboxes)
+                    .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            }
+        }
+
+        let ledger = self.shell_driver_mut().ledger_mut();
+        for replacement in replacements {
+            ledger.recover(replacement.state);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn interaction_terminal_recovery_batches(
+        &mut self,
+    ) -> Result<Vec<InteractionTerminalRecoveryBatch>, RuntimeDriverError> {
+        use crate::input_state::InteractionTerminalOutboxPhase;
+        struct ValidatedRecoveryBatch {
+            adoption: AuthorizedInteractionTerminalOutboxAdoption,
+            batch: InteractionTerminalRecoveryBatch,
+        }
+
+        self.reconcile_durable_interaction_terminal_phase().await?;
+
+        let mut grouped = std::collections::HashMap::<
+            crate::input_state::InteractionTerminalBatchKey,
+            Vec<crate::input_state::InteractionTerminalOutbox>,
+        >::new();
+        for stored in self.as_driver().stored_input_states_snapshot()? {
+            if let Some(outbox) = stored.state.interaction_terminal_outbox {
+                outbox
+                    .validate()
+                    .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+                grouped
+                    .entry(outbox.batch_key.clone())
+                    .or_default()
+                    .push(outbox);
+            }
+        }
+
+        // Validate the complete durable recovery image before mutating any
+        // owner binding. Runtime-completion correlation is single-valued, so
+        // two unpublished run-scoped batches for different runs are durable
+        // corruption, not an iteration-order choice. Runtime-termination
+        // batches are runless and remain independent.
+        let mut recovered_run_id: Option<RunId> = None;
+        let mut validated_batches = Vec::new();
+        for (batch_key, mut outboxes) in grouped {
+            outboxes.sort_by_key(|outbox| outbox.batch_ordinal);
+            crate::input_state::validate_interaction_terminal_outbox_batch_shape(&outboxes)
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            let published = outboxes
+                .iter()
+                .filter(|outbox| {
+                    matches!(
+                        outbox.phase,
+                        InteractionTerminalOutboxPhase::Published { .. }
+                    )
+                })
+                .count();
+            if published == outboxes.len() {
+                continue;
+            }
+            if published != 0 {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "interaction terminal recovery found a partially published batch"
+                        .to_string(),
+                });
+            }
+            let completion_input_ids =
+                crate::input_state::validate_unpublished_interaction_terminal_outbox_batch(
+                    &outboxes,
+                )
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+            let first = outboxes.first().ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "interaction terminal recovery produced an empty batch".to_string(),
+                )
+            })?;
+            let candidate_owner_input_id = first.candidate_owner_input_id.clone();
+            if outboxes.iter().any(|outbox| {
+                outbox.candidate_owner_input_id != candidate_owner_input_id
+                    || outbox.candidate_digest != first.candidate_digest
+                    || outbox.batch_key != batch_key
+            }) {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "interaction terminal recovery found split batch identity".to_string(),
+                });
+            }
+            let owner_rows: Vec<_> = outboxes
+                .iter()
+                .filter(|outbox| outbox.input_id == candidate_owner_input_id)
+                .collect();
+            if owner_rows.len() != 1 {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "interaction terminal recovery batch has no unique candidate owner"
+                        .to_string(),
+                });
+            }
+            let owner = owner_rows[0];
+            let candidate =
+                owner
+                    .candidate
+                    .as_ref()
+                    .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                        reason: "interaction terminal recovery candidate owner lost its payload"
+                            .to_string(),
+                    })?;
+            let adoption = self.authorize_interaction_terminal_outbox_adoption(&outboxes)?;
+            if let Some(run_id) = batch_key.run_id() {
+                if let Some(recovered) = recovered_run_id.as_ref() {
+                    if recovered != run_id {
+                        return Err(RuntimeDriverError::RecoveryCorruption {
+                            reason: format!(
+                                "interaction terminal recovery found unpublished batches for distinct runs {recovered} and {run_id}"
+                            ),
+                        });
+                    }
+                } else {
+                    recovered_run_id = Some(run_id.clone());
+                }
+            }
+
+            let input_ids = completion_input_ids;
+            let interaction_ids: Vec<_> = outboxes
+                .iter()
+                .map(|outbox| outbox.interaction_id)
+                .collect();
+            let phase = if outboxes
+                .iter()
+                .all(|outbox| matches!(outbox.phase, InteractionTerminalOutboxPhase::Candidate))
+            {
+                InteractionTerminalRecoveryPhase::Candidate
+            } else if outboxes.iter().all(|outbox| {
+                matches!(
+                    outbox.phase,
+                    InteractionTerminalOutboxPhase::Finalized { .. }
+                )
+            }) {
+                let (finalization_failed, events) =
+                    Self::validate_finalized_interaction_terminal_batch(&outboxes)
+                        .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+                let finalization_error = if finalization_failed {
+                    let detail = match events.first() {
+                        Some(meerkat_core::event::AgentEvent::InteractionFailed {
+                            reason:
+                                meerkat_core::event::InteractionFailureReason::FinalizationFailed {
+                                    detail,
+                                }
+                                | meerkat_core::event::InteractionFailureReason::Abandoned { detail },
+                            ..
+                        }) => detail.clone(),
+                        _ => {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: "failed terminal recovery carried no typed failure detail"
+                                    .to_string(),
+                            });
+                        }
+                    };
+                    Some(meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                        detail,
+                    ))
+                } else {
+                    None
+                };
+                InteractionTerminalRecoveryPhase::Finalized {
+                    events,
+                    finalization: if finalization_failed {
+                        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed
+                    } else {
+                        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded
+                    },
+                    finalization_error,
+                }
+            } else {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "interaction terminal recovery found a candidate/finalized split batch"
+                        .to_string(),
+                });
+            };
+            validated_batches.push(ValidatedRecoveryBatch {
+                adoption,
+                batch: InteractionTerminalRecoveryBatch {
+                    batch_key,
+                    input_ids,
+                    interaction_ids,
+                    terminal: candidate.core_apply_terminal(),
+                    terminal_observation: candidate.terminal_observation(),
+                    runtime_termination_reason: match candidate {
+                        crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
+                            reason,
+                        } => Some(reason.clone()),
+                        _ => None,
+                    },
+                    completion_error_metadata: candidate.completion_error_metadata(),
+                    phase,
+                },
+            });
+        }
+
+        if let Some(run_id) = recovered_run_id.as_ref() {
+            machine_validate_runtime_completion_result_correlation_recovery(self, run_id)?;
+        }
+
+        let mut batches = Vec::with_capacity(validated_batches.len());
+        for validated in validated_batches {
+            self.realize_interaction_terminal_outbox_adoption(validated.adoption)
+                .await?;
+            batches.push(validated.batch);
+        }
+        Ok(batches)
+    }
+
+    pub(crate) async fn committed_session_snapshot_for_terminal_recovery(
+        &self,
+    ) -> Result<Option<Vec<u8>>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(None),
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .committed_session_snapshot_for_terminal_recovery()
+                    .await
+            }
+        }
+    }
+
+    async fn commit_interaction_terminal_outbox_replacements(
+        &mut self,
+        expected: &[crate::input_state::StoredInputState],
+        replacements: Vec<crate::input_state::InputStatePersistenceRecord>,
+        stale_reason: &'static str,
+    ) -> Result<(), RuntimeDriverError> {
+        let outcome = match self {
+            DriverEntry::Ephemeral(_) => crate::store::InputStateBatchCasOutcome::Swapped,
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .compare_and_swap_interaction_terminal_outbox_replacements(
+                        expected,
+                        &replacements,
+                    )
+                    .await?
+            }
+        };
+        if outcome == crate::store::InputStateBatchCasOutcome::Stale {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: stale_reason.to_string(),
+            });
+        }
+
+        // The durable image is committed (or was already byte-identical) now.
+        // Publish it into the shell without another await. If the caller was
+        // cancelled while a store implementation completed the CAS after its
+        // future was dropped, the idempotent retry reaches this same point.
+        let ledger = self.shell_driver_mut().ledger_mut();
+        for replacement in replacements {
+            ledger.recover(replacement.into_stored().state);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn finalize_interaction_terminal_outboxes(
+        &mut self,
+        candidate_owner_input_id: &InputId,
+        events: &[meerkat_core::event::AgentEvent],
+        finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+    ) -> Result<(), RuntimeDriverError> {
+        let mut by_id = std::collections::BTreeMap::new();
+        for event in events {
+            let interaction_id = crate::input_state::interaction_terminal_event_id(event)
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "runtime completion authority emitted a non-interaction terminal"
+                        .to_string(),
+                })?;
+            if by_id.insert(interaction_id.0, event).is_some() {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "runtime completion authority emitted duplicate interaction terminal {interaction_id}"
+                    ),
+                });
+            }
+        }
+
+        let expected: Vec<_> = self
+            .as_driver()
+            .stored_input_states_snapshot()?
+            .into_iter()
+            .filter(|stored| {
+                stored
+                    .state
+                    .interaction_terminal_outbox
+                    .as_ref()
+                    .is_some_and(|outbox| {
+                        &outbox.candidate_owner_input_id == candidate_owner_input_id
+                    })
+            })
+            .collect();
+        let outboxes: Vec<_> = expected
+            .iter()
+            .filter_map(|stored| stored.state.interaction_terminal_outbox.clone())
+            .collect();
+        let expected_ids: std::collections::BTreeSet<_> = outboxes
+            .iter()
+            .map(|outbox| outbox.interaction_id.0)
+            .collect();
+        let actual_ids: std::collections::BTreeSet<_> = by_id.keys().copied().collect();
+        if expected_ids != actual_ids {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "generated completion batch did not exactly match directed outboxes: expected={expected_ids:?}, actual={actual_ids:?}"
+                ),
+            });
+        }
+        let candidate_owner_input_id = outboxes
+            .first()
+            .map(|outbox| outbox.candidate_owner_input_id.clone())
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason:
+                    "generated completion emitted directed terminals without committed outboxes"
+                        .to_string(),
+            })?;
+        let candidate_owner_count = outboxes
+            .iter()
+            .filter(|outbox| outbox.input_id == candidate_owner_input_id)
+            .count();
+        if candidate_owner_count != 1 {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "directed terminal outbox batch has {candidate_owner_count} rows for shared candidate owner {candidate_owner_input_id}"
+                ),
+            });
+        }
+        let candidate_owner = outboxes
+            .iter()
+            .find(|outbox| outbox.input_id == candidate_owner_input_id)
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "directed terminal outbox shared candidate owner disappeared".to_string(),
+                )
+            })?;
+        let candidate = candidate_owner.candidate.as_ref().ok_or_else(|| {
+            RuntimeDriverError::ValidationFailed {
+                reason: "directed terminal outbox shared candidate owner carried no candidate"
+                    .to_string(),
+            }
+        })?;
+        let candidate_digest = candidate_owner.candidate_digest.as_str();
+        let finalization_failed = finalization
+            == crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed;
+        for outbox in &outboxes {
+            self.validate_interaction_outbox_owner_binding(outbox)?;
+            if outbox.candidate_owner_input_id != candidate_owner_input_id
+                || outbox.candidate_digest != candidate_digest
+            {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "directed terminal outbox batch shared-candidate reference mismatch for input {}",
+                        outbox.input_id
+                    ),
+                });
+            }
+            let event = by_id.get(&outbox.interaction_id.0).ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "exact directed terminal set changed during validation".to_string(),
+                )
+            })?;
+            if !crate::input_state::interaction_terminal_candidate_matches_event(
+                candidate,
+                outbox.interaction_id,
+                event,
+                finalization_failed,
+            ) {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "generated terminal payload did not match committed candidate for interaction {}",
+                        outbox.interaction_id
+                    ),
+                });
+            }
+        }
+
+        let replacements = expected
+            .iter()
+            .cloned()
+            .map(|mut replacement| {
+                let replacement_input_id = replacement.state.input_id.clone();
+                let live = replacement
+                    .state
+                    .interaction_terminal_outbox
+                    .as_mut()
+                    .ok_or_else(|| {
+                        RuntimeDriverError::Internal(format!(
+                            "interaction terminal outbox input {replacement_input_id} lost its retry carrier"
+                        ))
+                    })?;
+                let event = (*by_id.get(&live.interaction_id.0).ok_or_else(|| {
+                    RuntimeDriverError::Internal(
+                        "exact directed terminal set changed during finalization".to_string(),
+                    )
+                })?)
+                .clone();
+                let digest = crate::input_state::interaction_terminal_payload_digest(&event)
+                    .map_err(RuntimeDriverError::Internal)?;
+                let owns_candidate = live.input_id == live.candidate_owner_input_id;
+                match &live.phase {
+                    crate::input_state::InteractionTerminalOutboxPhase::Candidate => {
+                        live.phase =
+                            crate::input_state::InteractionTerminalOutboxPhase::Finalized {
+                                finalization_failed,
+                                finalized_event: owns_candidate.then_some(event),
+                                finalized_payload_digest: digest,
+                            };
+                    }
+                    crate::input_state::InteractionTerminalOutboxPhase::Finalized {
+                        finalization_failed: existing_failed,
+                        finalized_event: Some(existing_event),
+                        finalized_payload_digest: existing_digest,
+                    } if owns_candidate
+                        && crate::input_state::interaction_terminal_payload_digest(
+                            existing_event,
+                        )
+                        .is_ok_and(|existing_event_digest| existing_event_digest == digest)
+                        && existing_digest == &digest
+                        && *existing_failed == finalization_failed => {}
+                    crate::input_state::InteractionTerminalOutboxPhase::Finalized {
+                        finalization_failed: existing_failed,
+                        finalized_event: None,
+                        finalized_payload_digest: existing_digest,
+                    } if !owns_candidate
+                        && existing_digest == &digest
+                        && *existing_failed == finalization_failed => {}
+                    _ => {
+                        return Err(RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "interaction terminal finalization conflict for input {}",
+                                live.input_id
+                            ),
+                        });
+                    }
+                }
+                live.validate().map_err(RuntimeDriverError::Internal)?;
+                crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(replacement)
+                    .map_err(RuntimeDriverError::Internal)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.commit_interaction_terminal_outbox_replacements(
+            &expected,
+            replacements,
+            "interaction terminal finalization lost the exact durable CAS",
+        )
+        .await
+    }
+
+    pub(crate) async fn mark_interaction_terminal_outboxes_published(
+        &mut self,
+        candidate_owner_input_id: &InputId,
+        receipts: &[meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt],
+    ) -> Result<(), RuntimeDriverError> {
+        let mut by_id = std::collections::BTreeMap::new();
+        for receipt in receipts {
+            if by_id.insert(receipt.interaction_id().0, receipt).is_some() {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "duplicate interaction terminal publication receipt".to_string(),
+                });
+            }
+        }
+        let expected: Vec<_> = self
+            .as_driver()
+            .stored_input_states_snapshot()?
+            .into_iter()
+            .filter(|stored| {
+                stored
+                    .state
+                    .interaction_terminal_outbox
+                    .as_ref()
+                    .is_some_and(|outbox| {
+                        &outbox.candidate_owner_input_id == candidate_owner_input_id
+                    })
+            })
+            .collect();
+        let outboxes: Vec<_> = expected
+            .iter()
+            .filter_map(|stored| stored.state.interaction_terminal_outbox.clone())
+            .collect();
+        let expected_ids: std::collections::BTreeSet<_> = outboxes
+            .iter()
+            .map(|outbox| outbox.interaction_id.0)
+            .collect();
+        if expected_ids != by_id.keys().copied().collect() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "publication receipts did not exactly match finalized outbox batch"
+                    .to_string(),
+            });
+        }
+        for outbox in &outboxes {
+            self.validate_interaction_outbox_owner_binding(outbox)?;
+        }
+
+        let replacements = expected
+            .iter()
+            .cloned()
+            .map(|mut replacement| {
+                let replacement_input_id = replacement.state.input_id.clone();
+                let live = replacement
+                    .state
+                    .interaction_terminal_outbox
+                    .as_mut()
+                    .ok_or_else(|| {
+                        RuntimeDriverError::Internal(format!(
+                            "interaction terminal outbox input {replacement_input_id} disappeared before publish receipt"
+                        ))
+                    })?;
+                let receipt = by_id.get(&live.interaction_id.0).ok_or_else(|| {
+                    RuntimeDriverError::Internal(
+                        "exact publication receipt set changed during persistence".to_string(),
+                    )
+                })?;
+                let publication = crate::input_state::InteractionTerminalPublication {
+                    terminal_seq: receipt.terminal_seq(),
+                    payload_digest: receipt.payload_digest().to_string(),
+                };
+                match &live.phase {
+                    crate::input_state::InteractionTerminalOutboxPhase::Finalized {
+                        finalization_failed,
+                        finalized_payload_digest,
+                        ..
+                    } if finalized_payload_digest == &publication.payload_digest => {
+                        let finalization_failed = *finalization_failed;
+                        live.candidate = None;
+                        live.completion_input_ids = None;
+                        live.phase =
+                            crate::input_state::InteractionTerminalOutboxPhase::Published {
+                                finalization_failed,
+                                publication,
+                            };
+                    }
+                    crate::input_state::InteractionTerminalOutboxPhase::Published {
+                        publication: existing,
+                        ..
+                    } if existing.terminal_seq == publication.terminal_seq
+                        && existing.payload_digest == publication.payload_digest => {}
+                    _ => {
+                        return Err(RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "interaction terminal publication receipt conflict for input {}",
+                                live.input_id
+                            ),
+                        });
+                    }
+                }
+                live.validate().map_err(RuntimeDriverError::Internal)?;
+                crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(replacement)
+                    .map_err(RuntimeDriverError::Internal)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.commit_interaction_terminal_outbox_replacements(
+            &expected,
+            replacements,
+            "interaction terminal publication receipt lost the exact durable CAS",
+        )
+        .await
+    }
+
     pub(crate) fn runtime_id(&self) -> &LogicalRuntimeId {
         match self {
             DriverEntry::Ephemeral(d) => d.runtime_id(),
@@ -791,12 +2270,28 @@ impl DriverEntry {
         &mut self,
         context: &str,
         retired_ops_epoch: &meerkat_core::RuntimeEpochId,
+        authority: super::DeleteOpsFinalizationAuthority,
     ) -> Result<(), RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(_) => Ok(()),
             DriverEntry::Persistent(driver) => {
                 driver
-                    .commit_unregister_finalization(context, retired_ops_epoch)
+                    .commit_unregister_finalization(context, retired_ops_epoch, authority)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn persist_completed_unregister_machine_lifecycle(
+        &mut self,
+        context: &str,
+        authority: super::RetainOpsFinalizationAuthority,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(()),
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .persist_completed_unregister_machine_lifecycle(context, authority)
                     .await
             }
         }
@@ -903,42 +2398,121 @@ impl DriverEntry {
         &mut self,
         receipt: &meerkat_core::lifecycle::RunBoundaryReceipt,
         session_snapshot: Option<&Vec<u8>>,
+        owner_session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(_) => Ok(()),
             DriverEntry::Persistent(d) => {
-                d.machine_commit_completed_boundary_snapshot(receipt, session_snapshot)
-                    .await
+                d.machine_commit_completed_boundary_snapshot(
+                    receipt,
+                    session_snapshot,
+                    owner_session_id,
+                )
+                .await
             }
         }
     }
 
     pub(crate) async fn machine_realize_run_failed(
         &mut self,
-        run_id: RunId,
-        contributing_input_ids: Vec<InputId>,
-        replay_plan: crate::driver::ephemeral::ReplayQueuedContributorsPlan,
-        terminal_error: &str,
-        runtime_apply_failure: Option<&CoreApplyFailureCause>,
-        recoverable: bool,
+        realization: MachineRunFailureRealization,
     ) -> Result<(), RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => {
-                let _ = (terminal_error, runtime_apply_failure, recoverable);
-                d.machine_realize_run_failed(&run_id, &contributing_input_ids, &replay_plan)
-            }
-            DriverEntry::Persistent(d) => {
-                d.machine_realize_run_failed(
-                    &run_id,
-                    &contributing_input_ids,
-                    &replay_plan,
-                    terminal_error,
-                    runtime_apply_failure,
-                    recoverable,
-                )
-                .await
+        let MachineRunFailureRealization {
+            run_id,
+            contributing_input_ids,
+            replay_plan,
+            terminal_error,
+            runtime_apply_failure,
+            recoverable,
+            applied_commit,
+        } = realization;
+        let checkpoint = self.rollback_snapshot();
+
+        if let Err(error) = self.shell_driver_mut().machine_realize_run_failed(
+            &run_id,
+            &contributing_input_ids,
+            &replay_plan,
+            recoverable,
+        ) {
+            self.restore_rollback_snapshot(checkpoint);
+            return Err(error);
+        }
+
+        // A recoverable failed run normally requeues its contributors, but the
+        // generated rollback transition can terminalize the exact inputs whose
+        // stage-attempt budget was exhausted. Only that newly-Abandoned directed
+        // subset owns an Interaction terminal. Requeued directed inputs retain
+        // their existing waiters and receive no outbox row.
+        if recoverable {
+            let terminal_directed_input_ids =
+                match max_attempts_exhausted_directed_contributors(self, &contributing_input_ids) {
+                    Ok(input_ids) => input_ids,
+                    Err(error) => {
+                        self.restore_rollback_snapshot(checkpoint);
+                        return Err(error);
+                    }
+                };
+            if !terminal_directed_input_ids.is_empty() {
+                let outboxes = match authorized_staged_directed_terminal_outboxes(
+                    self,
+                    InteractionTerminalBatchScope::Run(&run_id),
+                    &terminal_directed_input_ids,
+                    crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
+                        error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                            terminal_error.clone(),
+                        ),
+                    },
+                ) {
+                    Ok(outboxes) => outboxes,
+                    Err(error) => {
+                        self.restore_rollback_snapshot(checkpoint);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = self.stage_interaction_terminal_outboxes(outboxes) {
+                    self.restore_rollback_snapshot(checkpoint);
+                    return Err(error);
+                }
             }
         }
+
+        let persist_result = match self {
+            DriverEntry::Ephemeral(_) => Ok(()),
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .persist_machine_realized_run_failed(MachineRunFailureRealization {
+                        run_id,
+                        contributing_input_ids,
+                        replay_plan,
+                        terminal_error,
+                        runtime_apply_failure,
+                        recoverable,
+                        applied_commit,
+                    })
+                    .await
+            }
+        };
+        if let Err(error) = persist_result {
+            self.restore_rollback_snapshot(checkpoint);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn machine_realize_terminal_failure_applied_in_memory(
+        &mut self,
+        run_id: &RunId,
+        contributing_input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => {
+                driver.machine_realize_terminal_failure_applied(run_id, contributing_input_ids)?;
+            }
+            DriverEntry::Persistent(driver) => {
+                driver.machine_realize_terminal_failure_applied(run_id, contributing_input_ids)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn machine_realize_run_cancelled(
@@ -1024,6 +2598,17 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) async fn abandon_queued_input(
+        &mut self,
+        input_id: &InputId,
+        reason: crate::input_state::InputAbandonReason,
+    ) -> Result<bool, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => driver.abandon_queued_input(input_id, reason),
+            DriverEntry::Persistent(driver) => driver.abandon_queued_input(input_id, reason).await,
+        }
+    }
+
     pub(crate) fn prepare_destroy_lifecycle(
         &mut self,
     ) -> Result<PreparedDestroy, RuntimeDriverError> {
@@ -1077,6 +2662,344 @@ impl DriverEntry {
             _ => {}
         }
     }
+}
+
+fn authorized_directed_terminal_outboxes(
+    driver: &DriverEntry,
+    authority: &AuthorizedRuntimeLoopRunCommit,
+    directed_interaction_ids: &[meerkat_core::interaction::InteractionId],
+    terminal: Option<&meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
+) -> Result<Vec<crate::input_state::InteractionTerminalOutbox>, RuntimeDriverError> {
+    use crate::input_state::{
+        InteractionTerminalCandidate, InteractionTerminalOutbox,
+        interaction_terminal_payload_digest,
+    };
+
+    let mut directed_interaction_ids = directed_interaction_ids.to_vec();
+    directed_interaction_ids.sort_by_key(|interaction_id| interaction_id.0);
+    let mut declared = std::collections::BTreeSet::new();
+    if directed_interaction_ids.len() > 256 {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "directed interaction terminal batch exceeds the 256-input pending bound"
+                .to_string(),
+        });
+    }
+    for interaction_id in &directed_interaction_ids {
+        if !declared.insert(interaction_id.0) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "duplicate directed interaction id {interaction_id} in runtime turn metadata"
+                ),
+            });
+        }
+    }
+
+    let consumed: std::collections::BTreeSet<_> = authority
+        .consumed_input_ids()
+        .iter()
+        .map(|input_id| input_id.0)
+        .collect();
+    let mut persisted_directed = std::collections::BTreeSet::new();
+    for input_id in authority.consumed_input_ids() {
+        let stored = driver
+            .as_driver()
+            .stored_input_state(input_id)
+            .ok_or_else(|| RuntimeDriverError::Internal(format!(
+                "consumed input {input_id} has no persisted shell for directed terminal validation"
+            )))?;
+        if let Some(input) = stored.state.persisted_input.as_ref()
+            && let Some(interaction_id) = crate::input::validated_directed_interaction_id(input)
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
+        {
+            persisted_directed.insert(interaction_id.0);
+        }
+    }
+    if declared != persisted_directed {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "directed interaction metadata did not exactly match persisted tracked inputs: declared={declared:?}, persisted={persisted_directed:?}"
+            ),
+        });
+    }
+    if !declared.is_subset(&consumed) {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "directed interaction metadata named a non-contributing input".to_string(),
+        });
+    }
+    if declared.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let completion_input_ids = authority.consumed_input_ids().to_vec();
+    if completion_input_ids.is_empty() || completion_input_ids.len() > 256 {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "runtime completion recipient batch has invalid size".to_string(),
+        });
+    }
+    if completion_input_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != completion_input_ids.len()
+    {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "runtime completion recipient batch contains duplicate inputs".to_string(),
+        });
+    }
+    let completion_input_ids_digest = interaction_terminal_payload_digest(&completion_input_ids)
+        .map_err(RuntimeDriverError::Internal)?;
+
+    let owner_session_id = authority.owner_session_id().clone();
+    let candidate = match terminal {
+        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(result)) => {
+            InteractionTerminalCandidate::RunResult {
+                result: result.clone(),
+            }
+        }
+        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::CallbackPending {
+            tool_name,
+            args,
+        }) => InteractionTerminalCandidate::CallbackPending {
+            tool_name: tool_name.clone(),
+            args: args.clone(),
+        },
+        Some(
+            meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure {
+                error,
+            },
+        ) => InteractionTerminalCandidate::MachineTerminalFailure {
+            error: error.clone(),
+        },
+        Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::NoPendingBoundary)
+        | None => InteractionTerminalCandidate::CompletedWithoutResult,
+    };
+    let candidate_digest =
+        interaction_terminal_payload_digest(&candidate).map_err(RuntimeDriverError::Internal)?;
+
+    let candidate_owner_input_id = InputId::from_uuid(
+        directed_interaction_ids
+            .first()
+            .ok_or_else(|| RuntimeDriverError::Internal("directed batch lost owner".into()))?
+            .0,
+    );
+    directed_interaction_ids
+        .iter()
+        .enumerate()
+        .map(|(ordinal, interaction_id)| {
+            let input_id = InputId::from_uuid(interaction_id.0);
+            let owns_candidate = input_id == candidate_owner_input_id;
+            let outbox = InteractionTerminalOutbox {
+                interaction_id: *interaction_id,
+                input_id,
+                batch_ordinal: ordinal as u16,
+                batch_key: crate::input_state::InteractionTerminalBatchKey::Run {
+                    run_id: authority.run_id().clone(),
+                },
+                owner_session_id: owner_session_id.clone(),
+                owner_agent_runtime_id: authority
+                    .owner_agent_runtime_id()
+                    .map(|value| value.0.clone()),
+                owner_fence_token: authority.owner_fence_token().map(|value| value.0),
+                owner_runtime_generation: authority.owner_runtime_generation().map(|value| value.0),
+                owner_runtime_epoch_id: authority
+                    .owner_runtime_epoch_id()
+                    .map(|value| value.0.clone()),
+                candidate_owner_input_id: candidate_owner_input_id.clone(),
+                candidate: owns_candidate.then(|| candidate.clone()),
+                candidate_digest: candidate_digest.clone(),
+                completion_input_ids: owns_candidate.then(|| completion_input_ids.clone()),
+                completion_input_ids_digest: completion_input_ids_digest.clone(),
+                phase: crate::input_state::InteractionTerminalOutboxPhase::Candidate,
+            };
+            outbox.validate().map_err(RuntimeDriverError::Internal)?;
+            Ok(outbox)
+        })
+        .collect()
+}
+
+fn authorized_staged_directed_terminal_outboxes(
+    driver: &DriverEntry,
+    scope: InteractionTerminalBatchScope<'_>,
+    input_ids: &[InputId],
+    candidate: crate::input_state::InteractionTerminalCandidate,
+) -> Result<Vec<crate::input_state::InteractionTerminalOutbox>, RuntimeDriverError> {
+    use crate::input_state::{InteractionTerminalOutbox, interaction_terminal_payload_digest};
+    let mut directed = Vec::new();
+    for input_id in input_ids {
+        let stored = driver
+            .as_driver()
+            .stored_input_state(input_id)
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "staged input {input_id} disappeared before terminal outbox authorization"
+                ))
+            })?;
+        if let Some(input) = stored.state.persisted_input.as_ref()
+            && let Some(interaction_id) = crate::input::validated_directed_interaction_id(input)
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
+        {
+            if input_id.0 != interaction_id.0 {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "directed terminal input/interaction identity mismatch".to_string(),
+                });
+            }
+            directed.push((input_id.clone(), interaction_id));
+        }
+    }
+    if directed.len() > 256 {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "directed interaction terminal batch exceeds the 256-input pending bound"
+                .to_string(),
+        });
+    }
+    if directed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if input_ids.len() > 256 {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "staged completion recipient batch exceeds the 256-input pending bound"
+                .to_string(),
+        });
+    }
+    if input_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != input_ids.len()
+    {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "staged completion recipient batch contains duplicate inputs".to_string(),
+        });
+    }
+    let completion_input_ids = input_ids.to_vec();
+    let completion_input_ids_digest = interaction_terminal_payload_digest(&completion_input_ids)
+        .map_err(RuntimeDriverError::Internal)?;
+    directed.sort_by_key(|(input_id, _)| input_id.0);
+    let binding = {
+        let authority = driver.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        (
+            state.session_id.clone(),
+            state.active_runtime_id.clone(),
+            state.active_fence_token,
+            state.active_runtime_generation,
+            state.active_runtime_epoch_id.clone(),
+        )
+    };
+    let owner_session = binding.0.ok_or_else(|| {
+        RuntimeDriverError::Internal(
+            "directed terminal outbox authority carried no owner session".to_string(),
+        )
+    })?;
+    let owner_session_id = SessionId::parse(&owner_session.0).map_err(|error| {
+        RuntimeDriverError::Internal(format!(
+            "directed terminal outbox owner session was not a UUID: {error}"
+        ))
+    })?;
+    let candidate_digest =
+        interaction_terminal_payload_digest(&candidate).map_err(RuntimeDriverError::Internal)?;
+    let candidate_owner_input_id = directed
+        .first()
+        .map(|(input_id, _)| input_id.clone())
+        .ok_or_else(|| RuntimeDriverError::Internal("directed batch lost owner".into()))?;
+    let batch_key = match scope {
+        InteractionTerminalBatchScope::Run(run_id) => {
+            crate::input_state::InteractionTerminalBatchKey::Run {
+                run_id: run_id.clone(),
+            }
+        }
+        InteractionTerminalBatchScope::RuntimeTermination => {
+            crate::input_state::InteractionTerminalBatchKey::RuntimeTermination {
+                candidate_owner_input_id: candidate_owner_input_id.clone(),
+            }
+        }
+    };
+    directed
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (input_id, interaction_id))| {
+            let owns_candidate = input_id == candidate_owner_input_id;
+            let outbox = InteractionTerminalOutbox {
+                interaction_id,
+                input_id,
+                batch_ordinal: ordinal as u16,
+                batch_key: batch_key.clone(),
+                owner_session_id: owner_session_id.clone(),
+                owner_agent_runtime_id: binding.1.as_ref().map(|value| value.0.clone()),
+                owner_fence_token: binding.2.map(|value| value.0),
+                owner_runtime_generation: binding.3.map(|value| value.0),
+                owner_runtime_epoch_id: binding.4.as_ref().map(|value| value.0.clone()),
+                candidate_owner_input_id: candidate_owner_input_id.clone(),
+                candidate: owns_candidate.then(|| candidate.clone()),
+                candidate_digest: candidate_digest.clone(),
+                completion_input_ids: owns_candidate.then(|| completion_input_ids.clone()),
+                completion_input_ids_digest: completion_input_ids_digest.clone(),
+                phase: crate::input_state::InteractionTerminalOutboxPhase::Candidate,
+            };
+            outbox.validate().map_err(RuntimeDriverError::Internal)?;
+            Ok(outbox)
+        })
+        .collect()
+}
+
+/// Identify the exact contributors terminalized by the generated
+/// `ResolveStagedRollback -> Abandon(MaxAttemptsExhausted)` transition.
+///
+/// The caller supplies the pre-transition staged contributor set. Reading the
+/// generated-backed stored state after rollback makes this an observation of
+/// the transition result, not a prediction from an attempt counter. Only
+/// directed terminal rows are returned; surviving queued contributors are
+/// deliberately absent so their completion waiters remain registered.
+fn max_attempts_exhausted_directed_contributors(
+    driver: &DriverEntry,
+    contributing_input_ids: &[InputId],
+) -> Result<Vec<InputId>, RuntimeDriverError> {
+    let mut terminal_directed = Vec::new();
+    for input_id in contributing_input_ids {
+        let stored = driver
+            .as_driver()
+            .stored_input_state(input_id)
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "failed-run contributor {input_id} disappeared after rollback realization"
+                ))
+            })?;
+        if !matches!(
+            (&stored.seed.phase, &stored.seed.terminal_outcome),
+            (
+                crate::input_state::InputLifecycleState::Abandoned,
+                Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::MaxAttemptsExhausted { .. }
+                })
+            )
+        ) {
+            continue;
+        }
+        let input = stored.state.persisted_input.as_ref().ok_or_else(|| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: format!(
+                    "max-attempts-abandoned contributor {input_id} lost its admitted input payload"
+                ),
+            }
+        })?;
+        let Some(interaction_id) = crate::input::validated_directed_interaction_id(input)
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
+        else {
+            continue;
+        };
+        if input_id.0 != interaction_id.0 {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "abandoned directed terminal input/interaction identity mismatch"
+                    .to_string(),
+            });
+        }
+        terminal_directed.push(input_id.clone());
+    }
+    terminal_directed.sort_by_key(|input_id| input_id.0);
+    Ok(terminal_directed)
 }
 
 /// Shared completion registry (accessed by adapter for registration and loop for resolution).
@@ -1179,6 +3102,33 @@ pub(crate) enum RuntimeLoopRunCommitError {
     TerminalSnapshot(RuntimeDriverError),
 }
 
+pub(crate) struct MachineTerminalAppliedDraft {
+    pub(crate) receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
+    pub(crate) session_snapshot: Vec<u8>,
+}
+
+pub(crate) struct MachineTerminalAppliedCommit {
+    pub(crate) receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+    pub(crate) session_snapshot: Vec<u8>,
+    pub(crate) owner_session_id: SessionId,
+}
+
+/// Complete mechanical payload for realizing a machine-authorized failed run.
+///
+/// The runtime-loop owner assembles this only after the generated authority has
+/// classified the failure and validated any failed-but-applied commit. Driver
+/// variants then consume the same payload without reconstructing semantic
+/// failure facts at the persistence boundary.
+pub(crate) struct MachineRunFailureRealization {
+    pub(crate) run_id: RunId,
+    pub(crate) contributing_input_ids: Vec<InputId>,
+    pub(crate) replay_plan: crate::driver::ephemeral::ReplayQueuedContributorsPlan,
+    pub(crate) terminal_error: String,
+    pub(crate) runtime_apply_failure: Option<CoreApplyFailureCause>,
+    pub(crate) recoverable: bool,
+    pub(crate) applied_commit: Option<MachineTerminalAppliedCommit>,
+}
+
 impl std::fmt::Display for RuntimeLoopRunCommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1200,7 +3150,7 @@ pub(crate) struct AuthorizedRuntimeLoopRunCommit {
     consumed_input_ids: Vec<InputId>,
     commit_input_id: InputId,
     receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-    owner_session_id: Option<crate::meerkat_machine::dsl::SessionId>,
+    owner_session_id: SessionId,
     owner_agent_runtime_id: Option<crate::meerkat_machine::dsl::AgentRuntimeId>,
     owner_fence_token: Option<crate::meerkat_machine::dsl::FenceToken>,
     owner_runtime_generation: Option<crate::meerkat_machine::dsl::Generation>,
@@ -1251,6 +3201,21 @@ impl AuthorizedRuntimeLoopRunCommit {
         })?;
         let preview =
             preview_authorized_runtime_loop_run_commit(driver, &run_id, &commit_input_id)?;
+        let owner_session_id = preview
+            .owner_session_id
+            .as_ref()
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "runtime-loop run commit authority carried no owner session".to_string(),
+            })
+            .and_then(|session_id| {
+                SessionId::parse(&session_id.0).map_err(|error| {
+                    RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "runtime-loop run commit owner session was invalid: {error}"
+                        ),
+                    }
+                })
+            })?;
         Ok(Self {
             generated_plan:
                 generated_kernel_command_capabilities::CommandPlanKind::AuthorizedRuntimeLoopRunCommit,
@@ -1258,7 +3223,7 @@ impl AuthorizedRuntimeLoopRunCommit {
             consumed_input_ids,
             commit_input_id,
             receipt,
-            owner_session_id: preview.owner_session_id,
+            owner_session_id,
             owner_agent_runtime_id: preview.owner_agent_runtime_id,
             owner_fence_token: preview.owner_fence_token,
             owner_runtime_generation: preview.owner_runtime_generation,
@@ -1301,8 +3266,8 @@ impl AuthorizedRuntimeLoopRunCommit {
         self.generated_plan
     }
 
-    fn owner_session_id(&self) -> Option<&crate::meerkat_machine::dsl::SessionId> {
-        self.owner_session_id.as_ref()
+    fn owner_session_id(&self) -> &SessionId {
+        &self.owner_session_id
     }
 
     fn owner_agent_runtime_id(&self) -> Option<&crate::meerkat_machine::dsl::AgentRuntimeId> {
@@ -1556,8 +3521,37 @@ pub(crate) fn machine_apply_run_return_projection(
     Ok(projection)
 }
 
+fn service_turn_terminal_is_coherent(
+    turn_phase: crate::meerkat_machine::dsl::TurnPhase,
+    terminal_outcome: Option<crate::meerkat_machine::dsl::TurnTerminalOutcome>,
+    terminal_cause_kind: Option<crate::meerkat_machine::dsl::TurnTerminalCauseKind>,
+) -> bool {
+    use crate::meerkat_machine::dsl::{TurnPhase, TurnTerminalCauseKind, TurnTerminalOutcome};
+
+    match (turn_phase, terminal_outcome, terminal_cause_kind) {
+        (TurnPhase::Completed, Some(TurnTerminalOutcome::Completed), None) => true,
+        (TurnPhase::Failed, Some(outcome), Some(cause))
+            if cause != TurnTerminalCauseKind::Unknown =>
+        {
+            outcome
+                == match cause {
+                    TurnTerminalCauseKind::BudgetExhausted => TurnTerminalOutcome::BudgetExhausted,
+                    TurnTerminalCauseKind::TimeBudgetExceeded => {
+                        TurnTerminalOutcome::TimeBudgetExceeded
+                    }
+                    TurnTerminalCauseKind::StructuredOutputValidationFailed => {
+                        TurnTerminalOutcome::StructuredOutputValidationFailed
+                    }
+                    _ => TurnTerminalOutcome::Failed,
+                }
+        }
+        _ => false,
+    }
+}
+
 pub(crate) async fn machine_commit_service_turn_terminal_receipt(
     driver: &mut DriverEntry,
+    session_snapshot: Vec<u8>,
 ) -> Result<(), RuntimeDriverError> {
     let current_phase = driver.runtime_state();
     if current_phase != RuntimeState::Running {
@@ -1581,23 +3575,106 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
             "service-turn terminal receipt requires a machine-owned current_run_id".to_string(),
         ));
     };
-    let turn_needs_completion = {
+    let (
+        owner_session_id,
+        generated_run_id,
+        turn_phase,
+        turn_terminal_run_id,
+        terminal_outcome,
+        terminal_cause_kind,
+        primitive_kind,
+    ) = {
         let authority = driver.shared_dsl_authority();
         let auth = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !matches!(
+        (
+            auth.state().session_id.clone(),
+            auth.state().current_run_id.clone(),
             auth.state().turn_phase,
-            crate::meerkat_machine::dsl::TurnPhase::Completed
-                | crate::meerkat_machine::dsl::TurnPhase::Failed
-                | crate::meerkat_machine::dsl::TurnPhase::Cancelled
+            auth.state().turn_terminal_run_id.clone(),
+            auth.state().terminal_outcome,
+            auth.state().terminal_cause_kind,
+            auth.state().primitive_kind,
         )
     };
-    let terminal_checkpoint = driver.rollback_snapshot();
-    if turn_needs_completion && let Err(err) = machine_apply_turn_run_completed(driver, &run_id) {
-        driver.restore_rollback_snapshot(terminal_checkpoint);
-        return Err(err);
+    if generated_run_id.as_ref() != Some(&crate::meerkat_machine::dsl::RunId::from_domain(&run_id))
+    {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "service-turn terminal snapshot did not match the generated current run"
+                .to_string(),
+        });
     }
+    if turn_terminal_run_id.as_ref()
+        != Some(&crate::meerkat_machine::dsl::RunId::from_domain(&run_id))
+    {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "service-turn commit lacked an exact generated terminal-run witness"
+                .to_string(),
+        });
+    }
+    if !service_turn_terminal_is_coherent(turn_phase, terminal_outcome, terminal_cause_kind) {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "service-turn commit requires an exact coherent generated Completed or Failed terminal; phase={turn_phase:?}, outcome={terminal_outcome:?}, cause={terminal_cause_kind:?}"
+            ),
+        });
+    }
+    let owner_session_id = owner_session_id
+        .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+            reason: "service-turn terminal snapshot lacked generated session ownership".to_string(),
+        })
+        .and_then(|session_id| {
+            SessionId::parse(&session_id.0).map_err(|error| RuntimeDriverError::ValidationFailed {
+                reason: format!("generated service-turn session identity was invalid: {error}"),
+            })
+        })?;
+    let session =
+        serde_json::from_slice::<meerkat_core::Session>(&session_snapshot).map_err(|error| {
+            RuntimeDriverError::ValidationFailed {
+                reason: format!("service-turn terminal snapshot was not a Session: {error}"),
+            }
+        })?;
+    if session.id() != &owner_session_id {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "service-turn terminal session owner mismatch: generated {owner_session_id}, snapshot {}",
+                session.id()
+            ),
+        });
+    }
+    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|error| {
+        RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "service-turn terminal messages could not be encoded for receipt digest: {error}"
+            ),
+        }
+    })?;
+    let boundary = match primitive_kind {
+        Some(crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn) => {
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart
+        }
+        Some(
+            crate::meerkat_machine::dsl::TurnPrimitiveKind::ImmediateAppend
+            | crate::meerkat_machine::dsl::TurnPrimitiveKind::ImmediateContextAppend,
+        ) => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+        other => {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "service-turn terminal snapshot had no supported generated primitive kind: {other:?}"
+                ),
+            });
+        }
+    };
+    let receipt = RunBoundaryReceipt {
+        run_id: run_id.clone(),
+        boundary,
+        contributing_input_ids: Vec::new(),
+        conversation_digest: Some(format!("{:x}", Sha256::digest(encoded_messages))),
+        message_count: session.messages().len(),
+        sequence: driver.run_boundary_sequence(&run_id),
+    };
+    let terminal_checkpoint = driver.rollback_snapshot();
     let authority = driver.shared_dsl_authority();
     let service_turn_commit_result = {
         let mut auth = authority
@@ -1632,7 +3709,13 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
     match (driver, terminal_checkpoint) {
         (DriverEntry::Persistent(driver), DriverRollbackSnapshot::Persistent(rollback)) => {
             driver
-                .publish_service_turn_terminal_lifecycle(rollback, projection.phase)
+                .publish_service_turn_terminal(
+                    rollback,
+                    projection.phase,
+                    session_snapshot,
+                    receipt,
+                    owner_session_id,
+                )
                 .await?;
         }
         (DriverEntry::Ephemeral(driver), DriverRollbackSnapshot::Ephemeral(_)) => {
@@ -1958,6 +4041,65 @@ pub(crate) fn machine_staged_contributors(driver: &DriverEntry) -> Vec<InputId> 
             driver.as_driver().input_phase(work_id) == Some(InputLifecycleState::Staged)
         })
         .collect()
+}
+
+/// Pure observation of the exact validated directed interactions among the
+/// current generated Staged contributor set.
+///
+/// Runtime-loop failure paths use this before realizing `RunFailed` so they can
+/// distinguish a genuinely non-directed batch from directed contributors whose
+/// rollback may either requeue them or terminalize them at max attempts. The
+/// caller must already own the normal B -> M -> driver read order; this helper
+/// acquires no locks and mutates no authority.
+pub(crate) fn machine_staged_directed_interaction_ids(
+    driver: &DriverEntry,
+) -> Result<Vec<meerkat_core::interaction::InteractionId>, RuntimeDriverError> {
+    let staged_input_ids = machine_staged_contributors(driver);
+    let mut directed = Vec::new();
+    for input_id in staged_input_ids {
+        let stored = driver
+            .as_driver()
+            .stored_input_state(&input_id)
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "staged contributor {input_id} disappeared during directed-interaction observation"
+                ))
+            })?;
+        let input = stored.state.persisted_input.as_ref().ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "staged contributor {input_id} lost its admitted input payload"
+            ))
+        })?;
+        let Some(interaction_id) = crate::input::validated_directed_interaction_id(input)
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
+        else {
+            continue;
+        };
+        if input_id.0 != interaction_id.0 {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "staged directed input/interaction identity mismatch".to_string(),
+            });
+        }
+        directed.push(interaction_id);
+    }
+    directed.sort_by_key(|interaction_id| interaction_id.0);
+    if directed.len() > 256 {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "staged directed interaction batch exceeds the 256-input pending bound"
+                .to_string(),
+        });
+    }
+    if directed
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != directed.len()
+    {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "staged directed interaction batch contains duplicate interactions".to_string(),
+        });
+    }
+    Ok(directed)
 }
 
 pub(crate) fn machine_validate_run_failed(
@@ -3236,12 +5378,66 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
     Ok(())
 }
 
+fn validate_completed_run_session_witness(
+    owner_session_id: &SessionId,
+    receipt: &RunBoundaryReceipt,
+    session_snapshot: Option<&[u8]>,
+) -> Result<(), RuntimeDriverError> {
+    let Some(session_snapshot) = session_snapshot else {
+        return Ok(());
+    };
+    let session =
+        serde_json::from_slice::<meerkat_core::Session>(session_snapshot).map_err(|error| {
+            RuntimeDriverError::ValidationFailed {
+                reason: format!("completed-run session snapshot was not a Session: {error}"),
+            }
+        })?;
+    if session.id() != owner_session_id {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "completed-run session owner mismatch: generated {owner_session_id}, snapshot {}",
+                session.id()
+            ),
+        });
+    }
+    if receipt.message_count != session.messages().len() {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "completed-run receipt message count {} did not match session message count {}",
+                receipt.message_count,
+                session.messages().len()
+            ),
+        });
+    }
+    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|error| {
+        RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "completed-run session messages could not be encoded for digest validation: {error}"
+            ),
+        }
+    })?;
+    let expected_digest = format!("{:x}", Sha256::digest(encoded_messages));
+    match receipt.conversation_digest.as_deref() {
+        Some(actual_digest) if actual_digest == expected_digest => Ok(()),
+        Some(actual_digest) => Err(RuntimeDriverError::ValidationFailed {
+            reason: format!(
+                "completed-run receipt digest {actual_digest} did not match session digest {expected_digest}"
+            ),
+        }),
+        None => Err(RuntimeDriverError::ValidationFailed {
+            reason: "completed-run receipt omitted the required SHA-256 session digest".to_string(),
+        }),
+    }
+}
+
 pub(crate) async fn commit_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,
     consumed_input_ids: Vec<InputId>,
     receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft,
     session_snapshot: Option<Vec<u8>>,
+    directed_interaction_ids: Vec<meerkat_core::interaction::InteractionId>,
+    terminal: Option<&meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
 ) -> Result<(), RuntimeLoopRunCommitError> {
     let mut driver = driver.lock().await;
     let commit_authority =
@@ -3255,8 +5451,25 @@ pub(crate) async fn commit_runtime_loop_run(
     let receipt = commit_authority.receipt().clone();
     let consumed_input_ids = commit_authority.consumed_input_ids().to_vec();
     let commit_input_id = commit_authority.commit_input_id().clone();
+    validate_completed_run_session_witness(
+        commit_authority.owner_session_id(),
+        &receipt,
+        session_snapshot.as_deref(),
+    )
+    .map_err(RuntimeLoopRunCommitError::Rejected)?;
+    let interaction_outboxes = authorized_directed_terminal_outboxes(
+        &driver,
+        &commit_authority,
+        &directed_interaction_ids,
+        terminal,
+    )
+    .map_err(RuntimeLoopRunCommitError::Rejected)?;
 
     let terminal_checkpoint = driver.rollback_snapshot();
+    if let Err(err) = driver.stage_interaction_terminal_outboxes(interaction_outboxes) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunCommitError::Rejected(err));
+    }
     if let Err(err) = driver.machine_realize_boundary_applied_in_memory(&completed_run_id, &receipt)
     {
         driver.restore_rollback_snapshot(terminal_checkpoint);
@@ -3276,14 +5489,6 @@ pub(crate) async fn commit_runtime_loop_run(
     if let Err(err) = machine_apply_turn_run_completed(&mut driver, &completed_run_id) {
         driver.restore_rollback_snapshot(terminal_checkpoint);
         return Err(RuntimeLoopRunCommitError::Rejected(err));
-    }
-    if commit_authority.owner_session_id().is_none() {
-        driver.restore_rollback_snapshot(terminal_checkpoint);
-        return Err(RuntimeLoopRunCommitError::Rejected(
-            RuntimeDriverError::Internal(
-                "runtime-loop run commit authority carried no owner session".to_string(),
-            ),
-        ));
     }
     let _owner_runtime_binding = (
         commit_authority.owner_agent_runtime_id(),
@@ -3355,7 +5560,11 @@ pub(crate) async fn commit_runtime_loop_run(
         ));
     }
     if let Err(err) = driver
-        .machine_commit_completed_boundary_snapshot(&receipt, session_snapshot.as_ref())
+        .machine_commit_completed_boundary_snapshot(
+            &receipt,
+            session_snapshot.as_ref(),
+            commit_authority.owner_session_id(),
+        )
         .await
     {
         driver.restore_rollback_snapshot(terminal_checkpoint);
@@ -3414,6 +5623,62 @@ pub(crate) fn machine_resolve_runtime_completion_result(
             ),
         })?;
     runtime_completion_result_authority_from_effects(dsl_run_id.as_ref(), &effects)
+}
+
+fn apply_runtime_completion_result_correlation_recovery(
+    authority: &mut crate::meerkat_machine::dsl::MeerkatMachineAuthority,
+    run_id: &RunId,
+) -> Result<(), RuntimeDriverError> {
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        authority,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::
+            RecoverRuntimeCompletionResultCorrelation {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+            },
+    )
+    .map(|_| ())
+    .map_err(|error| RuntimeDriverError::ValidationFailed {
+        reason: crate::meerkat_machine::dsl_authority::map_error(
+            error,
+            "RecoverRuntimeCompletionResultCorrelation",
+        ),
+    })
+}
+
+fn machine_validate_runtime_completion_result_correlation_recovery(
+    driver: &DriverEntry,
+    run_id: &RunId,
+) -> Result<(), RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let state = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
+        .clone();
+    let mut preview = crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
+        state,
+    )
+    .map_err(|error| {
+        RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
+            error,
+            "RecoverRuntimeCompletionResultCorrelation preview",
+        ))
+    })?;
+    apply_runtime_completion_result_correlation_recovery(&mut preview, run_id)
+}
+
+/// Restore the single generated completion-result correlation from an exact
+/// durable unpublished interaction-terminal batch after whole-image preview
+/// validation and owner adoption have succeeded.
+pub(crate) fn machine_recover_runtime_completion_result_correlation(
+    driver: &DriverEntry,
+    run_id: &RunId,
+) -> Result<(), RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let mut authority = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    apply_runtime_completion_result_correlation_recovery(&mut authority, run_id)
 }
 
 #[cfg(test)]
@@ -3574,14 +5839,19 @@ pub(crate) async fn fail_runtime_loop_run(
     fail_runtime_loop_run_inner(
         driver,
         run_id,
-        failure.message().to_owned(),
-        Some(failure),
-        false,
-        None,
+        RuntimeLoopRunFailureContext {
+            terminal_error: failure.message().to_owned(),
+            runtime_apply_failure: Some(failure),
+            machine_terminal_failure_observed: false,
+            machine_terminal_error: None,
+            terminal_failure_source: None,
+            applied_terminal: None,
+        },
     )
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn fail_machine_run(
     driver: &SharedDriver,
     run_id: RunId,
@@ -3590,10 +5860,36 @@ pub(crate) async fn fail_machine_run(
     fail_runtime_loop_run_inner(
         driver,
         run_id,
-        failure.error,
-        None,
-        failure.machine_terminal_failure_observed,
-        failure.source,
+        RuntimeLoopRunFailureContext {
+            terminal_error: failure.error,
+            runtime_apply_failure: None,
+            machine_terminal_failure_observed: failure.machine_terminal_failure_observed,
+            machine_terminal_error: failure.machine_terminal_error,
+            terminal_failure_source: failure.source,
+            applied_terminal: None,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn commit_machine_terminal_run(
+    driver: &SharedDriver,
+    run_id: RunId,
+    error: meerkat_core::TurnErrorMetadata,
+    applied: MachineTerminalAppliedDraft,
+) -> Result<(), RuntimeLoopRunFailError> {
+    let failure = super::MeerkatMachineRunFailure::from_machine_terminal_failure(error);
+    fail_runtime_loop_run_inner(
+        driver,
+        run_id,
+        RuntimeLoopRunFailureContext {
+            terminal_error: failure.error,
+            runtime_apply_failure: None,
+            machine_terminal_failure_observed: failure.machine_terminal_failure_observed,
+            machine_terminal_error: failure.machine_terminal_error,
+            terminal_failure_source: failure.source,
+            applied_terminal: Some(applied),
+        },
     )
     .await
 }
@@ -3607,7 +5903,18 @@ pub(crate) async fn cancel_runtime_loop_run(
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_cancelled(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
+    let interaction_outboxes = authorized_staged_directed_terminal_outboxes(
+        &driver,
+        InteractionTerminalBatchScope::Run(&cancelled_run_id),
+        &staged_input_ids,
+        crate::input_state::InteractionTerminalCandidate::Cancelled,
+    )
+    .map_err(RuntimeLoopRunFailError::Rejected)?;
     let terminal_checkpoint = driver.rollback_snapshot();
+    if let Err(error) = driver.stage_interaction_terminal_outboxes(interaction_outboxes) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunFailError::Rejected(error));
+    }
     if let Err(err) = machine_apply_turn_run_cancelled(&mut driver, &cancelled_run_id) {
         driver.restore_rollback_snapshot(terminal_checkpoint);
         return Err(RuntimeLoopRunFailError::Rejected(err));
@@ -3641,20 +5948,262 @@ pub(crate) async fn cancel_runtime_loop_run(
     Ok(())
 }
 
-async fn fail_runtime_loop_run_inner(
-    driver: &SharedDriver,
-    run_id: RunId,
+fn machine_terminal_carrier_validation_failed(reason: impl Into<String>) -> RuntimeDriverError {
+    RuntimeDriverError::ValidationFailed {
+        reason: reason.into(),
+    }
+}
+
+/// Validate every executor-provided failed-but-applied witness against the
+/// generated outer-machine state before any live or durable mutation occurs.
+///
+/// A compliant executor reaches the failed turn through its shared
+/// `TurnStateHandle`, so the outer machine already owns the exact terminal
+/// outcome/cause and session identity. An executor that bypasses that authority
+/// cannot mint a `MachineTerminalFailure` carrier after the fact.
+fn validate_machine_terminal_applied_commit(
+    driver: &DriverEntry,
+    failed_run_id: &RunId,
+    staged_input_ids: &[InputId],
+    error: &meerkat_core::TurnErrorMetadata,
+    applied: MachineTerminalAppliedDraft,
+) -> Result<MachineTerminalAppliedCommit, RuntimeDriverError> {
+    if !error.terminal {
+        return Err(machine_terminal_carrier_validation_failed(
+            "machine-terminal metadata was not marked terminal",
+        ));
+    }
+    let outcome = error.outcome.ok_or_else(|| {
+        machine_terminal_carrier_validation_failed(
+            "machine-terminal metadata omitted its terminal outcome",
+        )
+    })?;
+    if !error.kind.is_specific_failure_cause() {
+        return Err(machine_terminal_carrier_validation_failed(
+            "machine-terminal metadata used a nonspecific failure cause",
+        ));
+    }
+
+    let (
+        owner_session_id,
+        generated_run_id,
+        generated_turn_phase,
+        generated_terminal_run_id,
+        generated_terminal_outcome,
+        generated_terminal_cause_kind,
+    ) = {
+        let authority = driver.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        (
+            state.session_id.clone(),
+            state.current_run_id.clone(),
+            state.turn_phase,
+            state.turn_terminal_run_id.clone(),
+            state.terminal_outcome,
+            state.terminal_cause_kind,
+        )
+    };
+    if generated_run_id.as_ref()
+        != Some(&crate::meerkat_machine::dsl::RunId::from_domain(
+            failed_run_id,
+        ))
+    {
+        return Err(machine_terminal_carrier_validation_failed(format!(
+            "machine-terminal carrier run {failed_run_id} did not match generated current run"
+        )));
+    }
+    if generated_turn_phase != crate::meerkat_machine::dsl::TurnPhase::Failed {
+        return Err(machine_terminal_carrier_validation_failed(
+            "machine-terminal carrier lacked a generated failed turn",
+        ));
+    }
+    if generated_terminal_run_id.as_ref()
+        != Some(&crate::meerkat_machine::dsl::RunId::from_domain(
+            failed_run_id,
+        ))
+    {
+        return Err(machine_terminal_carrier_validation_failed(
+            "machine-terminal carrier did not match the generated terminal run witness",
+        ));
+    }
+    let expected_outcome = crate::meerkat_machine::dsl::TurnTerminalOutcome::from(outcome);
+    if generated_terminal_outcome != Some(expected_outcome) {
+        return Err(machine_terminal_carrier_validation_failed(format!(
+            "machine-terminal outcome {outcome:?} did not match generated terminal outcome {generated_terminal_outcome:?}"
+        )));
+    }
+    let expected_cause = crate::meerkat_machine::dsl::TurnTerminalCauseKind::from(error.kind);
+    if generated_terminal_cause_kind != Some(expected_cause) {
+        return Err(machine_terminal_carrier_validation_failed(format!(
+            "machine-terminal cause {:?} did not match generated terminal cause {generated_terminal_cause_kind:?}",
+            error.kind
+        )));
+    }
+
+    let owner_session_id = owner_session_id
+        .ok_or_else(|| {
+            machine_terminal_carrier_validation_failed(
+                "machine-terminal carrier lacked generated session ownership",
+            )
+        })
+        .and_then(|session_id| {
+            SessionId::parse(&session_id.0).map_err(|parse_error| {
+                machine_terminal_carrier_validation_failed(format!(
+                    "generated machine session identity was invalid: {parse_error}"
+                ))
+            })
+        })?;
+    let session = serde_json::from_slice::<meerkat_core::Session>(&applied.session_snapshot)
+        .map_err(|error| {
+            machine_terminal_carrier_validation_failed(format!(
+                "machine-terminal session snapshot was not a Session: {error}"
+            ))
+        })?;
+    if session.id() != &owner_session_id {
+        return Err(machine_terminal_carrier_validation_failed(format!(
+            "machine-terminal session owner mismatch: generated {owner_session_id}, snapshot {}",
+            session.id()
+        )));
+    }
+
+    let receipt = applied
+        .receipt
+        .into_sequenced(driver.run_boundary_sequence(failed_run_id));
+    machine_validate_run_commit_receipt(driver, failed_run_id, staged_input_ids, &receipt)?;
+    if receipt.message_count != session.messages().len() {
+        return Err(machine_terminal_carrier_validation_failed(format!(
+            "machine-terminal receipt message count {} did not match session message count {}",
+            receipt.message_count,
+            session.messages().len()
+        )));
+    }
+    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|error| {
+        machine_terminal_carrier_validation_failed(format!(
+            "machine-terminal session messages could not be encoded for digest validation: {error}"
+        ))
+    })?;
+    let expected_digest = format!("{:x}", Sha256::digest(encoded_messages));
+    match receipt.conversation_digest.as_deref() {
+        Some(actual_digest) if actual_digest == expected_digest => {}
+        Some(actual_digest) => {
+            return Err(machine_terminal_carrier_validation_failed(format!(
+                "machine-terminal receipt digest {actual_digest} did not match session digest {expected_digest}"
+            )));
+        }
+        None => {
+            return Err(machine_terminal_carrier_validation_failed(
+                "machine-terminal receipt omitted the required SHA-256 session digest",
+            ));
+        }
+    }
+
+    Ok(MachineTerminalAppliedCommit {
+        receipt,
+        session_snapshot: applied.session_snapshot,
+        owner_session_id,
+    })
+}
+
+struct RuntimeLoopRunFailureContext {
     terminal_error: String,
     runtime_apply_failure: Option<CoreApplyFailureCause>,
     machine_terminal_failure_observed: bool,
+    machine_terminal_error: Option<meerkat_core::TurnErrorMetadata>,
     terminal_failure_source: Option<crate::meerkat_machine::dsl::RunFailureSourceKind>,
+    applied_terminal: Option<MachineTerminalAppliedDraft>,
+}
+
+async fn fail_runtime_loop_run_inner(
+    driver: &SharedDriver,
+    run_id: RunId,
+    failure: RuntimeLoopRunFailureContext,
 ) -> Result<(), RuntimeLoopRunFailError> {
+    let RuntimeLoopRunFailureContext {
+        terminal_error,
+        runtime_apply_failure,
+        machine_terminal_failure_observed,
+        machine_terminal_error,
+        terminal_failure_source,
+        applied_terminal,
+    } = failure;
     let mut driver = driver.lock().await;
     let failed_run_id = run_id.clone();
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
+    if machine_terminal_failure_observed != machine_terminal_error.is_some() {
+        return Err(RuntimeLoopRunFailError::Rejected(
+            RuntimeDriverError::ValidationFailed {
+                reason: "machine-terminal failure observation and typed completion error disagreed"
+                    .to_string(),
+            },
+        ));
+    }
+    let prepared_applied_commit = match (machine_terminal_error.as_ref(), applied_terminal) {
+        (Some(error), Some(applied)) => Some(
+            validate_machine_terminal_applied_commit(
+                &driver,
+                &failed_run_id,
+                &staged_input_ids,
+                error,
+                applied,
+            )
+            .map_err(RuntimeLoopRunFailError::Rejected)?,
+        ),
+        (Some(_), None) => {
+            return Err(RuntimeLoopRunFailError::Rejected(
+                machine_terminal_carrier_validation_failed(
+                    "machine-terminal failure must use the failed-but-applied output carrier",
+                ),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(RuntimeLoopRunFailError::Rejected(
+                machine_terminal_carrier_validation_failed(
+                    "failed-but-applied commit lacked machine-terminal metadata",
+                ),
+            ));
+        }
+        (None, None) => None,
+    };
     let terminal_checkpoint = driver.rollback_snapshot();
+    let mut applied_commit = None;
+    if let Some(error) = machine_terminal_error.as_ref() {
+        let interaction_outboxes = authorized_staged_directed_terminal_outboxes(
+            &driver,
+            InteractionTerminalBatchScope::Run(&failed_run_id),
+            &staged_input_ids,
+            crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
+                error: error.clone(),
+            },
+        )
+        .map_err(RuntimeLoopRunFailError::Rejected)?;
+        if let Err(error) = driver.stage_interaction_terminal_outboxes(interaction_outboxes) {
+            driver.restore_rollback_snapshot(terminal_checkpoint);
+            return Err(RuntimeLoopRunFailError::Rejected(error));
+        }
+        if let Err(error) = driver
+            .machine_realize_terminal_failure_applied_in_memory(&failed_run_id, &staged_input_ids)
+        {
+            driver.restore_rollback_snapshot(terminal_checkpoint);
+            return Err(RuntimeLoopRunFailError::Rejected(error));
+        }
+        if let Some(commit) = prepared_applied_commit {
+            if commit.receipt.sequence != driver.run_boundary_sequence(&failed_run_id) {
+                driver.restore_rollback_snapshot(terminal_checkpoint);
+                return Err(RuntimeLoopRunFailError::Rejected(
+                    RuntimeDriverError::ValidationFailed {
+                        reason: "machine-terminal boundary sequence changed during commit"
+                            .to_string(),
+                    },
+                ));
+            }
+            applied_commit = Some(commit);
+        }
+    }
     let run_failed_effects = match machine_apply_turn_run_failed(
         &mut driver,
         &failed_run_id,
@@ -3669,6 +6218,7 @@ async fn fail_runtime_loop_run_inner(
             return Err(RuntimeLoopRunFailError::Rejected(err));
         }
     };
+    let recoverable = !machine_terminal_failure_observed;
     let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
     if let Err(err) = machine_apply_run_return_projection(
         &mut driver,
@@ -3683,14 +6233,15 @@ async fn fail_runtime_loop_run_inner(
         ));
     }
     if let Err(run_err) = driver
-        .machine_realize_run_failed(
-            failed_run_id.clone(),
-            staged_input_ids,
+        .machine_realize_run_failed(MachineRunFailureRealization {
+            run_id: failed_run_id.clone(),
+            contributing_input_ids: staged_input_ids,
             replay_plan,
-            &terminal_error,
-            runtime_apply_failure.as_ref(),
-            true,
-        )
+            terminal_error,
+            runtime_apply_failure,
+            recoverable,
+            applied_commit,
+        })
         .await
     {
         driver.restore_rollback_snapshot(terminal_checkpoint);
@@ -3730,6 +6281,79 @@ mod run_failed_cause_tests {
         assert_eq!(attempt.class(), expected_class);
         let realized = attempt.realize();
         assert_eq!(realized.cleanup_observation(), expected_cleanup);
+    }
+
+    #[test]
+    fn service_turn_terminal_validation_rejects_outcome_cause_mismatches() {
+        use crate::meerkat_machine::dsl::{
+            TurnPhase, TurnTerminalCauseKind as Cause, TurnTerminalOutcome as Outcome,
+        };
+
+        let coherent = [
+            (TurnPhase::Completed, Some(Outcome::Completed), None),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::BudgetExhausted),
+                Some(Cause::BudgetExhausted),
+            ),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::TimeBudgetExceeded),
+                Some(Cause::TimeBudgetExceeded),
+            ),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::StructuredOutputValidationFailed),
+                Some(Cause::StructuredOutputValidationFailed),
+            ),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::Failed),
+                Some(Cause::LlmFailure),
+            ),
+        ];
+        for (phase, outcome, cause) in coherent {
+            assert!(
+                service_turn_terminal_is_coherent(phase, outcome, cause),
+                "coherent terminal was rejected: phase={phase:?}, outcome={outcome:?}, cause={cause:?}"
+            );
+        }
+
+        let mismatched = [
+            (
+                TurnPhase::Completed,
+                Some(Outcome::Completed),
+                Some(Cause::FatalFailure),
+            ),
+            (TurnPhase::Completed, Some(Outcome::Failed), None),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::BudgetExhausted),
+                Some(Cause::TimeBudgetExceeded),
+            ),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::Failed),
+                Some(Cause::BudgetExhausted),
+            ),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::StructuredOutputValidationFailed),
+                Some(Cause::LlmFailure),
+            ),
+            (TurnPhase::Failed, None, Some(Cause::LlmFailure)),
+            (
+                TurnPhase::Failed,
+                Some(Outcome::Failed),
+                Some(Cause::Unknown),
+            ),
+        ];
+        for (phase, outcome, cause) in mismatched {
+            assert!(
+                !service_turn_terminal_is_coherent(phase, outcome, cause),
+                "mismatched terminal was accepted: phase={phase:?}, outcome={outcome:?}, cause={cause:?}"
+            );
+        }
     }
 
     #[test]
@@ -3822,6 +6446,26 @@ mod run_failed_cause_tests {
             crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
         )
         .expect("generated completion result authority should resolve");
+
+        assert_runtime_completion_authority(
+            class,
+            crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError,
+            crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeApplyFailed,
+        );
+    }
+
+    #[test]
+    fn runtime_completion_result_authority_classifies_machine_terminal_commit_failure() {
+        let run_id = RunId::new();
+        let driver = running_driver(&run_id);
+
+        let class = machine_resolve_runtime_completion_result(
+            &driver,
+            Some(&run_id),
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal,
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+        )
+        .expect("failed machine-terminal commit should retain generated completion authority");
 
         assert_runtime_completion_authority(
             class,
@@ -4226,6 +6870,748 @@ mod recovery_tests {
     ) -> crate::input_state::InputStatePersistenceRecord {
         crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(bundle)
             .expect("test input-state seed should pass generated persistence authority")
+    }
+
+    fn serialized_input_states(
+        mut states: Vec<crate::input_state::StoredInputState>,
+    ) -> Vec<serde_json::Value> {
+        states.sort_by_key(|stored| stored.state.input_id.to_string());
+        states
+            .into_iter()
+            .map(|stored| serde_json::to_value(stored).expect("serialize stored input state"))
+            .collect()
+    }
+
+    async fn seed_terminal_recovery_outbox(
+        persistent: &mut PersistentRuntimeDriver,
+        session_id: &SessionId,
+        runtime_id: &LogicalRuntimeId,
+        batch_key: crate::input_state::InteractionTerminalBatchKey,
+        candidate: crate::input_state::InteractionTerminalCandidate,
+    ) {
+        use crate::input_state::{InteractionTerminalOutbox, InteractionTerminalOutboxPhase};
+
+        let input = Input::Prompt(crate::input::PromptInput::new(
+            format!("terminal recovery batch {batch_key:?}"),
+            None,
+        ));
+        let input_id = input.id().clone();
+        assert!(
+            persistent
+                .accept_input(input)
+                .await
+                .expect("accept terminal recovery input")
+                .is_accepted(),
+            "seed unpublished terminal recovery input"
+        );
+        let completion_input_ids = vec![input_id.clone()];
+        let candidate_digest = crate::input_state::interaction_terminal_payload_digest(&candidate)
+            .expect("digest terminal candidate");
+        let completion_input_ids_digest =
+            crate::input_state::interaction_terminal_payload_digest(&completion_input_ids)
+                .expect("digest completion recipients");
+        persistent
+            .inner_mut()
+            .ledger_mut()
+            .get_mut(&input_id)
+            .expect("accepted terminal recovery input")
+            .interaction_terminal_outbox = Some(InteractionTerminalOutbox {
+            interaction_id: meerkat_core::interaction::InteractionId(input_id.0),
+            input_id: input_id.clone(),
+            batch_ordinal: 0,
+            batch_key,
+            owner_session_id: session_id.clone(),
+            owner_agent_runtime_id: Some(runtime_id.0.clone()),
+            owner_fence_token: Some(1),
+            owner_runtime_generation: Some(1),
+            owner_runtime_epoch_id: Some("previous-epoch".to_string()),
+            candidate_owner_input_id: input_id.clone(),
+            candidate: Some(candidate),
+            candidate_digest,
+            completion_input_ids: Some(completion_input_ids),
+            completion_input_ids_digest,
+            phase: InteractionTerminalOutboxPhase::Candidate,
+        });
+    }
+
+    async fn candidate_terminal_recovery_driver(
+        runtime_name: &str,
+        run_id: RunId,
+    ) -> (
+        LogicalRuntimeId,
+        Arc<crate::store::InMemoryRuntimeStore>,
+        DriverEntry,
+        Vec<serde_json::Value>,
+    ) {
+        use crate::input_state::{InteractionTerminalBatchKey, InteractionTerminalCandidate};
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new(runtime_name);
+        let session_id = SessionId::new();
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store_trait: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut persistent =
+            PersistentRuntimeDriver::new(runtime_id.clone(), store_trait, blob_store);
+        persistent
+            .inner_mut()
+            .recover_runtime_authority_from_binding_observation(
+                crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                RuntimeState::Idle,
+                Some(&runtime_id),
+                Some(2),
+                Some(crate::meerkat_machine::dsl::Generation::from(2)),
+                Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                    "current-epoch".to_string(),
+                )),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            )
+            .expect("seed current runtime attachment authority");
+        seed_terminal_recovery_outbox(
+            &mut persistent,
+            &session_id,
+            &runtime_id,
+            InteractionTerminalBatchKey::Run { run_id },
+            InteractionTerminalCandidate::CompletedWithoutResult,
+        )
+        .await;
+
+        let driver = DriverEntry::Persistent(persistent);
+        let shell_before = driver
+            .as_driver()
+            .stored_input_states_snapshot()
+            .expect("snapshot seeded terminal batch");
+        for stored in &shell_before {
+            store
+                .persist_input_state(&runtime_id, &persistable(stored.clone()))
+                .await
+                .expect("persist seeded terminal batch");
+        }
+        (
+            runtime_id,
+            store,
+            driver,
+            serialized_input_states(shell_before),
+        )
+    }
+
+    fn completed_terminal_events(
+        batch: &InteractionTerminalRecoveryBatch,
+    ) -> Vec<meerkat_core::event::AgentEvent> {
+        batch
+            .interaction_ids
+            .iter()
+            .map(
+                |interaction_id| meerkat_core::event::AgentEvent::InteractionComplete {
+                    interaction_id: *interaction_id,
+                    result: String::new(),
+                    structured_output: None,
+                },
+            )
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_cancelled_before_cas_leaves_both_images_unchanged() {
+        use crate::store::RuntimeStore;
+
+        let (runtime_id, store, driver, before) =
+            candidate_terminal_recovery_driver("terminal-recovery-cancel-before-cas", RunId::new())
+                .await;
+        let entered = Arc::new(crate::tokio::sync::Notify::new());
+        let release = Arc::new(crate::tokio::sync::Notify::new());
+        store.block_next_input_state_batch_cas_before_mutation(
+            Arc::clone(&entered),
+            Arc::clone(&release),
+        );
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(driver));
+        let task = crate::tokio::spawn({
+            let driver = Arc::clone(&driver);
+            async move {
+                driver
+                    .lock()
+                    .await
+                    .interaction_terminal_recovery_batches()
+                    .await
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        let join_error = match task.await {
+            Ok(_) => panic!("blocked recovery completed instead of being cancelled"),
+            Err(error) => error,
+        };
+        assert!(
+            join_error.is_cancelled(),
+            "test cancellation must stop recovery before the durable CAS"
+        );
+        release.notify_waiters();
+
+        let shell_after_cancel = serialized_input_states(
+            driver
+                .lock()
+                .await
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot shell after cancellation"),
+        );
+        let durable_after_cancel = serialized_input_states(
+            store
+                .load_input_states(&runtime_id)
+                .await
+                .expect("load durable image after cancellation"),
+        );
+        assert_eq!(shell_after_cancel, before);
+        assert_eq!(durable_after_cancel, before);
+
+        let batches = driver
+            .lock()
+            .await
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("retry after pre-CAS cancellation must succeed");
+        assert_eq!(batches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_cancelled_after_store_commit_retries_idempotently() {
+        use crate::store::RuntimeStore;
+
+        let (runtime_id, store, driver, before) =
+            candidate_terminal_recovery_driver("terminal-recovery-cancel-after-cas", RunId::new())
+                .await;
+        let entered = Arc::new(crate::tokio::sync::Notify::new());
+        let release = Arc::new(crate::tokio::sync::Notify::new());
+        store.block_next_input_state_batch_cas_after_commit(
+            Arc::clone(&entered),
+            Arc::clone(&release),
+        );
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(driver));
+        let task = crate::tokio::spawn({
+            let driver = Arc::clone(&driver);
+            async move {
+                driver
+                    .lock()
+                    .await
+                    .interaction_terminal_recovery_batches()
+                    .await
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        let join_error = match task.await {
+            Ok(_) => panic!("blocked recovery completed instead of being cancelled"),
+            Err(error) => error,
+        };
+        assert!(
+            join_error.is_cancelled(),
+            "test cancellation must drop the store acknowledgement"
+        );
+        release.notify_waiters();
+
+        let shell_after_cancel = serialized_input_states(
+            driver
+                .lock()
+                .await
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot shell after lost acknowledgement"),
+        );
+        let durable_after_cancel = serialized_input_states(
+            store
+                .load_input_states(&runtime_id)
+                .await
+                .expect("load committed durable image"),
+        );
+        assert_eq!(
+            shell_after_cancel, before,
+            "store-first recovery must not publish shell state before CAS acknowledgement"
+        );
+        assert_ne!(
+            durable_after_cancel, before,
+            "the injected boundary must observe a committed durable replacement"
+        );
+
+        let batches = driver
+            .lock()
+            .await
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("byte-identical CAS retry must acknowledge and publish the shell");
+        assert_eq!(batches.len(), 1);
+        let shell_after_retry = serialized_input_states(
+            driver
+                .lock()
+                .await
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot shell after idempotent retry"),
+        );
+        let durable_after_retry = serialized_input_states(
+            store
+                .load_input_states(&runtime_id)
+                .await
+                .expect("load durable image after idempotent retry"),
+        );
+        assert_eq!(shell_after_retry, durable_after_retry);
+        assert_eq!(durable_after_retry, durable_after_cancel);
+    }
+
+    #[tokio::test]
+    async fn terminal_finalization_cancelled_after_commit_reconciles_then_adopts_new_owner() {
+        use crate::input_state::InteractionTerminalOutboxPhase;
+        use crate::store::RuntimeStore;
+
+        let (runtime_id, store, driver, _) = candidate_terminal_recovery_driver(
+            "terminal-finalization-cancel-after-commit",
+            RunId::new(),
+        )
+        .await;
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(driver));
+        let candidate_batch = {
+            let mut driver = driver.lock().await;
+            let mut batches = driver
+                .interaction_terminal_recovery_batches()
+                .await
+                .expect("initial recovery must adopt the candidate owner");
+            assert_eq!(batches.len(), 1);
+            batches.remove(0)
+        };
+        let candidate_owner_input_id = candidate_batch.input_ids[0].clone();
+        let events = completed_terminal_events(&candidate_batch);
+        let entered = Arc::new(crate::tokio::sync::Notify::new());
+        let release = Arc::new(crate::tokio::sync::Notify::new());
+        store.block_next_input_state_batch_cas_after_commit(
+            Arc::clone(&entered),
+            Arc::clone(&release),
+        );
+        let task = crate::tokio::spawn({
+            let driver = Arc::clone(&driver);
+            let candidate_owner_input_id = candidate_owner_input_id.clone();
+            let events = events.clone();
+            async move {
+                driver
+                    .lock()
+                    .await
+                    .finalize_interaction_terminal_outboxes(
+                        &candidate_owner_input_id,
+                        &events,
+                        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+                    )
+                    .await
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        let join_error = match task.await {
+            Ok(_) => panic!("blocked terminal finalization completed instead of being cancelled"),
+            Err(error) => error,
+        };
+        assert!(join_error.is_cancelled());
+        release.notify_waiters();
+
+        let shell_phase = {
+            let driver = driver.lock().await;
+            let stored = driver
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot shell after lost finalization acknowledgement");
+            let outbox = stored[0]
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .expect("shell terminal outbox");
+            outbox.phase.clone()
+        };
+        assert!(matches!(
+            shell_phase,
+            InteractionTerminalOutboxPhase::Candidate
+        ));
+        let durable = store
+            .load_input_states(&runtime_id)
+            .await
+            .expect("load durable finalized outbox");
+        assert!(matches!(
+            &durable[0]
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .expect("durable terminal outbox")
+                .phase,
+            InteractionTerminalOutboxPhase::Finalized { .. }
+        ));
+
+        // Replace machine owner B with C after B's Finalized CAS committed.
+        // Recovery must hydrate B's exact committed phase, then use ordinary
+        // exact adoption to bind the unpublished batch to C.
+        {
+            let authority = driver.lock().await.shared_dsl_authority();
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut rotated = authority.state().clone();
+            rotated.active_fence_token = Some(crate::meerkat_machine::dsl::FenceToken::from(3));
+            rotated.active_runtime_generation =
+                Some(crate::meerkat_machine::dsl::Generation::from(3));
+            rotated.active_runtime_epoch_id = Some(
+                crate::meerkat_machine::dsl::RuntimeEpochId::from("replacement-epoch".to_string()),
+            );
+            *authority =
+                crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(rotated)
+                    .expect("rotate terminal recovery owner without losing input authority");
+        }
+
+        let recovered = driver
+            .lock()
+            .await
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("lost finalization acknowledgement must reconcile and adopt");
+        assert_eq!(recovered.len(), 1);
+        assert!(matches!(
+            &recovered[0].phase,
+            InteractionTerminalRecoveryPhase::Finalized { .. }
+        ));
+        let shell = driver
+            .lock()
+            .await
+            .as_driver()
+            .stored_input_states_snapshot()
+            .expect("snapshot reconciled finalized shell");
+        assert_eq!(
+            shell[0]
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .expect("reconciled terminal outbox")
+                .owner_fence_token,
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_publication_cancelled_after_commit_reconciles_published_image() {
+        use crate::input_state::InteractionTerminalOutboxPhase;
+        use crate::store::RuntimeStore;
+
+        let (runtime_id, store, driver, _) = candidate_terminal_recovery_driver(
+            "terminal-publication-cancel-after-commit",
+            RunId::new(),
+        )
+        .await;
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(driver));
+        let candidate_batch = {
+            let mut driver = driver.lock().await;
+            let mut batches = driver
+                .interaction_terminal_recovery_batches()
+                .await
+                .expect("initial recovery must adopt the candidate owner");
+            assert_eq!(batches.len(), 1);
+            batches.remove(0)
+        };
+        let candidate_owner_input_id = candidate_batch.input_ids[0].clone();
+        let events = completed_terminal_events(&candidate_batch);
+        driver
+            .lock()
+            .await
+            .finalize_interaction_terminal_outboxes(
+                &candidate_owner_input_id,
+                &events,
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+            )
+            .await
+            .expect("finalize terminal outbox before publication");
+        let finalized = driver
+            .lock()
+            .await
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("load finalized recovery batch");
+        let InteractionTerminalRecoveryPhase::Finalized {
+            events: finalized_events,
+            ..
+        } = &finalized[0].phase
+        else {
+            panic!("terminal batch must be finalized before publication");
+        };
+        let receipts = finalized_events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| {
+                meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                    event,
+                    u64::try_from(index).expect("receipt index") + 1,
+                )
+                .expect("build exact terminal publication receipt")
+            })
+            .collect::<Vec<_>>();
+
+        let entered = Arc::new(crate::tokio::sync::Notify::new());
+        let release = Arc::new(crate::tokio::sync::Notify::new());
+        store.block_next_input_state_batch_cas_after_commit(
+            Arc::clone(&entered),
+            Arc::clone(&release),
+        );
+        let task = crate::tokio::spawn({
+            let driver = Arc::clone(&driver);
+            let candidate_owner_input_id = candidate_owner_input_id.clone();
+            let receipts = receipts.clone();
+            async move {
+                driver
+                    .lock()
+                    .await
+                    .mark_interaction_terminal_outboxes_published(
+                        &candidate_owner_input_id,
+                        &receipts,
+                    )
+                    .await
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        let join_error = match task.await {
+            Ok(_) => panic!("blocked terminal publication completed instead of being cancelled"),
+            Err(error) => error,
+        };
+        assert!(join_error.is_cancelled());
+        release.notify_waiters();
+
+        let shell = driver
+            .lock()
+            .await
+            .as_driver()
+            .stored_input_states_snapshot()
+            .expect("snapshot shell after lost publication acknowledgement");
+        assert!(matches!(
+            &shell[0]
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .expect("shell terminal outbox")
+                .phase,
+            InteractionTerminalOutboxPhase::Finalized { .. }
+        ));
+        let durable_after_cancel = store
+            .load_input_states(&runtime_id)
+            .await
+            .expect("load durable published outbox");
+        assert!(matches!(
+            &durable_after_cancel[0]
+                .state
+                .interaction_terminal_outbox
+                .as_ref()
+                .expect("durable terminal outbox")
+                .phase,
+            InteractionTerminalOutboxPhase::Published { .. }
+        ));
+
+        let recovered = driver
+            .lock()
+            .await
+            .interaction_terminal_recovery_batches()
+            .await
+            .expect("lost publication acknowledgement must reconcile");
+        assert!(
+            recovered.is_empty(),
+            "published batches are already drained"
+        );
+        let shell_after_retry = serialized_input_states(
+            driver
+                .lock()
+                .await
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot shell after publication reconciliation"),
+        );
+        assert_eq!(
+            shell_after_retry,
+            serialized_input_states(durable_after_cancel)
+        );
+    }
+
+    #[tokio::test]
+    async fn split_run_terminal_recovery_rejects_before_any_owner_mutation() {
+        use crate::input_state::{InteractionTerminalBatchKey, InteractionTerminalCandidate};
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("split-run-terminal-recovery");
+        let session_id = SessionId::new();
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store_trait: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut persistent =
+            PersistentRuntimeDriver::new(runtime_id.clone(), store_trait, blob_store);
+        persistent
+            .inner_mut()
+            .recover_runtime_authority_from_binding_observation(
+                crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                RuntimeState::Idle,
+                Some(&runtime_id),
+                Some(2),
+                Some(crate::meerkat_machine::dsl::Generation::from(2)),
+                Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                    "current-epoch".to_string(),
+                )),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            )
+            .expect("seed current runtime attachment authority");
+
+        for run_id in [RunId::new(), RunId::new()] {
+            seed_terminal_recovery_outbox(
+                &mut persistent,
+                &session_id,
+                &runtime_id,
+                InteractionTerminalBatchKey::Run { run_id },
+                InteractionTerminalCandidate::CompletedWithoutResult,
+            )
+            .await;
+        }
+
+        let mut driver = DriverEntry::Persistent(persistent);
+        let shell_before = driver
+            .as_driver()
+            .stored_input_states_snapshot()
+            .expect("snapshot seeded terminal batches");
+        for stored in &shell_before {
+            store
+                .persist_input_state(&runtime_id, &persistable(stored.clone()))
+                .await
+                .expect("persist seeded terminal batch");
+        }
+        let shell_before = serialized_input_states(shell_before);
+        let durable_before = serialized_input_states(
+            store
+                .load_input_states(&runtime_id)
+                .await
+                .expect("load durable terminal batches"),
+        );
+
+        let error = match driver.interaction_terminal_recovery_batches().await {
+            Ok(_) => panic!("distinct unpublished run batches must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                RuntimeDriverError::RecoveryCorruption { ref reason }
+                    if reason.contains("distinct runs")
+            ),
+            "unexpected split-run recovery error: {error}"
+        );
+
+        let shell_after = serialized_input_states(
+            driver
+                .as_driver()
+                .stored_input_states_snapshot()
+                .expect("snapshot terminal batches after rejection"),
+        );
+        let durable_after = serialized_input_states(
+            store
+                .load_input_states(&runtime_id)
+                .await
+                .expect("load durable terminal batches after rejection"),
+        );
+        assert_eq!(
+            shell_after, shell_before,
+            "split-run rejection must not adopt either shell owner binding"
+        );
+        assert_eq!(
+            durable_after, durable_before,
+            "split-run rejection must not persist either owner adoption"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_machine_run_correlation_rejects_before_any_owner_mutation() {
+        use crate::input_state::{InteractionTerminalBatchKey, InteractionTerminalCandidate};
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("conflicting-run-terminal-recovery");
+        let session_id = SessionId::new();
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store_trait: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut persistent =
+            PersistentRuntimeDriver::new(runtime_id.clone(), store_trait, blob_store);
+        persistent
+            .inner_mut()
+            .recover_runtime_authority_from_binding_observation(
+                crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                RuntimeState::Idle,
+                Some(&runtime_id),
+                Some(2),
+                Some(crate::meerkat_machine::dsl::Generation::from(2)),
+                Some(crate::meerkat_machine::dsl::RuntimeEpochId::from(
+                    "current-epoch".to_string(),
+                )),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            )
+            .expect("seed current runtime attachment authority");
+        let durable_run_id = RunId::new();
+        seed_terminal_recovery_outbox(
+            &mut persistent,
+            &session_id,
+            &runtime_id,
+            InteractionTerminalBatchKey::Run {
+                run_id: durable_run_id,
+            },
+            InteractionTerminalCandidate::CompletedWithoutResult,
+        )
+        .await;
+
+        let machine_run_id = RunId::new();
+        let mut driver = DriverEntry::Persistent(persistent);
+        machine_recover_runtime_completion_result_correlation(&driver, &machine_run_id)
+            .expect("seed a different machine-owned run correlation");
+        let shell_before = driver
+            .as_driver()
+            .stored_input_states_snapshot()
+            .expect("snapshot seeded terminal batch");
+        for stored in &shell_before {
+            store
+                .persist_input_state(&runtime_id, &persistable(stored.clone()))
+                .await
+                .expect("persist seeded terminal batch");
+        }
+        let shell_before = serialized_input_states(shell_before);
+        let durable_before = serialized_input_states(
+            store
+                .load_input_states(&runtime_id)
+                .await
+                .expect("load durable terminal batch"),
+        );
+
+        let error = match driver.interaction_terminal_recovery_batches().await {
+            Ok(_) => panic!("a different machine-owned run correlation must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, RuntimeDriverError::ValidationFailed { .. }),
+            "unexpected correlation recovery error: {error}"
+        );
+        assert_eq!(
+            serialized_input_states(
+                driver
+                    .as_driver()
+                    .stored_input_states_snapshot()
+                    .expect("snapshot terminal batch after rejection"),
+            ),
+            shell_before,
+            "correlation rejection must precede shell owner adoption"
+        );
+        assert_eq!(
+            serialized_input_states(
+                store
+                    .load_input_states(&runtime_id)
+                    .await
+                    .expect("load durable terminal batch after rejection"),
+            ),
+            durable_before,
+            "correlation rejection must precede durable owner adoption"
+        );
     }
 
     #[test]

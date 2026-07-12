@@ -1634,6 +1634,10 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             peer_response_terminal_apply_intent: value
                 .peer_response_terminal_apply_intent
                 .map(Into::into),
+            // Directed interaction correlation is minted by the receiving
+            // runtime from the stable delivery input ID; callers cannot send
+            // or forge it through turn-metadata wire payloads.
+            directed_interaction_ids: Vec::new(),
             transcript_identity: Default::default(),
         }
     }

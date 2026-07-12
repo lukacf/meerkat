@@ -169,6 +169,19 @@ subset.
 | `mob/profile/list` | Mob | — | `MobProfileListResult` | List realm-scoped mob profiles (mob feature) |
 | `mob/profile/update` | Mob | `MobProfileUpdateParams` | `MobProfileLookupResult` | Update a realm-scoped mob profile (mob feature) |
 | `mob/profile/delete` | Mob | `MobProfileDeleteParams` | `MobProfileDeleteResult` | Delete a realm-scoped mob profile (mob feature) |
+| `mob/grant_scopes` | Mob | `MobGrantScopesParams` | `MobGrantScopesResult` | Record (full-replace) a principal's control-scope grant (mob feature) |
+| `mob/revoke_scopes` | Mob | `MobRevokeScopesParams` | `MobRevokeScopesResult` | Revoke control scopes from a principal's grant; omit scopes to revoke the entire grant (mob feature) |
+| `mob/grants` | Mob | `MobIdParams` | `MobGrantsResult` | List raw control-scope grant records; expired rows appear verbatim (mob feature) |
+| `mob/member_history` | Mob | `MobMemberHistoryParams` | `MobMemberHistoryResult` | Read a mob member transcript page by identity; one shape local and remote (mob feature) |
+| `mob/hosts` | Mob | `MobIdParams` | `MobHostsResult` | List tracked member hosts with bind phase and declared capabilities (mob feature) |
+| `mob/route_installs` | Mob | `MobIdParams` | `MobRouteInstallsResult` | Outstanding cross-host route-install obligations (mob feature) |
+| `mob/bind_host` | Mob | `MobBindHostParams` | `MobBindHostResult` | Bind a member-host daemon to a mob from its binding descriptor (mob feature) |
+| `mob/revoke_host` | Mob | `MobRevokeHostParams` | `MobRevokeHostResult` | Revoke a bound (or bind-requested) member host (mob feature) |
+| `mob/hard_cancel_member` | Mob | `MobHardCancelParams` | `MobHardCancelResult` | Hard-cancel a mob member; immediate user-interrupt authority (mob feature) |
+| `mob/member_live_open` | Mob | `MobMemberLiveOpenParams` | `LiveOpenResult` | Open a live realtime channel on a mob member by identity (mob feature) |
+| `mob/member_live_close` | Mob | `MobMemberLiveChannelParams` | `LiveCloseResult` | Close one named live channel on a mob member (mob feature) |
+| `mob/member_live_status` | Mob | `MobMemberLiveStatusParams` | `LiveStatusResult` | Read live channel status for a mob member; omit channel_id to discover (mob feature) |
+| `mob/member_live_control` | Mob | `MobMemberLiveControlParams` | `BridgeLiveControlOutcome` | Drive one turn-level live control verb on a member channel (mob feature) |
 | `schedule/create` | Schedule | `CreateScheduleRequest` | `Schedule` | Create a new schedule (schedule feature) |
 | `schedule/get` | Schedule | `ScheduleIdParams` | `Schedule` | Get a schedule by ID (schedule feature) |
 | `schedule/list` | Schedule | `ListSchedulesParams` | `ScheduleListResult` | List schedules (schedule feature) |

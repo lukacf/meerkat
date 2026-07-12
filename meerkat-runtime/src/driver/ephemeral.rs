@@ -2481,6 +2481,31 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
+    /// Realize an input that the generated turn machine already handled to a
+    /// hard-failure terminal before any successful runtime boundary existed.
+    ///
+    /// `RecordBoundarySeq` reads the canonical per-run counter from generated
+    /// authority (zero for a pre-boundary terminal).  Persisting that value is
+    /// required provenance for directed-turn observers; callers must never
+    /// synthesize or hard-code the sequence in shell state.
+    pub(crate) fn machine_realize_terminal_failure_applied(
+        &mut self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        for input_id in input_ids {
+            self.apply_input(input_id, run_id)?;
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::RecordBoundarySeq {
+                    input_id: Self::dsl_key(input_id),
+                    run_id: mm_dsl::RunId::from_domain(run_id),
+                },
+                "RecordBoundarySeq(MachineTerminalFailure)",
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn consume_inputs(
         &mut self,
         input_ids: &[InputId],
@@ -3260,6 +3285,8 @@ impl EphemeralRuntimeDriver {
         without_wake: bool,
         active_turn_boundary_available: bool,
     ) -> Result<ResolvedAdmission, RuntimeDriverError> {
+        crate::input::validated_directed_interaction_id(input)
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
         let authority = MachineAdmissionAuthority::new(
             input.id().to_string(),
@@ -3663,6 +3690,46 @@ impl EphemeralRuntimeDriver {
         Ok(count)
     }
 
+    /// Atomically abandon one exact queued input. Staged/applied work is not
+    /// touched here because its run owns cancellation; callers use the
+    /// run-fenced interrupt path for those phases.
+    pub(crate) fn abandon_queued_input(
+        &mut self,
+        input_id: &InputId,
+        reason: InputAbandonReason,
+    ) -> Result<bool, RuntimeDriverError> {
+        if self.input_phase(input_id) != Some(InputLifecycleState::Queued) {
+            return Ok(false);
+        }
+        let from_phase =
+            self.input_phase_required(input_id, "before exact queued-input abandonment")?;
+        let attempt_count = u64::from(self.input_attempt_count(input_id));
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::AbandonInput {
+                input_id: Self::dsl_key(input_id),
+                reason: mm_dsl::InputAbandonReason::from(&reason),
+                attempt_count,
+            },
+            "AbandonInput(TrackedCancel)",
+        )?;
+        self.sync_terminal_projection_from_machine(
+            input_id,
+            from_phase,
+            InputLifecycleState::Abandoned,
+            "TrackedCancel",
+        )?;
+        self.events
+            .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                InputLifecycleEvent::Abandoned {
+                    input_id: input_id.clone(),
+                    reason,
+                },
+            )));
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+        Ok(true)
+    }
+
     pub(crate) fn abandon_pending_inputs(
         &mut self,
         reason: InputAbandonReason,
@@ -3695,7 +3762,16 @@ impl EphemeralRuntimeDriver {
         run_id: &RunId,
         contributing_input_ids: &[InputId],
         replay_plan: &ReplayQueuedContributorsPlan,
+        recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
+        if !recoverable {
+            tracing::debug!(
+                run_id = ?run_id,
+                contributors = contributing_input_ids.len(),
+                "runtime consumed contributors after a machine-owned terminal failure"
+            );
+            return self.consume_inputs(contributing_input_ids, run_id);
+        }
         tracing::debug!(
             run_id = ?run_id,
             kind = replay_plan.notice_kind,
@@ -3892,6 +3968,7 @@ mod tests {
 
     fn peer_message_input() -> Input {
         Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -3940,6 +4017,7 @@ mod tests {
 
     fn progress_input_with_supersession(label: &str, supersession_key: &str) -> Input {
         Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -4936,6 +5014,7 @@ mod tests {
             .unwrap();
 
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,

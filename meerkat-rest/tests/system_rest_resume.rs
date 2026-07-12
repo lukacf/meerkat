@@ -73,6 +73,7 @@ async fn inner_test_rest_resume_metadata() {
         session_service.clone(),
         Some(runtime_adapter.clone()),
         None,
+        meerkat_mob::MobControlPrincipal::Owner,
     );
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -218,6 +219,7 @@ async fn inner_test_rest_resume_metadata() {
         session_service2.clone(),
         Some(runtime_adapter2.clone()),
         None,
+        meerkat_mob::MobControlPrincipal::Owner,
     );
     // The resume server's CONFIG carries deliberately divergent defaults
     // (model resolved per request via the canonical

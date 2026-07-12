@@ -106,7 +106,6 @@ There are no separate public reduced-surface binaries. Reduced-surface distribut
 |------|---------|
 | `MemberLaunchMode` | Fresh / Resume / Fork (how to start a member) |
 | `ForkContext` | FullHistory (CoW) / LastMessages(n) (how much history to fork) |
-| `BudgetSplitPolicy` | Equal / Proportional / Remaining / Fixed(u64) |
 | `MobMemberSnapshot` | Public: status, output_preview, error, tokens_used, is_final, current_session_id, peer_connectivity, kickoff, external_member, resolved_capabilities. Binding atoms (agent_identity, agent_runtime_id, fence_token, current_bridge_session_id) are `pub(crate)` + `#[serde(skip)]` — bridge-internal, never app-facing |
 | `FrameSpec` / `FlowNodeSpec` / `RepeatUntilSpec` | Frame-based flow graphs and repeat-until loop nodes |
 | `MobDefinition.owner_bridge_session_id` / `MobDefinition.is_implicit` | Session-scoped mob ownership, access control, implicit cleanup |

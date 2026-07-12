@@ -40,10 +40,40 @@ import type {
   WireAuthProvider,
   WireBackendKind,
   WireCredentialSourceKind,
+  WireMemberProgressSnapshot,
   WireAuthStatusState,
   EventEnvelope,
 } from '../src/index.js';
 import { Auth } from '../src/index.js';
+import type {
+  WirePeerConnectivityKnown,
+  WirePeerConnectivitySnapshot,
+  WireUnreachablePeer,
+} from '../src/generated/mob.js';
+
+declare const generatedConnectivity: WirePeerConnectivityKnown;
+const generatedConnectivitySnapshot: WirePeerConnectivitySnapshot =
+  generatedConnectivity.snapshot;
+const generatedUnreachablePeers: WireUnreachablePeer[] =
+  generatedConnectivitySnapshot.unreachable_peers ?? [];
+void generatedConnectivitySnapshot;
+void generatedUnreachablePeers;
+
+const generatedMemberProgress: WireMemberProgressSnapshot = {
+  run_state: 'run_open',
+  in_flight_work: 1,
+  last_progress_at_ms: 1710000000123,
+  last_progress_event: 'execution_advanced',
+  health: 'healthy',
+};
+const memberSnapshotWithProgress: MobMemberSnapshot = {
+  status: 'active',
+  member_ref: 'member-ref',
+  tokens_used: 0,
+  is_final: false,
+  progress: generatedMemberProgress,
+};
+void memberSnapshotWithProgress;
 
 // ─── RuntimeConfig ──────────────────────────────────────────────
 
@@ -297,6 +327,7 @@ const spawnSpec: SpawnSpec = {
   runtime_mode: 'autonomous_host',
   initial_message: 'Hello',
   labels: { role: 'worker' },
+  model_override: 'gpt-5.4',
 };
 
 const spawnSpecWithoutGeneration: SpawnSpec = {
@@ -462,6 +493,7 @@ const helperWithConnectionResult: Promise<MobHelperResult> = mob.spawnHelper(
   'Summarize using the OpenAI binding.',
   {
     agentIdentity: 'helper-2',
+    modelOverride: 'gpt-5.4',
     authBinding: { realm: 'default', binding: 'openai', profile: 'work' },
   },
 );
@@ -470,6 +502,7 @@ const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'Review the draft and suggest one improvement.',
   {
     agentIdentity: 'fork-1',
+    modelOverride: 'claude-sonnet-4-6',
     authBinding: { realm: 'default', binding: 'anthropic' },
   },
 );

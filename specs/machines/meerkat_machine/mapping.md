@@ -143,6 +143,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginUnregisterSessionRetainsSnapshotStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BeginUnregisterUnservedAttachmentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginUnregisterUnservedAttachmentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginUnregisterUnservedAttachmentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RuntimeLoopStoppedForUnregisterIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -827,6 +836,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveUserInterruptPublicResultAcceptedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveUserInterruptPublicResultAcceptedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultNoopInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -947,6 +959,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelAfterBoundaryAlreadyPending`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AbortCancelAfterBoundaryDispatchInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortCancelAfterBoundaryDispatchIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortCancelAfterBoundaryDispatchAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortCancelAfterBoundaryDispatchRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortCancelAfterBoundaryDispatchRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortCancelAfterBoundaryDispatchStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortCancelAfterBoundaryDispatchDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BoundaryAppliedPublish`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
@@ -1005,6 +1038,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RuntimeExecutorExitedFromStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeInteractionTerminalOutboxAdoptionInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeInteractionTerminalOutboxAdoptionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeInteractionTerminalOutboxAdoptionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeInteractionTerminalOutboxAdoptionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeInteractionTerminalOutboxAdoptionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeInteractionTerminalOutboxAdoptionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRuntimeCompletionResultCorrelationInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRuntimeCompletionResultCorrelationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRuntimeCompletionResultCorrelationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRuntimeCompletionResultCorrelationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRuntimeCompletionResultCorrelationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRuntimeCompletionResultCorrelationStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveRuntimeCompletionResultCompletedInitializing`
@@ -1586,7 +1655,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublishEventStopped`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
-- `AcceptWithCompletionIdleQueued`
+- `AcceptWithCompletionIdleQueuedPassive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcceptWithCompletionIdleQueuedWakeIfIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AcceptWithCompletionIdleImmediate`
@@ -1595,7 +1667,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AcceptWithCompletionAttachedImmediate`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `AcceptWithCompletionAttachedQueued`
+- `AcceptWithCompletionAttachedQueuedPassive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcceptWithCompletionAttachedQueuedWakeIfIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AcceptWithCompletionRunningQueuedPassive`
@@ -2370,6 +2445,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LlmReturnedToolCallsZero`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CallbackPendingCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LlmReturnedTerminal`
@@ -3506,6 +3584,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinishSurfaceRequestUnpublishedTerminalInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionUnregisteredIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionAcceptedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3513,12 +3594,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionAcceptedRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ResolveLiveOpenAdmissionAcceptedRetired`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ResolveLiveOpenAdmissionAcceptedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionSessionAlreadyBoundIdle`
@@ -3530,12 +3605,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveOpenAdmissionSessionAlreadyBoundRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveLiveOpenAdmissionSessionAlreadyBoundRetired`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ResolveLiveOpenAdmissionSessionAlreadyBoundStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3545,10 +3614,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveOpenAdmissionChannelAlreadyBoundRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveLiveOpenAdmissionChannelAlreadyBoundRetired`
+- `ResolveLiveOpenAdmissionDrainingIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResolveLiveOpenAdmissionChannelAlreadyBoundStopped`
+- `ResolveLiveOpenAdmissionDrainingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionDrainingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionStopDeferredAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionStopDeferredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionRetiredRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveOpenAdmissionStoppedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AbandonLiveOpenAdmissionIdle`
@@ -6266,6 +6350,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RequestCompletionWaiterResolutionForUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionTerminalOutboxAdoptionAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

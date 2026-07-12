@@ -9,7 +9,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Code Anchors
 - `mob_handle_surface` (machine `MobMachine`): `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
-- `mob_actor_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
+- `mob_actor_authority` (machine `MobMachine`): `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, recover durable incarnations, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff pending/replay and resolve started/callback pending/failed/clear, wiring graph, and session binding
 - `mob_owner_bridge_cleanup_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `mob_coordination_board_authority` (machine `MobMachine`): `meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 - `mob_operator_admission_authority` (machine `MobMachine`): `meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
@@ -19,7 +19,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 ### Scenarios
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
-- `retire-respawn-destroy` — member retires, resets, respawns with a new runtime incarnation, stops/stopped, resumes, shuts down, destroys cleanly, and resets to running when reusable
+- `retire-recover-destroy` — member retires, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
 - `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
@@ -312,6 +312,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InitializeAdaptiveRunRunningRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `InitializeAdaptiveRunReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordAdaptivePlanningDecisionActiveRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -354,10 +357,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordAdaptiveLayerMobDestroyedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordAdaptiveLayerMobDestroyedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordAdaptiveLayerMobRetainedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecordAdaptiveLayerMobRetainedCleanupRequiredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerMobRetainedReplayRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecordAdaptiveCleanupResolvedRunning`
@@ -370,6 +379,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RequestAdaptiveCancelRunningRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestAdaptiveCancelReplayRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecordAdaptiveDeadlineObservedExpiredRunning`
@@ -403,6 +415,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyMemberOperationEligibilityRunningDestroyDeniedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyMemberOperationEligibilityRunningLifecycleDeniedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyMemberOperationEligibilityNotRunningStopped`
@@ -900,7 +915,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CommitSpawnMembershipFreshPeerOnly`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `CommitSpawnMembershipReplacing`
+- `CommitSpawnMembershipRemote`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BeginSpawnExecFresh`
@@ -909,7 +924,70 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginSpawnExecFreshPeerOnly`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `BeginSpawnExecReplacing`
+- `BeginSpawnExecDeniedNonPortableRustBundles`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedNonPortablePerSpawnExternalTools`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedNonPortableMobDefaultExternalTools`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedNonPortableDefaultLlmClientOverride`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedNonPortableHostSurfaceMcpAllowlist`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedNonPortableInheritedToolFilter`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedNonPortableWorkgraphTools`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedSecretBearingShellEnv`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedSecretBearingMcpStdioEnv`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedSecretBearingMcpHttpHeaders`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedHostNotBound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedMissingCapabilityAutonomousMembers`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedMissingCapabilityDurableSessions`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedMissingCapabilityTrackedInputCancel`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedMissingCapabilityProtocolV4`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedMissingCapabilityMemoryStore`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedMissingCapabilityMcp`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedOwnerBridgeAbsent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedResumePlacementMismatch`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecDeniedDigestAbsent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginSpawnExecRemote`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberMaterializationFailureRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CommitSpawnActivationFinalRunning`
@@ -942,6 +1020,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbortSpawnExecActiveCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AbortSpawnExecMaterializePendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecMaterializePendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortSpawnExecMaterializePendingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AbortSpawnExecLateArrivalRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -954,6 +1041,39 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbortSpawnExecDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizePlacedCarrierCleanupActiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizePlacedCarrierCleanupActiveStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizePlacedCarrierCleanupActiveCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCarrierCleanupActiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCarrierCleanupActiveStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCarrierCleanupActiveCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCarrierCleanupLateArrivalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCarrierCleanupLateArrivalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCarrierCleanupLateArrivalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizePlacedCarrierCleanupDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCarrierCleanupDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSpawnProfileRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -961,6 +1081,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `EnsureMemberRunningMissing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPendingPlacedSpawnRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCommittedPlacedSpawnRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PromoteCommittedPlacedSpawnCarrierBindingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCarrierCleanupRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCarrierCleanupAlreadyRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverRosterMemberRunning`
@@ -1005,7 +1140,40 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterMemberRetirementStartedPreservingBinding`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverRosterMemberRetirementStartedPlaced`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRosterMemberRetirementStartedPeerOnly`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyPreservationStartedFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyPreservationStartedAlreadyRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyPreservationStartedAbandoned`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedRetiringFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedRetiringAlreadyRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedTerminalFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedTerminalAlreadyRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedTerminalRecoveredFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedStaleSuccessor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverRemoteMemberRuntimeRetiredFreshRunning`
@@ -1035,10 +1203,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterMemberRetiredRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `RecoverRosterMemberRetiredAlreadyAbsent`
+- `RecoverRosterMemberRetiringRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRosterMemberRetiringReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRosterMemberRetiredCurrentAlreadyAbsent`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverRosterMemberRetiredStaleGeneration`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRosterMemberRetiredStaleIncarnation`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverMemberKickoffPending`
@@ -1060,6 +1237,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverObjectiveBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverFinalizedPlacedKickoffRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BindObjectiveOwnerRunning`
@@ -1095,13 +1275,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StartupMarkReadyCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `KickoffMarkPendingRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `KickoffMarkPendingStopped`
+- `KickoffMarkPending`
   - anchors: `mob_actor_authority`
   - scenarios: (unclaimed)
-- `KickoffMarkPendingCompleted`
+- `KickoffMarkPendingReplayRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `KickoffMarkPendingReplayStopped`
+  - anchors: `mob_actor_authority`
+  - scenarios: (unclaimed)
+- `KickoffMarkPendingReplayCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: (unclaimed)
 - `ConcludeObjectiveRunning`
@@ -1110,13 +1293,280 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ConcludeObjectiveIdempotentRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `KickoffMarkStartingRunning`
+- `KickoffMarkStarting`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `KickoffMarkStartingStopped`
+- `KickoffMarkStartingReplayRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `KickoffMarkStartingCompleted`
+- `KickoffMarkStartingReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `KickoffMarkStartingReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffPendingReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffPendingReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffPendingReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffResolvedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffResolvedReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffResolvedReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffFinalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffFinalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StartPlacedKickoffFinalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedFreshCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedAfterCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedAfterCancellationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedAfterCancellationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedFinalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedFinalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedFinalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffStartedFinalReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingFreshCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingAfterCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingAfterCancellationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingAfterCancellationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingFinalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingFinalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingFinalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCallbackPendingFinalReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedFreshCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedAfterCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedAfterCancellationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedAfterCancellationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedFinalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedFinalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedFinalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffFailedFinalReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledFreshCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledFinalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledFinalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledFinalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedKickoffCancelledFinalReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionFreshCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionAfterCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionAfterCancellationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionAfterCancellationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RejectPlacedKickoffBeforeAdmissionReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomePresentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomePresentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomePresentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomePresentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomeReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomeReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomeReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedKickoffOutcomeReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationActiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationActiveStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationActiveCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationActiveDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationTerminalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationTerminalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationTerminalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationTerminalDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedKickoffObligationReplayDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `KickoffResolveStartedRunning`
@@ -1464,6 +1914,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RetireMember`
+  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
+  - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+- `RetireMemberRemote`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireMemberRemoteConfirmedRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireMemberPeerOnly`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRuntimeBindingRefusalRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1512,6 +1974,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitDestroyMemberRetireLiveStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireRemoteRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireRemoteStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireConfirmedRevokedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitDestroyMemberRetireConfirmedRevokedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitDestroyMemberRetirePeerOnlyRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1557,13 +2031,31 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveMemberRetirementArchivedLive`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedLivePreservingTopology`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ObserveMemberRetirementArchivedLiveStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ObserveMemberRetirementArchivedRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedRetiredPreservingTopology`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ObserveMemberRetirementArchivedRetiredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedPlacedLiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedPlacedLiveStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedPlacedRetiredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedPlacedRetiredStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ObserveMemberRetirementArchivedStaleRuntime`
@@ -1596,18 +2088,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveDestroyMemberRetirementArchivedRetiredStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveDestroyMemberRetirementArchivedPlacedLiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveDestroyMemberRetirementArchivedPlacedLiveStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveDestroyMemberRetirementArchivedPlacedRetiredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveDestroyMemberRetirementArchivedPlacedRetiredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ObserveDestroyMemberRetirementArchivedAlreadyClearedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ObserveDestroyMemberRetirementArchivedAlreadyClearedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ResetMember`
-  - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
-- `RespawnMember`
-  - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `ResolveRespawnTopologyRestoreCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1685,10 +2183,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `StopRunning`
   - anchors: (unclaimed)
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-recover-destroy`
 - `ResumeStopped`
   - anchors: `mob_actor_authority`
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-recover-destroy`
 - `CompleteRunning`
   - anchors: (unclaimed)
   - scenarios: `flow-and-run-lifecycle`
@@ -1719,25 +2217,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRosterUnwireAlreadyAbsent`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ConvergeRecoveredRosterTopologyPruneRunning`
+- `ConvergeRecoveredRosterTopologyPrune`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ConvergeRecoveredRosterTopologyPruneStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ConvergeRecoveredRosterTopologyPruneCompleted`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ConvergeRecoveredRosterTopologyRetainRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ConvergeRecoveredRosterTopologyRetainStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ConvergeRecoveredRosterTopologyRetainCompleted`
+- `ConvergeRecoveredRosterTopologyRetain`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ConvergeRecoveredRosterTopologyDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRespawnTopologyAbandoned`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConvergeRecoveredRespawnTopologyDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `UnwireMembersRunning`
@@ -1786,6 +2278,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeMemberPeerOverlayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRetiringMemberPeerOverlayCleanupRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeMemberTrustWiringRunning`
@@ -1935,6 +2430,669 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RollbackPendingRecipientTrustDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BeginHostBindFreshUnplaced`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginHostBindFreshReplacement`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginHostBindRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginHostBindReplacementRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitHostBind`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HostRebound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefreshHostCapabilities`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeHost`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOrdinaryHostBindRequestRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOrdinaryHostBindRequestStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOrdinaryHostBindRequestCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOrdinaryHostBindRequestDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverReplacementHostBindRequestRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverReplacementHostBindRequestStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverReplacementHostBindRequestCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverReplacementHostBindRequestDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingGenerationHighwaterRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingGenerationHighwaterStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingGenerationHighwaterCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverHostBindingGenerationHighwaterDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverConfirmedHostBindingRevocationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverConfirmedHostBindingRevocationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverConfirmedHostBindingRevocationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverConfirmedHostBindingRevocationDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRouteInstallInstall`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeRouteRemovalBeforeUnwire`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRouteInstallRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRouteInstallStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRouteInstallCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRouteInstallDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackRouteInstallRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackRouteInstallStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackRouteInstallCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackRouteInstallDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteTurnDispatchSequenceAdvance`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRemoteTurnDispatchSequenceReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteTurnObligationFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteTurnObligationPendingReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteTurnObligationCommittedReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteTurnObligationResolvedReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordRemoteTurnObligationHistoricalReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationPresentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationPresentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationPresentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationPresentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortRemoteTurnObligationReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomePendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomePendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomePendingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomePendingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeDisposedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeDisposedReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeDisposedReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitRemoteTurnOutcomeDisposedReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationCommittedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationCommittedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationCommittedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationCommittedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationDisposedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationDisposedReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationDisposedReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRemoteTurnObligationDisposedReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomePresentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomePresentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomePresentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomePresentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomeReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomeReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomeReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgeRemoteTurnOutcomeReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposeRemoteTurnObligationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposeRemoteTurnObligationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposeRemoteTurnObligationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposeRemoteTurnObligationDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceStoppedFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceStoppedReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceCompletedFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPlacedCompletionLifecycleQuiesceCompletedReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPlacedCompletionLifecycleQuiesceRunningFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPlacedCompletionLifecycleQuiesceRunningReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPlacedCompletionLifecycleQuiesceStoppedRetireAll`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPlacedCompletionLifecycleQuiesceStoppedRetireAllReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPlacedCompletionLifecycleQuiesceCompletedRetireAll`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPlacedCompletionLifecycleQuiesceCompletedRetireAllReplay`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceAdvanceRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceAdvanceStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceAdvanceCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceAdvanceDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPlacedCompletionDispatchSequenceReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPendingPlacedCompletionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPendingPlacedCompletionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverPendingPlacedCompletionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverResolvedPlacedCompletionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverResolvedPlacedCompletionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverResolvedPlacedCompletionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCompletedWithCleanupCustody`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationFresh`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationPendingReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationPendingReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationPendingReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationResolvedReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationResolvedReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationResolvedReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationHistoricalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationHistoricalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationHistoricalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordPlacedCompletionObligationHistoricalReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationPendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationPendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationPendingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationTerminalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationTerminalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationTerminalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestPlacedCompletionCancellationTerminalReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomePendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomePendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomePendingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomeReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomeReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomeReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomeHistoricalReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomeHistoricalReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomeHistoricalReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolvePlacedCompletionOutcomeHistoricalReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClosePlacedCompletionOutcomePendingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClosePlacedCompletionOutcomePendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClosePlacedCompletionOutcomePendingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClosePlacedCompletionOutcomeReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClosePlacedCompletionOutcomeReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClosePlacedCompletionOutcomeReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClosePlacedCompletionOutcomeReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedCompletionOutcomePresentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedCompletionOutcomePresentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedCompletionOutcomePresentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedCompletionOutcomeReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedCompletionOutcomeReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedCompletionOutcomeReplayCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AcknowledgePlacedCompletionOutcomeReplayDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedCompletionOutcomeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedCompletionOutcomeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedCompletionOutcomeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DisposePlacedCompletionOutcomeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GrantOperatorScopes`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorScopesAll`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorScopesPartial`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorScopesAbsent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionAdmittedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionAdmittedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionAdmittedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionAdmittedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionUnknownIdentityRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionUnknownIdentityStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionUnknownIdentityCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionUnknownIdentityDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionSenderKeyMismatchRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionSenderKeyMismatchStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionSenderKeyMismatchCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionSenderKeyMismatchDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleGenerationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleGenerationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleGenerationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleGenerationDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleFenceRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleFenceStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleFenceCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleFenceDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleSessionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleSessionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleSessionDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionNoPlacementRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionNoPlacementStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionNoPlacementCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionNoPlacementDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostBindingGenerationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostBindingGenerationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostBindingGenerationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionStaleHostBindingGenerationDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionHostRevokedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionHostRevokedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionHostRevokedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberOperatorAdmissionHostRevokedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchLocalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchLocalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchLocalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRemoteTurnDirectiveRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRemoteTurnDirectiveStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRemoteTurnDirectiveCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRejectedOverlayAutonomousRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRejectedOverlayAutonomousStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRejectedOverlayAutonomousCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRejectedHostIncapableRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRejectedHostIncapableStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyFlowStepDispatchRejectedHostIncapableCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CommitSupervisorRotationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1963,6 +3121,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SubscribeAgentEventsDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubscribeAgentEventsExternalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubscribeAgentEventsExternalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubscribeAgentEventsExternalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SubscribeAgentEventsExternalDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SubscribeAgentEventsMissingMemberRunning`
@@ -2271,6 +3441,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeFlowRunReducerCommandFailStepEscalating`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeFlowRunReducerCommandSkipStep`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2281,6 +3454,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeFlowRunReducerCommandCancelStep`
@@ -2400,6 +3576,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinishRunRunningZero`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CompleteFlowStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteFlowStoppedZero`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteFlowCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteFlowCompletedZero`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteFlowDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteFlowDestroyedZero`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishRunStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishRunStoppedZero`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishRunCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishRunCompletedZero`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishRunDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FinishRunDestroyedZero`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRetirePendingSpawnDispositionCancelCommittedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2420,16 +3632,22 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `RetireRunningReleasing`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+  - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+- `RetireRemoteReleasingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireRemoteConfirmedRevokedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireRunningPreservingBinding`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+  - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireRunningNoBinding`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+  - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireStoppedReleasing`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+  - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RequestPendingSessionIngressDetachForMobDestroyRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2448,12 +3666,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SessionIngressDetachFailedForMobDestroyStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RetireRemoteReleasingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireRemoteConfirmedRevokedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RetireStoppedPreservingBinding`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+  - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireStoppedNoBinding`
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
-  - scenarios: `retire-respawn-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
+  - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireAbsentRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2510,7 +3734,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `RespawnRunning`
   - anchors: (unclaimed)
-  - scenarios: `retire-respawn-destroy`
+  - scenarios: `retire-recover-destroy`
 - `CancelAllWorkRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2610,6 +3834,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AppendLifecycleJournal`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PersistPlacedCompletionLifecycleIntent`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AppendOperatorActionProvenance`
@@ -2921,15 +4148,90 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdaptiveRunTerminalized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestHostBind`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HostRegistered`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HostReboundRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HostCapabilitiesRefreshed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HostRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PersistPendingPlacedSpawn`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestMemberMaterialization`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitPlacedSpawnCarrier`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PromoteCommittedPlacedSpawnCarrierBinding`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PlacedCarrierCleanupRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PlacedCarrierCleanupAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PlacedCarrierCleanupResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestMemberRelease`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RouteInstallRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberOperatorAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberOperatorRejected`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FlowStepDispatchClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeExternalAgentEventSubscription`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GrantRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GrantRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `bindings_require_known_identity`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `identity_runtime_material_matches_runtime_binding`
+- `placed_spawn_pending_attempt_is_complete`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `member_spawn_material_matches_runtime_binding`
+- `pending_autonomous_placed_spawn_is_an_exact_pending_attempt`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_spawn_committed_attempt_is_complete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_spawn_attempt_is_not_both_pending_and_committed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `identity_runtime_history_is_coherent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `current_runtime_binding_has_history`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `pending_respawn_topology_has_no_current_runtime`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `member_peer_endpoint_material_is_coherent`
@@ -2980,6 +4282,84 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `implicit_delegation_requires_cleanup`
   - anchors: `mob_owner_bridge_cleanup_authority`
   - scenarios: `owner-bridge-cleanup`
+- `placement_never_targets_half_bound_host`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_members_require_owner_bridge`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_endpoints_subset_of_bound_hosts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `host_epochs_present_for_hosts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `host_binding_generations_cover_tracked_hosts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `replacement_host_bind_requests_are_exact_and_disjoint`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `host_capability_maps_cover_bound_hosts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `remote_committed_members_have_peer_endpoints`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_member_peer_ids_are_unique`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_member_peer_ids_are_disjoint_from_hosts`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `remote_turn_custody_sets_are_pairwise_disjoint`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_completion_custody_is_well_partitioned`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_completion_lifecycle_intent_matches_quiesce`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_completion_lifecycle_intent_owns_no_adaptive_custody`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_completion_custody_is_input_and_sequence_injective`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_kickoff_custody_sets_are_disjoint`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_kickoff_custody_is_identity_and_input_injective`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `retained_placed_kickoff_correlations_are_injective_and_live`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_kickoff_and_flow_correlations_are_disjoint`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_completion_correlations_are_disjoint`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `pending_route_ledger_is_install_only`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `remote_turn_custody_requires_exact_current_placement`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_completion_custody_requires_exact_current_placement`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_kickoff_custody_requires_exact_current_placement`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `remote_turn_custody_sequences_are_bounded_and_injective`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `placed_completion_sequences_are_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime};
 use tokio::time as tokio_time;
 
 const CALLABLE_POLICY_PATH: &str = "adaptive/policies.toml";
+const LAYER_DESTROY_RETRY_INITIAL: Duration = Duration::from_millis(25);
+const LAYER_DESTROY_RETRY_MAX: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MobpackRunOutcome {
@@ -140,27 +142,63 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
     async fn provision_layer(
         &mut self,
         compiled: &crate::adaptive::CompiledLayer,
-    ) -> Result<Self::Layer, crate::adaptive::AdaptiveError> {
-        let mut builder = MobBuilder::from_mobpack(
+    ) -> crate::adaptive::AdaptiveLayerProvision<Self::Layer> {
+        let mut builder = match MobBuilder::from_mobpack(
             compiled.definition.clone(),
             BTreeMap::new(),
             MobStorage::in_memory(),
-        )?
-        .with_session_service(Arc::clone(&self.session_service));
+        ) {
+            Ok(builder) => builder.with_session_service(Arc::clone(&self.session_service)),
+            Err(error) => {
+                return crate::adaptive::AdaptiveLayerProvision::Failed {
+                    primary: error.into(),
+                    layer: None,
+                    spawned_members: 0,
+                };
+            }
+        };
         if let Some(adapter) = self.session_service.runtime_adapter() {
             builder = builder.with_runtime_adapter(adapter);
         }
-        let handle = builder.create().await?;
-        let spawn_results = handle.spawn_many(compiled.spawn_specs.clone()).await?;
+        let handle = match builder.create().await {
+            Ok(handle) => handle,
+            Err(error) => {
+                return crate::adaptive::AdaptiveLayerProvision::Failed {
+                    primary: error.into(),
+                    layer: None,
+                    spawned_members: 0,
+                };
+            }
+        };
+        let spawn_results = match handle.spawn_many(compiled.spawn_specs.clone()).await {
+            Ok(spawn_results) => spawn_results,
+            Err(error) => {
+                return crate::adaptive::AdaptiveLayerProvision::Failed {
+                    primary: error.into(),
+                    layer: Some(handle),
+                    // The aggregate call can fail after provisioning side
+                    // effects but before returning row receipts. Report the
+                    // conservative upper bound; joined destroy owns rollback.
+                    spawned_members: compiled.spawn_specs.len() as u64,
+                };
+            }
+        };
         if let Some(failure) = spawn_results
             .iter()
             .find_map(|result| result.as_ref().err())
         {
-            return Err(crate::adaptive::AdaptiveError::DriverRuntime(format!(
-                "mobpack layer spawn failed: {failure}"
-            )));
+            return crate::adaptive::AdaptiveLayerProvision::Failed {
+                primary: crate::adaptive::AdaptiveError::DriverRuntime(format!(
+                    "mobpack layer spawn failed: {failure}"
+                )),
+                layer: Some(handle),
+                // A failed row can be ambiguous after provisioning side
+                // effects. Report the conservative upper bound; destroy owns
+                // all actual materializations.
+                spawned_members: compiled.spawn_specs.len() as u64,
+            };
         }
-        Ok(handle)
+        crate::adaptive::AdaptiveLayerProvision::Ready(handle)
     }
 
     async fn start_layer_flow(
@@ -186,11 +224,44 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
 
     async fn cleanup_layer(
         &mut self,
-        _layer: Self::Layer,
-        _layer_id: &crate::adaptive::LayerId,
-        _attempt: u64,
+        layer: &Self::Layer,
+        layer_id: &crate::adaptive::LayerId,
+        attempt: u64,
     ) -> Result<crate::adaptive::AdaptiveLayerCleanup, crate::adaptive::AdaptiveError> {
-        Ok(crate::adaptive::AdaptiveLayerCleanup::Destroyed)
+        let mut retry_delay = LAYER_DESTROY_RETRY_INITIAL;
+        loop {
+            match layer.destroy().await {
+                Ok(_) => return Ok(crate::adaptive::AdaptiveLayerCleanup::Destroyed),
+                Err(error) => {
+                    let actor_channel_closed = matches!(
+                        &error,
+                        crate::MobDestroyError::Mob(
+                            MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed
+                        )
+                    );
+                    if actor_channel_closed
+                        && matches!(
+                            layer.status().await,
+                            Ok(crate::runtime::MobState::Destroyed)
+                        )
+                    {
+                        // The actor publishes its terminal phase before
+                        // exiting. A closed command/reply channel plus that
+                        // watch proof is equivalent to the lost success ACK.
+                        return Ok(crate::adaptive::AdaptiveLayerCleanup::Destroyed);
+                    }
+                    tracing::warn!(
+                        layer_id = layer_id.as_str(),
+                        attempt,
+                        error = %error,
+                        retry_delay_ms = retry_delay.as_millis(),
+                        "adaptive mobpack child destroy incomplete; retaining handle and retrying",
+                    );
+                    tokio_time::sleep(retry_delay).await;
+                    retry_delay = retry_delay.saturating_mul(2).min(LAYER_DESTROY_RETRY_MAX);
+                }
+            }
+        }
     }
 }
 

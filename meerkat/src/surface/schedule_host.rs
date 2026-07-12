@@ -1073,7 +1073,7 @@ fn completion_wait_failure_reason(error: &CompletionWaitError) -> DeliveryComple
         CompletionWaitError::ChannelClosed => {
             DeliveryCompletionFailureReason::RuntimeCompletionChannelClosed
         }
-        CompletionWaitError::AuthorityUnavailable(_) => {
+        CompletionWaitError::AttachmentReplaced | CompletionWaitError::AuthorityUnavailable(_) => {
             DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable
         }
     }

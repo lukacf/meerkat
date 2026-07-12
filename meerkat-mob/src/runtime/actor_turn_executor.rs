@@ -1,9 +1,14 @@
 use super::handle::MobHandle;
 use super::provisioner::MobProvisioner;
-use super::turn_executor::{
-    ActorTurnTicket, FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition,
+use super::remote_flow_ticket::{
+    MobHandleObligationResolver, REMATERIALIZED_STEP_FAILURE_REASON, RemoteFlowTicketRegistry,
+    RemoteTurnObligationPump, TurnDirectiveDelivery,
 };
-use crate::error::MobError;
+use super::turn_executor::{
+    ActorTurnTicket, FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,
+    RemoteTurnTicket, TimeoutDisposition,
+};
+use crate::error::{FlowStepDispatchRejectKind, MobError};
 use crate::event::MemberRef;
 use crate::ids::{AgentIdentity, RunId, StepId};
 use crate::machines::mob_machine as mob_dsl;
@@ -14,6 +19,7 @@ use futures::FutureExt;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
+use meerkat_core::turn_terminal::TurnTerminalClassifier;
 use meerkat_core::types::{ContentInput, SessionId};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -24,20 +30,41 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 pub struct ActorFlowTurnExecutor {
     handle: MobHandle,
     provisioner: Arc<dyn MobProvisioner>,
+    /// One registry per mob (DEC-P6F-6): the executor arms/disarms; the
+    /// events-lane poll pump feeds it through the same Arc (obtained via
+    /// [`Self::remote_flow_ticket_registry`]).
+    registry: Arc<RemoteFlowTicketRegistry>,
+    /// A17 pump-liveness hook, installed by the events lane at mob build
+    /// (`install_remote_turn_obligation_pump`). Shared across executor
+    /// clones so the wiring survives the builder's clone-then-erase.
+    obligation_pump: Arc<std::sync::OnceLock<Arc<dyn RemoteTurnObligationPump>>>,
 }
 
 impl ActorFlowTurnExecutor {
     pub fn new(handle: MobHandle, provisioner: Arc<dyn MobProvisioner>) -> Self {
+        let registry = Arc::new(RemoteFlowTicketRegistry::new(Arc::new(
+            MobHandleObligationResolver {
+                handle: handle.clone(),
+            },
+        )));
         Self {
             handle,
             provisioner,
+            registry,
+            obligation_pump: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
-    fn actor_ticket(ticket: FlowTurnTicket) -> Arc<ActorTurnTicket> {
-        match ticket {
-            FlowTurnTicket::Actor(ticket) => ticket,
-        }
+    /// The ONE registry instance shared by this executor and the member
+    /// event pump (named hand-off hook, FLAG-P6F-5).
+    pub fn remote_flow_ticket_registry(&self) -> Arc<RemoteFlowTicketRegistry> {
+        Arc::clone(&self.registry)
+    }
+
+    /// Install the pump-liveness hook (events lane wires this at mob build;
+    /// a second install is a no-op — the first wiring wins).
+    pub fn install_remote_turn_obligation_pump(&self, pump: Arc<dyn RemoteTurnObligationPump>) {
+        let _ = self.obligation_pump.set(pump);
     }
 
     fn project_member_ref_session_binding(
@@ -106,113 +133,26 @@ impl ActorFlowTurnExecutor {
         E: Send + 'static,
         F: FnMut(E) -> AgentEvent + Send + 'static,
     {
+        // Thin shell over the ONE shared terminal classifier (DEC-P6F-8
+        // consumer #1): forward every event for display, feed the fold, send
+        // the classified terminal. Terminal semantics live in meerkat-core;
+        // a second terminal-event list here would be the split-terminality
+        // bug class by construction (gotcha 15).
         tokio::spawn(async move {
-            let mut completion_tx = Some(completion_tx);
-            let mut pending_completed_run: Option<(String, Option<serde_json::Value>)> = None;
+            let mut classifier = TurnTerminalClassifier::new();
             while let Some(event) = events.recv().await {
                 let payload = extract_payload(event);
                 if let (Some(tx), Some(frame)) = (&scoped_event_tx, &scoped_frame) {
                     let scoped = ScopedAgentEvent::new(vec![frame.clone()], payload.clone());
                     let _ = tx.send(scoped).await;
                 }
-                match payload {
-                    AgentEvent::RunCompleted {
-                        result,
-                        structured_output,
-                        extraction_required,
-                        ..
-                    } => {
-                        if extraction_required {
-                            pending_completed_run = Some((result, structured_output));
-                            continue;
-                        }
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Completed {
-                                output: result,
-                                structured_output,
-                            });
-                        }
-                        return;
-                    }
-                    AgentEvent::ExtractionSucceeded {
-                        structured_output, ..
-                    } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let (output, _) = pending_completed_run
-                                .take()
-                                .unwrap_or_else(|| (structured_output.to_string(), None));
-                            let _ = tx.send(FlowTurnOutcome::Completed {
-                                output,
-                                structured_output: Some(structured_output),
-                            });
-                        }
-                        return;
-                    }
-                    AgentEvent::ExtractionFailed {
-                        last_output,
-                        attempts,
-                        reason,
-                        ..
-                    } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let (output, _) =
-                                pending_completed_run.take().unwrap_or((last_output, None));
-                            let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: format!(
-                                    "structured output extraction failed after {attempts} attempt(s): {reason}; last_output={output:?}"
-                                ),
-                            });
-                        }
-                        return;
-                    }
-                    AgentEvent::InteractionComplete {
-                        result,
-                        structured_output,
-                        ..
-                    } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Completed {
-                                output: result,
-                                structured_output,
-                            });
-                        }
-                        return;
-                    }
-                    AgentEvent::InteractionCallbackPending {
-                        tool_name, args, ..
-                    } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: format!("callback pending for tool '{tool_name}': {args}"),
-                            });
-                        }
-                        return;
-                    }
-                    AgentEvent::RunFailed { error_report, .. } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: error_report.message,
-                            });
-                        }
-                        return;
-                    }
-                    AgentEvent::InteractionFailed { reason, .. } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: reason.to_string(),
-                            });
-                        }
-                        return;
-                    }
-                    _ => {}
+                if let Some(terminal) = classifier.observe(&payload) {
+                    let _ = completion_tx.send(FlowTurnOutcome::from(terminal.outcome));
+                    return;
                 }
             }
 
-            if let Some(tx) = completion_tx {
-                let _ = tx.send(FlowTurnOutcome::Failed {
-                    reason: "turn event stream closed before terminal outcome".to_string(),
-                });
-            }
+            let _ = completion_tx.send(FlowTurnOutcome::from(classifier.close().outcome));
         })
     }
 
@@ -261,6 +201,101 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             .await?
             .ok_or_else(|| MobError::MemberNotFound(target.clone()))?;
 
+        // DEC-P6F-1: consult the machine BEFORE any delivery. This is a
+        // mailbox command round-trip that COMPLETES before any bridge send
+        // begins; `dispatch` itself runs on the flow-run task (spawned by
+        // `FlowEngine`), never on the actor loop (ADJ-P4-12).
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifyFlowStepDispatch {
+                run_id: mob_dsl::RunId::from(run_id.to_string()),
+                step_id: mob_dsl::StepId::from(step_id.to_string()),
+                target: mob_dsl::AgentIdentity(target.to_string()),
+                overlay_present: turn_tool_overlay.is_some(),
+            })
+            .await?;
+        let dispatch = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::FlowStepDispatchClassified { dispatch, .. } => {
+                    Some(dispatch)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted flow-step dispatch classification but emitted no verdict"
+                        .into(),
+                )
+            })?;
+
+        match dispatch {
+            mob_dsl::FlowStepDispatchKind::Local => {
+                self.dispatch_local(entry, run_id, step_id, target, message, turn_tool_overlay)
+                    .await
+            }
+            mob_dsl::FlowStepDispatchKind::RemoteTurnDirective => {
+                self.dispatch_remote_turn_directive(
+                    entry,
+                    run_id,
+                    step_id,
+                    target,
+                    message,
+                    turn_tool_overlay,
+                )
+                .await
+            }
+            // Typed step failure AT DISPATCH — no delivery is ever sent; one
+            // machine arm, one error variant, identical local and remote
+            // (§18.8:1000/:1001). The old shell overlay re-check is DELETED:
+            // the `not_overlay_autonomous` guards on the admitting arms make
+            // an overlay+autonomous combination unreachable (DEC-P6F-2).
+            mob_dsl::FlowStepDispatchKind::RejectedOverlayAutonomous => {
+                Err(MobError::FlowStepDispatchRejected {
+                    target: target.clone(),
+                    kind: FlowStepDispatchRejectKind::OverlayAutonomous,
+                })
+            }
+            mob_dsl::FlowStepDispatchKind::RejectedHostIncapable => {
+                Err(MobError::FlowStepDispatchRejected {
+                    target: target.clone(),
+                    kind: FlowStepDispatchRejectKind::HostIncapable,
+                })
+            }
+        }
+    }
+
+    async fn await_terminal(
+        &self,
+        ticket: FlowTurnTicket,
+        timeout: Duration,
+    ) -> Result<FlowTurnOutcome, MobError> {
+        match ticket {
+            FlowTurnTicket::Actor(ticket) => self.await_actor_terminal(ticket, timeout).await,
+            FlowTurnTicket::Remote(ticket) => self.await_remote_terminal(ticket, timeout).await,
+        }
+    }
+
+    async fn on_timeout(&self, ticket: FlowTurnTicket) -> Result<TimeoutDisposition, MobError> {
+        match ticket {
+            FlowTurnTicket::Actor(ticket) => self.on_actor_timeout(ticket).await,
+            FlowTurnTicket::Remote(ticket) => self.on_remote_timeout(ticket).await,
+        }
+    }
+}
+
+impl ActorFlowTurnExecutor {
+    /// Today's local dispatch path, byte-for-byte minus the deleted shell
+    /// overlay reject (DEC-P6F-2 — the machine classification owns it).
+    async fn dispatch_local(
+        &self,
+        entry: crate::roster::RosterEntry,
+        run_id: &RunId,
+        step_id: &StepId,
+        target: &AgentIdentity,
+        message: ContentInput,
+        turn_tool_overlay: Option<TurnToolOverlay>,
+    ) -> Result<FlowTurnTicket, MobError> {
         let (completion_tx, completion_rx) = oneshot::channel::<FlowTurnOutcome>();
         let scoped_event_tx = self.handle.flow_streams.lock().await.get(run_id).cloned();
         let scope_frame = StreamScopeFrame::MobMember {
@@ -272,12 +307,6 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         };
         let bridge_handle = match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
-                if turn_tool_overlay.is_some() {
-                    return Err(MobError::Internal(format!(
-                        "turn tool overlay cannot be enforced for autonomous host member '{target}'; \
-                         use turn_driven runtime mode for steps with allowed_tools/blocked_tools"
-                    )));
-                }
                 let bridge_session_id = self
                     .handle
                     .resolve_bridge_session_id(&AgentIdentity::from(target.as_str()))
@@ -374,12 +403,176 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         })))
     }
 
-    async fn await_terminal(
+    /// Remote (placed-member) dispatch: the ONE delivery command upgraded
+    /// with the typed turn directive (§18 O1), obligation choreography per
+    /// DEC-P6F-7 (record → arm → send; unwind on failure).
+    async fn dispatch_remote_turn_directive(
         &self,
-        ticket: FlowTurnTicket,
+        entry: crate::roster::RosterEntry,
+        run_id: &RunId,
+        step_id: &StepId,
+        target: &AgentIdentity,
+        message: ContentInput,
+        turn_tool_overlay: Option<TurnToolOverlay>,
+    ) -> Result<FlowTurnTicket, MobError> {
+        // Fail closed BEFORE recording anything: a remote step without the
+        // A17 pump keep-alive could never observe its terminal.
+        let pump = self.obligation_pump.get().cloned().ok_or_else(|| {
+            MobError::Internal(
+                "remote flow dispatch requires an installed member event pump (A17); \
+                 no pump hook is wired on this composition"
+                    .to_string(),
+            )
+        })?;
+
+        // Fail-closed overlay projection (FLAG-P6F-8 / ADJ-P6-12):
+        // flow-lowered overlays always carry an empty dispatch_context, so
+        // this is lossless for flow steps; anything else is a typed error.
+        let tool_overlay = match turn_tool_overlay {
+            Some(overlay) => Some(overlay.into_public().map_err(|error| {
+                MobError::Internal(format!(
+                    "flow-lowered turn tool overlay failed public projection for '{target}': {error}"
+                ))
+            })?),
+            None => None,
+        };
+        let directive = super::bridge_protocol::BridgeTurnDirective {
+            correlation: super::bridge_protocol::BridgeTurnCorrelation {
+                run_id: run_id.to_string(),
+                step_id: step_id.to_string(),
+            },
+            tool_overlay,
+        };
+        // The caller mints and owns input_id (DEC-P6F-4): it is the
+        // obligation key, the journal key, and the ticket key.
+        let input_id = meerkat_core::time_compat::new_uuid_v7().to_string();
+        // Sequence allocation and custody admission are one actor-serialized
+        // operation. Fan-out dispatches never race a watch projection or
+        // exhaust a retry cap.
+        let intent = crate::run::MobRunRemoteTurnIntent {
+            obligation: crate::event::RemoteTurnObligationEvent {
+                agent_identity: target.clone(),
+                // Actor fills exact machine-owned placement and sequence.
+                host_id: String::new(),
+                host_binding_generation: 0,
+                member_session_id: String::new(),
+                generation: entry.generation,
+                fence_token: entry.fence_token,
+                dispatch_sequence: 0,
+                input_id: input_id.clone(),
+                run_id: run_id.clone(),
+                step_id: step_id.clone(),
+            },
+            content: message.clone(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            expected_member: Default::default(),
+            directive: directive.clone(),
+        };
+        let reserved = self.handle.reserve_remote_turn_obligation(intent).await?;
+        let obligation = &reserved.intent.obligation;
+        // The actor command above durably recorded the obligation before
+        // committing Pending custody. It continues to completion even if this
+        // flow future is canceled while awaiting its reply.
+        // Arm the ticket, then keep the pump alive for the obligation.
+        let completion_rx = self.registry.arm_exact(
+            target,
+            &input_id,
+            run_id,
+            step_id,
+            &reserved.intent.expected_member,
+        );
+        pump.ensure_pump_for_obligation(target);
+
+        // The directive send (the bridge send runs HERE, on the flow
+        //    task — never awaited on the actor loop; the machine round-trips
+        //    above already completed through the mailbox).
+        match self
+            .provisioner
+            .deliver_turn_directive(
+                &reserved.member_ref,
+                TurnDirectiveDelivery {
+                    input_id: obligation.input_id.clone(),
+                    content: reserved.intent.content.clone(),
+                    handling_mode: reserved.intent.handling_mode,
+                    expected_member: reserved.intent.expected_member.clone(),
+                    directive: reserved.intent.directive.clone(),
+                },
+            )
+            .await
+        {
+            Ok(_receipt) => Ok(FlowTurnTicket::Remote(Arc::new(RemoteTurnTicket {
+                run_id: run_id.clone(),
+                step_id: step_id.clone(),
+                target: target.clone(),
+                host_id: obligation.host_id.clone(),
+                host_binding_generation: obligation.host_binding_generation,
+                member_session_id: obligation.member_session_id.clone(),
+                generation: obligation.generation,
+                fence_token: obligation.fence_token,
+                dispatch_sequence: obligation.dispatch_sequence,
+                input_id,
+                completion_rx: Mutex::new(Some(completion_rx)),
+            }))),
+            Err(error) => {
+                // A timed-out send may still have admitted the turn. Keep
+                // pending custody and return a terminal ticket so FlowEngine
+                // first appends StepTargetFailed and only then commits it.
+                // Controlling-caused fault attribution (T-F6): the placed
+                // respawn marks the lane STRICTLY BEFORE its remote release
+                // tears the member transport, so a dispatch unwinding on
+                // that teardown is the respawn's own doing — surface the
+                // SAME typed generation failure the pump's generation watch
+                // produces. An unmarked lane keeps the raw error (no
+                // blanket rewriting of comms faults).
+                if let MobError::BridgeDeliveryRejected { cause, .. } = &error {
+                    self.registry.fail_armed_certified_no_effect(
+                        target,
+                        &input_id,
+                        error.to_string(),
+                        cause.as_ref().clone(),
+                    );
+                } else if self.registry.is_member_rematerializing(target) {
+                    tracing::warn!(
+                        target = %target,
+                        input_id = %input_id,
+                        error = %error,
+                        "remote dispatch unwound under a rematerializing mark; attributing typed"
+                    );
+                    self.registry.fail_armed(
+                        target,
+                        &input_id,
+                        REMATERIALIZED_STEP_FAILURE_REASON.to_string(),
+                    );
+                } else {
+                    tracing::warn!(
+                        target = %target,
+                        input_id = %input_id,
+                        error = %error,
+                        "remote delivery outcome is ambiguous; retaining the exact armed intent for same-id reconciliation"
+                    );
+                }
+                Ok(FlowTurnTicket::Remote(Arc::new(RemoteTurnTicket {
+                    run_id: run_id.clone(),
+                    step_id: step_id.clone(),
+                    target: target.clone(),
+                    host_id: obligation.host_id.clone(),
+                    host_binding_generation: obligation.host_binding_generation,
+                    member_session_id: obligation.member_session_id.clone(),
+                    generation: obligation.generation,
+                    fence_token: obligation.fence_token,
+                    dispatch_sequence: obligation.dispatch_sequence,
+                    input_id,
+                    completion_rx: Mutex::new(Some(completion_rx)),
+                })))
+            }
+        }
+    }
+
+    async fn await_actor_terminal(
+        &self,
+        ticket: Arc<ActorTurnTicket>,
         timeout: Duration,
     ) -> Result<FlowTurnOutcome, MobError> {
-        let ticket = Self::actor_ticket(ticket);
         let completion_rx = {
             let mut lock = ticket.completion_rx.lock().await;
             lock.take().ok_or_else(|| {
@@ -400,14 +593,41 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 }
                 Ok(FlowTurnOutcome::Failed {
                     reason: "turn completion channel closed".to_string(),
+                    disposition: FlowTurnFailureDisposition::ObservedTerminal,
                 })
             }
             Err(_) => Err(MobError::FlowTurnTimedOut),
         }
     }
 
-    async fn on_timeout(&self, ticket: FlowTurnTicket) -> Result<TimeoutDisposition, MobError> {
-        let ticket = Self::actor_ticket(ticket);
+    /// Remote await mirrors the Actor arm: oneshot under timeout; there is
+    /// no local bridge to join — the watcher IS the registry (DEC-P6F-5).
+    async fn await_remote_terminal(
+        &self,
+        ticket: Arc<RemoteTurnTicket>,
+        timeout: Duration,
+    ) -> Result<FlowTurnOutcome, MobError> {
+        let completion_rx = {
+            let mut lock = ticket.completion_rx.lock().await;
+            lock.take().ok_or_else(|| {
+                MobError::Internal("flow turn ticket cannot be awaited twice".to_string())
+            })?
+        };
+
+        match tokio::time::timeout(timeout, completion_rx).await {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(_)) => Ok(FlowTurnOutcome::Failed {
+                reason: "turn completion channel closed".to_string(),
+                disposition: FlowTurnFailureDisposition::ObservedTerminal,
+            }),
+            Err(_) => Err(MobError::FlowTurnTimedOut),
+        }
+    }
+
+    async fn on_actor_timeout(
+        &self,
+        ticket: Arc<ActorTurnTicket>,
+    ) -> Result<TimeoutDisposition, MobError> {
         let Some(bridge_handle) = ticket.bridge_handle.lock().await.take() else {
             return Ok(TimeoutDisposition::Canceled);
         };
@@ -415,27 +635,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
 
         // Hard flow turn timeouts are never retryable; MobMachine owns the
         // detach-vs-cancel decision (and the orphan budget) from here.
-        let effects = self
-            .handle
-            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition {
-                timed_out_run_id: mob_dsl::RunId::from(run_id.to_string()),
-                retryable: false,
-            })
-            .await?;
-        let disposition = effects
-            .into_iter()
-            .find_map(|effect| match effect {
-                mob_dsl::MobMachineEffect::TurnTimeoutDispositionClassified {
-                    disposition, ..
-                } => Some(disposition),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                MobError::Internal(
-                    "MobMachine accepted turn-timeout observation but emitted no disposition"
-                        .into(),
-                )
-            })?;
+        let disposition = self.classify_turn_timeout_disposition(&run_id).await?;
 
         match disposition {
             mob_dsl::TurnTimeoutDisposition::Detached => {
@@ -454,6 +654,57 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 Ok(TimeoutDisposition::Canceled)
             }
         }
+    }
+
+    /// Remote timeout = LOCAL PARITY (ADJ-P6-9 / FLAG-P6F-4): for BOTH
+    /// dispositions, disarm the ticket and resolve the obligation — the
+    /// timeout ladder disposes the step. Neither disposition sends
+    /// `HardCancelMember` (the local Canceled arm only aborts the local
+    /// watcher and never cancels the member's turn; the remote arm mirrors
+    /// that honestly — hard cancel stays an explicit verb). The remote turn
+    /// keeps running on its host; its journal record, when it lands, is
+    /// consumed as a display-only row.
+    async fn on_remote_timeout(
+        &self,
+        ticket: Arc<RemoteTurnTicket>,
+    ) -> Result<TimeoutDisposition, MobError> {
+        let disposition = self
+            .classify_turn_timeout_disposition(&ticket.run_id)
+            .await?;
+
+        self.registry.disarm(&ticket.target, &ticket.input_id);
+        match disposition {
+            mob_dsl::TurnTimeoutDisposition::Detached => Ok(TimeoutDisposition::Detached),
+            mob_dsl::TurnTimeoutDisposition::Canceled
+            | mob_dsl::TurnTimeoutDisposition::Retryable => Ok(TimeoutDisposition::Canceled),
+        }
+    }
+
+    async fn classify_turn_timeout_disposition(
+        &self,
+        run_id: &RunId,
+    ) -> Result<mob_dsl::TurnTimeoutDisposition, MobError> {
+        let effects = self
+            .handle
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ClassifyTurnTimeoutDisposition {
+                timed_out_run_id: mob_dsl::RunId::from(run_id.to_string()),
+                retryable: false,
+            })
+            .await?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::TurnTimeoutDispositionClassified {
+                    disposition, ..
+                } => Some(disposition),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted turn-timeout observation but emitted no disposition"
+                        .into(),
+                )
+            })
     }
 }
 
@@ -566,7 +817,7 @@ mod tests {
             .expect("send event");
 
         match completion_rx.await.expect("completion outcome") {
-            FlowTurnOutcome::Failed { reason } => {
+            FlowTurnOutcome::Failed { reason, .. } => {
                 assert_eq!(reason, "LLM failure terminal turn");
             }
             other => panic!("expected failed outcome, got {other:?}"),
@@ -645,7 +896,7 @@ mod tests {
             .expect("send extraction failed event");
 
         match completion_rx.await.expect("completion outcome") {
-            FlowTurnOutcome::Failed { reason } => {
+            FlowTurnOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("structured output extraction failed after 2 attempt(s)"),
                     "reason should preserve extraction attempts: {reason}"

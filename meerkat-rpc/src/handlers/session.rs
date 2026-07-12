@@ -33,7 +33,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse, bounded_collection_limit, bounded_collection_offset};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
-use meerkat::surface::{RequestContext, request_action};
+use meerkat::surface::RequestContext;
 
 // ---------------------------------------------------------------------------
 // Param types
@@ -263,6 +263,16 @@ pub async fn create_session_with_params(
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
+    if request_context
+        .as_ref()
+        .is_some_and(RequestContext::cancel_already_requested)
+    {
+        return RpcResponse::error(
+            id,
+            error::REQUEST_CANCELLED,
+            "request cancelled before start",
+        );
+    }
     let model_was_explicit = params.model.is_some();
     let provider_was_explicit = params.provider.is_some();
     let auth_binding_was_explicit = params.auth_binding.is_some();
@@ -452,46 +462,10 @@ pub async fn create_session_with_params(
     }
 
     if let Some(context) = request_context.as_ref() {
-        let runtime_adapter_for_cancel = Arc::clone(runtime_adapter);
-        let session_id_for_cancel = session_id.clone();
-        let install = context
-            .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime_adapter = Arc::clone(&runtime_adapter_for_cancel);
-                let session_id = session_id_for_cancel.clone();
-                async move {
-                    let _ = runtime_adapter
-                        .hard_cancel_current_run(&session_id, "RPC request cancelled")
-                        .await;
-                }
-            }))
-            .await;
-
-        let runtime_for_cleanup = Arc::clone(&runtime);
-        let session_id_for_cleanup = session_id.clone();
-        context.set_unpublished_cleanup(request_action(move || {
-            let runtime = Arc::clone(&runtime_for_cleanup);
-            let session_id = session_id_for_cleanup.clone();
-            async move {
-                if let Err(error) = runtime.archive_session(&session_id).await {
-                    tracing::error!(
-                        session_id = %session_id,
-                        error = %error.message,
-                        "RPC unpublished create archive failed; leaving runtime state registered"
-                    );
-                }
-            }
-        }));
-        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            if let Err(error) = runtime.archive_session(&session_id).await {
-                return RpcResponse::error(
-                    id,
-                    error.code,
-                    format!(
-                        "request cancelled before start but archive cleanup failed: {}",
-                        error.message
-                    ),
-                );
-            }
+        // The session is already durably discoverable at this point. A
+        // cancelled create may leave it resumable; before admission there is
+        // no exact input/run owned by this request to interrupt or roll back.
+        if context.cancel_already_requested() {
             return RpcResponse::error(
                 id,
                 error::REQUEST_CANCELLED,
@@ -531,9 +505,10 @@ pub async fn create_session_with_params(
         let prompt_for_turn = params.prompt.clone();
         let injected_context_for_turn = injected_context.clone();
         let skill_refs_for_turn = skill_refs.clone();
+        let request_context_for_turn = request_context.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
-                .start_turn_via_runtime(
+                .start_turn_via_runtime_with_request_context(
                     &sid_for_turn,
                     prompt_for_turn,
                     injected_context_for_turn,
@@ -542,6 +517,7 @@ pub async fn create_session_with_params(
                     None,
                     None,
                     None,
+                    request_context_for_turn,
                 )
                 .await
             {
@@ -575,7 +551,7 @@ pub async fn create_session_with_params(
         }
     } else {
         match runtime
-            .start_turn_via_runtime(
+            .start_turn_via_runtime_with_request_context(
                 &session_id,
                 params.prompt,
                 injected_context,
@@ -584,6 +560,7 @@ pub async fn create_session_with_params(
                 None,
                 None,
                 None,
+                request_context.clone(),
             )
             .await
         {

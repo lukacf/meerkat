@@ -49,6 +49,8 @@ jsonschema = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+url = { workspace = true }
 schemars = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -78,10 +80,20 @@ async-stream = { workspace = true }
 reqwest = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 meerkat-core = { workspace = true }
-meerkat-runtime = { workspace = true, features = ["test-support"] }
+meerkat-runtime = { workspace = true, features = ["test-support", "sqlite-store"] }
 meerkat-store = { workspace = true, features = ["jsonl"] }
 meerkat-machine-schema.workspace = true
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
+# Phase 6b live battery (cross_host_live.rs + support/live_plane.rs): the
+# fixture live plane composes the facade live surface + the meerkat-live
+# transport, and the scripted realtime factory rides the facade's featured
+# test-support module (ADJ-P6B-4, `test-realtime-fixtures` — landed by the
+# live-pipeline lane). Dev-only: the LIBRARY stays live-feature-free.
+meerkat = { workspace = true, features = ["live", "session-store", "jsonl-store", "test-realtime-fixtures"] }
+meerkat-live = { workspace = true }
+# T-C2 drives the returned bootstrap URL over a real WS client (pinned to
+# meerkat-live's tungstenite major).
+tokio-tungstenite = "0.29"
 
 # ## Features
 #

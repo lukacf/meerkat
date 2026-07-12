@@ -693,6 +693,7 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
     // Capture peer display label for error normalization before consuming the command.
     let peer_for_errors = match &command {
         CommsCommand::PeerMessage { to, .. }
+        | CommsCommand::IncarnationFencedPeerMessage { to, .. }
         | CommsCommand::PeerLifecycle { to, .. }
         | CommsCommand::PeerRequest { to, .. }
         | CommsCommand::PeerResponse { to, .. } => Some(to.label()),
@@ -744,6 +745,7 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
         .to_string();
     let dest_peer_id = match &command {
         CommsCommand::PeerMessage { to, .. }
+        | CommsCommand::IncarnationFencedPeerMessage { to, .. }
         | CommsCommand::PeerLifecycle { to, .. }
         | CommsCommand::PeerRequest { to, .. }
         | CommsCommand::PeerResponse { to, .. } => to.peer_id,
@@ -762,9 +764,11 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
             objective_id,
             ..
         } => {
+            reject_runtime_less_blob_blocks(blocks.as_deref())?;
             // The per-send taint override rides to the router's stamping
             // choke point even on the runtime-less fallback path.
-            ctx.router
+            let outcome = ctx
+                .router
                 .send_with_id(
                     dest_peer_id,
                     uuid::Uuid::new_v4(),
@@ -779,21 +783,89 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
                 )
                 .await
                 .map_err(|e| format_router_send_error(&dest_display, e))?;
-            Ok(json!({ "status": "sent", "kind": cmd_kind }))
+            Ok(sent_result(
+                &cmd_kind,
+                SendReceipt::PeerMessageSent {
+                    envelope_id: outcome.envelope_id,
+                    delivery: outcome.delivery,
+                },
+            ))
+        }
+        CommsCommand::IncarnationFencedPeerMessage {
+            body,
+            blocks,
+            content_taint,
+            handling_mode,
+            objective_id,
+            expected_recipient,
+            ..
+        } => {
+            reject_runtime_less_blob_blocks(blocks.as_deref())?;
+            let outcome = ctx
+                .router
+                .send_with_id(
+                    dest_peer_id,
+                    uuid::Uuid::new_v4(),
+                    crate::types::MessageKind::IncarnationFencedMessage {
+                        body,
+                        blocks,
+                        content_taint: None,
+                        handling_mode: Some(handling_mode),
+                        objective_id,
+                        expected_recipient,
+                    },
+                    content_taint,
+                )
+                .await
+                .map_err(|e| format_router_send_error(&dest_display, e))?;
+            Ok(sent_result(
+                &cmd_kind,
+                SendReceipt::PeerMessageSent {
+                    envelope_id: outcome.envelope_id,
+                    delivery: outcome.delivery,
+                },
+            ))
         }
         CommsCommand::PeerLifecycle { kind, params, .. } => {
-            ctx.router
+            let outcome = ctx
+                .router
                 .send(
                     dest_peer_id,
                     crate::types::MessageKind::Lifecycle { kind, params },
                 )
                 .await
                 .map_err(|e| format_router_send_error(&dest_display, e))?;
-            Ok(json!({ "status": "sent", "kind": cmd_kind }))
+            Ok(sent_result(
+                &cmd_kind,
+                SendReceipt::PeerLifecycleSent {
+                    envelope_id: outcome.envelope_id,
+                },
+            ))
         }
         CommsCommand::PeerRequest { .. } => Err(runtime_command_authority_unavailable_message()),
         CommsCommand::PeerResponse { .. } => Err(runtime_command_authority_unavailable_message()),
     }
+}
+
+fn reject_runtime_less_blob_blocks(blocks: Option<&[ContentBlock]>) -> Result<(), String> {
+    let has_sender_local_blob = blocks.is_some_and(|blocks| {
+        blocks.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Image {
+                    data: ImageData::Blob { .. },
+                    ..
+                }
+            )
+        })
+    });
+    if has_sender_local_blob {
+        return Err(
+            "tool_unavailable: runtime_less_blob_transport_unavailable: blob-backed comms blocks require a runtime blob store"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn runtime_command_authority_unavailable_message() -> String {
@@ -915,11 +987,7 @@ mod tests {
         PeerTransport, TrustedPeerDescriptor,
     };
     use parking_lot::Mutex;
-    use std::sync::LazyLock;
     use tokio::sync::Notify;
-
-    static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-        LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     fn extract_projection_send_response_args(text: &str) -> Value {
         let marker = "send_response with arguments ";
@@ -1216,19 +1284,56 @@ mod tests {
         )
     }
 
-    async fn make_runtime_less_inproc_context() -> (ToolContext, meerkat_core::comms::PeerId) {
-        let _lock = INPROC_REGISTRY_LOCK.lock().await;
-        crate::InprocRegistry::global().clear();
-
+    async fn make_runtime_less_trust_only_context() -> (ToolContext, meerkat_core::comms::PeerId) {
         let peer_keypair = Keypair::generate();
-        let (_receiver_inbox, receiver_sender) = crate::Inbox::new();
-        crate::InprocRegistry::global().register(
-            "test-peer",
-            peer_keypair.public_key(),
-            receiver_sender,
-        );
-
         make_trusted_runtime_less_context(&peer_keypair).await
+    }
+
+    async fn make_runtime_less_inproc_delivery_pair() -> (
+        ToolContext,
+        meerkat_core::comms::PeerId,
+        Arc<CommsRuntime>,
+        Arc<CommsRuntime>,
+    ) {
+        let nonce = uuid::Uuid::new_v4().simple();
+        let sender_name = format!("mcp-tools-runtime-less-sender-{nonce}");
+        let receiver_name = format!("mcp-tools-runtime-less-receiver-{nonce}");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).expect("sender runtime"));
+        let receiver =
+            Arc::new(CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime"));
+
+        add_generated_peer_projection_trust(
+            sender.as_ref(),
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                &receiver_name,
+                receiver.public_key().to_peer_id().to_string(),
+                *receiver.public_key().as_bytes(),
+                format!("inproc://{receiver_name}"),
+            )
+            .expect("receiver trusted peer descriptor"),
+            "install receiver trust",
+        )
+        .await;
+        add_generated_peer_projection_trust(
+            receiver.as_ref(),
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                &sender_name,
+                sender.public_key().to_peer_id().to_string(),
+                *sender.public_key().as_bytes(),
+                format!("inproc://{sender_name}"),
+            )
+            .expect("sender trusted peer descriptor"),
+            "install sender trust",
+        )
+        .await;
+
+        let receiver_peer_id = receiver.public_key().to_peer_id();
+        let context = ToolContext {
+            router: sender.router_arc(),
+            trusted_peers: sender.trusted_peers_shared(),
+            runtime: None,
+        };
+        (context, receiver_peer_id, sender, receiver)
     }
 
     #[test]
@@ -2297,7 +2402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_request_without_runtime_command_authority_fails_closed() {
-        let (ctx, peer_id) = make_runtime_less_inproc_context().await;
+        let (ctx, peer_id) = make_runtime_less_trust_only_context().await;
 
         let error = handle_tools_call(
             &ctx,
@@ -2316,13 +2421,11 @@ mod tests {
             error.contains("runtime_command_authority_unavailable"),
             "expected runtime command authority error, got: {error}"
         );
-
-        crate::InprocRegistry::global().clear();
     }
 
     #[tokio::test]
     async fn test_send_response_without_runtime_command_authority_fails_closed() {
-        let (ctx, peer_id) = make_runtime_less_inproc_context().await;
+        let (ctx, peer_id) = make_runtime_less_trust_only_context().await;
         let request_id = uuid::Uuid::new_v4();
 
         let error = handle_tools_call(
@@ -2342,8 +2445,6 @@ mod tests {
             error.contains("runtime_command_authority_unavailable"),
             "expected runtime command authority error, got: {error}"
         );
-
-        crate::InprocRegistry::global().clear();
     }
 
     #[tokio::test]
@@ -2479,6 +2580,97 @@ mod tests {
         assert_eq!(result["receipt"]["kind"], "peer_message_sent");
         assert_eq!(result["receipt"]["delivery"], "handed_off");
         assert!(result["receipt"].get("acked").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_less_inproc_send_message_returns_typed_delivery_outcome() {
+        let (ctx, peer_id, _sender, _receiver) = make_runtime_less_inproc_delivery_pair().await;
+
+        let result = handle_tools_call(
+            &ctx,
+            "send_message",
+            &json!({"peer_id": peer_id, "body": "hello", "handling_mode": "queue"}),
+        )
+        .await
+        .expect("runtime-less send_message should return a typed receipt");
+
+        assert_eq!(result["status"], "sent");
+        assert_eq!(result["kind"], "peer_message");
+        assert_eq!(result["receipt"]["kind"], "peer_message_sent");
+        assert_eq!(result["receipt"]["delivery"], "handed_off");
+        let envelope_id = result["receipt"]["envelope_id"]
+            .as_str()
+            .expect("receipt envelope_id must be a string");
+        assert_ne!(
+            uuid::Uuid::parse_str(envelope_id).expect("receipt envelope_id must be a UUID"),
+            uuid::Uuid::nil()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_less_send_message_rejects_sender_local_blob_before_transport() {
+        let (ctx, peer_id, _sender, _receiver) = make_runtime_less_inproc_delivery_pair().await;
+
+        let error = handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                "body": "generated image",
+                "blocks": [{
+                    "type": "image_ref",
+                    "source": "blob",
+                    "blob_id": "sha256:sender-local",
+                    "media_type": "image/png"
+                }],
+                "handling_mode": "queue"
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect_err("runtime-less transport cannot resolve a sender-local blob id");
+
+        assert!(error.contains("runtime_less_blob_transport_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_less_inproc_fenced_send_has_peer_message_receipt_parity() {
+        let (ctx, peer_id, _sender, _receiver) = make_runtime_less_inproc_delivery_pair().await;
+
+        let result = dispatch(
+            &ctx,
+            CommsCommand::IncarnationFencedPeerMessage {
+                to: PeerRoute::new(peer_id),
+                body: "fenced hello".to_string(),
+                blocks: None,
+                content_taint: None,
+                handling_mode: HandlingMode::Queue,
+                objective_id: None,
+                expected_recipient: meerkat_core::comms::PeerRecipientIncarnation {
+                    mob_id: "mob".to_string(),
+                    agent_identity: "worker".to_string(),
+                    host_id: "host".to_string(),
+                    binding_generation: 2,
+                    member_session_id: "session".to_string(),
+                    generation: 3,
+                    fence_token: 5,
+                },
+            },
+        )
+        .await
+        .expect("runtime-less fenced send should return a typed receipt");
+
+        assert_eq!(result["status"], "sent");
+        assert_eq!(result["kind"], "incarnation_fenced_peer_message");
+        assert_eq!(result["receipt"]["kind"], "peer_message_sent");
+        assert_eq!(result["receipt"]["delivery"], "handed_off");
+        let envelope_id = result["receipt"]["envelope_id"]
+            .as_str()
+            .expect("receipt envelope_id must be a string");
+        assert_ne!(
+            uuid::Uuid::parse_str(envelope_id).expect("receipt envelope_id must be a UUID"),
+            uuid::Uuid::nil()
+        );
     }
 
     #[tokio::test]

@@ -148,7 +148,8 @@ fn test_peer_input_candidate_from_interaction(
         from_peer: interaction.from.clone(),
         from_peer_id: peer_id,
         kind: match &interaction.content {
-            InteractionContent::Message { body, .. } => {
+            InteractionContent::Message { body, .. }
+            | InteractionContent::IncarnationFencedMessage { body, .. } => {
                 PeerIngressEnvelopeKind::Message { body: body.clone() }
             }
             InteractionContent::Request { intent, params, .. } => {
@@ -179,7 +180,10 @@ fn test_peer_input_candidate_from_interaction(
         .expect("generated envelope classification should echo the canonical sender peer id");
     let classification = admission.classification;
     let convention = match &interaction.content {
-        InteractionContent::Message { .. } => meerkat_core::PeerIngressConvention::Message,
+        InteractionContent::Message { .. }
+        | InteractionContent::IncarnationFencedMessage { .. } => {
+            meerkat_core::PeerIngressConvention::Message
+        }
         InteractionContent::Request { intent, .. } => {
             if let Some(kind) = classification.lifecycle_kind {
                 let peer = admission

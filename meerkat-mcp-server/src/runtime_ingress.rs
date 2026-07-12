@@ -3,23 +3,15 @@ use meerkat::session_runtime::admission::{
     RuntimePreAdmissionEntry, RuntimePreAdmissionRegistration, RuntimePreAdmissionRestore,
     RuntimeRegistrationLockLease,
 };
-#[cfg(feature = "comms")]
-use meerkat::surface::configure_peer_ingress;
-use meerkat::{
-    CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService, RunResult, Session,
-    SessionServiceControlExt,
-    surface::{
-        SurfaceRuntimeMaterializeError, SurfaceSessionRecoveryContext,
-        SurfaceSessionRecoveryOverrides, build_recovered_session, materialize_session,
-        materialize_session_with_reserved_admission,
-    },
-};
+#[cfg(test)]
+use meerkat::{CreateSessionRequest, RunResult};
+use meerkat::{FactoryAgentBuilder, PersistentSessionService, Session, SessionServiceControlExt};
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::AgentError;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorBoundaryHandle,
-    CoreExecutorError, CoreExecutorInterruptHandle,
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
@@ -32,18 +24,167 @@ use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_runtime::completion::CompletionHandle;
 use meerkat_runtime::{AcceptOutcome, Input, MeerkatMachine};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{
+    Arc, Mutex as StdMutex, OnceLock, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 type RequestEventTx = mpsc::Sender<EventEnvelope<AgentEvent>>;
 
-pub(crate) type SharedMcpRuntimeSessions =
-    Arc<RwLock<HashMap<SessionId, Arc<McpRuntimeSessionState>>>>;
-pub(crate) type SharedMcpAdapters = Arc<Mutex<HashMap<String, Arc<McpRouterAdapter>>>>;
-pub(crate) type SharedMcpRuntimePreAdmissions =
-    Arc<StdMutex<HashMap<SessionId, Vec<RuntimePreAdmissionEntry>>>>;
+#[derive(Debug)]
+pub(crate) enum McpRuntimeIngressError {
+    Session(SessionError),
+    Runtime(meerkat_runtime::RuntimeDriverError),
+}
+
+impl std::fmt::Display for McpRuntimeIngressError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Session(error) => error.fmt(formatter),
+            Self::Runtime(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for McpRuntimeIngressError {}
+
+impl From<SessionError> for McpRuntimeIngressError {
+    fn from(error: SessionError) -> Self {
+        Self::Session(error)
+    }
+}
+
+impl From<meerkat_runtime::RuntimeDriverError> for McpRuntimeIngressError {
+    fn from(error: meerkat_runtime::RuntimeDriverError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl McpRuntimeIngressError {
+    pub(crate) fn into_tool_error(self, context: impl std::fmt::Display) -> crate::ToolCallError {
+        match self {
+            Self::Session(error) => session_error_to_tool_error(error, context),
+            Self::Runtime(error) => crate::ToolCallError::internal(format!("{context}: {error}")),
+        }
+    }
+}
+
+pub(crate) type SharedMcpSidecars = Arc<RwLock<HashMap<SessionId, McpSessionSidecar>>>;
 pub(crate) type SharedMcpRuntimeRegistrationLocks =
     Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>;
+
+/// Process-local MCP configuration for one logical session.
+///
+/// Router connections and callback handlers survive an executor attachment
+/// replacement in this process, but they are intentionally not durable across
+/// an MCP host restart.
+#[derive(Clone)]
+pub(crate) struct McpLogicalSessionConfig {
+    incarnation: uuid::Uuid,
+    revision: u64,
+    router: Option<Arc<McpRouterAdapter>>,
+    callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
+}
+
+impl McpLogicalSessionConfig {
+    fn fresh() -> Self {
+        Self {
+            incarnation: uuid::Uuid::new_v4(),
+            revision: 0,
+            router: None,
+            callback_tools: None,
+        }
+    }
+}
+
+/// The one MCP sidecar slot for a logical session.
+///
+/// `logical` is session-scoped. `attachment` is exact-executor-scoped and is
+/// compare-and-removed by the machine-minted attachment witness.
+pub(crate) struct McpSessionSidecar {
+    logical: McpLogicalSessionConfig,
+    attachment: Option<Arc<McpRuntimeAttachmentState>>,
+}
+
+#[derive(Clone)]
+struct McpLogicalConfigCandidate {
+    previous: Option<McpLogicalSessionConfig>,
+    base_incarnation: Option<uuid::Uuid>,
+    base_revision: Option<u64>,
+    desired: McpLogicalSessionConfig,
+}
+
+struct McpAttachmentAcquisition {
+    attachment: Arc<McpRuntimeAttachmentState>,
+    _registration_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl McpAttachmentAcquisition {
+    fn existing(
+        attachment: Arc<McpRuntimeAttachmentState>,
+        registration_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Self {
+        Self {
+            attachment,
+            _registration_guard: registration_guard,
+        }
+    }
+
+    fn into_attachment(self) -> Arc<McpRuntimeAttachmentState> {
+        self.attachment
+    }
+}
+impl McpLogicalConfigCandidate {
+    fn with_router(mut self, router: Arc<McpRouterAdapter>) -> Self {
+        self.desired.router = Some(router);
+        self.bump_revision();
+        self
+    }
+
+    fn with_callback_tools(mut self, callback_tools: Option<Arc<dyn AgentToolDispatcher>>) -> Self {
+        self.desired.callback_tools = callback_tools;
+        self.bump_revision();
+        self
+    }
+
+    fn bump_revision(&mut self) {
+        self.desired.revision = self.desired.revision.saturating_add(1);
+    }
+}
+
+pub(crate) enum McpCallbackConfig {
+    Preserve,
+    Replace(Option<Arc<dyn AgentToolDispatcher>>),
+}
+
+#[derive(Clone)]
+pub(crate) struct McpLogicalConfigSnapshot {
+    pub(crate) sidecar_exists: bool,
+    pub(crate) router: Option<Arc<McpRouterAdapter>>,
+    pub(crate) callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    pub(crate) attachment_witness: Option<meerkat_runtime::RuntimeExecutorAttachmentWitness>,
+}
+
+/// Serialized lease for one live logical-session router.
+///
+/// Field order is intentional: Rust drops fields in declaration order, so the
+/// owned mutex guard releases its Arc before the registration lease performs
+/// the Weak-map eviction check.
+pub(crate) struct McpLiveRouterLease {
+    _operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _lease: RuntimeRegistrationLockLease,
+    router: Arc<McpRouterAdapter>,
+    _witness: meerkat_runtime::RuntimeExecutorAttachmentWitness,
+    _actor_lease: meerkat::LiveSessionActorTurnBoundaryLease,
+}
+
+impl McpLiveRouterLease {
+    pub(crate) fn router(&self) -> Arc<McpRouterAdapter> {
+        Arc::clone(&self.router)
+    }
+}
 
 /// Sync restore hook backing the shared [`RuntimePreAdmissionRegistration`]
 /// RAII seam for MCP (defined in `meerkat::session_runtime::admission`, the
@@ -51,94 +192,120 @@ pub(crate) type SharedMcpRuntimeRegistrationLocks =
 /// guard calls `restore_or_release`, which removes the pre-admission entry —
 /// dropping its `RuntimePreAdmission` and releasing the reserved capacity.
 struct McpPreAdmissionLedger {
-    pre_admissions: SharedMcpRuntimePreAdmissions,
+    attachment: Arc<McpRuntimeAttachmentState>,
 }
 
 impl RuntimePreAdmissionRestore for McpPreAdmissionLedger {
     fn restore_or_release(
         &self,
-        session_id: &SessionId,
+        _session_id: &SessionId,
         input_id: &meerkat_core::lifecycle::InputId,
     ) {
-        discard_mcp_runtime_pre_admission(&self.pre_admissions, session_id, input_id);
+        self.attachment.discard_pre_admission(input_id);
     }
 }
 
-fn discard_mcp_runtime_pre_admission(
-    pre_admissions: &SharedMcpRuntimePreAdmissions,
-    session_id: &SessionId,
-    input_id: &meerkat_core::lifecycle::InputId,
-) {
-    let mut pre_admissions = pre_admissions
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(entries) = pre_admissions.get_mut(session_id) else {
-        return;
-    };
-    if let Some(index) = entries.iter().position(|entry| &entry.input_id == input_id) {
-        entries.remove(index);
+struct McpQueuedTurnRegistration {
+    attachment: Arc<McpRuntimeAttachmentState>,
+    input_id: meerkat_core::lifecycle::InputId,
+    armed: bool,
+}
+
+impl McpQueuedTurnRegistration {
+    fn rekey(&mut self, input_id: meerkat_core::lifecycle::InputId) -> bool {
+        let rekeyed = self
+            .attachment
+            .rekey_turn_context(&self.input_id, input_id.clone());
+        if rekeyed {
+            self.input_id = input_id;
+        }
+        rekeyed
     }
-    if entries.is_empty() {
-        pre_admissions.remove(session_id);
+
+    fn disarm(mut self) {
+        self.armed = false;
     }
 }
 
-fn rekey_mcp_runtime_pre_admission(
-    pre_admissions: &SharedMcpRuntimePreAdmissions,
-    session_id: &SessionId,
-    from_input_id: &meerkat_core::lifecycle::InputId,
-    to_input_id: meerkat_core::lifecycle::InputId,
-) {
-    if from_input_id == &to_input_id {
-        return;
-    }
-    let mut pre_admissions = pre_admissions
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(entries) = pre_admissions.get_mut(session_id)
-        && let Some(entry) = entries
-            .iter_mut()
-            .find(|entry| &entry.input_id == from_input_id)
-    {
-        entry.input_id = to_input_id;
+impl Drop for McpQueuedTurnRegistration {
+    fn drop(&mut self) {
+        if self.armed {
+            self.attachment.discard_turn_context(&self.input_id);
+        }
     }
 }
 
 fn wrap_mcp_runtime_pre_admission_cleanup(
     context: McpRuntimeIngressContext,
     session_id: SessionId,
+    attachment: Arc<McpRuntimeAttachmentState>,
     requested_input_id: meerkat_core::lifecycle::InputId,
     accepted_input_id: meerkat_core::lifecycle::InputId,
     handle: CompletionHandle,
 ) -> CompletionHandle {
     handle.with_resultful_completion_cleanup(move |completion| async move {
-        let runtime_registration_lock = context.runtime_registration_lock(&session_id);
-        let _runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-        let release_pre_admission = match completion {
+        // Completion cleanup is attachment-exact. It must not hold the
+        // surface registration gate while shared retirement establishes B;
+        // every removal below compare-checks the attachment witness.
+        let cleanup = match completion {
             Ok(cleanup_observation) => {
                 context
                     .cleanup_runtime_after_completion_outcome_locked(
                         &session_id,
+                        &attachment,
                         cleanup_observation,
                     )
                     .await?
             }
+            Err(error) if error.is_attachment_replaced() => {
+                McpRuntimeCompletionCleanup::StaleAttachment { error }
+            }
             Err(error) => {
-                context
+                let release_pre_admission = context
                     .runtime_wait_failure_releases_pre_admission(&session_id, &error)
-                    .await?
+                    .await?;
+                McpRuntimeCompletionCleanup::Current {
+                    release_pre_admission,
+                }
             }
         };
+        let (release_pre_admission, stale_error) = match cleanup {
+            McpRuntimeCompletionCleanup::Current {
+                release_pre_admission,
+            } => (release_pre_admission, None),
+            McpRuntimeCompletionCleanup::StaleAttachment { error } => (true, Some(error)),
+        };
         if release_pre_admission {
-            context
-                .discard_runtime_pre_admission(&session_id, &requested_input_id)
-                .await;
-            context
-                .discard_runtime_pre_admission(&session_id, &accepted_input_id)
-                .await;
+            attachment.discard_pre_admission(&requested_input_id);
+            attachment.discard_pre_admission(&accepted_input_id);
+        }
+        if let Some(error) = stale_error {
+            attachment.discard_turn_context(&requested_input_id);
+            attachment.discard_turn_context(&accepted_input_id);
+            return Err(error);
         }
         Ok(())
     })
+}
+
+enum McpRuntimeCompletionCleanup {
+    Current {
+        release_pre_admission: bool,
+    },
+    /// The waiter belongs to an attachment that no longer owns this session.
+    /// Its request-local admission is releasable, but its successful outcome
+    /// must be withheld so replacement B can never be observed as A's work.
+    StaleAttachment {
+        error: meerkat_runtime::completion::CompletionWaitError,
+    },
+}
+
+impl McpRuntimeCompletionCleanup {
+    fn stale() -> Self {
+        Self::StaleAttachment {
+            error: meerkat_runtime::completion::CompletionWaitError::AttachmentReplaced,
+        }
+    }
 }
 
 pub(crate) struct McpRuntimeIngressResources {
@@ -149,9 +316,7 @@ pub(crate) struct McpRuntimeIngressResources {
     pub realm_id: meerkat_core::connection::RealmId,
     pub instance_id: Option<String>,
     pub backend: String,
-    pub mcp_adapters: SharedMcpAdapters,
-    pub runtime_sessions: SharedMcpRuntimeSessions,
-    pub runtime_pre_admissions: SharedMcpRuntimePreAdmissions,
+    pub sidecars: SharedMcpSidecars,
     pub runtime_registration_locks: SharedMcpRuntimeRegistrationLocks,
 }
 
@@ -164,12 +329,8 @@ pub(crate) struct McpRuntimeIngressContext {
     realm_id: meerkat_core::connection::RealmId,
     instance_id: Option<String>,
     backend: String,
-    mcp_adapters: SharedMcpAdapters,
-    runtime_sessions: SharedMcpRuntimeSessions,
-    runtime_pre_admissions: SharedMcpRuntimePreAdmissions,
+    sidecars: SharedMcpSidecars,
     runtime_registration_locks: SharedMcpRuntimeRegistrationLocks,
-    #[cfg(test)]
-    fail_external_cleanup_discard_once: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl McpRuntimeIngressContext {
@@ -182,149 +343,995 @@ impl McpRuntimeIngressContext {
             realm_id: resources.realm_id,
             instance_id: resources.instance_id,
             backend: resources.backend,
-            mcp_adapters: resources.mcp_adapters,
-            runtime_sessions: resources.runtime_sessions,
-            runtime_pre_admissions: resources.runtime_pre_admissions,
+            sidecars: resources.sidecars,
             runtime_registration_locks: resources.runtime_registration_locks,
-            #[cfg(test)]
-            fail_external_cleanup_discard_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    async fn snapshot_config_candidate(&self, session_id: &SessionId) -> McpLogicalConfigCandidate {
+        let existing = self
+            .sidecars
+            .read()
+            .await
+            .get(session_id)
+            .map(|sidecar| sidecar.logical.clone());
+        let desired = existing
+            .clone()
+            .unwrap_or_else(McpLogicalSessionConfig::fresh);
+        McpLogicalConfigCandidate {
+            previous: existing.clone(),
+            base_incarnation: existing.as_ref().map(|config| config.incarnation),
+            base_revision: existing.as_ref().map(|config| config.revision),
+            desired,
+        }
+    }
+
+    async fn current_attachment_exact(
+        &self,
+        session_id: &SessionId,
+        witness: &meerkat_runtime::RuntimeExecutorAttachmentWitness,
+    ) -> Option<Arc<McpRuntimeAttachmentState>> {
+        self.sidecars
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|sidecar| sidecar.attachment.as_ref())
+            .filter(|attachment| {
+                attachment.accepts_input_plumbing() && attachment.witness() == witness
+            })
+            .cloned()
+    }
+
+    pub(crate) async fn current_attachment_witness_for_actor_exact(
+        &self,
+        session_id: &SessionId,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+    ) -> Option<meerkat_runtime::RuntimeExecutorAttachmentWitness> {
+        self.sidecars
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|sidecar| sidecar.attachment.as_ref())
+            .filter(|attachment| attachment.belongs_to_actor(actor_witness))
+            .map(|attachment| attachment.witness().clone())
+    }
+
+    /// Configure peer ingress only for the already-materialized exact MCP
+    /// incarnation. This method never reconstructs a missing actor/executor.
+    #[cfg(feature = "comms")]
+    pub(crate) async fn configure_peer_ingress_exact(
+        &self,
+        session_id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        let actor_lease = self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease(session_id)
+            .await
+            .map_err(|error| match error {
+                SessionError::NotFound { .. } => {
+                    explicit_resume_required(session_id, "live actor is absent")
+                }
+                other => other,
+            })?;
+        let registration_lease = self.runtime_registration_lock(session_id);
+        let _registration_guard = Arc::clone(&registration_lease.lock).lock_owned().await;
+        let attachment = self
+            .current_attachment_exact(
+                session_id,
+                &self
+                    .runtime_adapter
+                    .current_executor_attachment_witness(session_id)
+                    .await
+                    .ok_or_else(|| {
+                        explicit_resume_required(session_id, "runtime attachment is absent")
+                    })?,
+            )
+            .await
+            .filter(|attachment| attachment.belongs_to_actor(actor_lease.witness()))
+            .ok_or_else(|| {
+                explicit_resume_required(
+                    session_id,
+                    "live actor has no matching exact MCP attachment",
+                )
+            })?;
+        let comms_runtime = self.service.comms_runtime(session_id).await;
+        self.runtime_adapter
+            .update_peer_ingress_context_if_current(attachment.witness(), keep_alive, comms_runtime)
+            .await
+            .map_err(runtime_driver_error_to_session_error)
+            .map(|_| ())
+    }
+
+    /// Install one inactive exact attachment sidecar while the machine still
+    /// retains its pending serving fence. The final active-bit flip happens in
+    /// the machine commit hook, so no serving executor can exist without its
+    /// mechanical MCP owner.
+    async fn stage_attachment_publication(
+        &self,
+        session_id: &SessionId,
+        candidate: &McpLogicalConfigCandidate,
+        attachment: Arc<McpRuntimeAttachmentState>,
+    ) -> Result<(), SessionError> {
+        let mut sidecars = self.sidecars.write().await;
+        let can_publish = match (candidate.base_incarnation, sidecars.get(session_id)) {
+            (None, None) => true,
+            (Some(expected_incarnation), Some(sidecar)) => {
+                sidecar.logical.incarnation == expected_incarnation
+                    && Some(sidecar.logical.revision) == candidate.base_revision
+                    && sidecar.attachment.as_ref().is_none_or(|current| {
+                        current.witness() == attachment.witness() || current.is_retired()
+                    })
+            }
+            _ => false,
+        };
+        if !can_publish {
+            return Err(explicit_resume_required(
+                session_id,
+                "logical config or exact attachment changed before sidecar commit",
+            ));
+        }
+
+        match sidecars.get_mut(session_id) {
+            Some(sidecar) => {
+                sidecar.logical = candidate.desired.clone();
+                sidecar.attachment = Some(Arc::clone(&attachment));
+            }
+            None => {
+                sidecars.insert(
+                    session_id.clone(),
+                    McpSessionSidecar {
+                        logical: candidate.desired.clone(),
+                        attachment: Some(Arc::clone(&attachment)),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Undo only the exact actor/attachment whose machine commit succeeded
+    /// but whose post-commit MCP ownership validation failed. This is a
+    /// call-local compare-and-remove cleanup: it never archives durable session
+    /// state and can never retire or detach a same-SessionId replacement.
+    async fn cleanup_failed_committed_attachment(
+        &self,
+        session_id: &SessionId,
+        attachment_witness: &meerkat_runtime::RuntimeExecutorAttachmentWitness,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+    ) -> Result<(), SessionError> {
+        let retirement = self
+            .runtime_adapter
+            .unregister_executor_attachment_if_current(attachment_witness)
+            .await;
+        self.finish_failed_committed_attachment_cleanup(
+            session_id,
+            attachment_witness,
+            actor_witness,
+            retirement,
+        )
+        .await
+    }
+
+    /// Finish MCP-local cleanup only after the machine proves exact A is no
+    /// longer serving. A retirement error preserves the actor and sidecar as
+    /// one coherent retryable assembly; tearing them down would strand a live
+    /// machine executor without its owners.
+    async fn finish_failed_committed_attachment_cleanup(
+        &self,
+        session_id: &SessionId,
+        attachment_witness: &meerkat_runtime::RuntimeExecutorAttachmentWitness,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+        retirement: Result<bool, meerkat_runtime::RuntimeDriverError>,
+    ) -> Result<(), SessionError> {
+        let retired = retirement.map_err(runtime_driver_error_to_session_error)?;
+        let current = self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await;
+        if !retired && current.as_ref() == Some(attachment_witness) {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "machine refused exact retirement while MCP attachment {attachment_witness:?} remains current"
+            ))));
+        }
+        let session_has_executor = self
+            .runtime_adapter
+            .session_has_executor(session_id)
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
+
+        // Exact A is now absent. Compare-detach only A; replacement B's
+        // sidecar is untouched. Canonical machine teardown normally already
+        // performed this through the executor's post-stop cleanup handle.
+        self.detach_exact(session_id, attachment_witness).await;
+
+        // If another executor exists it may legitimately retain this service
+        // actor, so never discard the actor in that case. With no executor,
+        // exact actor cleanup is safe and closes a partially committed create.
+        if !session_has_executor
+            && let Some(actor_lease) = self
+                .service
+                .acquire_live_session_actor_turn_boundary_lease_exact(actor_witness)
+                .await?
+        {
+            self.service
+                .discard_live_session_actor(&actor_lease)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn fail_committed_attachment(
+        &self,
+        session_id: &SessionId,
+        attachment_witness: &meerkat_runtime::RuntimeExecutorAttachmentWitness,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+        primary: SessionError,
+    ) -> SessionError {
+        match self
+            .cleanup_failed_committed_attachment(session_id, attachment_witness, actor_witness)
+            .await
+        {
+            Ok(()) => primary,
+            Err(cleanup_error) => SessionError::Agent(AgentError::InternalError(format!(
+                "{primary}; exact cleanup after failed MCP attachment commit validation also failed: {cleanup_error}"
+            ))),
+        }
+    }
+
+    async fn detach_exact(
+        &self,
+        session_id: &SessionId,
+        witness: &meerkat_runtime::RuntimeExecutorAttachmentWitness,
+    ) -> bool {
+        let attachment = {
+            let mut sidecars = self.sidecars.write().await;
+            let Some(sidecar) = sidecars.get_mut(session_id) else {
+                return false;
+            };
+            if !sidecar
+                .attachment
+                .as_ref()
+                .is_some_and(|attachment| attachment.witness() == witness)
+            {
+                return false;
+            }
+            sidecar.attachment.take()
+        };
+        if let Some(attachment) = attachment {
+            attachment.retire().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn remove_unattached_logical_exact(
+        &self,
+        session_id: &SessionId,
+        incarnation: uuid::Uuid,
+        revision: u64,
+    ) -> bool {
+        let mut sidecars = self.sidecars.write().await;
+        if !sidecars.get(session_id).is_some_and(|sidecar| {
+            sidecar.logical.incarnation == incarnation
+                && sidecar.logical.revision == revision
+                && sidecar.attachment.is_none()
+        }) {
+            return false;
+        }
+        sidecars.remove(session_id);
+        true
+    }
+
+    async fn ensure_attachment_for_live_session(
+        &self,
+        session_id: &SessionId,
+        candidate: McpLogicalConfigCandidate,
+        actor_lease: &meerkat::LiveSessionActorTurnBoundaryLease,
+        registration_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Result<McpAttachmentAcquisition, SessionError> {
+        if actor_lease.session_id() != session_id {
+            return Err(explicit_resume_required(
+                session_id,
+                "live actor lease belongs to a different session",
+            ));
+        }
+        if candidate.base_revision != Some(candidate.desired.revision) {
+            return Err(explicit_resume_required(
+                session_id,
+                "logical configuration changed outside an explicit resume",
+            ));
+        }
+
+        let witness = self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .ok_or_else(|| explicit_resume_required(session_id, "runtime attachment is absent"))?;
+        let attachment = self
+            .current_attachment_exact(session_id, &witness)
+            .await
+            .ok_or_else(|| {
+                explicit_resume_required(
+                    session_id,
+                    "exact MCP sidecar for the current runtime attachment is absent",
+                )
+            })?;
+
+        // Machine-owned teardown can run independently of the surface lock.
+        // Revalidate after capturing the sidecar so attachment A can never be
+        // returned after replacement B became current.
+        if self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .as_ref()
+            != Some(&witness)
+            || !attachment.belongs_to_actor(actor_lease.witness())
+            || !attachment.accepts_input_plumbing()
+        {
+            return Err(explicit_resume_required(
+                session_id,
+                "live actor, runtime attachment, and MCP sidecar are not one exact incarnation",
+            ));
+        }
+
+        Ok(McpAttachmentAcquisition::existing(
+            attachment,
+            registration_guard,
+        ))
     }
 
     async fn runtime_session_state(
         &self,
         session_id: &SessionId,
-    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
-        let lock = self.runtime_registration_lock(session_id);
-        let _guard = lock.mutex().lock().await;
-        self.runtime_session_state_locked(session_id).await
+    ) -> Result<Arc<McpRuntimeAttachmentState>, SessionError> {
+        let actor_lease = self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease(session_id)
+            .await
+            .map_err(|error| match error {
+                SessionError::NotFound { .. } => {
+                    explicit_resume_required(session_id, "live actor is absent")
+                }
+                other => other,
+            })?;
+        self.runtime_session_state_locked_acquisition(session_id, &actor_lease, None)
+            .await
+            .map(McpAttachmentAcquisition::into_attachment)
     }
 
-    /// Materialize and attach while the caller owns the per-session
-    /// registration lock. Accept paths already own this lock while carrying a
-    /// reserved admission, so they use this non-reentrant form.
-    async fn runtime_session_state_locked(
+    async fn runtime_session_state_locked_acquisition(
         &self,
         session_id: &SessionId,
-    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
-        let existing = self.runtime_sessions.read().await.get(session_id).cloned();
-        let state = existing
-            .clone()
-            .unwrap_or_else(|| Arc::new(McpRuntimeSessionState::default()));
-        if !self.service.has_live_session(session_id).await? {
-            self.rematerialize_persisted_session(session_id, Arc::clone(&state))
-                .await?;
-            return Ok(state);
-        }
-        if let Some(existing) = existing {
-            if self
-                .runtime_adapter
-                .session_has_executor(session_id)
-                .await
-                .map_err(runtime_driver_error_to_session_error)?
-            {
-                return Ok(existing);
-            }
-            existing.clear_queued_turns().await;
-            let executor = Box::new(McpSessionRuntimeExecutor::new(
-                self.clone(),
-                session_id.clone(),
-                existing.clone(),
-            ));
-            self.runtime_adapter
-                .ensure_session_with_executor(session_id.clone(), executor)
-                .await
-                .map_err(runtime_driver_error_to_session_error)?;
-            return Ok(existing);
-        }
-
-        let executor = Box::new(McpSessionRuntimeExecutor::new(
-            self.clone(),
-            session_id.clone(),
-            state.clone(),
-        ));
-        self.runtime_adapter
-            .ensure_session_with_executor(session_id.clone(), executor)
-            .await
-            .map_err(runtime_driver_error_to_session_error)?;
-        self.runtime_sessions
-            .write()
-            .await
-            .insert(session_id.clone(), state.clone());
-        Ok(state)
+        actor_lease: &meerkat::LiveSessionActorTurnBoundaryLease,
+        registration_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Result<McpAttachmentAcquisition, SessionError> {
+        let candidate = self.snapshot_config_candidate(session_id).await;
+        self.ensure_attachment_for_live_session(
+            session_id,
+            candidate,
+            actor_lease,
+            registration_guard,
+        )
+        .await
     }
 
     pub(crate) async fn ensure_session(
         &self,
         session_id: &SessionId,
-    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
+    ) -> Result<Arc<McpRuntimeAttachmentState>, SessionError> {
         self.runtime_session_state(session_id).await
-    }
-
-    pub(crate) async fn ensure_session_locked(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
-        self.runtime_session_state_locked(session_id).await
     }
 
     pub(crate) async fn current_callback_tools(
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn AgentToolDispatcher>> {
-        let state = self
-            .runtime_sessions
+        self.sidecars
             .read()
             .await
             .get(session_id)
-            .cloned()?;
-        state.callback_tools().await
+            .and_then(|sidecar| sidecar.logical.callback_tools.clone())
+    }
+
+    /// Capture session-scoped logical MCP configuration for an explicit
+    /// materialization. The eventual attachment commit compare-checks this
+    /// revision; this snapshot itself carries no lifecycle authority.
+    pub(crate) async fn logical_config_for_prepared_actor(
+        &self,
+        session_id: &SessionId,
+        prepared: &crate::McpPreparedActorMaterialization,
+    ) -> Result<McpLogicalConfigSnapshot, SessionError> {
+        if prepared.session_id() != session_id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "MCP logical configuration snapshot belongs to {}, not {session_id}",
+                prepared.session_id()
+            ))));
+        }
+        let sidecars = self.sidecars.read().await;
+        let sidecar = sidecars.get(session_id);
+        Ok(McpLogicalConfigSnapshot {
+            sidecar_exists: sidecar.is_some(),
+            router: sidecar.and_then(|sidecar| sidecar.logical.router.clone()),
+            callback_tools: sidecar.and_then(|sidecar| sidecar.logical.callback_tools.clone()),
+            attachment_witness: sidecar
+                .and_then(|sidecar| sidecar.attachment.as_ref())
+                .filter(|attachment| attachment.accepts_input_plumbing())
+                .map(|attachment| attachment.witness().clone()),
+        })
+    }
+
+    /// Exact logical/attachment snapshot for a non-rebuild resume. The lease
+    /// retains the service actor's B boundary so concurrent configure or
+    /// replacement cannot interleave a different router with this actor.
+    pub(crate) async fn logical_config_for_live_actor(
+        &self,
+        session_id: &SessionId,
+        actor_lease: &meerkat::LiveSessionActorTurnBoundaryLease,
+    ) -> Result<McpLogicalConfigSnapshot, SessionError> {
+        if actor_lease.session_id() != session_id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "MCP logical configuration snapshot actor belongs to {}, not {session_id}",
+                actor_lease.session_id()
+            ))));
+        }
+        let sidecars = self.sidecars.read().await;
+        let sidecar = sidecars.get(session_id);
+        Ok(McpLogicalConfigSnapshot {
+            sidecar_exists: sidecar.is_some(),
+            router: sidecar.and_then(|sidecar| sidecar.logical.router.clone()),
+            callback_tools: sidecar.and_then(|sidecar| sidecar.logical.callback_tools.clone()),
+            attachment_witness: sidecar
+                .and_then(|sidecar| sidecar.attachment.as_ref())
+                .filter(|attachment| {
+                    attachment.accepts_input_plumbing()
+                        && attachment.belongs_to_actor(actor_lease.witness())
+                })
+                .map(|attachment| attachment.witness().clone()),
+        })
+    }
+
+    pub(crate) async fn logical_router(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<McpRouterAdapter>> {
+        self.sidecars
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|sidecar| sidecar.logical.router.clone())
+    }
+
+    pub(crate) async fn current_attachment_witness(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat_runtime::RuntimeExecutorAttachmentWitness> {
+        self.sidecars
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|sidecar| sidecar.attachment.as_ref())
+            .filter(|attachment| attachment.accepts_input_plumbing())
+            .map(|attachment| attachment.witness().clone())
+    }
+
+    pub(crate) async fn has_sidecar(&self, session_id: &SessionId) -> bool {
+        self.sidecars.read().await.contains_key(session_id)
+    }
+
+    pub(crate) async fn live_router_lease(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<McpLiveRouterLease, SessionError> {
+        // Canonical lock order is B before any MCP mechanical gate. Retaining
+        // this exact actor lease keeps router configuration A from being used
+        // with a same-SessionId replacement actor B.
+        let actor_lease = self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease(session_id)
+            .await
+            .map_err(|error| match error {
+                SessionError::NotFound { .. } => {
+                    explicit_resume_required(session_id, "live actor is absent")
+                }
+                other => other,
+            })?;
+        let lease = self.runtime_registration_lock(session_id);
+        let guard = Arc::clone(&lease.lock).lock_owned().await;
+        let (router, attachment) = {
+            let sidecars = self.sidecars.read().await;
+            let sidecar = sidecars.get(session_id).ok_or_else(|| {
+                explicit_resume_required(session_id, "logical MCP configuration is absent")
+            })?;
+            let attachment = sidecar
+                .attachment
+                .as_ref()
+                .filter(|attachment| attachment.accepts_input_plumbing())
+                .ok_or_else(|| {
+                    explicit_resume_required(session_id, "exact MCP attachment is absent")
+                })?;
+            let router = sidecar.logical.router.clone().ok_or_else(|| {
+                explicit_resume_required(session_id, "logical MCP router is absent")
+            })?;
+            (router, Arc::clone(attachment))
+        };
+        let operation_guard = Arc::clone(&attachment.operation_gate).lock_owned().await;
+        if !attachment.accepts_input_plumbing() {
+            return Err(explicit_resume_required(
+                session_id,
+                "exact MCP attachment retired during router acquisition",
+            ));
+        }
+        if self.authoritative_session_archived(session_id).await? {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+        let witness = attachment.witness().clone();
+        let machine_witness = self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .ok_or_else(|| explicit_resume_required(session_id, "runtime attachment is absent"))?;
+        if machine_witness != witness || !attachment.belongs_to_actor(actor_lease.witness()) {
+            return Err(explicit_resume_required(
+                session_id,
+                "actor, sidecar, and runtime attachment are not one exact incarnation",
+            ));
+        }
+        Ok(McpLiveRouterLease {
+            _operation_guard: operation_guard,
+            _guard: guard,
+            _lease: lease,
+            router,
+            _witness: witness,
+            _actor_lease: actor_lease,
+        })
     }
 
     pub(crate) async fn configure_session(
         &self,
         session_id: &SessionId,
-        callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
-        replace_runtime_attachment: bool,
-    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
-        let lock = self.runtime_registration_lock(session_id);
-        let _guard = lock.mutex().lock().await;
-        self.configure_session_locked(session_id, callback_tools, replace_runtime_attachment)
+        callback_config: McpCallbackConfig,
+    ) -> Result<Arc<McpRuntimeAttachmentState>, SessionError> {
+        self.configure_session_with_optional_router(session_id, callback_config, None)
             .await
     }
 
-    pub(crate) async fn configure_session_locked(
+    pub(crate) async fn configure_session_with_router(
         &self,
         session_id: &SessionId,
-        callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
-        replace_runtime_attachment: bool,
-    ) -> Result<Arc<McpRuntimeSessionState>, SessionError> {
-        if replace_runtime_attachment {
-            self.runtime_adapter
-                .unregister_session(session_id)
-                .await
-                .map_err(runtime_driver_error_to_session_error)?;
+        callback_config: McpCallbackConfig,
+        router: Arc<McpRouterAdapter>,
+    ) -> Result<Arc<McpRuntimeAttachmentState>, SessionError> {
+        self.configure_session_with_optional_router(session_id, callback_config, Some(router))
+            .await
+    }
+
+    async fn configure_session_with_optional_router(
+        &self,
+        session_id: &SessionId,
+        callback_config: McpCallbackConfig,
+        router: Option<Arc<McpRouterAdapter>>,
+    ) -> Result<Arc<McpRuntimeAttachmentState>, SessionError> {
+        let actor_lease = self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease(session_id)
+            .await
+            .map_err(|error| match error {
+                SessionError::NotFound { .. } => {
+                    explicit_resume_required(session_id, "live actor is absent")
+                }
+                other => other,
+            })?;
+        let lock = self.runtime_registration_lock(session_id);
+        let guard = Arc::clone(&lock.lock).lock_owned().await;
+        self.configure_session_with_optional_router_locked(
+            session_id,
+            callback_config,
+            router,
+            actor_lease,
+            Some(guard),
+        )
+        .await
+    }
+
+    pub(crate) async fn commit_prepared_session(
+        &self,
+        session_id: &SessionId,
+        mut prepared: crate::McpPreparedActorMaterialization,
+        callback_config: McpCallbackConfig,
+        router: Option<Arc<McpRouterAdapter>>,
+    ) -> Result<Arc<McpRuntimeAttachmentState>, SessionError> {
+        if prepared.session_id() != session_id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "prepared MCP materialization belongs to {}, not {session_id}",
+                prepared.session_id()
+            ))));
         }
-        let state = self.runtime_session_state_locked(session_id).await?;
-        state.set_callback_tools(callback_tools).await;
-        Ok(state)
+        let actor_witness = prepared.actor_witness_slot().witness().ok_or_else(|| {
+            explicit_resume_required(
+                session_id,
+                "prepared actor has not published an exact service witness",
+            )
+        })?;
+        let replaces_predecessor = prepared.replaces_predecessor();
+        let actor_lease = self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease_exact(&actor_witness)
+            .await?
+            .ok_or_else(|| {
+                explicit_resume_required(
+                    session_id,
+                    "prepared service actor was replaced before attachment commit",
+                )
+            })?;
+        drop(actor_lease);
+
+        let created_attachment = Arc::new(StdMutex::new(None));
+        let created_attachment_for_factory = Arc::clone(&created_attachment);
+        let context = self.clone();
+        let executor_session_id = session_id.clone();
+        let actor_witness_slot = prepared.actor_witness_slot().clone();
+        let attachment_actor_witness = actor_witness.clone();
+        let outcome = prepared
+            .ensure_executor_attachment(move |witness| {
+                let attachment = Arc::new(McpRuntimeAttachmentState::new_for_actor(
+                    witness,
+                    attachment_actor_witness,
+                ));
+                *created_attachment_for_factory
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(Arc::clone(&attachment));
+                Box::new(McpSessionRuntimeExecutor::new_exact(
+                    context,
+                    executor_session_id,
+                    attachment,
+                    actor_witness_slot,
+                )) as Box<dyn CoreExecutor>
+            })
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
+        let pending = match outcome {
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(witness) => {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "prepared MCP materialization unexpectedly found committed attachment {witness:?} for {session_id}"
+                ))));
+            }
+        };
+        let created_attachment_state = {
+            created_attachment
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        };
+        let attachment = match created_attachment_state {
+            Some(attachment) => attachment,
+            None => {
+                let primary = SessionError::Agent(AgentError::InternalError(format!(
+                    "prepared MCP executor factory did not publish attachment state for {session_id}"
+                )));
+                return Err(abort_pending_mcp_attachment_after_error(pending, primary).await);
+            }
+        };
+        if attachment.witness() != pending.witness() {
+            let primary = SessionError::Agent(AgentError::InternalError(format!(
+                "MCP executor factory witness diverged before commit for {session_id}"
+            )));
+            return Err(abort_pending_mcp_attachment_after_error(pending, primary).await);
+        }
+
+        // The aggregate map update is its own compare-and-swap. Do not acquire
+        // the surface registration gate while the pending attachment retains
+        // machine mutation authority: ordinary input paths hold that gate
+        // while entering the machine, and cleanup may acquire the service
+        // boundary before returning here. The logical revision plus exact
+        // attachment witness make a stale publication fail closed without a
+        // cross-owner lock transaction.
+        let mut candidate = self.snapshot_config_candidate(session_id).await;
+        if let Some(router) = router {
+            candidate = candidate.with_router(router);
+        }
+        if let McpCallbackConfig::Replace(callback_tools) = callback_config {
+            candidate = candidate.with_callback_tools(callback_tools);
+        }
+        let stage_result = self
+            .stage_attachment_publication(session_id, &candidate, Arc::clone(&attachment))
+            .await;
+        if let Err(primary) = stage_result {
+            return Err(abort_pending_mcp_attachment_after_error(pending, primary).await);
+        }
+
+        // Test-only startup failure is injected after sidecar staging but
+        // before serving publication. This is the precise window where a
+        // surface registration gate must not be retained while pending-loop
+        // abort cleanup waits for the service-owned boundary.
+        #[cfg(test)]
+        if let Err(error) = self
+            .runtime_adapter
+            .run_executor_attach_post_ensure_test_hook(session_id)
+            .await
+        {
+            let primary = SessionError::Agent(AgentError::InternalError(format!(
+                "MCP executor attachment post-ensure hook failed for {session_id}: {error}"
+            )));
+            return Err(abort_pending_mcp_attachment_after_error(pending, primary).await);
+        }
+
+        let expected_witness = attachment.witness().clone();
+        let attachment_for_activation = Arc::clone(&attachment);
+        let activate = move |committed: &meerkat_runtime::RuntimeExecutorAttachmentWitness| {
+            if committed != &expected_witness {
+                return Err(meerkat_runtime::RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "MCP sidecar staged for {expected_witness:?}, machine committed {committed:?}"
+                    ),
+                });
+            }
+            attachment_for_activation.activate()
+        };
+        let committed = if replaces_predecessor {
+            pending.commit_with_replacing_predecessor(activate).await
+        } else {
+            pending.commit_with(activate).await
+        }
+        .map_err(runtime_driver_error_to_session_error)?;
+        if &committed != attachment.witness() {
+            let primary = explicit_resume_required(
+                session_id,
+                "machine committed a different executor attachment witness",
+            );
+            return Err(self
+                .fail_committed_attachment(
+                    session_id,
+                    attachment.witness(),
+                    &actor_witness,
+                    primary,
+                )
+                .await);
+        }
+
+        // Do not retain the mechanical registration gate while acquiring the
+        // exact service actor boundary. A concurrent explicit resume may win;
+        // the compare checks below then fail closed without publishing over it.
+        let actor_lease = match self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease_exact(&actor_witness)
+            .await
+        {
+            Ok(Some(actor_lease)) => actor_lease,
+            Ok(None) => {
+                let primary = explicit_resume_required(
+                    session_id,
+                    "service actor changed after executor attachment commit",
+                );
+                return Err(self
+                    .fail_committed_attachment(
+                        session_id,
+                        attachment.witness(),
+                        &actor_witness,
+                        primary,
+                    )
+                    .await);
+            }
+            Err(primary) => {
+                return Err(self
+                    .fail_committed_attachment(
+                        session_id,
+                        attachment.witness(),
+                        &actor_witness,
+                        primary,
+                    )
+                    .await);
+            }
+        };
+        let registration_lease = self.runtime_registration_lock(session_id);
+        let _registration_guard = Arc::clone(&registration_lease.lock).lock_owned().await;
+        if self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .as_ref()
+            != Some(attachment.witness())
+            || self.current_attachment_witness(session_id).await.as_ref()
+                != Some(attachment.witness())
+            || !attachment.belongs_to_actor(actor_lease.witness())
+        {
+            let primary = explicit_resume_required(
+                session_id,
+                "actor or executor attachment changed after exact MCP sidecar activation",
+            );
+            drop(_registration_guard);
+            drop(registration_lease);
+            drop(actor_lease);
+            return Err(self
+                .fail_committed_attachment(
+                    session_id,
+                    attachment.witness(),
+                    &actor_witness,
+                    primary,
+                )
+                .await);
+        }
+
+        if self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .as_ref()
+            != Some(attachment.witness())
+            || self.current_attachment_witness(session_id).await.as_ref()
+                != Some(attachment.witness())
+        {
+            drop(_registration_guard);
+            drop(registration_lease);
+            drop(actor_lease);
+            let primary = explicit_resume_required(
+                session_id,
+                "executor attachment changed immediately after exact MCP sidecar activation",
+            );
+            return Err(self
+                .fail_committed_attachment(
+                    session_id,
+                    attachment.witness(),
+                    &actor_witness,
+                    primary,
+                )
+                .await);
+        }
+        Ok(attachment)
+    }
+
+    async fn configure_session_with_optional_router_locked(
+        &self,
+        session_id: &SessionId,
+        callback_config: McpCallbackConfig,
+        router: Option<Arc<McpRouterAdapter>>,
+        actor_lease: meerkat::LiveSessionActorTurnBoundaryLease,
+        registration_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Result<Arc<McpRuntimeAttachmentState>, SessionError> {
+        let base_candidate = self.snapshot_config_candidate(session_id).await;
+        let mut candidate = base_candidate.clone();
+        if let Some(router) = router {
+            candidate = candidate.with_router(router);
+        }
+        if let McpCallbackConfig::Replace(callback_tools) = callback_config {
+            candidate = candidate.with_callback_tools(callback_tools);
+        }
+        let acquisition = self
+            .ensure_attachment_for_live_session(
+                session_id,
+                base_candidate,
+                &actor_lease,
+                registration_guard,
+            )
+            .await?;
+        let attachment = Arc::clone(&acquisition.attachment);
+        let operation_guard = Arc::clone(&attachment.operation_gate).lock_owned().await;
+        if !attachment.accepts_input_plumbing()
+            || self
+                .runtime_adapter
+                .current_executor_attachment_witness(session_id)
+                .await
+                .as_ref()
+                != Some(attachment.witness())
+        {
+            return Err(explicit_resume_required(
+                session_id,
+                "exact attachment changed before logical configuration commit",
+            ));
+        }
+
+        {
+            let mut sidecars = self.sidecars.write().await;
+            let sidecar = sidecars.get_mut(session_id).ok_or_else(|| {
+                explicit_resume_required(session_id, "logical MCP sidecar is absent")
+            })?;
+            if sidecar.logical.incarnation
+                != candidate.base_incarnation.ok_or_else(|| {
+                    explicit_resume_required(
+                        session_id,
+                        "logical MCP sidecar incarnation is absent",
+                    )
+                })?
+                || Some(sidecar.logical.revision) != candidate.base_revision
+                || !sidecar
+                    .attachment
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &attachment))
+            {
+                return Err(explicit_resume_required(
+                    session_id,
+                    "logical MCP sidecar changed before configuration commit",
+                ));
+            }
+            sidecar.logical = candidate.desired.clone();
+        }
+
+        if !attachment.accepts_input_plumbing()
+            || self
+                .runtime_adapter
+                .current_executor_attachment_witness(session_id)
+                .await
+                .as_ref()
+                != Some(attachment.witness())
+        {
+            let mut sidecars = self.sidecars.write().await;
+            if let Some(sidecar) = sidecars.get_mut(session_id)
+                && sidecar.logical.incarnation == candidate.desired.incarnation
+                && sidecar.logical.revision == candidate.desired.revision
+                && sidecar
+                    .attachment
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &attachment))
+                && let Some(previous) = candidate.previous
+            {
+                sidecar.logical = previous;
+            }
+            return Err(explicit_resume_required(
+                session_id,
+                "exact attachment changed during logical configuration commit",
+            ));
+        }
+        drop(operation_guard);
+        Ok(acquisition.into_attachment())
     }
 
     async fn clear_runtime_session_state_locked(
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
-        // unregister_session owns comms-drain quiescence. Do not consume the
-        // MCP state/adapters until that authoritative teardown succeeds.
-        self.unregister_runtime_session_if_present(session_id)
-            .await?;
-        if let Some(state) = self.runtime_sessions.write().await.remove(session_id) {
-            state.clear_queued_turns().await;
-        }
-        self.mcp_adapters
-            .lock()
+        let (logical_identity, attachment) = self
+            .sidecars
+            .read()
             .await
-            .remove(&session_id.to_string());
+            .get(session_id)
+            .map(|sidecar| {
+                (
+                    Some((sidecar.logical.incarnation, sidecar.logical.revision)),
+                    sidecar.attachment.clone(),
+                )
+            })
+            .unwrap_or((None, None));
+        let Some(attachment) = attachment else {
+            if self.runtime_adapter.contains_session(session_id).await {
+                return Err(explicit_resume_required(
+                    session_id,
+                    "runtime registration exists without an exact MCP sidecar cleanup witness",
+                ));
+            }
+            if let Some((incarnation, revision)) = logical_identity {
+                self.remove_unattached_logical_exact(session_id, incarnation, revision)
+                    .await;
+            }
+            return Ok(());
+        };
+
+        self.runtime_adapter
+            .unregister_executor_attachment_if_current(attachment.witness())
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
+        self.detach_exact(session_id, attachment.witness()).await;
+        if self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .as_ref()
+            == Some(attachment.witness())
+        {
+            return Err(SessionError::Unsupported(format!(
+                "exact MCP attachment cleanup did not retire witness {:?} for session {session_id}",
+                attachment.witness()
+            )));
+        }
+        if let Some((incarnation, revision)) = logical_identity {
+            self.remove_unattached_logical_exact(session_id, incarnation, revision)
+                .await;
+        }
         Ok(())
     }
 
@@ -332,22 +1339,32 @@ impl McpRuntimeIngressContext {
     /// saga has authorized external cleanup. Runtime registration remains the
     /// saga's responsibility; calling `unregister_session` here would recurse
     /// into and deadlock on that same coordinator.
-    async fn clear_external_runtime_session_state(&self, session_id: &SessionId) {
-        if let Some(state) = self.runtime_sessions.write().await.remove(session_id) {
-            state.clear_queued_turns().await;
+    async fn clear_external_runtime_attachment_state_under_retirement(
+        &self,
+        session_id: &SessionId,
+        attachment: &Arc<McpRuntimeAttachmentState>,
+        _retirement_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        {
+            let mut sidecars = self.sidecars.write().await;
+            if let Some(sidecar) = sidecars.get_mut(session_id)
+                && sidecar
+                    .attachment
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, attachment))
+            {
+                sidecar.attachment.take();
+            }
         }
-        self.mcp_adapters
-            .lock()
-            .await
-            .remove(&session_id.to_string());
-        self.discard_all_runtime_pre_admissions_for_session(session_id)
-            .await;
+        attachment.finish_retirement().await;
     }
 
     async fn clear_runtime_session_state_after_verified_termination_locked(
         &self,
         session_id: &SessionId,
+        attachment: &McpRuntimeAttachmentState,
         cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
+        remove_logical_sidecar: bool,
     ) -> Result<(), SessionError> {
         if !cleanup_observation.proves_runtime_termination_for(session_id) {
             return Err(SessionError::Unsupported(format!(
@@ -359,43 +1376,45 @@ impl McpRuntimeIngressContext {
                 "MCP runtime termination cleanup for {session_id} expected an already-absent registration"
             )));
         }
-        self.clear_runtime_session_state_locked(session_id).await
-    }
-
-    /// Idempotently drive machine-owned unregister to verified absence.
-    ///
-    /// A deeper compensation path may already have completed unregister before
-    /// an outer MCP cleanup owner runs. Verified absence is success; an error
-    /// that leaves the registration present is still propagated and retains
-    /// the MCP retry anchors.
-    async fn unregister_runtime_session_if_present(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), SessionError> {
-        if !self.runtime_adapter.contains_session(session_id).await {
-            return Ok(());
+        let logical_identity = if remove_logical_sidecar {
+            self.sidecars
+                .read()
+                .await
+                .get(session_id)
+                .map(|sidecar| (sidecar.logical.incarnation, sidecar.logical.revision))
+        } else {
+            None
+        };
+        self.detach_exact(session_id, attachment.witness()).await;
+        if let Some((incarnation, revision)) = logical_identity {
+            self.remove_unattached_logical_exact(session_id, incarnation, revision)
+                .await;
         }
-        match self.runtime_adapter.unregister_session(session_id).await {
-            Ok(()) => Ok(()),
-            Err(_) if !self.runtime_adapter.contains_session(session_id).await => Ok(()),
-            Err(error) => Err(runtime_driver_error_to_session_error(error)),
-        }
+        Ok(())
     }
 
     pub(crate) async fn clear_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        let lock = self.runtime_registration_lock(session_id);
-        let _guard = lock.mutex().lock().await;
-        self.clear_session_locked(session_id).await
+        // Exact machine retirement owns its own mutation fence;
+        // compare-and-remove by attachment witness protects a concurrent
+        // replacement without transferring cleanup to a detached task.
+        self.clear_runtime_session_state_locked(session_id).await
     }
 
-    pub(crate) async fn clear_session_locked(
+    async fn clear_session_after_runtime_stop_terminalized(
         &self,
         session_id: &SessionId,
-    ) -> Result<(), SessionError> {
-        self.clear_runtime_session_state_locked(session_id).await?;
-        self.discard_all_runtime_pre_admissions_for_session(session_id)
-            .await;
-        Ok(())
+        attachment: &Arc<McpRuntimeAttachmentState>,
+        retirement_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        // The runtime-owned executor decorator closes the exact adapter
+        // attachment after this service/surface cleanup returns. Calling the
+        // ordinary unregister path here would await this loop's own handle.
+        self.clear_external_runtime_attachment_state_under_retirement(
+            session_id,
+            attachment,
+            retirement_guard,
+        )
+        .await;
     }
 
     async fn session_archived_by_authority(
@@ -419,13 +1438,25 @@ impl McpRuntimeIngressContext {
             .await
     }
 
-    /// Resolve completion cleanup while the caller owns the per-session
-    /// runtime-registration lock.
+    /// Resolve completion cleanup from one exact attachment observation.
     async fn cleanup_runtime_after_completion_outcome_locked(
         &self,
         session_id: &SessionId,
+        attachment: &McpRuntimeAttachmentState,
         cleanup_observation: meerkat_runtime::completion::CompletionCleanupObservation,
-    ) -> Result<bool, meerkat_runtime::completion::CompletionWaitError> {
+    ) -> Result<McpRuntimeCompletionCleanup, meerkat_runtime::completion::CompletionWaitError> {
+        if let Some(_current) = self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .filter(|current| current != attachment.witness())
+        {
+            // The completion belongs to stale attachment A. It may release
+            // A-local request resources, but it must never ask the
+            // session-scoped DSL to classify or clean replacement B, nor may
+            // its caller observe B's result as a successful completion of A.
+            return Ok(McpRuntimeCompletionCleanup::stale());
+        }
         let archived_now = match self.authoritative_session_archived(session_id).await {
             Ok(archived_now) => archived_now,
             Err(error) => {
@@ -438,14 +1469,38 @@ impl McpRuntimeIngressContext {
                 );
             }
         };
+        let archived_logical_identity = if archived_now {
+            self.sidecars
+                .read()
+                .await
+                .get(session_id)
+                .and_then(|sidecar| {
+                    sidecar
+                        .attachment
+                        .as_ref()
+                        .is_some_and(|current| current.witness() == attachment.witness())
+                        .then_some((sidecar.logical.incarnation, sidecar.logical.revision))
+                })
+        } else {
+            None
+        };
         let live_session = if archived_now {
             meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::NotObserved
         } else {
-            match self.service.has_live_session(session_id).await {
-                Ok(true) => {
+            let actor_witness = attachment.actor_witness.get().ok_or_else(|| {
+                meerkat_runtime::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                    "MCP runtime completion attachment for {session_id} lacks an exact actor witness"
+                ))
+            })?;
+            match self
+                .service
+                .acquire_live_session_actor_turn_boundary_lease_exact(actor_witness)
+                .await
+            {
+                Ok(Some(_actor_lease)) => {
                     meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Present
                 }
-                Ok(false) => {
+                Ok(None) => {
                     meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Absent
                 }
                 Err(error) => {
@@ -477,14 +1532,23 @@ impl McpRuntimeIngressContext {
                 if archived_now && !self.runtime_adapter.contains_session(session_id).await {
                     // The only benign resolution race: durable archive is
                     // proven and the runtime registration is already gone.
-                    return Ok(true);
+                    self.detach_exact(session_id, attachment.witness()).await;
+                    if let Some((incarnation, revision)) = archived_logical_identity {
+                        self.remove_unattached_logical_exact(session_id, incarnation, revision)
+                            .await;
+                    }
+                    return Ok(McpRuntimeCompletionCleanup::Current {
+                        release_pre_admission: true,
+                    });
                 }
                 if runtime_termination_cleanup
                     && !self.runtime_adapter.contains_session(session_id).await
                 {
                     self.clear_runtime_session_state_after_verified_termination_locked(
                         session_id,
+                        attachment,
                         &runtime_termination_proof,
+                        archived_now,
                     )
                     .await
                     .map_err(|cleanup_error| {
@@ -494,7 +1558,9 @@ impl McpRuntimeIngressContext {
                             ),
                         )
                     })?;
-                    return Ok(true);
+                    return Ok(McpRuntimeCompletionCleanup::Current {
+                        release_pre_admission: true,
+                    });
                 }
                 return Err(
                     meerkat_runtime::completion::CompletionWaitError::AuthorityUnavailable(
@@ -507,43 +1573,63 @@ impl McpRuntimeIngressContext {
         };
         let release_pre_admission = cleanup_authority.releases_pre_admission();
         if cleanup_authority.requires_runtime_cleanup() {
-            let discard_error = match self.service.discard_live_session(session_id).await {
-                Ok(()) | Err(SessionError::NotFound { .. }) => None,
-                Err(error) => Some(error),
-            };
-            let clear_error = if runtime_termination_cleanup
+            if runtime_termination_cleanup
                 && !self.runtime_adapter.contains_session(session_id).await
             {
                 self.clear_runtime_session_state_after_verified_termination_locked(
                     session_id,
+                    attachment,
                     &runtime_termination_proof,
+                    archived_now,
                 )
                 .await
-                .err()
-            } else {
-                self.clear_runtime_session_state_locked(session_id)
-                    .await
-                    .err()
-            };
-            if discard_error.is_some() || clear_error.is_some() {
-                let mut causes = Vec::new();
-                if let Some(error) = discard_error {
-                    causes.push(format!("live-session discard failed: {error}"));
-                }
-                if let Some(error) = clear_error {
-                    causes.push(format!("runtime unregister failed: {error}"));
-                }
-                return Err(
+                .map_err(|error| {
                     meerkat_runtime::completion::CompletionWaitError::AuthorityUnavailable(
                         format!(
-                            "MCP runtime completion cleanup failed for {session_id}: {}",
-                            causes.join("; ")
+                            "MCP runtime completion exact termination cleanup failed for {session_id}: {error}"
                         ),
-                    ),
-                );
+                    )
+                })?;
+            } else {
+                let removed = self
+                    .runtime_adapter
+                    .unregister_executor_attachment_if_current(attachment.witness())
+                    .await
+                    .map_err(runtime_driver_error_to_session_error)
+                    .map_err(|error| {
+                        meerkat_runtime::completion::CompletionWaitError::AuthorityUnavailable(
+                            format!(
+                                "MCP runtime completion exact actor-and-attachment retirement failed for {session_id}: {error}"
+                            ),
+                        )
+                    })?;
+                if !removed {
+                    // A delayed completion for attachment A has no authority
+                    // over a same-SessionId replacement B's actor, machine
+                    // registration, sidecar, or returned completion result.
+                    return Ok(McpRuntimeCompletionCleanup::stale());
+                }
+                if archived_now {
+                    self.detach_exact(session_id, attachment.witness()).await;
+                    if let Some((incarnation, revision)) = archived_logical_identity {
+                        self.remove_unattached_logical_exact(session_id, incarnation, revision)
+                            .await;
+                    }
+                } else {
+                    self.detach_exact(session_id, attachment.witness()).await;
+                }
+            }
+            if archived_now {
+                self.detach_exact(session_id, attachment.witness()).await;
+                if let Some((incarnation, revision)) = archived_logical_identity {
+                    self.remove_unattached_logical_exact(session_id, incarnation, revision)
+                        .await;
+                }
             }
         }
-        Ok(release_pre_admission)
+        Ok(McpRuntimeCompletionCleanup::Current {
+            release_pre_admission,
+        })
     }
 
     async fn runtime_wait_failure_releases_pre_admission(
@@ -567,61 +1653,28 @@ impl McpRuntimeIngressContext {
 
     async fn insert_runtime_pre_admission(
         &self,
+        attachment: &McpRuntimeAttachmentState,
         session_id: SessionId,
         input_id: meerkat_core::lifecycle::InputId,
         admission: meerkat::RuntimeContextAdmissionGuard,
     ) -> Result<(), SessionError> {
-        let mut pre_admissions = self
-            .runtime_pre_admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entries = pre_admissions.entry(session_id.clone()).or_default();
-        if entries.iter().any(|entry| entry.input_id == input_id) {
-            return Err(SessionError::Busy { id: session_id });
-        }
-        entries.push(RuntimePreAdmissionEntry {
-            input_id,
-            admission: admission.into(),
-        });
-        Ok(())
+        attachment.insert_pre_admission(session_id, input_id, admission)
     }
 
     async fn take_runtime_pre_admission(
         &self,
-        session_id: &SessionId,
+        attachment: &McpRuntimeAttachmentState,
         input_ids: &[meerkat_core::lifecycle::InputId],
     ) -> Option<meerkat::RuntimeContextAdmissionGuard> {
-        if input_ids.is_empty() {
-            return None;
-        }
-        let mut pre_admissions = self
-            .runtime_pre_admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entries = pre_admissions.get_mut(session_id)?;
-        let index = entries
-            .iter()
-            .position(|entry| input_ids.contains(&entry.input_id))?;
-        let entry = entries.remove(index);
-        if entries.is_empty() {
-            pre_admissions.remove(session_id);
-        }
-        Some(entry.admission.into_admission())
+        attachment.take_pre_admission(input_ids)
     }
 
     async fn discard_runtime_pre_admission(
         &self,
-        session_id: &SessionId,
+        attachment: &McpRuntimeAttachmentState,
         input_id: &meerkat_core::lifecycle::InputId,
     ) {
-        discard_mcp_runtime_pre_admission(&self.runtime_pre_admissions, session_id, input_id);
-    }
-
-    async fn discard_all_runtime_pre_admissions_for_session(&self, session_id: &SessionId) {
-        self.runtime_pre_admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(session_id);
+        attachment.discard_pre_admission(input_id);
     }
 
     pub(crate) fn runtime_registration_lock(
@@ -648,255 +1701,157 @@ impl McpRuntimeIngressContext {
         }
     }
 
-    pub(crate) async fn clear_session_if_new_locked(
-        &self,
-        session_id: &SessionId,
-        runtime_was_registered: bool,
-        runtime_state_existed: bool,
-    ) -> Result<(), SessionError> {
-        let runtime_is_registered = self.runtime_adapter.contains_session(session_id).await;
-        let has_active_inputs = if runtime_is_registered {
-            !self
-                .runtime_adapter
-                .list_active_inputs(session_id)
-                .await
-                .map_err(runtime_driver_error_to_session_error)?
-                .is_empty()
-        } else {
-            false
-        };
-        if has_active_inputs {
-            return Ok(());
-        }
-        if self
-            .runtime_pre_admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(session_id)
-        {
-            return Ok(());
-        }
-        if !runtime_was_registered {
-            self.unregister_runtime_session_if_present(session_id)
-                .await?;
-        }
-        if !runtime_state_existed {
-            if let Some(state) = self.runtime_sessions.write().await.remove(session_id) {
-                state.clear_queued_turns().await;
-            }
-            self.mcp_adapters
-                .lock()
-                .await
-                .remove(&session_id.to_string());
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn clear_session_if_new(
-        &self,
-        session_id: &SessionId,
-        runtime_was_registered: bool,
-        runtime_state_existed: bool,
-    ) -> Result<(), SessionError> {
-        let lock = self.runtime_registration_lock(session_id);
-        let _guard = lock.mutex().lock().await;
-        self.clear_session_if_new_locked(session_id, runtime_was_registered, runtime_state_existed)
-            .await
-    }
-
     pub(crate) async fn accept_input_with_completion(
         &self,
         session_id: &SessionId,
         input: Input,
         event_tx: Option<RequestEventTx>,
-    ) -> Result<(AcceptOutcome, Option<CompletionHandle>), meerkat_runtime::RuntimeDriverError>
-    {
+    ) -> Result<(AcceptOutcome, Option<CompletionHandle>), McpRuntimeIngressError> {
+        let actor_lease = self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease(session_id)
+            .await
+            .map_err(|error| match error {
+                SessionError::NotFound { .. } => McpRuntimeIngressError::Session(
+                    explicit_resume_required(session_id, "live actor is absent"),
+                ),
+                other => McpRuntimeIngressError::Session(other),
+            })?;
         if self
             .authoritative_session_archived(session_id)
             .await
-            .map_err(|error| meerkat_runtime::RuntimeDriverError::Internal(error.to_string()))?
+            .map_err(McpRuntimeIngressError::Session)?
         {
-            self.clear_session(session_id).await.map_err(|error| {
-                meerkat_runtime::RuntimeDriverError::Internal(error.to_string())
-            })?;
-            return Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Retired,
-            });
+            return Err(McpRuntimeIngressError::Runtime(
+                meerkat_runtime::RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Retired,
+                },
+            ));
         }
 
+        // B is the authority boundary; only after capturing the exact actor do
+        // we serialize MCP attachment plumbing. Retain this guard through
+        // pre-admission insertion and machine accept so clear/config cannot
+        // tear the aggregate between those steps.
+        let registration_lease = self.runtime_registration_lock(session_id);
+        let registration_guard = Arc::clone(&registration_lease.lock).lock_owned().await;
+
         let requested_input_id = input.id().clone();
-        let runtime_registration_lock = self.runtime_registration_lock(session_id);
-        let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
-        let runtime_state_existed = self.runtime_sessions.read().await.contains_key(session_id);
-        let mut pre_admission = match self
+        let acquisition = match self
+            .runtime_session_state_locked_acquisition(
+                session_id,
+                &actor_lease,
+                Some(registration_guard),
+            )
+            .await
+        {
+            Ok(acquisition) => acquisition,
+            Err(error) => return Err(McpRuntimeIngressError::Session(error)),
+        };
+        let attachment = Arc::clone(&acquisition.attachment);
+        let attachment_operation_guard = Arc::clone(&attachment.operation_gate).lock_owned().await;
+        let machine_witness = self
+            .runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await;
+        if !attachment.accepts_input_plumbing()
+            || machine_witness.as_ref() != Some(attachment.witness())
+        {
+            drop(attachment_operation_guard);
+            return Err(McpRuntimeIngressError::Runtime(
+                meerkat_runtime::RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Retired,
+                },
+            ));
+        }
+        let pre_admission = match self
             .service
-            .reserve_runtime_turn_admission(session_id)
+            .reserve_runtime_turn_admission_for_actor(&actor_lease)
             .await
         {
             Ok(admission) => Some(admission),
-            Err(error) => {
-                return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
-                    reason: error.to_string(),
-                });
-            }
+            Err(error) => return Err(McpRuntimeIngressError::Session(error)),
         };
-        if !self
-            .service
-            .has_live_session(session_id)
-            .await
-            .map_err(|error| meerkat_runtime::RuntimeDriverError::Internal(error.to_string()))?
-        {
-            let admission = pre_admission.take().ok_or_else(|| {
-                meerkat_runtime::RuntimeDriverError::Internal(
-                    "persisted-only MCP recovery lost its reserved admission".to_string(),
-                )
-            })?;
-            let state = self
-                .runtime_sessions
-                .read()
-                .await
-                .get(session_id)
-                .cloned()
-                .unwrap_or_else(|| Arc::new(McpRuntimeSessionState::default()));
-            if let Err(error) = self
-                .rematerialize_persisted_session_with_admission(session_id, state, admission)
-                .await
-            {
-                if let Err(cleanup) = self
-                    .clear_session_if_new_locked(
-                        session_id,
-                        runtime_was_registered,
-                        runtime_state_existed,
-                    )
-                    .await
-                {
-                    return Err(meerkat_runtime::RuntimeDriverError::Internal(format!(
-                        "{error}; additionally failed to clear newly rematerialized MCP runtime session: {cleanup}"
-                    )));
-                }
-                return Err(meerkat_runtime::RuntimeDriverError::Internal(
-                    error.to_string(),
-                ));
-            }
-        }
         let mut pre_admission_registration = None;
         if let Some(admission) = pre_admission {
             if let Err(error) = self
                 .insert_runtime_pre_admission(
+                    &attachment,
                     session_id.clone(),
                     requested_input_id.clone(),
                     admission,
                 )
                 .await
             {
-                return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
-                    reason: error.to_string(),
-                });
+                drop(attachment_operation_guard);
+                return Err(McpRuntimeIngressError::Session(error));
             }
             pre_admission_registration = Some(RuntimePreAdmissionRegistration::new(
                 Arc::new(McpPreAdmissionLedger {
-                    pre_admissions: Arc::clone(&self.runtime_pre_admissions),
+                    attachment: Arc::clone(&attachment),
                 }),
                 session_id.clone(),
                 requested_input_id.clone(),
             ));
         }
 
-        let state = match self.runtime_session_state_locked(session_id).await {
-            Ok(state) => state,
-            Err(error) => {
-                self.discard_runtime_pre_admission(session_id, &requested_input_id)
-                    .await;
-                if let Some(registration) = pre_admission_registration.take() {
-                    registration.disarm();
-                }
-                if let Err(cleanup) = self
-                    .clear_session_if_new_locked(
-                        session_id,
-                        runtime_was_registered,
-                        runtime_state_existed,
-                    )
-                    .await
-                {
-                    return Err(meerkat_runtime::RuntimeDriverError::Internal(format!(
-                        "{error}; additionally failed to clear newly prepared MCP runtime session: {cleanup}"
-                    )));
-                }
-                return Err(meerkat_runtime::RuntimeDriverError::Internal(
-                    error.to_string(),
-                ));
-            }
-        };
-        let mut context_input_id = requested_input_id.clone();
-        let queued_context = state
-            .enqueue_turn_context(requested_input_id.clone(), event_tx)
-            .await;
+        let mut queued_context_registration =
+            attachment.register_turn_context(requested_input_id.clone(), event_tx);
+        let queued_context = queued_context_registration.is_some();
 
         let (outcome, mut handle) = match self
             .runtime_adapter
-            .accept_input_with_completion(session_id, input)
+            .accept_input_with_completion_for_attachment(attachment.witness(), input)
             .await
         {
             Ok(result) => result,
             Err(error) => {
-                if queued_context {
-                    let _ = state.discard_turn_context(&requested_input_id).await;
-                }
-                self.discard_runtime_pre_admission(session_id, &requested_input_id)
+                drop(queued_context_registration.take());
+                self.discard_runtime_pre_admission(&attachment, &requested_input_id)
                     .await;
                 if let Some(registration) = pre_admission_registration.take() {
                     registration.disarm();
                 }
-                if let Err(cleanup) = self
-                    .clear_session_if_new_locked(
-                        session_id,
-                        runtime_was_registered,
-                        runtime_state_existed,
-                    )
-                    .await
-                {
-                    return Err(meerkat_runtime::RuntimeDriverError::Internal(format!(
-                        "{error}; additionally failed to clear newly prepared MCP runtime session: {cleanup}"
-                    )));
-                }
-                return Err(error);
+                drop(attachment_operation_guard);
+                return Err(McpRuntimeIngressError::Runtime(error));
             }
         };
 
-        match &outcome {
-            AcceptOutcome::Accepted { input_id, .. } if handle.is_some() => {
-                if let Some(raw_handle) = handle.take() {
-                    let cleanup_handle = wrap_mcp_runtime_pre_admission_cleanup(
-                        self.clone(),
-                        session_id.clone(),
-                        requested_input_id.clone(),
-                        input_id.clone(),
-                        raw_handle,
-                    );
-                    rekey_mcp_runtime_pre_admission(
-                        &self.runtime_pre_admissions,
-                        session_id,
-                        &requested_input_id,
-                        input_id.clone(),
-                    );
-                    handle = Some(cleanup_handle);
-                }
+        match (&outcome, handle.take()) {
+            (
+                AcceptOutcome::Accepted { input_id, .. }
+                | AcceptOutcome::Deduplicated {
+                    existing_id: input_id,
+                    ..
+                },
+                Some(raw_handle),
+            ) => {
+                let cleanup_handle = wrap_mcp_runtime_pre_admission_cleanup(
+                    self.clone(),
+                    session_id.clone(),
+                    Arc::clone(&attachment),
+                    requested_input_id.clone(),
+                    input_id.clone(),
+                    raw_handle,
+                );
+                attachment.rekey_pre_admission(&requested_input_id, input_id.clone());
+                handle = Some(cleanup_handle);
                 if let Some(registration) = pre_admission_registration.take() {
                     registration.disarm();
                 }
             }
-            AcceptOutcome::Accepted { input_id, .. } => {
-                self.discard_runtime_pre_admission(session_id, &requested_input_id)
+            (AcceptOutcome::Accepted { input_id, .. }, None) => {
+                self.discard_runtime_pre_admission(&attachment, &requested_input_id)
                     .await;
-                self.discard_runtime_pre_admission(session_id, input_id)
+                self.discard_runtime_pre_admission(&attachment, input_id)
                     .await;
                 if let Some(registration) = pre_admission_registration.take() {
                     registration.disarm();
                 }
             }
-            _ => {
-                self.discard_runtime_pre_admission(session_id, &requested_input_id)
+            (_, returned_handle) => {
+                debug_assert!(returned_handle.is_none());
+                self.discard_runtime_pre_admission(&attachment, &requested_input_id)
                     .await;
                 if let Some(registration) = pre_admission_registration.take() {
                     registration.disarm();
@@ -913,242 +1868,86 @@ impl McpRuntimeIngressContext {
             if let Some(input_id) = canonical_input_id
                 && input_id != &requested_input_id
             {
-                let rekeyed = state
-                    .rekey_turn_context(&requested_input_id, input_id.clone())
-                    .await;
-                if rekeyed {
-                    context_input_id = input_id.clone();
-                }
+                let _ = queued_context_registration
+                    .as_mut()
+                    .is_some_and(|registration| registration.rekey(input_id.clone()));
             }
         }
 
-        if handle.is_none() && queued_context {
-            let _ = state.discard_turn_context(&context_input_id).await;
+        if handle.is_some()
+            && let Some(registration) = queued_context_registration.take()
+        {
+            registration.disarm();
         }
+        drop(queued_context_registration);
 
-        if !matches!(&outcome, AcceptOutcome::Accepted { .. }) || handle.is_none() {
-            self.clear_session_if_new_locked(
-                session_id,
-                runtime_was_registered,
-                runtime_state_existed,
-            )
-            .await
-            .map_err(|error| meerkat_runtime::RuntimeDriverError::Internal(error.to_string()))?;
-        }
+        drop(attachment_operation_guard);
+        drop(registration_lease);
 
-        drop(runtime_registration_guard);
-        drop(runtime_registration_lock);
         Ok((outcome, handle))
-    }
-
-    async fn external_tools_for_session(
-        &self,
-        session_id: &SessionId,
-        state: &McpRuntimeSessionState,
-    ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, SessionError> {
-        let callback_tools = state.callback_tools().await;
-        let mcp_tools = self
-            .mcp_adapters
-            .lock()
-            .await
-            .get(&session_id.to_string())
-            .cloned()
-            .map(|adapter| adapter as Arc<dyn AgentToolDispatcher>);
-        crate::compose_external_tool_dispatchers(callback_tools, mcp_tools)
-            .map_err(|error| SessionError::Agent(AgentError::InternalError(error)))
-    }
-
-    async fn materialize_with_state(
-        &self,
-        session: Session,
-        request: CreateSessionRequest,
-        keep_alive: bool,
-        state: Arc<McpRuntimeSessionState>,
-        admission: Option<meerkat::RuntimeContextAdmissionGuard>,
-    ) -> Result<RunResult, SessionError> {
-        let session_id = session.id().clone();
-        if self
-            .session_archived_by_authority(&session_id, &session)
-            .await?
-        {
-            return Err(SessionError::NotFound { id: session_id });
-        }
-        self.runtime_sessions
-            .write()
-            .await
-            .insert(session_id.clone(), state.clone());
-        let context = self.clone();
-        let result = if let Some(admission) = admission {
-            Box::pin(materialize_session_with_reserved_admission(
-                &self.service,
-                &self.runtime_adapter,
-                session,
-                request,
-                admission,
-                move |runtime_session_id| {
-                    Box::new(McpSessionRuntimeExecutor::new(
-                        context,
-                        runtime_session_id,
-                        state,
-                    ))
-                },
-            ))
-            .await
-        } else {
-            Box::pin(materialize_session(
-                &self.service,
-                &self.runtime_adapter,
-                session,
-                request,
-                move |runtime_session_id| {
-                    Box::new(McpSessionRuntimeExecutor::new(
-                        context,
-                        runtime_session_id,
-                        state,
-                    ))
-                },
-            ))
-            .await
-        };
-
-        match result {
-            Ok(result) => {
-                #[cfg(feature = "comms")]
-                configure_peer_ingress(
-                    &self.runtime_adapter,
-                    &self.service,
-                    &result.session_id,
-                    keep_alive,
-                )
-                .await
-                .map_err(runtime_driver_error_to_session_error)?;
-                Ok(result)
-            }
-            Err(error) => Err(surface_materialize_session_error(error)),
-        }
-    }
-
-    async fn rematerialize_persisted_session(
-        &self,
-        session_id: &SessionId,
-        state: Arc<McpRuntimeSessionState>,
-    ) -> Result<SessionId, SessionError> {
-        let session = self
-            .service
-            .load_authoritative_session(session_id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.clone(),
-            })?;
-        if self
-            .session_archived_by_authority(session_id, &session)
-            .await?
-        {
-            return Err(SessionError::NotFound {
-                id: session_id.clone(),
-            });
-        }
-        let current_snapshot = self.config_runtime.get().await.ok();
-        let current_generation = current_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.generation)
-            .or_else(|| {
-                session
-                    .session_metadata()
-                    .as_ref()
-                    .and_then(|meta| meta.config_generation)
-            });
-        let external_tools = self.external_tools_for_session(session_id, &state).await?;
-        let recovered = build_recovered_session(
-            session.clone(),
-            &SurfaceSessionRecoveryOverrides::default(),
-            SurfaceSessionRecoveryContext {
-                llm_client_override: None,
-                external_tools,
-                realm_id: Some(self.realm_id.clone()),
-                instance_id: self.instance_id.clone(),
-                backend: Some(self.backend.clone()),
-                config_generation: current_generation,
-                ..Default::default()
-            },
-        )
-        .map_err(surface_recovery_session_error)?;
-        let keep_alive = recovered.keep_alive;
-        let result = Box::pin(self.materialize_with_state(
-            session,
-            recovered.into_deferred_create_request(),
-            keep_alive,
-            state,
-            None,
-        ))
-        .await?;
-        Ok(result.session_id)
-    }
-
-    async fn rematerialize_persisted_session_with_admission(
-        &self,
-        session_id: &SessionId,
-        state: Arc<McpRuntimeSessionState>,
-        admission: meerkat::RuntimeContextAdmissionGuard,
-    ) -> Result<SessionId, SessionError> {
-        let session = self
-            .service
-            .load_authoritative_session(session_id)
-            .await?
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.clone(),
-            })?;
-        if self
-            .session_archived_by_authority(session_id, &session)
-            .await?
-        {
-            return Err(SessionError::NotFound {
-                id: session_id.clone(),
-            });
-        }
-        let current_snapshot = self.config_runtime.get().await.ok();
-        let current_generation = current_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.generation)
-            .or_else(|| {
-                session
-                    .session_metadata()
-                    .as_ref()
-                    .and_then(|meta| meta.config_generation)
-            });
-        let external_tools = self.external_tools_for_session(session_id, &state).await?;
-        let recovered = build_recovered_session(
-            session.clone(),
-            &SurfaceSessionRecoveryOverrides::default(),
-            SurfaceSessionRecoveryContext {
-                llm_client_override: None,
-                external_tools,
-                realm_id: Some(self.realm_id.clone()),
-                instance_id: self.instance_id.clone(),
-                backend: Some(self.backend.clone()),
-                config_generation: current_generation,
-                ..Default::default()
-            },
-        )
-        .map_err(surface_recovery_session_error)?;
-        let keep_alive = recovered.keep_alive;
-        let result = Box::pin(self.materialize_with_state(
-            session,
-            recovered.into_deferred_create_request(),
-            keep_alive,
-            state,
-            Some(admission),
-        ))
-        .await?;
-        Ok(result.session_id)
     }
 }
 
-fn surface_materialize_session_error(error: SurfaceRuntimeMaterializeError) -> SessionError {
-    match error {
-        SurfaceRuntimeMaterializeError::Session(error) => error,
-        other => SessionError::Agent(AgentError::InternalError(other.to_string())),
+pub(crate) fn resume_required_error(session_id: &SessionId, reason: &str) -> SessionError {
+    SessionError::FailedWithData {
+        message: format!(
+            "MCP ingress for session {session_id} is unavailable because {reason}; call meerkat_resume explicitly"
+        ),
+        data: serde_json::json!({
+            "kind": "session_resume_required",
+            "session_resume_required": true,
+            "session_id": session_id.to_string(),
+            "reason": reason,
+        }),
     }
+}
+
+pub(crate) fn resume_required_tool_error(
+    session_id: &SessionId,
+    reason: &str,
+) -> crate::ToolCallError {
+    crate::ToolCallError::new(
+        meerkat_contracts::ErrorCode::SessionNotRunning.jsonrpc_code(),
+        format!(
+            "MCP ingress for session {session_id} is unavailable because {reason}; call meerkat_resume explicitly"
+        ),
+        Some(serde_json::json!({
+            "kind": "session_resume_required",
+            "session_resume_required": true,
+            "session_id": session_id.to_string(),
+            "reason": reason,
+        })),
+    )
+}
+
+pub(crate) fn session_error_to_tool_error(
+    error: SessionError,
+    context: impl std::fmt::Display,
+) -> crate::ToolCallError {
+    match error {
+        SessionError::FailedWithData { message, data }
+            if data
+                .get("session_resume_required")
+                .and_then(|value| value.as_bool())
+                == Some(true) =>
+        {
+            crate::ToolCallError::new(
+                meerkat_contracts::ErrorCode::SessionNotRunning.jsonrpc_code(),
+                message,
+                Some(data),
+            )
+        }
+        SessionError::NotFound { id } => crate::ToolCallError::new(
+            meerkat_contracts::ErrorCode::SessionNotFound.jsonrpc_code(),
+            format!("session not found: {id}"),
+            Some(serde_json::json!({ "session_id": id.to_string() })),
+        ),
+        other => crate::ToolCallError::internal(format!("{context}: {other}")),
+    }
+}
+
+fn explicit_resume_required(session_id: &SessionId, missing: &str) -> SessionError {
+    resume_required_error(session_id, missing)
 }
 
 fn runtime_driver_error_to_session_error(
@@ -1157,20 +1956,16 @@ fn runtime_driver_error_to_session_error(
     SessionError::Agent(AgentError::InternalError(error.to_string()))
 }
 
-fn combine_session_cleanup_error(
-    primary: impl std::fmt::Display,
-    cleanup: impl std::fmt::Display,
-    context: &str,
+async fn abort_pending_mcp_attachment_after_error(
+    pending: meerkat_runtime::PendingRuntimeExecutorAttachment,
+    primary: SessionError,
 ) -> SessionError {
-    SessionError::Agent(AgentError::InternalError(format!(
-        "{primary}; additionally failed to {context}: {cleanup}"
-    )))
-}
-
-fn surface_recovery_session_error(
-    error: meerkat::surface::SurfaceSessionRecoveryError,
-) -> SessionError {
-    SessionError::Agent(AgentError::InternalError(error.to_string()))
+    match pending.abort().await {
+        Ok(()) => primary,
+        Err(cleanup_error) => SessionError::Agent(AgentError::InternalError(format!(
+            "{primary}; exact pending MCP attachment abort also failed: {cleanup_error}"
+        ))),
+    }
 }
 
 #[derive(Default)]
@@ -1182,49 +1977,209 @@ struct QueuedTurnContext {
     event_tx: RequestEventTx,
 }
 
-pub(crate) struct McpRuntimeSessionState {
-    queued_turns: Mutex<RuntimeTurnQueue>,
-    callback_tools: RwLock<Option<Arc<dyn AgentToolDispatcher>>>,
+pub(crate) struct McpRuntimeAttachmentState {
+    witness: meerkat_runtime::RuntimeExecutorAttachmentWitness,
+    actor_witness: OnceLock<meerkat::LiveSessionActorWitness>,
+    active: AtomicBool,
+    retired: AtomicBool,
+    operation_gate: Arc<Mutex<()>>,
+    queued_turns: StdMutex<RuntimeTurnQueue>,
+    pre_admissions: StdMutex<Vec<RuntimePreAdmissionEntry>>,
 }
 
-impl Default for McpRuntimeSessionState {
-    fn default() -> Self {
+impl std::fmt::Debug for McpRuntimeAttachmentState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpRuntimeAttachmentState")
+            .field("witness", &self.witness)
+            .field("active", &self.active.load(Ordering::Acquire))
+            .field("retired", &self.retired.load(Ordering::Acquire))
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpRuntimeAttachmentState {
+    fn new_for_actor(
+        witness: meerkat_runtime::RuntimeExecutorAttachmentWitness,
+        actor_witness: meerkat::LiveSessionActorWitness,
+    ) -> Self {
+        let actor_witness_slot = OnceLock::new();
+        if actor_witness_slot.set(actor_witness).is_err() {
+            unreachable!("fresh MCP attachment actor-witness slot must be empty");
+        }
         Self {
-            queued_turns: Mutex::new(RuntimeTurnQueue::default()),
-            callback_tools: RwLock::new(None),
+            witness,
+            actor_witness: actor_witness_slot,
+            active: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
+            operation_gate: Arc::new(Mutex::new(())),
+            queued_turns: StdMutex::new(RuntimeTurnQueue::default()),
+            pre_admissions: StdMutex::new(Vec::new()),
         }
     }
-}
 
-impl McpRuntimeSessionState {
-    async fn set_callback_tools(&self, callback_tools: Option<Arc<dyn AgentToolDispatcher>>) {
-        *self.callback_tools.write().await = callback_tools;
+    fn witness(&self) -> &meerkat_runtime::RuntimeExecutorAttachmentWitness {
+        &self.witness
     }
 
-    async fn callback_tools(&self) -> Option<Arc<dyn AgentToolDispatcher>> {
-        self.callback_tools.read().await.clone()
+    fn belongs_to_actor(&self, actor_witness: &meerkat::LiveSessionActorWitness) -> bool {
+        self.actor_witness.get() == Some(actor_witness)
     }
 
-    async fn enqueue_turn_context(
+    /// Activate this exact sidecar at the machine's serving linearization
+    /// point. A later runtime-loop serving-release failure leaves the sidecar
+    /// briefly marked active while the machine's owned exact-abort path tears
+    /// it down. That state is fail-closed: every MCP acquisition also requires
+    /// the same witness to be current in the machine, so it cannot serve or
+    /// publish over a replacement attachment.
+    fn activate(&self) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        if self.is_retired() {
+            return Err(meerkat_runtime::RuntimeDriverError::StaleAuthority {
+                reason: format!(
+                    "cannot activate retired MCP attachment for {}",
+                    self.witness.session_id()
+                ),
+            });
+        }
+        self.active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| meerkat_runtime::RuntimeDriverError::StaleAuthority {
+                reason: format!(
+                    "MCP attachment for {} was already active before exact publication",
+                    self.witness.session_id()
+                ),
+            })?;
+        if self.is_retired() {
+            self.active.store(false, Ordering::Release);
+            return Err(meerkat_runtime::RuntimeDriverError::StaleAuthority {
+                reason: format!(
+                    "MCP attachment for {} retired during exact publication",
+                    self.witness.session_id()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
+    fn accepts_input_plumbing(&self) -> bool {
+        self.active.load(Ordering::Acquire) && !self.is_retired()
+    }
+
+    fn insert_pre_admission(
         &self,
+        session_id: SessionId,
+        input_id: meerkat_core::lifecycle::InputId,
+        admission: meerkat::RuntimeContextAdmissionGuard,
+    ) -> Result<(), SessionError> {
+        let mut entries = self
+            .pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.accepts_input_plumbing() {
+            return Err(SessionError::NotRunning { id: session_id });
+        }
+        if entries.iter().any(|entry| entry.input_id == input_id) {
+            return Err(SessionError::Busy { id: session_id });
+        }
+        entries.push(RuntimePreAdmissionEntry {
+            input_id,
+            admission: admission.into(),
+        });
+        Ok(())
+    }
+
+    fn take_pre_admission(
+        &self,
+        input_ids: &[meerkat_core::lifecycle::InputId],
+    ) -> Option<meerkat::RuntimeContextAdmissionGuard> {
+        if input_ids.is_empty() {
+            return None;
+        }
+        let mut entries = self
+            .pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let index = entries
+            .iter()
+            .position(|entry| input_ids.contains(&entry.input_id))?;
+        Some(entries.remove(index).admission.into_admission())
+    }
+
+    fn discard_pre_admission(&self, input_id: &meerkat_core::lifecycle::InputId) {
+        let mut entries = self
+            .pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = entries.iter().position(|entry| &entry.input_id == input_id) {
+            entries.remove(index);
+        }
+    }
+
+    fn rekey_pre_admission(
+        &self,
+        from_input_id: &meerkat_core::lifecycle::InputId,
+        to_input_id: meerkat_core::lifecycle::InputId,
+    ) {
+        if from_input_id == &to_input_id {
+            return;
+        }
+        let mut entries = self
+            .pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| &entry.input_id == from_input_id)
+        {
+            entry.input_id = to_input_id;
+        }
+    }
+
+    fn has_pre_admissions(&self) -> bool {
+        !self
+            .pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
+    fn register_turn_context(
+        self: &Arc<Self>,
         input_id: meerkat_core::lifecycle::InputId,
         event_tx: Option<RequestEventTx>,
-    ) -> bool {
+    ) -> Option<McpQueuedTurnRegistration> {
         let Some(event_tx) = event_tx else {
-            return false;
+            return None;
         };
-        let mut queued_turns = self.queued_turns.lock().await;
+        let mut queued_turns = self
+            .queued_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.accepts_input_plumbing() {
+            return None;
+        }
         queued_turns
             .entries
-            .insert(input_id, QueuedTurnContext { event_tx });
-        true
+            .insert(input_id.clone(), QueuedTurnContext { event_tx });
+        Some(McpQueuedTurnRegistration {
+            attachment: Arc::clone(self),
+            input_id,
+            armed: true,
+        })
     }
 
-    async fn take_turn_context_for_inputs(
+    fn take_turn_context_for_inputs(
         &self,
         contributing_input_ids: &[meerkat_core::lifecycle::InputId],
     ) -> Option<QueuedTurnContext> {
-        let mut queued_turns = self.queued_turns.lock().await;
+        let mut queued_turns = self
+            .queued_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut selected = None;
         for input_id in contributing_input_ids {
             if let Some(context) = queued_turns.entries.remove(input_id) {
@@ -1234,7 +2189,7 @@ impl McpRuntimeSessionState {
         selected
     }
 
-    async fn rekey_turn_context(
+    fn rekey_turn_context(
         &self,
         from_input_id: &meerkat_core::lifecycle::InputId,
         to_input_id: meerkat_core::lifecycle::InputId,
@@ -1242,7 +2197,10 @@ impl McpRuntimeSessionState {
         if from_input_id == &to_input_id {
             return true;
         }
-        let mut queued_turns = self.queued_turns.lock().await;
+        let mut queued_turns = self
+            .queued_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if queued_turns.entries.contains_key(&to_input_id) {
             queued_turns.entries.remove(from_input_id);
             return true;
@@ -1254,24 +2212,120 @@ impl McpRuntimeSessionState {
         true
     }
 
-    async fn discard_turn_context(&self, input_id: &meerkat_core::lifecycle::InputId) -> bool {
+    fn discard_turn_context(&self, input_id: &meerkat_core::lifecycle::InputId) -> bool {
         self.queued_turns
             .lock()
-            .await
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entries
             .remove(input_id)
             .is_some()
     }
 
-    async fn clear_queued_turns(&self) {
-        self.queued_turns.lock().await.entries.clear();
+    async fn retire(&self) {
+        let _operation_guard = self.begin_retirement().await;
+        self.finish_retirement().await;
+    }
+
+    async fn begin_retirement(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        let operation_guard = Arc::clone(&self.operation_gate).lock_owned().await;
+        self.retired.store(true, Ordering::Release);
+        operation_guard
+    }
+
+    async fn finish_retirement(&self) {
+        self.queued_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .clear();
+        self.pre_admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
 struct McpSessionRuntimeExecutor {
     context: McpRuntimeIngressContext,
     session_id: SessionId,
-    state: Arc<McpRuntimeSessionState>,
+    attachment: Arc<McpRuntimeAttachmentState>,
+    actor_witness_slot: Option<meerkat::LiveSessionActorWitnessSlot>,
+}
+
+struct McpSessionRuntimePostStopCleanupHandle {
+    context: McpRuntimeIngressContext,
+    session_id: SessionId,
+    attachment: Arc<McpRuntimeAttachmentState>,
+    actor_witness_slot: Option<meerkat::LiveSessionActorWitnessSlot>,
+}
+
+#[async_trait]
+impl CoreExecutorPostStopCleanupHandle for McpSessionRuntimePostStopCleanupHandle {
+    async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
+        // Canonical order is service turn-finalization boundary B before the
+        // attachment-local operation gate. Live router/config paths use the
+        // same B -> operation order, so post-stop cleanup cannot deadlock them.
+        let _turn_finalization_guard = self
+            .context
+            .service
+            .acquire_runtime_turn_finalization_guard(&self.session_id)
+            .await;
+        let retirement_guard = self.attachment.begin_retirement().await;
+        let cleanup = match self.actor_witness_slot.as_ref() {
+            Some(actor_witness_slot) => {
+                meerkat::surface::persistent_runtime_post_stop_cleanup_handle_for_actor_slot(
+                    Arc::clone(&self.context.service),
+                    self.session_id.clone(),
+                    actor_witness_slot.clone(),
+                )
+            }
+            None => meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+                Arc::clone(&self.context.service),
+                self.session_id.clone(),
+            ),
+        };
+        cleanup
+            .cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary()
+            .await?;
+        self.context
+            .clear_session_after_runtime_stop_terminalized(
+                &self.session_id,
+                &self.attachment,
+                retirement_guard,
+            )
+            .await;
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+    ) -> Result<(), CoreExecutorError> {
+        let retirement_guard = self.attachment.begin_retirement().await;
+        let cleanup = match self.actor_witness_slot.as_ref() {
+            Some(actor_witness_slot) => {
+                meerkat::surface::persistent_runtime_post_stop_cleanup_handle_for_actor_slot(
+                    Arc::clone(&self.context.service),
+                    self.session_id.clone(),
+                    actor_witness_slot.clone(),
+                )
+            }
+            None => meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+                Arc::clone(&self.context.service),
+                self.session_id.clone(),
+            ),
+        };
+        cleanup
+            .cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary()
+            .await?;
+        self.context
+            .clear_session_after_runtime_stop_terminalized(
+                &self.session_id,
+                &self.attachment,
+                retirement_guard,
+            )
+            .await;
+        Ok(())
+    }
 }
 
 struct McpSessionRuntimeBoundaryHandle {
@@ -1281,11 +2335,16 @@ struct McpSessionRuntimeBoundaryHandle {
 
 #[async_trait]
 impl CoreExecutorBoundaryHandle for McpSessionRuntimeBoundaryHandle {
-    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
         self.context
             .service
             .cancel_after_boundary_with_machine_authority(
                 &self.session_id,
+                expected_run_id,
                 self.context.runtime_adapter.session_control_authority(),
             )
             .await
@@ -1321,15 +2380,31 @@ impl CoreExecutorInterruptHandle for McpSessionRuntimeInterruptHandle {
 }
 
 impl McpSessionRuntimeExecutor {
-    fn new(
+    fn new_exact(
         context: McpRuntimeIngressContext,
         session_id: SessionId,
-        state: Arc<McpRuntimeSessionState>,
+        attachment: Arc<McpRuntimeAttachmentState>,
+        actor_witness_slot: meerkat::LiveSessionActorWitnessSlot,
     ) -> Self {
         Self {
             context,
             session_id,
-            state,
+            attachment,
+            actor_witness_slot: Some(actor_witness_slot),
+        }
+    }
+
+    #[cfg(test)]
+    fn new(
+        context: McpRuntimeIngressContext,
+        session_id: SessionId,
+        attachment: Arc<McpRuntimeAttachmentState>,
+    ) -> Self {
+        Self {
+            context,
+            session_id,
+            attachment,
+            actor_witness_slot: None,
         }
     }
 }
@@ -1355,9 +2430,12 @@ fn should_apply_context_without_turn(primitive: &RunPrimitive) -> bool {
     primitive.is_context_only_apply_without_turn()
 }
 
-async fn apply_runtime_turn(
+/// Apply callback invoked by `McpSessionRuntimeExecutor::apply` after the
+/// runtime loop has acquired the non-reentrant service turn-finalization
+/// boundary, including recovery and NoPending cleanup.
+async fn apply_runtime_turn_under_runtime_turn_boundary(
     context: &McpRuntimeIngressContext,
-    state: &Arc<McpRuntimeSessionState>,
+    attachment: &Arc<McpRuntimeAttachmentState>,
     session_id: &SessionId,
     run_id: meerkat_core::lifecycle::RunId,
     primitive: &RunPrimitive,
@@ -1382,7 +2460,7 @@ async fn apply_runtime_turn(
         let boundary = primitive.apply_boundary();
         let contributing_input_ids = staged.contributing_input_ids.clone();
         let pre_admission = context
-            .take_runtime_pre_admission(session_id, &contributing_input_ids)
+            .take_runtime_pre_admission(attachment, &contributing_input_ids)
             .await;
         return if let Some(admission) = pre_admission {
             match context
@@ -1429,9 +2507,7 @@ async fn apply_runtime_turn(
         }
         _ => Vec::new(),
     };
-    let queued_context = state
-        .take_turn_context_for_inputs(&contributing_input_ids)
-        .await;
+    let queued_context = attachment.take_turn_context_for_inputs(&contributing_input_ids);
     let event_tx = queued_context
         .as_ref()
         .map(|context| context.event_tx.clone());
@@ -1463,7 +2539,7 @@ async fn apply_runtime_turn(
     })?;
 
     let pre_admission = context
-        .take_runtime_pre_admission(session_id, &contributing_input_ids)
+        .take_runtime_pre_admission(attachment, &contributing_input_ids)
         .await;
     if let Some(admission) = pre_admission {
         match context
@@ -1498,6 +2574,24 @@ async fn apply_runtime_turn(
     }
 }
 
+#[cfg(test)]
+async fn apply_runtime_turn(
+    context: &McpRuntimeIngressContext,
+    attachment: &Arc<McpRuntimeAttachmentState>,
+    session_id: &SessionId,
+    run_id: meerkat_core::lifecycle::RunId,
+    primitive: &RunPrimitive,
+) -> Result<CoreApplyOutput, SessionError> {
+    let _turn_finalization_guard = context
+        .service
+        .acquire_runtime_turn_finalization_guard(session_id)
+        .await;
+    apply_runtime_turn_under_runtime_turn_boundary(
+        context, attachment, session_id, run_id, primitive,
+    )
+    .await
+}
+
 #[async_trait]
 impl CoreExecutor for McpSessionRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
@@ -1514,14 +2608,45 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
         }))
     }
 
+    fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+        Some(meerkat::surface::persistent_runtime_publication_handle(
+            Arc::clone(&self.context.service),
+            self.session_id.clone(),
+        ))
+    }
+
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        true
+    }
+
+    fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+        Some(Arc::new(McpSessionRuntimePostStopCleanupHandle {
+            context: self.context.clone(),
+            session_id: self.session_id.clone(),
+            attachment: Arc::clone(&self.attachment),
+            actor_witness_slot: self.actor_witness_slot.clone(),
+        }))
+    }
+
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationBoundaryHandle>> {
+        Some(
+            meerkat::surface::persistent_runtime_turn_finalization_boundary_handle(
+                Arc::clone(&self.context.service),
+                self.session_id.clone(),
+            ),
+        )
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        match Box::pin(apply_runtime_turn(
+        match Box::pin(apply_runtime_turn_under_runtime_turn_boundary(
             &self.context,
-            &self.state,
+            &self.attachment,
             &self.session_id,
             run_id,
             &primitive,
@@ -1568,10 +2693,38 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        self.context
+            .service
+            .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
+                &self.session_id,
+                session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        self.context
+            .service
+            .publish_interaction_terminals_exact_batch(&self.session_id, events)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .service
-            .cancel_after_boundary_with_machine_authority(
+            .cancel_current_after_boundary_with_machine_authority(
                 &self.session_id,
                 self.context.runtime_adapter.session_control_authority(),
             )
@@ -1588,37 +2741,14 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        #[cfg(test)]
-        let injected_discard_failure = self
-            .context
-            .fail_external_cleanup_discard_once
-            .swap(false, std::sync::atomic::Ordering::AcqRel);
-        #[cfg(test)]
-        let discard_result = if injected_discard_failure {
-            Err(SessionError::Unsupported(
-                "synthetic fail-once MCP live-session discard".to_string(),
-            ))
-        } else {
-            self.context
-                .service
-                .discard_live_session(&self.session_id)
-                .await
-        };
-        #[cfg(not(test))]
-        let discard_result = self
-            .context
-            .service
-            .discard_live_session(&self.session_id)
-            .await;
-        match discard_result {
-            Ok(()) | Err(SessionError::NotFound { .. }) => {
-                self.context
-                    .clear_external_runtime_session_state(&self.session_id)
-                    .await;
-                Ok(())
-            }
-            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
+        McpSessionRuntimePostStopCleanupHandle {
+            context: self.context.clone(),
+            session_id: self.session_id.clone(),
+            attachment: Arc::clone(&self.attachment),
+            actor_witness_slot: self.actor_witness_slot.clone(),
         }
+        .cleanup_after_runtime_stop_terminalized()
+        .await
     }
 }
 
@@ -1714,9 +2844,7 @@ mod tests {
             realm_id: RealmId::parse("mcp-runtime-test").expect("valid realm id"),
             instance_id: None,
             backend: "test".to_string(),
-            mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
-            runtime_sessions: Arc::new(RwLock::new(HashMap::new())),
-            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            sidecars: Arc::new(RwLock::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
         })
     }
@@ -1785,35 +2913,115 @@ mod tests {
         }
     }
 
+    async fn materialize_test_session(
+        context: &McpRuntimeIngressContext,
+        session: Session,
+        mut request: CreateSessionRequest,
+        router: Option<Arc<McpRouterAdapter>>,
+        callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    ) -> Result<(RunResult, Arc<McpRuntimeAttachmentState>), SessionError> {
+        let session_id = session.id().clone();
+        let prepared = crate::prepare_new_mcp_actor_materialization(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
+        )
+        .await
+        .map_err(|error| SessionError::Agent(AgentError::InternalError(error.message)))?;
+        let build = request.build.get_or_insert_with(Default::default);
+        build.resume_session = Some(session);
+        build.runtime_build_mode =
+            meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
+        let outcome = crate::create_runtime_backed_session_and_run_initial_turn_call_local(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
+            request,
+            None,
+            prepared,
+        )
+        .await
+        .map_err(|error| SessionError::Agent(AgentError::InternalError(error.message)))?;
+        let crate::McpCallLocalActorCreateOutcome {
+            result,
+            transaction,
+        } = outcome;
+        let result = match result {
+            Ok(result) => result,
+            Err(
+                crate::McpRuntimeBackedCreateError::Session { error, .. }
+                | crate::McpRuntimeBackedCreateError::CreatedSessionIdentityMismatch(error)
+                | crate::McpRuntimeBackedCreateError::InitialTurnIdentityMismatch(error),
+            ) => {
+                return Err(error);
+            }
+        };
+        let attachment = context
+            .commit_prepared_session(
+                &session_id,
+                transaction,
+                McpCallbackConfig::Replace(callback_tools),
+                router,
+            )
+            .await?;
+        Ok((result, attachment))
+    }
+
     async fn create_session_with_test_machine(
         context: &McpRuntimeIngressContext,
         prompt: &str,
         initial_turn: meerkat_core::service::InitialTurnPolicy,
     ) -> Result<RunResult, SessionError> {
-        context
-            .materialize_with_state(
-                Session::new(),
-                create_request(prompt, initial_turn),
-                false,
-                Arc::new(McpRuntimeSessionState::default()),
-                None,
-            )
-            .await
+        let session = Session::new();
+        materialize_test_session(
+            context,
+            session,
+            create_request(prompt, initial_turn),
+            None,
+            None,
+        )
+        .await
+        .map(|(result, _)| result)
+    }
+
+    async fn create_session_with_test_mcp_config(
+        context: &McpRuntimeIngressContext,
+        prompt: &str,
+        initial_turn: meerkat_core::service::InitialTurnPolicy,
+        router: Arc<McpRouterAdapter>,
+        callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    ) -> Result<(RunResult, Arc<McpRuntimeAttachmentState>), SessionError> {
+        let session = Session::new();
+
+        let router_tools: Arc<dyn AgentToolDispatcher> = router.clone();
+        let external_tools: Arc<dyn AgentToolDispatcher> = match callback_tools.as_ref() {
+            Some(callback_tools) => Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                Arc::clone(callback_tools),
+                router_tools,
+            ])),
+            None => router_tools,
+        };
+        let mut request = create_request(prompt, initial_turn);
+        request
+            .build
+            .get_or_insert_with(Default::default)
+            .external_tools = Some(external_tools);
+
+        materialize_test_session(context, session, request, Some(router), callback_tools).await
     }
 
     async fn create_deferred_session_with_generated_authority(
         context: &McpRuntimeIngressContext,
         prompt: &str,
     ) -> SessionId {
-        context
-            .service
-            .create_session(create_request(
-                prompt,
-                meerkat_core::service::InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("deferred session create should seed generated authority")
-            .session_id
+        create_session_with_test_machine(
+            context,
+            prompt,
+            meerkat_core::service::InitialTurnPolicy::Defer,
+        )
+        .await
+        .expect("deferred session materialization should seed generated authority")
+        .session_id
     }
 
     fn context_append() -> ConversationContextAppend {
@@ -1829,8 +3037,12 @@ mod tests {
     async fn mcp_runtime_ingress_rejects_malformed_terminal_peer_response_intent() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context(&temp).await;
-        let state = Arc::new(McpRuntimeSessionState::default());
-        let session_id = SessionId::new();
+        let session_id =
+            create_deferred_session_with_generated_authority(&context, "invalid terminal").await;
+        let state = context
+            .ensure_session(&session_id)
+            .await
+            .expect("test attachment should exist");
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::Immediate,
             appends: Vec::new(),
@@ -1862,163 +3074,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_runtime_rematerialize_rejects_archived_without_pre_handoff_cleanup() {
+    async fn persisted_only_ensure_requires_explicit_resume_without_minting_attachment() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context(&temp).await;
         let created = context
             .service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".into(),
-                system_prompt: meerkat::SystemPromptOverride::Inherit,
-                max_tokens: Some(1024),
-                event_tx: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-                build: Some(meerkat_core::service::SessionBuildOptions::default()),
-                labels: None,
-            })
+            .create_session(create_request(
+                "persisted only",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
             .await
-            .expect("deferred session create should succeed");
-        let session_id = created.session_id;
-        archive_with_test_machine_authority(&context, &session_id)
-            .await
-            .expect("archive should succeed");
-        let state = Arc::new(McpRuntimeSessionState::default());
-
-        let rejected = context
-            .rematerialize_persisted_session(&session_id, state)
-            .await;
-        assert!(
-            matches!(rejected, Err(SessionError::NotFound { .. })),
-            "archived MCP runtime rematerialization should reject before binding: {rejected:?}"
-        );
-        assert!(
-            context.runtime_adapter.contains_session(&session_id).await,
-            "archived MCP runtime rematerialization must retain registration for canonical post-handoff teardown"
-        );
-        assert!(
-            !context
-                .runtime_sessions
-                .read()
-                .await
-                .contains_key(&session_id),
-            "archived MCP runtime rematerialization must not install runtime session state"
-        );
-        context
-            .clear_session(&session_id)
-            .await
-            .expect("test cleanup should run outside CoreExecutor::apply");
-    }
-
-    #[tokio::test]
-    async fn mcp_runtime_apply_recovers_persisted_session_for_context_only_apply() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context(&temp).await;
-        let created = context
-            .service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".into(),
-                system_prompt: meerkat::SystemPromptOverride::Inherit,
-                max_tokens: Some(1024),
-                event_tx: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-                build: Some(meerkat_core::service::SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
+            .expect("create persisted session");
         let session_id = created.session_id;
         context
             .service
             .discard_live_session(&session_id)
             .await
-            .expect("discard live session");
-        context
-            .clear_session(&session_id)
-            .await
-            .expect("test runtime session should clear");
-        assert!(
-            !context.runtime_adapter.contains_session(&session_id).await,
-            "test must remove runtime registration before context-only recovery"
-        );
+            .expect("discard live actor");
+        let witness_before = context
+            .runtime_adapter
+            .current_executor_attachment_witness(&session_id)
+            .await;
 
-        let state = context
+        let error = context
             .ensure_session(&session_id)
             .await
-            .expect("MCP runtime executor should attach");
-        let input_id = InputId::new();
-        let primitive = RunPrimitive::StagedInput(StagedRunInput {
-            boundary: RunApplyBoundary::RunCheckpoint,
-            appends: Vec::new(),
-            context_appends: vec![ConversationContextAppend {
-                key: "mcp-context-recovery".to_string(),
-                content: CoreRenderable::Text {
-                    text: "mcp recovered context".to_string(),
-                },
-            }],
-            contributing_input_ids: vec![input_id.clone()],
-            turn_metadata: Some(RuntimeTurnMetadata {
-                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                ..Default::default()
-            }),
-        });
+            .expect_err("generic ensure must not rematerialize a persisted-only session");
 
-        let output = apply_runtime_turn(&context, &state, &session_id, RunId::new(), &primitive)
-            .await
-            .expect("context-only apply should recover persisted MCP session");
-
-        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
-        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
-        assert!(context.runtime_adapter.contains_session(&session_id).await);
         assert!(
+            error.to_string().contains("meerkat_resume"),
+            "unexpected fail-closed error: {error}"
+        );
+        assert_eq!(
             context
-                .runtime_sessions
-                .read()
-                .await
-                .contains_key(&session_id),
-            "context-only recovery should install MCP runtime session state"
+                .runtime_adapter
+                .current_executor_attachment_witness(&session_id)
+                .await,
+            witness_before,
+            "generic ensure must not mint or replace a runtime attachment"
         );
-
-        let session_snapshot: Session = serde_json::from_slice(
-            output
-                .session_snapshot
-                .as_deref()
-                .expect("context-only apply should return a machine commit snapshot"),
-        )
-        .expect("machine commit snapshot should deserialize");
-        let system_context = session_snapshot
-            .system_context_state()
-            .expect("context-only recovery should persist system-context state");
-        assert!(
-            system_context.applied().iter().any(|append| {
-                append.source.as_deref() == Some("mcp-context-recovery")
-                    && append
-                        .content
-                        .render_text()
-                        .contains("mcp recovered context")
-            }),
-            "context-only recovery should persist MCP runtime context append: {system_context:?}"
-        );
+        assert!(!context.has_sidecar(&session_id).await);
     }
 
     #[tokio::test]
     async fn mcp_apply_does_not_rematerialize_session_lost_after_locked_preparation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context(&temp).await;
-        let created = context
-            .service
-            .create_session(create_request(
-                "lost after preparation",
-                meerkat_core::service::InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("create session");
-        let session_id = created.session_id;
+        let session_id =
+            create_deferred_session_with_generated_authority(&context, "lost after preparation")
+                .await;
         let state = context
             .ensure_session(&session_id)
             .await
@@ -2045,7 +3149,7 @@ mod tests {
             }),
         });
         let mut executor =
-            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), state);
+            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), Arc::clone(&state));
         let error = CoreExecutor::apply(&mut executor, RunId::new(), primitive)
             .await
             .expect_err("post-preparation loss must surface to the runtime-loop handoff");
@@ -2061,104 +3165,16 @@ mod tests {
         assert!(context.runtime_adapter.contains_session(&session_id).await);
         context
             .runtime_adapter
-            .unregister_session(&session_id)
+            .unregister_executor_attachment_if_current(state.witness())
             .await
             .expect("external teardown owner unregisters after apply returns");
-    }
-
-    #[tokio::test]
-    async fn mcp_cold_start_materializes_before_non_empty_compaction_outbox_validation() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context(&temp).await;
-        let created = context
-            .service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".into(),
-                system_prompt: meerkat::SystemPromptOverride::Inherit,
-                max_tokens: Some(1024),
-                event_tx: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-                build: Some(meerkat_core::service::SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
-        let session_id = created.session_id;
-        context
-            .service
-            .discard_live_session(&session_id)
-            .await
-            .expect("discard live session");
-        context
-            .clear_session(&session_id)
-            .await
-            .expect("clear runtime registration");
-
-        let state = context
-            .ensure_session(&session_id)
-            .await
-            .expect("cold startup must materialize before attaching the runtime loop");
-        let mut executor =
-            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), Arc::clone(&state));
-        let intent: meerkat_core::CompactionProjectionIntent =
-            serde_json::from_value(serde_json::json!({
-                "projection": {
-                    "session_id": session_id,
-                    "parent_revision": "cold-parent",
-                    "revision": "cold-revision",
-                    "commit_fingerprint": "sha256:cold-start-outbox"
-                },
-                "summary_tokens": 3,
-                "messages_before": 2,
-                "messages_after": 1
-            }))
-            .expect("valid compaction intent fixture");
-
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            executor.reconcile_committed_compaction_projections(&[intent]),
-        )
-        .await
-        .expect("cold non-empty outbox reconciliation must not deadlock")
-        .expect_err("unbacked projection fixture must still fail closed");
-        assert!(
-            !error.to_string().contains("session not found"),
-            "non-empty outbox must reach the materialized memory owner: {error}"
-        );
-        assert!(
-            context
-                .service
-                .has_live_session(&session_id)
-                .await
-                .expect("check live session"),
-            "startup reconciliation must materialize the durable memory owner first"
-        );
     }
 
     #[tokio::test]
     async fn mcp_runtime_accept_clears_state_for_archived_session() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context(&temp).await;
-        let created = context
-            .service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".into(),
-                system_prompt: meerkat::SystemPromptOverride::Inherit,
-                max_tokens: Some(1024),
-                event_tx: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-                build: Some(meerkat_core::service::SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
-        let session_id = created.session_id;
+        let session_id = create_deferred_session_with_generated_authority(&context, "hello").await;
         context
             .ensure_session(&session_id)
             .await
@@ -2178,9 +3194,11 @@ mod tests {
         assert!(
             matches!(
                 rejected,
-                Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                    state: meerkat_runtime::RuntimeState::Retired
-                })
+                Err(McpRuntimeIngressError::Runtime(
+                    meerkat_runtime::RuntimeDriverError::NotReady {
+                        state: meerkat_runtime::RuntimeState::Retired
+                    }
+                ))
             ),
             "archived MCP accept should reject as not ready: {rejected:?}"
         );
@@ -2188,272 +3206,565 @@ mod tests {
             !context.runtime_adapter.contains_session(&session_id).await,
             "archived MCP accept may clear local runtime registration after reporting Retired"
         );
-        assert!(
-            !context
-                .runtime_sessions
-                .read()
-                .await
-                .contains_key(&session_id),
-            "archived MCP accept must clear runtime session state"
-        );
+        assert!(!context.has_sidecar(&session_id).await);
     }
 
     #[tokio::test]
-    async fn mcp_runtime_pre_admission_completion_cleanup_clears_terminated_runtime() {
+    async fn exact_detach_retires_attachment_plumbing_but_retains_logical_config() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 2).await;
         let session_id =
             create_deferred_session_with_generated_authority(&context, "runtime cleanup target")
                 .await;
-        let completion_handle = runtime_terminated_completion_handle(
-            context.runtime_adapter.as_ref(),
-            &session_id,
-            "runtime stopped during cleanup",
-        )
-        .await;
-        context.runtime_sessions.write().await.insert(
-            session_id.clone(),
-            Arc::new(McpRuntimeSessionState::default()),
-        );
-        context.mcp_adapters.lock().await.insert(
-            session_id.to_string(),
-            Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new())),
-        );
-        assert!(
-            context
-                .runtime_sessions
-                .read()
-                .await
-                .contains_key(&session_id)
-        );
-        assert!(
-            context
-                .mcp_adapters
-                .lock()
-                .await
-                .contains_key(&session_id.to_string())
-        );
+        let router = Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new()));
+        let attachment = context
+            .configure_session_with_router(
+                &session_id,
+                McpCallbackConfig::Replace(None),
+                Arc::clone(&router),
+            )
+            .await
+            .expect("exact MCP attachment should commit");
 
         let requested_input_id = InputId::new();
-        let accepted_input_id = InputId::new();
         let admission = context
             .service
             .reserve_create_session_admission()
             .await
             .expect("reserve active admission");
         context
-            .insert_runtime_pre_admission(session_id.clone(), requested_input_id.clone(), admission)
+            .insert_runtime_pre_admission(
+                &attachment,
+                session_id.clone(),
+                requested_input_id,
+                admission,
+            )
             .await
             .expect("insert pending pre-admission");
 
-        let handle = wrap_mcp_runtime_pre_admission_cleanup(
-            context.clone(),
-            session_id.clone(),
-            requested_input_id,
-            accepted_input_id,
-            completion_handle,
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
-            .await
-            .expect("cleanup handle should finish")
-            .expect("authorized cleanup should preserve the completion outcome");
-
-        assert!(
-            !context
-                .runtime_sessions
-                .read()
-                .await
-                .contains_key(&session_id),
-            "runtime termination cleanup must remove MCP runtime session state"
-        );
-        assert!(
-            !context
-                .mcp_adapters
-                .lock()
-                .await
-                .contains_key(&session_id.to_string()),
-            "runtime termination cleanup must remove MCP adapter bindings"
-        );
         assert!(
             context
-                .runtime_pre_admissions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&session_id)
-                .is_none(),
-            "runtime termination cleanup must release MCP runtime pre-admission"
+                .detach_exact(&session_id, attachment.witness())
+                .await
         );
 
-        context
-            .service
-            .create_session(create_request(
-                "new deferred capacity user",
-                meerkat_core::service::InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("cleanup must release active capacity");
+        assert!(context.has_sidecar(&session_id).await);
+        assert!(
+            context
+                .current_attachment_witness(&session_id)
+                .await
+                .is_none()
+        );
+        assert!(Arc::ptr_eq(
+            &context
+                .logical_router(&session_id)
+                .await
+                .expect("router retained"),
+            &router
+        ));
+        assert!(!attachment.has_pre_admissions());
+        assert!(attachment.is_retired());
     }
 
     #[tokio::test]
-    async fn mcp_runtime_completion_preserves_outcome_after_machine_saga_cleanup() {
+    async fn normal_post_stop_cleanup_locks_boundary_before_attachment_operation_gate() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 2).await;
-        let session_id = create_deferred_session_with_generated_authority(
+        let router = Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new()));
+        let (created, attachment) = create_session_with_test_mcp_config(
             &context,
-            "MCP machine-saga cleanup target",
-        )
-        .await;
-        let completion_handle = runtime_terminated_completion_handle(
-            context.runtime_adapter.as_ref(),
-            &session_id,
-            "MCP external cleanup precedes machine saga",
-        )
-        .await;
-        let executor_state = Arc::new(McpRuntimeSessionState::default());
-        context
-            .runtime_sessions
-            .write()
-            .await
-            .insert(session_id.clone(), Arc::clone(&executor_state));
-        let mut executor =
-            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), executor_state);
-        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
-            &mut executor,
+            "post-stop lock order",
+            meerkat_core::service::InitialTurnPolicy::Defer,
+            router,
+            None,
         )
         .await
-        .expect("MCP executor external cleanup should succeed");
-        assert!(
-            context.runtime_adapter.contains_session(&session_id).await,
-            "MCP external cleanup must not recursively unregister machine authority"
+        .expect("materialize exact attachment");
+        let session_id = created.session_id;
+        let turn_boundary = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            context
+                .service
+                .acquire_runtime_turn_finalization_guard(&session_id),
+        )
+        .await
+        .expect("pending materialization must not retain the service boundary");
+        let cleanup = McpSessionRuntimePostStopCleanupHandle {
+            context: context.clone(),
+            session_id: session_id.clone(),
+            attachment: Arc::clone(&attachment),
+            actor_witness_slot: None,
+        };
+        let cleanup_task =
+            tokio::spawn(async move { cleanup.cleanup_after_runtime_stop_terminalized().await });
+        tokio::task::yield_now().await;
+
+        let operation_guard = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            Arc::clone(&attachment.operation_gate).lock_owned(),
+        )
+        .await
+        .expect("normal cleanup must wait on B before acquiring the operation gate");
+        drop(operation_guard);
+        drop(turn_boundary);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cleanup_task)
+            .await
+            .expect("post-stop cleanup must finish after B is released")
+            .expect("cleanup task joins");
+
+        if let Some(witness) = context
+            .runtime_adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+        {
+            context
+                .runtime_adapter
+                .unregister_executor_attachment_if_current(&witness)
+                .await
+                .expect("test cleanup unregisters any retained machine attachment");
+        }
+    }
+
+    #[tokio::test]
+    async fn materialization_does_not_retain_registration_gate_while_cleanup_waits_for_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 2).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let prepared = crate::prepare_new_mcp_actor_materialization(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
+        )
+        .await
+        .expect("prepare exact materialization");
+        let mut request = create_request(
+            "post-ensure cleanup lock order",
+            meerkat_core::service::InitialTurnPolicy::Defer,
         );
+        let build = request.build.get_or_insert_with(Default::default);
+        build.resume_session = Some(session);
+        build.runtime_build_mode =
+            meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
+        let create = crate::create_runtime_backed_session_and_run_initial_turn_call_local(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
+            request,
+            None,
+            prepared,
+        )
+        .await
+        .expect("call-local actor creation");
+        let crate::McpCallLocalActorCreateOutcome {
+            result,
+            transaction,
+        } = create;
+        result.expect("deferred actor creation");
+
         context
             .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("machine-owned saga should remove the stopped MCP runtime");
-        assert!(!context.runtime_adapter.contains_session(&session_id).await);
+            .test_pause_next_executor_after_ensure();
+        let commit_context = context.clone();
+        let commit_session_id = session_id.clone();
+        let mut commit = tokio::spawn(async move {
+            commit_context
+                .commit_prepared_session(
+                    &commit_session_id,
+                    transaction,
+                    McpCallbackConfig::Preserve,
+                    None,
+                )
+                .await
+        });
 
-        let handle = wrap_mcp_runtime_pre_admission_cleanup(
-            context,
-            session_id,
-            InputId::new(),
-            InputId::new(),
-            completion_handle,
-        );
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
-            .await
-            .expect("machine-saga MCP cleanup should finish")
-            .expect("verified machine-saga cleanup should preserve the completion outcome");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            context
+                .runtime_adapter
+                .test_wait_for_executor_after_ensure_pause(),
+        )
+        .await
+        .expect("MCP materialization must reach the exact post-ensure hook");
+        let turn_boundary = context
+            .service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        context
+            .runtime_adapter
+            .test_release_executor_after_ensure_pause();
         assert!(
-            matches!(
-                outcome,
-                meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
-            ),
-            "MCP machine-saga cleanup must publish RuntimeTerminated: {outcome:?}"
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut commit)
+                .await
+                .is_err(),
+            "faulted attachment cleanup must wait for the retained service boundary"
         );
+
+        let registration_lease = context.runtime_registration_lock(&session_id);
+        let registration_guard = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            Arc::clone(&registration_lease.lock).lock_owned(),
+        )
+        .await
+        .expect("pending materialization must not retain the MCP registration gate");
+        drop(registration_guard);
+        drop(registration_lease);
+        drop(turn_boundary);
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), commit)
+            .await
+            .expect("faulted materialization cleanup must finish after B is released")
+            .expect("materialization task joins")
+            .expect_err("injected post-ensure stop must reject materialization");
+        assert!(error.to_string().contains("post-ensure hook failed"));
     }
 
     #[tokio::test]
-    async fn mcp_external_cleanup_failure_retains_all_projection_retry_anchors() {
+    async fn sidecar_cas_loss_aborts_before_attachment_serves() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 2).await;
-        let session_id = create_deferred_session_with_generated_authority(
-            &context,
-            "MCP external cleanup retry anchor",
-        )
-        .await;
-        let executor_state = Arc::new(McpRuntimeSessionState::default());
-        context
-            .runtime_sessions
-            .write()
-            .await
-            .insert(session_id.clone(), Arc::clone(&executor_state));
-        context.mcp_adapters.lock().await.insert(
-            session_id.to_string(),
-            Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new())),
-        );
-        let input_id = InputId::new();
-        let admission = context
-            .service
-            .reserve_create_session_admission()
-            .await
-            .expect("reserve cleanup retry admission");
-        context
-            .insert_runtime_pre_admission(session_id.clone(), input_id, admission)
-            .await
-            .expect("insert cleanup retry pre-admission");
-        context
-            .fail_external_cleanup_discard_once
-            .store(true, std::sync::atomic::Ordering::Release);
-        let mut executor =
-            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), executor_state);
-
-        let error = meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
-            &mut executor,
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let prepared = crate::prepare_new_mcp_actor_materialization(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
         )
         .await
-        .expect_err("injected live-session discard failure must remain visible");
-        assert!(
-            error
-                .to_string()
-                .contains("synthetic fail-once MCP live-session discard")
+        .expect("prepare fresh exact materialization");
+        let mut request = create_request(
+            "sidecar compare-and-swap loss",
+            meerkat_core::service::InitialTurnPolicy::Defer,
         );
+        let build = request.build.get_or_insert_with(Default::default);
+        build.resume_session = Some(session);
+        build.runtime_build_mode =
+            meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
+        let create = crate::create_runtime_backed_session_and_run_initial_turn_call_local(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
+            request,
+            None,
+            prepared,
+        )
+        .await
+        .expect("call-local actor creation");
+        let crate::McpCallLocalActorCreateOutcome {
+            result,
+            mut transaction,
+        } = create;
+        result.expect("deferred actor creation");
+        let actor_witness = transaction
+            .actor_witness_slot()
+            .witness()
+            .expect("created actor witness");
+
+        let candidate = context.snapshot_config_candidate(&session_id).await;
+        let created_attachment = Arc::new(StdMutex::new(None));
+        let created_attachment_for_factory = Arc::clone(&created_attachment);
+        let executor_context = context.clone();
+        let executor_session_id = session_id.clone();
+        let actor_witness_slot = transaction.actor_witness_slot().clone();
+        let attachment_actor_witness = actor_witness.clone();
+        let pending = match transaction
+            .ensure_executor_attachment(move |witness| {
+                let attachment = Arc::new(McpRuntimeAttachmentState::new_for_actor(
+                    witness,
+                    attachment_actor_witness,
+                ));
+                *created_attachment_for_factory
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(Arc::clone(&attachment));
+                Box::new(McpSessionRuntimeExecutor::new_exact(
+                    executor_context,
+                    executor_session_id,
+                    attachment,
+                    actor_witness_slot,
+                )) as Box<dyn CoreExecutor>
+            })
+            .await
+            .expect("prepare pending exact attachment")
+        {
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(_) => {
+                panic!("fresh transaction must not find an existing attachment")
+            }
+        };
+        let attachment = created_attachment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("executor factory publishes attachment state");
+
+        // Invalidate the logical candidate after it was captured but before
+        // the inactive sidecar is staged. The failure occurs while the machine
+        // still withholds serving publication.
         assert!(
             context
-                .runtime_sessions
-                .read()
+                .runtime_adapter
+                .current_executor_attachment_witness(&session_id)
                 .await
-                .contains_key(&session_id)
+                .is_none(),
+            "pending attachment must not serve before sidecar staging"
         );
+        context.sidecars.write().await.insert(
+            session_id.clone(),
+            McpSessionSidecar {
+                logical: McpLogicalSessionConfig::fresh(),
+                attachment: None,
+            },
+        );
+        let primary = context
+            .stage_attachment_publication(&session_id, &candidate, Arc::clone(&attachment))
+            .await
+            .expect_err("logical CAS loss must fail before serving publication");
+        let error = abort_pending_mcp_attachment_after_error(pending, primary).await;
+        assert!(error.to_string().contains("meerkat_resume"));
         assert!(
             context
-                .mcp_adapters
-                .lock()
+                .runtime_adapter
+                .current_executor_attachment_witness(&session_id)
                 .await
-                .contains_key(&session_id.to_string())
-        );
-        assert!(
-            context
-                .runtime_pre_admissions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(&session_id),
-            "failed discard must retain the pre-admission retry anchor"
+                .is_none(),
+            "failed sidecar staging must not leave its machine attachment serving"
         );
         assert!(
             context
                 .service
-                .has_live_session(&session_id)
+                .acquire_live_session_actor_turn_boundary_lease_exact(&actor_witness)
                 .await
-                .expect("inspect live session after failed cleanup")
+                .expect("inspect exact actor")
+                .is_none(),
+            "failed sidecar staging must compare-remove its exact actor"
         );
+        assert!(
+            context
+                .current_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "failed attachment must never become surface-visible"
+        );
+    }
 
-        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
-            &mut executor,
+    #[tokio::test]
+    async fn post_commit_validation_retirement_failure_preserves_coherent_assembly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 2).await;
+        let router = Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new()));
+        let (created, attachment) = create_session_with_test_mcp_config(
+            &context,
+            "retirement failure coherence",
+            meerkat_core::service::InitialTurnPolicy::Defer,
+            router,
+            None,
         )
         .await
-        .expect("retry should clear projections after discard succeeds");
+        .expect("materialize coherent exact attachment");
+        let session_id = created.session_id;
+        let attachment_witness = attachment.witness().clone();
+        let actor_witness = attachment
+            .actor_witness
+            .get()
+            .expect("exact actor witness")
+            .clone();
+
+        let error = context
+            .finish_failed_committed_attachment_cleanup(
+                &session_id,
+                &attachment_witness,
+                &actor_witness,
+                Err(meerkat_runtime::RuntimeDriverError::Internal(
+                    "injected exact retirement failure after commit validation failure".to_string(),
+                )),
+            )
+            .await
+            .expect_err("retirement failure must fail without partial owner cleanup");
         assert!(
-            !context
-                .runtime_sessions
-                .read()
+            error
+                .to_string()
+                .contains("injected exact retirement failure")
+        );
+        assert_eq!(
+            context
+                .runtime_adapter
+                .current_executor_attachment_witness(&session_id)
+                .await,
+            Some(attachment_witness.clone()),
+            "machine attachment remains coherently owned when retirement fails"
+        );
+        assert_eq!(
+            context.current_attachment_witness(&session_id).await,
+            Some(attachment_witness),
+            "retirement failure must not detach the exact sidecar"
+        );
+        assert!(
+            context
+                .service
+                .acquire_live_session_actor_turn_boundary_lease_exact(&actor_witness)
                 .await
-                .contains_key(&session_id)
+                .expect("inspect exact actor")
+                .is_some(),
+            "retirement failure must not discard the serving attachment's actor"
         );
-        assert!(
-            !context
-                .mcp_adapters
-                .lock()
+        assert!(!attachment.is_retired());
+    }
+
+    #[tokio::test]
+    async fn actor_missing_router_update_fails_closed_without_split_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 2).await;
+        let session_id = create_deferred_session_with_generated_authority(
+            &context,
+            "actor-missing router update",
+        )
+        .await;
+        let original_router = Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new()));
+        let attachment = context
+            .configure_session_with_router(
+                &session_id,
+                McpCallbackConfig::Replace(None),
+                Arc::clone(&original_router),
+            )
+            .await
+            .expect("attach original router");
+        let original_witness = attachment.witness().clone();
+        context
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("open actor-missing recovery window");
+
+        let replacement_router = Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new()));
+        let error = context
+            .configure_session_with_router(
+                &session_id,
+                McpCallbackConfig::Preserve,
+                replacement_router,
+            )
+            .await
+            .expect_err("actor-only recovery cannot commit a logical router update");
+        assert!(error.to_string().contains("meerkat_resume"));
+        assert!(Arc::ptr_eq(
+            &context
+                .logical_router(&session_id)
                 .await
-                .contains_key(&session_id.to_string())
+                .expect("original logical router remains"),
+            &original_router,
+        ));
+        assert_eq!(
+            context.current_attachment_witness(&session_id).await,
+            Some(original_witness),
+            "failed router update must preserve exact attachment A"
         );
         assert!(
             !context
-                .runtime_pre_admissions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(&session_id)
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("actor liveness lookup"),
+            "failed router update must not construct an actor from unpublished config"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_attachment_cannot_publish_over_or_clean_up_replacement() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context_with_capacity(&temp, 2).await;
+        let router = Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new()));
+        let (created, attachment_a) = create_session_with_test_mcp_config(
+            &context,
+            "exact attachment replacement",
+            meerkat_core::service::InitialTurnPolicy::Defer,
+            Arc::clone(&router),
+            None,
+        )
+        .await
+        .expect("materialize attachment A");
+        let session_id = created.session_id;
+        let candidate_a = context.snapshot_config_candidate(&session_id).await;
+        let witness_a = attachment_a.witness().clone();
+        let queued_input = InputId::new();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        attachment_a
+            .register_turn_context(queued_input.clone(), Some(event_tx))
+            .expect("queue context belongs to attachment A")
+            .disarm();
+
+        let session = context
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative lookup")
+            .expect("persisted replacement session");
+        let prepared = crate::prepare_mcp_actor_materialization(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
+        )
+        .await
+        .expect("explicit resume seam prepares replacement B");
+        let mut request = create_request("", meerkat_core::service::InitialTurnPolicy::Defer);
+        let build = request.build.get_or_insert_with(Default::default);
+        build.resume_session = Some(session);
+        build.runtime_build_mode =
+            meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
+        build.external_tools = Some(router.clone());
+        let outcome = crate::create_runtime_backed_session_and_run_initial_turn_call_local(
+            &context.service,
+            &context.runtime_adapter,
+            &session_id,
+            request,
+            None,
+            prepared,
+        )
+        .await
+        .expect("call-local replacement create");
+        let crate::McpCallLocalActorCreateOutcome {
+            result,
+            transaction,
+        } = outcome;
+        result.expect("replacement actor B should resume");
+        let attachment_b = context
+            .commit_prepared_session(&session_id, transaction, McpCallbackConfig::Preserve, None)
+            .await
+            .expect("commit exact replacement B");
+        assert_ne!(attachment_b.witness(), &witness_a);
+        assert!(
+            attachment_a
+                .take_turn_context_for_inputs(std::slice::from_ref(&queued_input))
+                .is_none(),
+            "retiring A must cancel its queued request"
+        );
+        assert!(
+            attachment_b
+                .take_turn_context_for_inputs(std::slice::from_ref(&queued_input))
+                .is_none(),
+            "queued work owned by A must never migrate to B"
+        );
+
+        assert!(
+            !context.detach_exact(&session_id, &witness_a).await,
+            "cleanup owned by attachment A must not compare-remove B"
+        );
+        let stale_publish = context
+            .stage_attachment_publication(&session_id, &candidate_a, attachment_a)
+            .await
+            .expect_err("delayed attachment A publication must fail closed");
+        assert!(stale_publish.to_string().contains("meerkat_resume"));
+        assert_eq!(
+            context.current_attachment_witness(&session_id).await,
+            Some(attachment_b.witness().clone()),
+            "neither stale publication nor stale cleanup may disturb B"
+        );
+        assert!(Arc::ptr_eq(
+            &context
+                .logical_router(&session_id)
+                .await
+                .expect("session-scoped router survives replacement"),
+            &router,
+        ));
     }
 
     #[tokio::test]
@@ -2465,12 +3776,10 @@ mod tests {
             "runtime unrelated cleanup target",
         )
         .await;
-        let completion_handle = runtime_terminated_completion_handle(
-            context.runtime_adapter.as_ref(),
-            &session_id,
-            "runtime stopped with unrelated admission",
-        )
-        .await;
+        let attachment = context
+            .ensure_session(&session_id)
+            .await
+            .expect("attach pre-admission fixture");
 
         let requested_input_id = InputId::new();
         let accepted_input_id = InputId::new();
@@ -2487,6 +3796,7 @@ mod tests {
             .expect("reserve unrelated active admission");
         context
             .insert_runtime_pre_admission(
+                &attachment,
                 session_id.clone(),
                 requested_input_id.clone(),
                 requested_admission,
@@ -2495,6 +3805,7 @@ mod tests {
             .expect("insert requested pre-admission");
         context
             .insert_runtime_pre_admission(
+                &attachment,
                 session_id.clone(),
                 unrelated_input_id.clone(),
                 unrelated_admission,
@@ -2502,25 +3813,14 @@ mod tests {
             .await
             .expect("insert unrelated pre-admission");
 
-        let handle = wrap_mcp_runtime_pre_admission_cleanup(
-            context.clone(),
-            session_id.clone(),
-            requested_input_id.clone(),
-            accepted_input_id,
-            completion_handle,
-        );
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
-            .await
-            .expect("cleanup handle should finish");
+        attachment.discard_pre_admission(&requested_input_id);
+        attachment.discard_pre_admission(&accepted_input_id);
 
         {
-            let pre_admissions = context
-                .runtime_pre_admissions
+            let entries = attachment
+                .pre_admissions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let entries = pre_admissions
-                .get(&session_id)
-                .expect("unrelated pre-admission must remain after completion cleanup");
             assert!(
                 entries
                     .iter()
@@ -2536,16 +3836,22 @@ mod tests {
         }
 
         context
-            .discard_runtime_pre_admission(&session_id, &unrelated_input_id)
+            .discard_runtime_pre_admission(&attachment, &unrelated_input_id)
             .await;
     }
 
     #[tokio::test]
     async fn mcp_runtime_completion_cleanup_retains_pre_admission_on_authority_mismatch() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context_with_capacity(&temp, 1).await;
+        let context = build_test_context_with_capacity(&temp, 3).await;
         let source_session_id = SessionId::new();
-        let target_session_id = SessionId::new();
+        let target_session_id =
+            create_deferred_session_with_generated_authority(&context, "mismatched cleanup target")
+                .await;
+        let attachment = context
+            .ensure_session(&target_session_id)
+            .await
+            .expect("attach mismatched cleanup target");
         let completion_handle = runtime_terminated_completion_handle(
             context.runtime_adapter.as_ref(),
             &source_session_id,
@@ -2562,6 +3868,7 @@ mod tests {
             .expect("reserve active admission");
         context
             .insert_runtime_pre_admission(
+                &attachment,
                 target_session_id.clone(),
                 requested_input_id.clone(),
                 admission,
@@ -2572,6 +3879,7 @@ mod tests {
         let handle = wrap_mcp_runtime_pre_admission_cleanup(
             context.clone(),
             target_session_id.clone(),
+            Arc::clone(&attachment),
             requested_input_id.clone(),
             accepted_input_id,
             completion_handle,
@@ -2586,19 +3894,17 @@ mod tests {
         );
 
         assert!(
-            context
-                .runtime_pre_admissions
+            attachment
+                .pre_admissions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&target_session_id)
-                .is_some_and(|entries| entries
-                    .iter()
-                    .any(|entry| entry.input_id == requested_input_id)),
+                .iter()
+                .any(|entry| entry.input_id == requested_input_id),
             "MCP runtime pre-admission must be retained when generated cleanup authority rejects the observation"
         );
 
         context
-            .discard_runtime_pre_admission(&target_session_id, &requested_input_id)
+            .discard_runtime_pre_admission(&attachment, &requested_input_id)
             .await;
     }
 
@@ -2701,7 +4007,7 @@ mod tests {
         .await
         .expect("completed target create should succeed");
         let target_session_id = target.session_id;
-        context
+        let attachment = context
             .ensure_session(&target_session_id)
             .await
             .expect("MCP runtime executor should attach");
@@ -2722,12 +4028,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(
-            context
-                .runtime_pre_admissions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&target_session_id)
-                .is_none(),
+            !attachment.has_pre_admissions(),
             "accept_input must not reserve active capacity while registration mutation is locked"
         );
 
@@ -2746,7 +4047,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_new_runtime_cleanup_preserves_pending_pre_admission() {
+    async fn mcp_runtime_accept_terminal_no_handle_retains_committed_runtime_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
         let target = create_session_with_test_machine(
@@ -2757,91 +4058,7 @@ mod tests {
         .await
         .expect("completed target create should succeed");
         let target_session_id = target.session_id;
-        context
-            .runtime_adapter
-            .unregister_session(&target_session_id)
-            .await
-            .expect("target runtime session should unregister cleanly");
-        let runtime_was_registered = context
-            .runtime_adapter
-            .contains_session(&target_session_id)
-            .await;
-        let runtime_state_existed = context
-            .runtime_sessions
-            .read()
-            .await
-            .contains_key(&target_session_id);
-        context
-            .runtime_adapter
-            .prepare_bindings(target_session_id.clone())
-            .await
-            .expect("prepare new runtime binding");
-        let input_id = InputId::new();
-        let admission = context
-            .service
-            .reserve_runtime_turn_admission(&target_session_id)
-            .await
-            .expect("reserve pending runtime admission");
-        context
-            .insert_runtime_pre_admission(target_session_id.clone(), input_id.clone(), admission)
-            .await
-            .expect("insert pending pre-admission");
-
-        context
-            .clear_session_if_new(
-                &target_session_id,
-                runtime_was_registered,
-                runtime_state_existed,
-            )
-            .await
-            .expect("pending pre-admission should make cleanup a no-op");
-        assert!(
-            context
-                .runtime_adapter
-                .contains_session(&target_session_id)
-                .await,
-            "cleanup must preserve a new runtime registration with pending active admission"
-        );
-
-        context
-            .discard_runtime_pre_admission(&target_session_id, &input_id)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn mcp_runtime_accept_terminal_no_handle_clears_new_runtime_state() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = create_session_with_test_machine(
-            &context,
-            "completed target",
-            meerkat_core::service::InitialTurnPolicy::RunImmediately,
-        )
-        .await
-        .expect("completed target create should succeed");
-        let target_session_id = target.session_id;
-        context
-            .service
-            .discard_live_session(&target_session_id)
-            .await
-            .expect("discard live target session");
-        context
-            .runtime_adapter
-            .unregister_session(&target_session_id)
-            .await
-            .expect("target runtime session should unregister cleanly");
-        context
-            .clear_session(&target_session_id)
-            .await
-            .expect("test target runtime session should clear");
-        assert!(
-            !context
-                .runtime_sessions
-                .read()
-                .await
-                .contains_key(&target_session_id),
-            "test requires no preexisting MCP runtime state"
-        );
+        assert!(context.has_sidecar(&target_session_id).await);
 
         let operation_id = meerkat_core::OperationId::new();
         let input = Input::Operation(meerkat_runtime::OperationInput {
@@ -2875,379 +4092,126 @@ mod tests {
             "terminal operation input should not return a completion handle"
         );
         assert!(
-            !context
+            context
                 .runtime_adapter
                 .contains_session(&target_session_id)
                 .await,
-            "terminal no-handle accept must unregister newly-created runtime registration"
+            "a successful no-handle request must not tear down the committed session attachment"
         );
         assert!(
-            !context
-                .runtime_sessions
-                .read()
-                .await
-                .contains_key(&target_session_id),
-            "terminal no-handle accept must clear newly-created MCP runtime state"
+            context.has_sidecar(&target_session_id).await,
+            "a successful no-handle request must retain the committed MCP sidecar"
         );
-        assert!(
-            context
-                .runtime_pre_admissions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&target_session_id)
-                .is_none(),
-            "terminal no-handle accept must release pre-admission"
-        );
-        context
-            .service
-            .create_session(create_request(
-                "replacement",
-                meerkat_core::service::InitialTurnPolicy::Defer,
-            ))
+        let attachment = context
+            .sidecars
+            .read()
             .await
-            .expect("terminal no-handle accept should release active capacity");
+            .get(&target_session_id)
+            .and_then(|sidecar| sidecar.attachment.clone())
+            .expect("committed attachment remains");
+        assert!(!attachment.has_pre_admissions());
     }
 
     #[tokio::test]
-    async fn mcp_runtime_accept_recovers_persisted_live_missing_session() {
+    async fn actor_missing_accept_requires_explicit_resume_and_preserves_exact_sidecar() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = create_session_with_test_machine(
+        let router = Arc::new(McpRouterAdapter::new(meerkat_mcp::McpRouter::new()));
+        let callback_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(crate::MpcToolDispatcher::new(&[]));
+        let (created, attachment) = create_session_with_test_mcp_config(
             &context,
-            "completed target",
-            meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            "actor missing",
+            meerkat_core::service::InitialTurnPolicy::Defer,
+            Arc::clone(&router),
+            Some(Arc::clone(&callback_tools)),
         )
         .await
-        .expect("completed target create should succeed");
-        let target_session_id = target.session_id;
-        let state = context
-            .ensure_session(&target_session_id)
+        .expect("attach exact MCP session");
+        let session_id = created.session_id;
+        let witness = attachment.witness().clone();
+        let revision = context
+            .sidecars
+            .read()
             .await
-            .expect("MCP runtime executor should attach");
+            .get(&session_id)
+            .expect("configured sidecar")
+            .logical
+            .revision;
         context
-            .runtime_adapter
-            .ensure_session_with_executor(
-                target_session_id.clone(),
-                Box::new(McpSessionRuntimeExecutor::new(
-                    context.clone(),
-                    target_session_id.clone(),
-                    state.clone(),
-                )),
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live actor");
+
+        let error = context
+            .accept_input_with_completion(
+                &session_id,
+                Input::Prompt(meerkat_runtime::PromptInput::new("must fail closed", None)),
+                None,
             )
             .await
-            .expect("runtime executor registration should succeed");
-        context
-            .service
-            .discard_live_session(&target_session_id)
-            .await
-            .expect("discard live target session");
-        assert!(
-            !context
-                .service
-                .has_live_session(&target_session_id)
-                .await
-                .expect("check live session"),
-            "test requires a persisted-only target session"
-        );
+            .expect_err("generic accept must not rebuild a missing actor");
 
-        let input = Input::Prompt(meerkat_runtime::PromptInput::new(
-            "recover persisted-only target",
-            None,
+        assert!(
+            error.to_string().contains("meerkat_resume"),
+            "unexpected fail-closed accept error: {error}"
+        );
+        let tool_error = error.into_tool_error("generic MCP accept failed");
+        assert_eq!(
+            tool_error.code,
+            meerkat_contracts::ErrorCode::SessionNotRunning.jsonrpc_code()
+        );
+        assert_eq!(
+            tool_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("session_resume_required"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "resume-required ingress failure must retain structured MCP data"
+        );
+        let sidecars = context.sidecars.read().await;
+        let sidecar = sidecars.get(&session_id).expect("sidecar is preserved");
+        assert_eq!(sidecar.logical.revision, revision);
+        assert!(Arc::ptr_eq(
+            sidecar
+                .attachment
+                .as_ref()
+                .expect("exact attachment remains"),
+            &attachment,
         ));
-        let (outcome, handle) = context
-            .accept_input_with_completion(&target_session_id, input, None)
-            .await
-            .expect("persisted-only MCP runtime accept should reserve and accept");
-        assert!(
-            matches!(outcome, AcceptOutcome::Accepted { .. }),
-            "persisted-only MCP input should be accepted: {outcome:?}"
-        );
-        if let Some(handle) = handle {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
-                .await
-                .expect("persisted-only MCP input should complete");
-        }
-
-        for _ in 0..200 {
-            let pre_admission_cleared = context
-                .runtime_pre_admissions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&target_session_id)
-                .is_none();
-            let active_inputs = context
-                .runtime_adapter
-                .list_active_inputs(&target_session_id)
-                .await
-                .unwrap_or_default();
-            if pre_admission_cleared && active_inputs.is_empty() {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        panic!("persisted-only MCP input did not finish and clear pre-admission");
-    }
-
-    #[tokio::test]
-    async fn concurrent_cold_ensure_and_accept_share_one_materialization_owner() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context_with_capacity(&temp, 1).await;
-        let created = context
-            .service
-            .create_session(create_request(
-                "cold concurrency",
-                meerkat_core::service::InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("create persisted session");
-        let session_id = created.session_id;
-        context
-            .service
-            .discard_live_session(&session_id)
-            .await
-            .expect("discard live session");
-        context
-            .clear_session(&session_id)
-            .await
-            .expect("remove initial runtime registration");
-
-        let barrier = Arc::new(tokio::sync::Barrier::new(3));
-        let ensure_task = {
-            let context = context.clone();
-            let session_id = session_id.clone();
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                context.ensure_session(&session_id).await
-            })
-        };
-        let accept_task = {
-            let context = context.clone();
-            let session_id = session_id.clone();
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                context
-                    .accept_input_with_completion(
-                        &session_id,
-                        Input::Prompt(meerkat_runtime::PromptInput::new(
-                            "concurrent cold accept",
-                            None,
-                        )),
-                        None,
-                    )
-                    .await
-            })
-        };
-        barrier.wait().await;
-
-        let ensured = ensure_task
-            .await
-            .expect("ensure task join")
-            .expect("cold ensure succeeds");
-        let (outcome, handle) = accept_task
-            .await
-            .expect("accept task join")
-            .expect("cold accept succeeds");
-        assert!(matches!(outcome, AcceptOutcome::Accepted { .. }));
-        let installed = context
-            .runtime_sessions
-            .read()
-            .await
-            .get(&session_id)
-            .cloned()
-            .expect("one runtime state installed");
-        assert!(Arc::ptr_eq(&ensured, &installed));
-        assert!(context.runtime_adapter.contains_session(&session_id).await);
-        if let Some(handle) = handle {
-            tokio::time::timeout(std::time::Duration::from_secs(5), handle.wait())
-                .await
-                .expect("concurrent cold accept completion must not hang")
-                .expect("concurrent cold accept completes successfully");
-        }
-    }
-
-    #[tokio::test]
-    async fn concurrent_cold_ensure_and_clear_never_publish_split_runtime_state() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context(&temp).await;
-        let created = context
-            .service
-            .create_session(create_request(
-                "cold ensure clear race",
-                meerkat_core::service::InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("create persisted session");
-        let session_id = created.session_id;
-        context
-            .service
-            .discard_live_session(&session_id)
-            .await
-            .expect("discard live session");
-        context
-            .clear_session(&session_id)
-            .await
-            .expect("remove initial runtime registration");
-
-        let barrier = Arc::new(tokio::sync::Barrier::new(3));
-        let ensure_task = {
-            let context = context.clone();
-            let session_id = session_id.clone();
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                context.ensure_session(&session_id).await
-            })
-        };
-        let clear_task = {
-            let context = context.clone();
-            let session_id = session_id.clone();
-            let barrier = Arc::clone(&barrier);
-            tokio::spawn(async move {
-                barrier.wait().await;
-                context.clear_session(&session_id).await
-            })
-        };
-        barrier.wait().await;
-        let ensured = ensure_task.await.expect("ensure task join");
-        clear_task
-            .await
-            .expect("clear task join")
-            .expect("clear succeeds");
-
-        let registered = context.runtime_adapter.contains_session(&session_id).await;
-        let installed = context
-            .runtime_sessions
-            .read()
-            .await
-            .get(&session_id)
-            .cloned();
-        assert_eq!(registered, installed.is_some());
-        if let (Ok(ensured), Some(installed)) = (ensured, installed) {
-            assert!(
-                Arc::ptr_eq(&ensured, &installed),
-                "the attached executor and published runtime state must share one exact Arc"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn mcp_runtime_recovery_no_pending_releases_capacity() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let context = build_test_context_with_capacity(&temp, 1).await;
-        let target = create_session_with_test_machine(
-            &context,
-            "completed target",
-            meerkat_core::service::InitialTurnPolicy::RunImmediately,
-        )
-        .await
-        .expect("completed target create should succeed");
-        let session_id = target.session_id;
-        context
-            .ensure_session(&session_id)
-            .await
-            .expect("MCP runtime executor should attach");
-        context
-            .service
-            .discard_live_session(&session_id)
-            .await
-            .expect("discard completed live session before recovery");
-        context
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
-        let state = context
-            .ensure_session(&session_id)
-            .await
-            .expect("canonical pre-attach recovery should rematerialize the session");
-
-        let input_id = InputId::new();
-        let primitive = RunPrimitive::StagedInput(StagedRunInput {
-            boundary: RunApplyBoundary::Immediate,
-            appends: Vec::new(),
-            context_appends: Vec::new(),
-            contributing_input_ids: vec![input_id],
-            turn_metadata: Some(RuntimeTurnMetadata {
-                execution_kind: Some(RuntimeExecutionKind::ResumePending),
-                ..Default::default()
-            }),
-        });
-        let output = apply_runtime_turn(&context, &state, &session_id, RunId::new(), &primitive)
-            .await
-            .expect("live-missing resume-pending recovery should return no-op output");
-        assert!(
-            matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary)),
-            "expected no-pending terminal from recovered completed session: {output:?}"
-        );
-        assert!(
+        drop(sidecars);
+        assert_eq!(
             context
-                .service
-                .has_live_session(&session_id)
+                .runtime_adapter
+                .current_executor_attachment_witness(&session_id)
+                .await,
+            Some(witness),
+            "fail-closed accept must not replace or unregister its attachment"
+        );
+        assert!(!attachment.has_pre_admissions());
+        assert!(Arc::ptr_eq(
+            &context
+                .logical_router(&session_id)
                 .await
-                .expect("check recovered live session before handoff cleanup"),
-            "direct apply must retain the rebuilt live session until the exact executor is handed off"
-        );
-        assert!(
-            context.runtime_adapter.contains_session(&session_id).await,
-            "direct apply helper must retain runtime authority until post-handoff unregister"
-        );
-
-        let mut executor =
-            McpSessionRuntimeExecutor::new(context.clone(), session_id.clone(), state);
-        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
-            &mut executor,
-        )
-        .await
-        .expect("post-handoff MCP executor cleanup should discard the rebuilt live session");
-        assert!(
-            !context
-                .service
-                .has_live_session(&session_id)
+                .expect("router remains"),
+            &router,
+        ));
+        assert!(Arc::ptr_eq(
+            &context
+                .current_callback_tools(&session_id)
                 .await
-                .expect("check recovered live session after handoff cleanup"),
-            "no-op recovery should discard the rematerialized live session only after stop terminalization"
-        );
-
-        context
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("test cleanup should drive canonical unregister");
-
-        context
-            .service
-            .create_session(create_request(
-                "new deferred capacity user",
-                meerkat_core::service::InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("no-op recovery must release active capacity");
+                .expect("callback config remains"),
+            &callback_tools,
+        ));
     }
 
     #[tokio::test]
     async fn mcp_runtime_apply_requests_post_handoff_teardown_for_archived_session() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context(&temp).await;
-        let created = context
-            .service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "claude-sonnet-4-5".to_string(),
-                prompt: "hello".into(),
-                system_prompt: meerkat::SystemPromptOverride::Inherit,
-                max_tokens: Some(1024),
-                event_tx: None,
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-                build: Some(meerkat_core::service::SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
-        let session_id = created.session_id;
+        let session_id = create_deferred_session_with_generated_authority(&context, "hello").await;
         let state = context
             .ensure_session(&session_id)
             .await
@@ -3281,11 +4245,10 @@ mod tests {
         );
         assert!(
             context
-                .runtime_sessions
-                .read()
+                .current_attachment_witness(&session_id)
                 .await
-                .contains_key(&session_id),
-            "archived MCP apply must retain runtime session state as cleanup retry anchor"
+                .is_some(),
+            "archived MCP apply must retain the exact attachment through executor cleanup handoff"
         );
     }
 

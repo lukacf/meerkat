@@ -70,6 +70,31 @@ failures -32010, budget exhaustion -32011, hook denial -32012, cancellation
 - **MCP Server**: Tool calls return `is_error: true` with the error message and code in the content.
 - **CLI**: Exit codes are coarse: 0 success, 1 error, 2 graceful budget exhaustion. Error details are printed to stderr.
 
+## Mob control scopes
+
+Plane-(b) operator access to a mob is scope-gated (multi-host mobs §8) with an
+owner-implicit-full, default-deny posture:
+
+| Principal | Effective scopes |
+|-----------|------------------|
+| Owner (v1 local RPC/REST/stdio/public-MCP consoles, the CLI, the owner bridge session) | Implicit full — every scope, no grant record needed |
+| Granted principal | Exactly its granted, unexpired `ControlScope` set |
+| Unknown / unresolvable principal | None (default-deny) |
+
+Grants are recorded per principal with an optional raw `expires_at_ms`;
+expiry is evaluated once per decision at the enforcement seam (`expired ⟺
+expires_at_ms <= now_ms`, never cached, never a machine fact). Grant
+administration requires `AdminGrants`; `AdminHost` covers host bind/revoke
+only — the two are distinct. Denials are typed end to end:
+`MobError::ScopeDenied` carries `{ required, presented }`, projected as
+`ErrorCode::ScopeDenied` (JSON-RPC `-32025`, HTTP 403, CLI exit 45) with a
+`WireScopeDeniedDetail` details payload; `presented` is always the caller's
+own effective set. Member upcalls and member-context tool surfaces ride the
+separate agent authority lane (`MobToolAuthorityContext`): grants never gate
+upcalls, and upcalls never satisfy scope checks. Revocation and expiry take
+effect at admission time — already-open event streams are not torn down in
+v1 (recorded v2 hardening).
+
 ## Pick only what you need
 
 ```toml

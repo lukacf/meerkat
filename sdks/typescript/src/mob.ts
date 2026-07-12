@@ -4,6 +4,8 @@ import type {
   AttributedMobEvent,
   ContentBlock,
   MobEventsOptions,
+  MobControlScope,
+  MobGrantRecord,
   MobEventsResult,
   MobFlowStatus,
   MobLifecycleAction,
@@ -19,12 +21,27 @@ import type {
   SpawnSpec,
 } from "./types.js";
 import type {
+  BridgeLiveControlOutcome,
+  BridgeLiveControlVerb,
+  LiveCloseResult,
+  LiveOpenResult,
+  LiveStatusResult,
+  MobBindHostResult,
+  MobHostStatus,
+  MobMemberHistoryResult,
+  MobRevokeHostResult,
+  MobRouteInstallsResult,
   MobSpawnManyResultEntry,
   WireAuthBindingRef,
+  WireHostBindingDescriptor,
+  WireHostRef,
+  WireMemberLifecycleCapabilities,
   WireMobMemberStatus,
   WireMemberProgressSnapshot,
+  WireNonPortableResourceKind,
+  WireReachability,
 } from "./generated/types.js";
-import type { MeerkatClient } from "./client.js";
+import type { MeerkatClient, MobMemberLiveOpenOptions } from "./client.js";
 
 export type MobHandlingMode = "queue" | "steer";
 export type MobRenderClass =
@@ -104,6 +121,15 @@ export interface MobMemberSnapshot {
   externalMember?: unknown;
   peerConnectivity?: MobPeerConnectivity;
   progress?: WireMemberProgressSnapshot;
+  /** Owning host; absent means the controlling host. */
+  placement?: WireHostRef;
+  controlReachability?: WireReachability;
+  commsReachability?: WireReachability;
+  /** Observer-local monotonic milliseconds since last verified contact. */
+  lastSeenMs?: number;
+  freshnessReason?: string;
+  lifecycleCapabilities?: WireMemberLifecycleCapabilities;
+  nonPortableDisabled?: WireNonPortableResourceKind[];
 }
 
 export interface MobKickoffWaitOptions {
@@ -201,6 +227,116 @@ export class Mob {
 
   async retire(agentIdentity: string): Promise<void> {
     await this.client.retireMobMember(this.mobId, agentIdentity);
+  }
+
+  /** Record (full-replace) a principal's control-scope grant. */
+  async grantScopes(
+    principal: string,
+    scopes: MobControlScope[],
+    expiresAtMs?: number,
+  ): Promise<MobGrantRecord> {
+    return this.client.grantMobScopes(this.mobId, principal, scopes, expiresAtMs);
+  }
+
+  /**
+   * Revoke scopes from a principal's grant (omit `scopes` to revoke the
+   * entire grant). Returns whether the grant record was removed entirely.
+   */
+  async revokeScopes(
+    principal: string,
+    scopes?: MobControlScope[],
+  ): Promise<boolean> {
+    return this.client.revokeMobScopes(this.mobId, principal, scopes);
+  }
+
+  /** List raw wire grant records (expired rows preserve `expires_at_ms`). */
+  async grants(): Promise<MobGrantRecord[]> {
+    return this.client.listMobGrants(this.mobId);
+  }
+
+  /**
+   * Read a member transcript page by identity — one shape local and
+   * remote, with typed placement + provenance on the envelope.
+   */
+  async memberHistory(
+    agentIdentity: string,
+    opts?: { fromIndex?: number; limit?: number },
+  ): Promise<MobMemberHistoryResult> {
+    return this.client.mobMemberHistory(this.mobId, agentIdentity, opts);
+  }
+
+  /** List tracked member hosts with bind phase and capabilities. */
+  async hosts(): Promise<MobHostStatus[]> {
+    return this.client.mobHosts(this.mobId);
+  }
+
+  /** Outstanding cross-host route-install obligations. */
+  async routeInstalls(): Promise<MobRouteInstallsResult> {
+    return this.client.mobRouteInstalls(this.mobId);
+  }
+
+  /** Bind a member-host daemon from its binding descriptor. */
+  async bindHost(
+    descriptor: WireHostBindingDescriptor,
+  ): Promise<MobBindHostResult> {
+    return this.client.bindMobHost(this.mobId, descriptor);
+  }
+
+  /** Revoke a bound (or bind-requested) member host. */
+  async revokeHost(hostId: string): Promise<MobRevokeHostResult> {
+    return this.client.revokeMobHost(this.mobId, hostId);
+  }
+
+  /**
+   * Hard-cancel a member (immediate user-interrupt authority; `reason`
+   * is required).
+   */
+  async hardCancel(agentIdentity: string, reason: string): Promise<boolean> {
+    return this.client.hardCancelMobMember(this.mobId, agentIdentity, reason);
+  }
+
+  /**
+   * Open a live realtime channel on a member. The result carries the
+   * owning host's WS URL + single-use token VERBATIM — treat it as opaque.
+   */
+  async memberLiveOpen(
+    agentIdentity: string,
+    opts?: MobMemberLiveOpenOptions,
+  ): Promise<LiveOpenResult> {
+    return this.client.openMobMemberLive(this.mobId, agentIdentity, opts);
+  }
+
+  /** Close one NAMED live channel on a member (close-what-you-name). */
+  async memberLiveClose(
+    agentIdentity: string,
+    channelId: string,
+  ): Promise<LiveCloseResult> {
+    return this.client.closeMobMemberLive(this.mobId, agentIdentity, channelId);
+  }
+
+  /**
+   * Read live channel status; omit `channelId` for the reply-loss
+   * discovery read.
+   */
+  async memberLiveStatus(
+    agentIdentity: string,
+    channelId?: string,
+  ): Promise<LiveStatusResult> {
+    return this.client.mobMemberLiveStatus(this.mobId, agentIdentity, channelId);
+  }
+
+  /** Drive one turn-level live control verb on a member channel. */
+  async memberLiveControl(
+    agentIdentity: string,
+    channelId: string,
+    verb: BridgeLiveControlVerb,
+  ): Promise<BridgeLiveControlOutcome> {
+    return this.client.controlMobMemberLive(
+      this.mobId,
+      agentIdentity,
+      channelId,
+      verb,
+    );
   }
 
   async respawn(

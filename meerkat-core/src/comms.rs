@@ -453,6 +453,22 @@ impl PeerRoute {
     }
 }
 
+/// Exact recipient residency carried by an incarnation-fenced peer message.
+/// Kept in core because the actual member runtime signs the peer envelope;
+/// mob-specific bridge types project into this transport-neutral carrier.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerRecipientIncarnation {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub host_id: String,
+    pub binding_generation: u64,
+    pub member_session_id: String,
+    pub generation: u64,
+    pub fence_token: u64,
+}
+
 /// Routing-subset descriptor for a trusted peer — the identity fields that
 /// traverse the core seam.
 ///
@@ -1674,6 +1690,17 @@ pub enum CommsCommand {
         handling_mode: HandlingMode,
         objective_id: Option<crate::interaction::ObjectiveId>,
     },
+    /// One-way peer message whose actual member sender is preserved while the
+    /// receiver must match a mandatory exact residency before admission.
+    IncarnationFencedPeerMessage {
+        to: PeerRoute,
+        body: String,
+        blocks: Option<Vec<ContentBlock>>,
+        content_taint: Option<SendTaintOverride>,
+        handling_mode: HandlingMode,
+        objective_id: Option<crate::interaction::ObjectiveId>,
+        expected_recipient: PeerRecipientIncarnation,
+    },
     /// Send a one-way peer lifecycle notification.
     PeerLifecycle {
         to: PeerRoute,
@@ -1716,6 +1743,9 @@ impl CommsCommand {
             Self::PeerMessage {
                 objective_id: slot, ..
             }
+            | Self::IncarnationFencedPeerMessage {
+                objective_id: slot, ..
+            }
             | Self::PeerRequest {
                 objective_id: slot, ..
             }
@@ -1731,6 +1761,7 @@ impl CommsCommand {
         match self {
             Self::Input { .. } => "input",
             Self::PeerMessage { .. } => "peer_message",
+            Self::IncarnationFencedPeerMessage { .. } => "incarnation_fenced_peer_message",
             Self::PeerLifecycle { .. } => "peer_lifecycle",
             Self::PeerRequest { .. } => "peer_request",
             Self::PeerResponse { .. } => "peer_response",
@@ -2090,6 +2121,37 @@ mod tests {
         assert!(PeerName::new("alice").is_ok());
         assert!(PeerName::new("".to_string()).is_err());
         assert!(PeerName::new("bad\x00name").is_err());
+    }
+
+    #[test]
+    fn incarnation_fenced_peer_message_accepts_objective_stamp() {
+        let objective_id = crate::interaction::ObjectiveId::new();
+        let command = CommsCommand::IncarnationFencedPeerMessage {
+            to: PeerRoute::new(PeerId::new()),
+            body: "fenced work".to_string(),
+            blocks: None,
+            content_taint: None,
+            handling_mode: HandlingMode::Queue,
+            objective_id: None,
+            expected_recipient: PeerRecipientIncarnation {
+                mob_id: "mob".to_string(),
+                agent_identity: "worker".to_string(),
+                host_id: "host".to_string(),
+                binding_generation: 1,
+                member_session_id: "session".to_string(),
+                generation: 1,
+                fence_token: 7,
+            },
+        }
+        .with_objective_id(Some(objective_id));
+
+        assert!(matches!(
+            command,
+            CommsCommand::IncarnationFencedPeerMessage {
+                objective_id: Some(actual),
+                ..
+            } if actual == objective_id
+        ));
     }
 
     #[test]

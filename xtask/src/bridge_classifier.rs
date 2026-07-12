@@ -24,10 +24,42 @@ use syn::visit::Visit;
 use crate::effect_authority::{path_has_pair, push_finding, strip_cfg_test_items};
 
 /// Production bridge files that must not interpret `ResponseStatus`.
-const BRIDGE_CLASSIFIER_FILES: [&str; 3] = [
+///
+/// Phase-3 additions (multi-host mobs): every new `BridgeCommand`/
+/// `BridgeReply` producer or consumer joins the list. Terminal-status
+/// construction lives in deliberately UNLISTED constructor seams (the
+/// `host_reply.rs` pattern, DEC-P3F-5) that listed files call through, so
+/// listed files stay `ResponseStatus`-token-free. Files that do not exist
+/// yet are skipped by the gate until their lane lands them.
+const BRIDGE_CLASSIFIER_FILES: [&str; 15] = [
     "meerkat-mob/src/runtime/supervisor_bridge.rs",
     "meerkat-mob/src/runtime/local_bridge.rs",
     "meerkat-contracts/src/wire/supervisor_bridge.rs",
+    // Controlling-side spawn dispatch + spec compiler (materialize sends,
+    // ack decode, HostStatus reconciliation, revival re-issue).
+    "meerkat-mob/src/runtime/actor.rs",
+    "meerkat-mob/src/runtime/spec_compiler.rs",
+    "meerkat-mob/src/runtime/provisioner.rs",
+    // Member-host serving arms (decode commands, reply through the
+    // host_reply constructor seam).
+    "meerkat-mob/src/runtime/host_actor.rs",
+    "meerkat-mob/src/runtime/host_materialize.rs",
+    // Member-side upcall lane (sends MemberOperatorRequest, decodes
+    // MemberOperatorReply) + controlling-side upcall responder.
+    "meerkat-mob/src/runtime/member_upcall.rs",
+    "meerkat-mob/src/runtime/member_operator_forwarder.rs",
+    "meerkat-mob/src/runtime/upcall_responder.rs",
+    // Phase-6 controlling-side BridgeReply consumers (DEC-P6E-23 +
+    // DEC-P6F §5.4; ADJ-P6-14 consolidated lead edit): the poll pump,
+    // the history proxy, and the remote flow ticket registry.
+    // comms_drain.rs/host_observation.rs stay UNLISTED by design (reply-
+    // constructor seams per the host_reply.rs pattern above).
+    "meerkat-mob/src/runtime/event_pump.rs",
+    "meerkat-mob/src/runtime/member_history_proxy.rs",
+    "meerkat-mob/src/runtime/remote_flow_ticket.rs",
+    // Phase-6b controlling-side live proxy (ADJ-P6B-17 consolidated lead
+    // edit): decodes the four member-live BridgeReply shapes.
+    "meerkat-mob/src/runtime/member_live_proxy.rs",
 ];
 
 const BRIDGE_CLASSIFIER_LABEL: &str = "W2-F violation: bridge code interprets `ResponseStatus` directly — route through `classify_response_terminality` + `TerminalityClass`";

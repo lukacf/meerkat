@@ -48,6 +48,7 @@ pub mod tokio {
 pub mod adaptive;
 pub mod backend;
 mod build;
+pub mod control_policy;
 pub mod coordination;
 pub mod definition;
 pub mod error;
@@ -59,6 +60,7 @@ pub mod launch;
 #[doc(hidden)]
 pub mod machines;
 mod mob_machine;
+mod portable_profile;
 pub mod profile;
 mod roster;
 pub mod run;
@@ -73,6 +75,10 @@ pub mod workgraph_attention;
 
 // Re-exports for convenience
 pub use backend::{MobBackendKind, RuntimeBinding};
+pub use control_policy::{
+    CommandAuthority, CommandAuthorityKind, ControlScope, MobControlPrincipal, OperatorGrant,
+    ResolvedControlPolicy, ScopeDenial,
+};
 pub use coordination::{
     CoordinationOwner, CoordinationRecordRefs, CoordinationResourceRef, MobCoordinationError,
     MobCoordinationEvent, MobCoordinationEventKind, MobCoordinationSnapshot, ResourceClaim,
@@ -80,14 +86,17 @@ pub use coordination::{
     WorkIntentStatus,
 };
 pub use definition::{MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind};
-pub use error::{MobError, MobFailureClass, RuntimeEffectKind};
+pub use error::{
+    FlowStepDispatchRejectKind, ForkSourceUnavailableCause, MobError, MobFailureClass,
+    RuntimeEffectKind,
+};
 pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
-    LoopId, LoopInstanceId, MobId, ProfileName, RespawnTopologyPeerId, RunId, StepId, WorkOrigin,
-    WorkRef, WorkSpec,
+    LoopId, LoopInstanceId, MobId, PlacedSpawnId, ProfileName, RespawnTopologyPeerId, RunId,
+    StepId, WorkOrigin, WorkRef, WorkSpec,
 };
-pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
+pub use launch::{ForkContext, MemberLaunchMode};
 #[doc(hidden)]
 pub use mob_machine::{
     MobMachineCatalogInput, MobMachineCommandClassification, MobMachineCommandClassificationRecord,
@@ -109,7 +118,24 @@ pub mod machine_schema_exports {
         meerkat_machine_schema::catalog::dsl::mob_machine_schema_metadata()
             .attach_to(crate::machines::mob_machine::MobMachineState::schema())
     }
+
+    /// Production-schema parity export for the non-canonical scoped authority
+    /// (plan §21.5). `attach_to` keeps the expansion's own rust binding, which
+    /// is what `meerkat-mob/tests/mob_host_binding_authority.rs` compares
+    /// against the catalog-side production-schema variant.
+    pub fn mob_host_binding_authority_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::mob_host_binding_authority_schema_metadata()
+            .attach_to(
+                crate::machines::mob_host_binding_authority::MobHostBindingAuthorityState::schema(),
+            )
+    }
 }
+
+#[doc(hidden)]
+pub use machines::mob_host_binding_authority::{
+    canonical_mob_host_binding_authority_runtime_internal_classifications,
+    canonical_mob_host_binding_authority_runtime_internal_input_variant_manifest,
+};
 
 pub use profile::{
     Profile, ProfileBinding, ProfileSource, ResumeOverrideField, SpawnTooling, ToolConfig,
@@ -123,6 +149,8 @@ pub use run::{
     mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
     mob_machine_step_status_is_terminal,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime::FactoryChainSpawnBasePromptSource;
 pub use runtime::RestoreIncompatible;
 pub use runtime::bridge::{MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge};
 pub use runtime::bridge_protocol::{
@@ -144,10 +172,11 @@ pub use runtime::{
     AdaptiveLayerSetupFault, AdaptiveLayerSetupFaultObservation, AdaptiveLayerSnapshot,
     AdaptivePlanningDecisionKind, AdaptiveRunLimits, AdaptiveRunPhaseView, AdaptiveRunSnapshot,
     AdaptiveStopReasonView, CurrentMobAdmission, ExternalPeerBindingSpec, HelperOptions,
-    HelperResult, InitializeAdaptiveRunRequest, MemberDeliveryReceipt, MemberHandle,
-    MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
-    MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
-    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    HelperResult, HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
+    InitializeAdaptiveRunRequest, MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain,
+    MemberLiveStatusDomain, MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport,
+    MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig,
+    MobHandle, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
     MobSessionService, MobSpawnManyFailure, MobState, MobUnreachablePeer,
     MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
     SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
@@ -157,15 +186,22 @@ pub use runtime::{
     stored_realm_profile_to_wire,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
-pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
+pub use runtime::{
+    FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,
+    TimeoutDisposition,
+};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
+pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
     InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
-    InMemoryRealmProfileStore, MobEventReceiver, MobEventStore, MobRunStore,
+    InMemoryRealmProfileStore, MobEventReceiver, MobEventStore, MobHostAuthorityDeletionAuthority,
+    MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobHostBindPhaseRecord,
+    MobHostCapabilityRecord, MobOperatorGrantDeletionAuthority,
+    MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord, MobRunStore,
     MobRuntimeMetadataStore, MobSpecStore, MobStoreError, RealmProfileStore, StoredRealmProfile,
     SupervisorAuthorityRecord,
 };

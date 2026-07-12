@@ -200,6 +200,13 @@ impl CommsMessage {
                 body: body.clone(),
                 blocks: blocks.clone(),
             },
+            // This public projection is explicitly session-injectable and has
+            // no access to the runtime's member-residency authority. A fenced
+            // envelope must therefore stay on the structured interaction
+            // drain, where MeerkatMachine checks `expected_recipient` before
+            // admitting any work. Flattening it into `Message` here would turn
+            // the legacy drain/recv APIs into an authority bypass.
+            MessageKind::IncarnationFencedMessage { .. } => return None,
             MessageKind::Request {
                 intent,
                 params,
@@ -245,7 +252,9 @@ impl CommsMessage {
     /// accepted at ingress cannot disappear or change identity if the peer
     /// is removed/renamed before drain.
     ///
-    /// Returns `None` for non-External items, PlainEvent, and Ack messages.
+    /// Returns `None` for non-External items, PlainEvent, Ack messages, and
+    /// incarnation-fenced messages. Fenced messages are authority-bearing and
+    /// may only be consumed through the structured runtime interaction drain.
     pub(crate) fn from_classified_entry(
         entry: &crate::inbox::ClassifiedInboxEntry,
     ) -> Option<Self> {
@@ -354,6 +363,40 @@ mod tests {
             },
         };
         assert_eq!(msg.from_peer, "test-peer");
+    }
+
+    #[test]
+    fn incarnation_fenced_envelope_is_not_session_injectable_comms_message() {
+        let sender = crate::Keypair::generate();
+        let mut envelope = crate::Envelope {
+            id: Uuid::new_v4(),
+            from: sender.public_key(),
+            to: crate::Keypair::generate().public_key(),
+            kind: MessageKind::IncarnationFencedMessage {
+                body: "must remain fenced".to_string(),
+                blocks: None,
+                content_taint: None,
+                handling_mode: None,
+                objective_id: None,
+                expected_recipient: meerkat_core::comms::PeerRecipientIncarnation {
+                    mob_id: "mob".to_string(),
+                    agent_identity: "worker".to_string(),
+                    host_id: "host".to_string(),
+                    binding_generation: 2,
+                    member_session_id: "session".to_string(),
+                    generation: 3,
+                    fence_token: 5,
+                },
+            },
+            sig: crate::Signature::new([0_u8; 64]),
+        };
+        envelope.sign(&sender);
+
+        assert!(
+            CommsMessage::from_external_with_resolved_peer(&envelope, "sender".to_string())
+                .is_none(),
+            "an authority-bearing fenced envelope must not flatten into the legacy session-injectable projection"
+        );
     }
 
     #[test]

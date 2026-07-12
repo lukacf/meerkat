@@ -33,15 +33,181 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use crate::store::MobMemberOperatorRequestKey;
+
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const HOST_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const REACHABILITY_STALE_AFTER: Duration = Duration::from_secs(15);
 #[cfg(not(test))]
 const READY_WAIT_BRIDGE_SESSION_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const READY_WAIT_BRIDGE_SESSION_RECHECK_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Debug, Clone)]
+pub(super) struct ReachabilityObservationView {
+    pub reachability: meerkat_contracts::wire::WireReachability,
+    pub last_seen_ms: Option<u64>,
+    pub freshness_reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReachabilityObservationRecord {
+    reachability: meerkat_contracts::wire::WireReachability,
+    last_verified: Option<Instant>,
+    freshness_reason: String,
+}
+
+/// Observer-local liveness projection shared by the actor, event pumps, and
+/// read-only handles. It is deliberately process-local and monotonic-time
+/// based: reachability is a rebuildable projection, never durable membership.
+#[derive(Debug, Default)]
+pub(super) struct ReachabilityObservations {
+    hosts: StdRwLock<BTreeMap<String, ReachabilityObservationRecord>>,
+    members: StdRwLock<BTreeMap<String, ReachabilityObservationRecord>>,
+}
+
+impl ReachabilityObservations {
+    fn success_record(reason: &str) -> ReachabilityObservationRecord {
+        ReachabilityObservationRecord {
+            reachability: meerkat_contracts::wire::WireReachability::Reachable,
+            last_verified: Some(Instant::now()),
+            freshness_reason: reason.to_string(),
+        }
+    }
+
+    pub(super) fn mark_host_success(&self, host_id: &str) {
+        self.hosts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(host_id.to_string(), Self::success_record("host_status_ack"));
+    }
+
+    pub(super) fn mark_host_failure(&self, host_id: &str, error: &MobError) {
+        let mut hosts = self
+            .hosts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_last_verified = hosts.get(host_id).and_then(|row| row.last_verified);
+        let timed_out = matches!(error, MobError::BridgeRequestTimedOut { .. });
+        let reachability = if timed_out {
+            if previous_last_verified.is_some() {
+                meerkat_contracts::wire::WireReachability::Stale
+            } else {
+                meerkat_contracts::wire::WireReachability::Unknown
+            }
+        } else {
+            meerkat_contracts::wire::WireReachability::Unreachable
+        };
+        hosts.insert(
+            host_id.to_string(),
+            ReachabilityObservationRecord {
+                reachability,
+                last_verified: previous_last_verified,
+                freshness_reason: if timed_out {
+                    "host_status_timeout"
+                } else {
+                    "host_status_unreachable"
+                }
+                .to_string(),
+            },
+        );
+    }
+
+    pub(super) fn mark_member_progress(&self, identity: &AgentIdentity) {
+        self.members
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                identity.to_string(),
+                Self::success_record("event_pump_progress"),
+            );
+    }
+
+    pub(super) fn mark_member_poll_failure(&self, identity: &AgentIdentity, timed_out: bool) {
+        let mut members = self
+            .members
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_last_verified = members
+            .get(identity.as_str())
+            .and_then(|row| row.last_verified);
+        members.insert(
+            identity.to_string(),
+            ReachabilityObservationRecord {
+                reachability: if timed_out && previous_last_verified.is_some() {
+                    meerkat_contracts::wire::WireReachability::Stale
+                } else if timed_out {
+                    meerkat_contracts::wire::WireReachability::Unknown
+                } else {
+                    meerkat_contracts::wire::WireReachability::Unreachable
+                },
+                last_verified: previous_last_verified,
+                freshness_reason: if timed_out {
+                    "event_pump_timeout"
+                } else {
+                    "event_pump_unreachable"
+                }
+                .to_string(),
+            },
+        );
+    }
+
+    pub(super) fn clear_host(&self, host_id: &str) {
+        self.hosts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(host_id);
+    }
+
+    pub(super) fn clear_member(&self, identity: &AgentIdentity) {
+        self.members
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(identity.as_str());
+    }
+
+    fn view(record: &ReachabilityObservationRecord) -> ReachabilityObservationView {
+        let elapsed = record.last_verified.map(|instant| instant.elapsed());
+        let auto_stale = matches!(
+            record.reachability,
+            meerkat_contracts::wire::WireReachability::Reachable
+        ) && elapsed.is_some_and(|age| age > REACHABILITY_STALE_AFTER);
+        ReachabilityObservationView {
+            reachability: if auto_stale {
+                meerkat_contracts::wire::WireReachability::Stale
+            } else {
+                record.reachability
+            },
+            last_seen_ms: elapsed.map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX)),
+            freshness_reason: if auto_stale {
+                "observation_stale".to_string()
+            } else {
+                record.freshness_reason.clone()
+            },
+        }
+    }
+
+    pub(super) fn host(&self, host_id: &str) -> Option<ReachabilityObservationView> {
+        self.hosts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(host_id)
+            .map(Self::view)
+    }
+
+    pub(super) fn member(&self, identity: &AgentIdentity) -> Option<ReachabilityObservationView> {
+        self.members
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(identity.as_str())
+            .map(Self::view)
+    }
+}
 
 fn adaptive_bundle_layer_terminal_store_plan()
 -> Result<adaptive_bundle::AdaptiveMobBundleStorePlan, MobError> {
@@ -397,8 +563,6 @@ pub struct SpawnMemberAdmissionObservations {
     pub launch_mode_present: bool,
     /// Presence of an explicit `tool_access_policy` on the spawn request.
     pub tool_access_policy_present: bool,
-    /// Presence of an explicit `budget_split_policy` on the spawn request.
-    pub budget_split_policy_present: bool,
     /// Presence of an explicit `tooling` selection on the spawn request.
     pub tooling_present: bool,
     /// Presence of an explicit `auth_binding` on the spawn request.
@@ -421,6 +585,26 @@ pub enum CurrentMobAdmission {
 pub enum SpawnToolAdmission {
     Allowed,
     Denied,
+}
+
+/// Machine-decided member-operator upcall admission verdict (multi-host §15
+/// R6), mirrored by the controlling-side upcall responder. `Rejected` carries
+/// the machine's typed cause verbatim (ADJ-14 maps it onto the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberOperatorAdmissionVerdict {
+    Admitted,
+    Rejected(mob_dsl::MemberOperatorRejectKind),
+}
+
+/// Raw facts for one member-originated operator admission decision.
+///
+/// The durable request key owns every requester-incarnation atom; ingress adds
+/// only the authenticated sender peer. The actor forwards these facts to the
+/// generated MobMachine without pre-composing an admission verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemberOperatorAdmissionRequest {
+    pub(crate) request_key: MobMemberOperatorRequestKey,
+    pub(crate) sender_peer_id: PeerId,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -490,6 +674,24 @@ pub struct MobMemberSnapshot {
     /// Machine-owned live execution/progress projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<MemberProgressSnapshot>,
+    /// Machine-recorded remote placement (owning host peer id) for this
+    /// member (phase 7, ADJ-P7-2: produced from the `member_placement`
+    /// machine fact at the status projection). `None` = local to the
+    /// controlling host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_reachability: Option<meerkat_contracts::wire::WireReachability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comms_reachability: Option<meerkat_contracts::wire::WireReachability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_capabilities: Option<meerkat_contracts::wire::WireMemberLifecycleCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_portable_disabled: Option<Vec<meerkat_contracts::wire::WireNonPortableResourceKind>>,
 }
 
 /// Whether the member currently owns an open execution run.
@@ -657,6 +859,18 @@ impl MobMemberSnapshot {
                     },
                 }
             }),
+            // Placement (phase 7, ADJ-P7-2): the `member_placement` machine
+            // fact, attached to the snapshot by the status projection.
+            placement: self
+                .placement
+                .clone()
+                .map(meerkat_contracts::wire::WireHostRef),
+            control_reachability: self.control_reachability,
+            comms_reachability: self.comms_reachability,
+            last_seen_ms: self.last_seen_ms,
+            freshness_reason: self.freshness_reason.clone(),
+            lifecycle_capabilities: self.lifecycle_capabilities,
+            non_portable_disabled: self.non_portable_disabled.clone(),
         })
     }
 }
@@ -1043,6 +1257,123 @@ pub struct SupervisorRotationReport {
     pub public_peer_id: String,
 }
 
+/// Domain-side host bind request (§7.2 step 2), built from a
+/// [`WireHostBindingDescriptor`](super::bridge_protocol::WireHostBindingDescriptor)
+/// by callers. Identity-first (D1): the canonical peer id derives from the
+/// descriptor's Ed25519 identity, never from a display name.
+#[derive(Debug, Clone)]
+pub struct HostBindRequest {
+    /// Canonical host peer id derived from the descriptor identity pubkey.
+    pub expected_peer_id: PeerId,
+    /// The host's Ed25519 signing public key.
+    pub pubkey: [u8; 32],
+    /// The host acceptor's advertised address.
+    pub address: String,
+    /// One-time ceremony token from the descriptor (redacted-Debug newtype;
+    /// never a principal credential — D3).
+    pub bootstrap_token: super::bridge_protocol::BridgeBootstrapToken,
+    /// Advertised ws/wss live base URL from the descriptor; the bind reply's
+    /// declaration is authoritative (restart truthfulness, DL5).
+    pub live_endpoint: Option<String>,
+}
+
+impl HostBindRequest {
+    /// Build the domain-side bind request from the descriptor `rkat mob host`
+    /// wrote (§7.2 plane a). Fails typed when the descriptor identity does not
+    /// resolve to a canonical Ed25519 peer identity.
+    pub fn from_descriptor(
+        descriptor: &super::bridge_protocol::WireHostBindingDescriptor,
+    ) -> Result<Self, MobError> {
+        let resolved = descriptor.identity.resolve().map_err(|error| {
+            MobError::WiringError(format!("invalid host binding descriptor identity: {error}"))
+        })?;
+        Ok(Self {
+            expected_peer_id: resolved.peer_id,
+            pubkey: resolved.pubkey,
+            address: descriptor.address.clone(),
+            bootstrap_token: descriptor.bootstrap_token.clone(),
+            live_endpoint: descriptor.live_endpoint.clone(),
+        })
+    }
+}
+
+/// Domain projection of a bound host's declared capability record (the §6.1
+/// single enumeration, flattened exactly like the MobMachine host capability
+/// maps).
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct HostCapabilityReport {
+    pub protocol_min: u64,
+    pub protocol_max: u64,
+    pub engine_version: String,
+    pub durable_sessions: bool,
+    pub autonomous_members: bool,
+    pub hard_cancel_member: bool,
+    pub tracked_input_cancel: bool,
+    pub memory_store: bool,
+    pub mcp: bool,
+    pub resolvable_providers: BTreeSet<String>,
+    pub approval_forwarding: bool,
+    /// Advertised ws/wss live base URL; `None` = live-incapable (DL5:
+    /// presence IS the capability).
+    pub live_endpoint: Option<String>,
+}
+
+impl HostCapabilityReport {
+    /// THE domain→wire capability conversion (ADJ-P7-2): lossless by
+    /// construction post the ADJ-P7-1 `WireHostCapabilityFlags` amendment
+    /// (`u64` protocol bounds, open `BTreeSet<String>` provider vocabulary —
+    /// no silent caps). Shared by `mob/bind_host` result rendering and the
+    /// [`MobHandle::hosts`] projection so the field mapping cannot drift
+    /// per call site.
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::wire::WireHostCapabilityFlags {
+        meerkat_contracts::wire::WireHostCapabilityFlags {
+            protocol_min: self.protocol_min,
+            protocol_max: self.protocol_max,
+            engine_version: self.engine_version.clone(),
+            durable_sessions: self.durable_sessions,
+            autonomous_members: self.autonomous_members,
+            hard_cancel_member: self.hard_cancel_member,
+            tracked_input_cancel: self.tracked_input_cancel,
+            memory_store: self.memory_store,
+            mcp: self.mcp,
+            resolvable_providers: self.resolvable_providers.clone(),
+            approval_forwarding: self.approval_forwarding,
+            live_endpoint: self.live_endpoint.clone(),
+        }
+    }
+}
+
+/// Report returned after a committed host bind (§7.2 step 2).
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct HostBindReport {
+    /// Identity-first host id: the host's canonical comms peer id.
+    pub host_id: String,
+    /// Supervisor authority epoch recorded for the binding (DEC-P2-9: the
+    /// supervisor epoch, never a second counter).
+    pub epoch: u64,
+    /// Capability record declared by the host in the bind reply.
+    pub capabilities: HostCapabilityReport,
+}
+
+/// Report returned after a committed host revocation (phase 7, ADJ-P7-2:
+/// the actor arm knows what it released — the wire
+/// `MobRevokeHostResult.released_members` promise is honored, never
+/// fabricated surface-side).
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct HostRevokeReport {
+    /// Canonical peer id of the revoked host.
+    pub host_id: String,
+    /// Member identities whose machine-recorded placement pointed at the
+    /// revoked host when the revocation committed. Their materializations
+    /// lose binding + recipient trust with the host; the placement entries
+    /// themselves stay recorded — the §9 revival ladder owns re-placement.
+    pub released_members: Vec<AgentIdentity>,
+}
+
 /// Structured report returned from mob destroy.
 #[derive(Debug, Clone, Default, Serialize)]
 #[non_exhaustive]
@@ -1137,6 +1468,21 @@ pub(crate) struct MemberSpawnReceipt {
     /// Canonical mob child operation for the spawned member lifecycle.
     pub(crate) operation_id: OperationId,
     pub(crate) session_origin: super::provisioner::ProvisionSessionOrigin,
+    /// Exact executor attachment that may be retired if the enclosing roster
+    /// transaction fails after provisioning succeeds. Resumed runtime-backed
+    /// sessions always carry this; fresh or external provisions do not.
+    #[serde(skip)]
+    pub(crate) rollback_authority: Option<super::provisioner::ResumedMemberRollbackAuthority>,
+    /// Typed materialize ack for host-materialized members (multi-host
+    /// §7.3). `None` for every local/external provisioning path; `Some` iff
+    /// the receipt came from `MobProvisioner::materialize_member`, carrying
+    /// the transport-validated ack facts the remote commit consumes.
+    #[serde(skip)]
+    pub(crate) materialized_ack: Option<Box<super::provisioner::MaterializedMemberAck>>,
+    /// Actor-classified respawn topology failures carried back through the
+    /// deferred placed-spawn reply. Empty for ordinary spawns.
+    #[serde(skip)]
+    pub(crate) failed_restore_peer_ids: Vec<crate::ids::RespawnTopologyPeerId>,
 }
 
 /// Public result from a successful member spawn.
@@ -1229,11 +1575,37 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MobMachineRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
+        // The spawn ladder's own machine-composed denial (multi-host
+        // placement/portability arms): same family as MobMachineRejected —
+        // the machine refused the requested transition.
+        MobError::SpawnMemberAdmissionDenied { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
+        // Bridge reply deadline: transport-class (matches
+        // `MobError::failure_class`), folded with the comms transport lane.
+        MobError::BridgeRequestTimedOut { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::CommsError
+        }
+        // Fork-source session history unavailable (typed W-G retype): the
+        // source SESSION could not serve the read — session-class failure.
+        MobError::ForkSourceUnavailable { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SessionError
+        }
+        // Capability-contract replacement is a host bind/rebind concern, not
+        // a spawn-many provisioning result.
+        MobError::HostCapabilityContractViolation { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::WiringError(_) | MobError::RetirementTopologyIncomplete(_) => {
             mob_dsl::MobSpawnManyFailureObservationKind::WiringError
         }
         MobError::SupervisorRotationIncomplete { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SupervisorRotationIncomplete
+        }
+        // Epoch exhaustion is not reachable from spawn-many provisioning; keep
+        // the exhaustive classifier fail-closed if it is ever threaded here.
+        MobError::SupervisorEpochExhausted { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         MobError::BridgeCommandRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::BridgeCommandRejected
@@ -1301,7 +1673,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::CallbackPending { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::CallbackPending
         }
-        MobError::StaleFenceToken { .. } => {
+        MobError::StaleFenceToken { .. } | MobError::StaleMemberOperatorAuthority { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::StaleFenceToken
         }
         MobError::StaleEventCursor { .. } => {
@@ -1320,6 +1692,22 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::InjectedContextUndeliverable { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
+        // Placed-interaction validation/terminal outcomes and lifecycle
+        // cleanup barriers belong to submit-work or lifecycle commands, never
+        // spawn-many provisioning. Keep the exhaustive classifier honest
+        // without laundering them into a false spawn failure cause.
+        MobError::PlacedInteractionIdAlreadyUsed { .. }
+        | MobError::InvalidPlacedInteractionId { .. }
+        | MobError::PlacedCompletionDeliveryRejected
+        | MobError::PlacedCompletionHostNoEffect
+        | MobError::PlacedCompletionHostCancelled
+        | MobError::PlacedCompletionDisposed
+        | MobError::PlacedCompletionCleanupPending { .. }
+        | MobError::PlacedKickoffCleanupPending { .. }
+        | MobError::AutonomousStopInterruptsPending { .. }
+        | MobError::LifecycleOperationPending { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
@@ -1333,7 +1721,19 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberCommsName(_) | MobError::ConditionEval { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
-        MobError::Internal(_) => mob_dsl::MobSpawnManyFailureObservationKind::Internal,
+        // Flow-step dispatch classification never runs during spawn-many
+        // provisioning (it is the flow lane's admission gate). Classify as
+        // Internal to keep the match total.
+        MobError::FlowStepDispatchRejected { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
+        MobError::Internal(_) | MobError::ExternalMemberCleanupUncertain { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
+        // Chokepoint-(a) scope denial: the caller's principal lacked the verb's
+        // required ControlScope, so the spawn was refused at admission — the
+        // same denied-admission family as SpawnMemberAdmissionDenied above.
+        MobError::ScopeDenied(_) => mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition,
     }
 }
 
@@ -1529,6 +1929,10 @@ pub enum MobRespawnError {
     Mob(#[from] MobError),
 }
 
+// NOTE (ADJ-P7-4): `MobRespawnError::wire_detail()` — the delegating §17.4
+// console wire projection — lives in `crate::error` beside the `MobError`
+// projection (that module owns the variant→code knowledge), not here.
+
 /// Receipt returned by member message delivery.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -1692,7 +2096,12 @@ impl From<AgentIdentity> for PeerTarget {
 /// fallback after `Destroy`, when the actor has exited by contract.
 #[derive(Clone)]
 pub struct MobHandle {
-    pub(super) command_tx: mpsc::Sender<MobCommand>,
+    pub(super) command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
+    /// The authority lane this handle's commands travel on (phase 5,
+    /// DEC-P5E-2). `MobBuilder` binds the launched handle to the OWNER
+    /// principal console (explicit launch-site mint, A16); surfaces rebind
+    /// clones via [`MobHandle::with_command_authority`].
+    pub(super) command_authority: crate::control_policy::CommandAuthority,
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) definition: Arc<MobDefinition>,
     pub(super) events: Arc<dyn MobEventStore>,
@@ -1709,6 +2118,7 @@ pub struct MobHandle {
     /// surfaces that must remain observable while a mutating command is
     /// awaiting shell cleanup.
     pub(super) machine_state_watch_rx: tokio::sync::watch::Receiver<mob_dsl::MobMachineState>,
+    pub(super) reachability_observations: Arc<ReachabilityObservations>,
     /// Read-only receiver for the actor's terminal-phase projection. The
     /// actor (sole writer) publishes the current DSL phase after every
     /// phase-changing transition and once more before exiting. Used by
@@ -1729,6 +2139,55 @@ pub struct MobHandle {
 }
 
 impl MobHandle {
+    /// Rebind a clone of this handle onto `authority` (phase 5, ADJ-P5-10).
+    ///
+    /// This is the PRODUCTION principal-binding seam: local single-user
+    /// surfaces bind `CommandAuthority::principal(MobControlPrincipal::Owner)`
+    /// (A16); the v2 bearer-token resolver binds validated `External`
+    /// principals through this same method; in-crate agent-lane consumers
+    /// rebind with the `pub(crate)` agent-lane authority.
+    #[must_use]
+    pub fn with_command_authority(
+        mut self,
+        authority: crate::control_policy::CommandAuthority,
+    ) -> MobHandle {
+        self.command_authority = authority;
+        self
+    }
+
+    /// Lane introspection for pins/audit (T-LS4).
+    #[must_use]
+    pub fn command_authority_kind(&self) -> crate::control_policy::CommandAuthorityKind {
+        self.command_authority.kind()
+    }
+
+    /// Chokepoint-(b) resolver over the committed machine projection: the
+    /// sealed policy for this handle's bound principal at `now_ms`.
+    ///
+    /// Serves the verbs that never send a MobCommand (watch-read
+    /// projections, event-router subscription admission). Actor-routed
+    /// verbs are gated once, at chokepoint (a), against the actor's own
+    /// serialized state — not here. Agent-lane / internal bindings resolve
+    /// as `Unresolved` (zero scopes): those lanes must never satisfy
+    /// principal checks (§15.2).
+    pub fn resolve_control_policy(
+        &self,
+        now_ms: u64,
+    ) -> Result<crate::control_policy::ResolvedControlPolicy, MobError> {
+        let state = self.machine_state_watch_rx.borrow().clone();
+        let policy = match self.command_authority.control_principal() {
+            Some(principal) => {
+                crate::control_policy::ResolvedControlPolicy::resolve(principal, &state, now_ms)
+            }
+            None => crate::control_policy::ResolvedControlPolicy::resolve(
+                &crate::control_policy::MobControlPrincipal::Unresolved,
+                &state,
+                now_ms,
+            ),
+        };
+        Ok(policy)
+    }
+
     /// Accessor for the realtime session factory carried from
     /// [`super::MobBuilder::with_realtime_session_factory`] (W2-E).
     pub fn realtime_session_factory(
@@ -1765,18 +2224,19 @@ impl MobHandle {
         self.supervisor_bridge.routable_supervisor_spec().await
     }
 
+    /// Typed member machine projection (ADJ-P5-18: a denial or transport
+    /// failure is an `Err`, never a defaulted projection).
     async fn member_machine_projection(
         &self,
         agent_identity: &AgentIdentity,
-    ) -> super::state::MobMemberMachineProjection {
+    ) -> Result<super::state::MobMemberMachineProjection, MobError> {
         self.send_actor_command(
             |reply_tx| super::state::MobCommand::MemberMachineProjection {
                 agent_identity: AgentIdentity::from(agent_identity.as_str()),
                 reply_tx,
             },
         )
-        .await
-        .unwrap_or_default()
+        .await?
     }
 }
 
@@ -1784,6 +2244,14 @@ impl MobHandle {
 pub(crate) struct RestoreFailureDiagnostic {
     pub(crate) bridge_session_id: Option<SessionId>,
     pub(crate) reason: String,
+}
+
+/// The machine's per-member subscribe verdict (phase 6): a local
+/// session-bound stream or the external (pump-tap) realization — the
+/// `AuthorizeExternalAgentEventSubscription` third outcome.
+enum AgentEventSubscriptionAuthority {
+    Local(SessionId),
+    External,
 }
 
 /// Clone-cheap, capability-bearing handle for interacting with one mob member.
@@ -1965,8 +2433,6 @@ pub struct SpawnMemberSpec {
     pub launch_mode: crate::launch::MemberLaunchMode,
     /// Tool access policy for this member.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
-    /// How to split budget from the orchestrator to this member.
-    pub budget_split_policy: Option<crate::launch::BudgetSplitPolicy>,
     /// Hard resource caps for the spawned member session.
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
     /// When true, automatically wire this member to its spawner.
@@ -2012,6 +2478,12 @@ pub struct SpawnMemberSpec {
     pub system_prompt_override: Option<SpawnSystemPromptOverride>,
     /// Explicit helper/member continuity intent.
     pub continuity_intent: SpawnContinuityIntent,
+    /// Multi-host placement (ADJ-7): the bound member host this member is
+    /// materialized on. The value is the host's canonical comms peer id
+    /// (identity-first, D1); admission is machine-owned — an unbound or
+    /// garbage id is a typed `HostNotBound` denial at the spawn ladder,
+    /// never a shell-side probe. `None` = controlling host (local member).
+    pub placement: Option<crate::machines::mob_machine::HostId>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -2027,7 +2499,6 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("labels", &self.labels)
             .field("launch_mode", &self.launch_mode)
             .field("tool_access_policy", &self.tool_access_policy)
-            .field("budget_split_policy", &self.budget_split_policy)
             .field("budget_limits", &self.budget_limits)
             .field("auto_wire_parent", &self.auto_wire_parent)
             .field("additional_instructions", &self.additional_instructions)
@@ -2040,6 +2511,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("external_tools", &self.external_tools.is_some())
             .field("system_prompt_override", &self.system_prompt_override)
             .field("continuity_intent", &self.continuity_intent)
+            .field("placement", &self.placement)
             .finish()
     }
 }
@@ -2057,7 +2529,6 @@ impl SpawnMemberSpec {
             labels: None,
             launch_mode: crate::launch::MemberLaunchMode::Fresh,
             tool_access_policy: None,
-            budget_split_policy: None,
             budget_limits: None,
             auto_wire_parent: false,
             additional_instructions: None,
@@ -2070,7 +2541,14 @@ impl SpawnMemberSpec {
             external_tools: None,
             system_prompt_override: None,
             continuity_intent: SpawnContinuityIntent::Ephemeral,
+            placement: None,
         }
+    }
+
+    /// Place this member on a bound member host (multi-host mobs §7.3).
+    pub fn with_placement(mut self, host: crate::machines::mob_machine::HostId) -> Self {
+        self.placement = Some(host);
+        self
     }
 
     /// Set the per-member auth binding (deferral §1).
@@ -2138,11 +2616,6 @@ impl SpawnMemberSpec {
 
     pub fn with_tool_access_policy(mut self, policy: meerkat_core::ops::ToolAccessPolicy) -> Self {
         self.tool_access_policy = Some(policy);
-        self
-    }
-
-    pub fn with_budget_split_policy(mut self, policy: crate::launch::BudgetSplitPolicy) -> Self {
-        self.budget_split_policy = Some(policy);
         self
     }
 
@@ -2447,8 +2920,13 @@ impl MobHandle {
             command_kind,
             "MobHandle::send_actor_command sending command"
         );
+        // Chokepoint (a) routing: every command carries the handle's bound
+        // authority lane; the actor gate resolves it before any handler.
         self.command_tx
-            .send(command)
+            .send(super::scope_gate::RoutedMobCommand {
+                authority: self.command_authority.clone(),
+                cmd: command,
+            })
             .await
             .map_err(|_| MobError::ActorCommandChannelClosed)?;
         tracing::debug!(
@@ -2666,7 +3144,7 @@ impl MobHandle {
                         include_retiring: false,
                         reply_tx,
                     })
-                    .await?;
+                    .await??;
                 Ok(MobMachineCommandResult::ListMembers(members))
             }
             MobMachineCommand::ListMembersIncludingRetiring => {
@@ -2675,7 +3153,7 @@ impl MobHandle {
                         include_retiring: true,
                         reply_tx,
                     })
-                    .await?;
+                    .await??;
                 Ok(MobMachineCommandResult::ListMembersIncludingRetiring(
                     members,
                 ))
@@ -2713,11 +3191,20 @@ impl MobHandle {
                         agent_identity: mob_dsl::AgentIdentity(agent_identity.to_string()),
                     })
                     .await?;
-                let session_id =
-                    Self::agent_event_subscription_session_from_effects(effects, &agent_identity)?;
-                let stream = self
-                    .subscribe_authorized_agent_session_events(&agent_identity, &session_id)
-                    .await?;
+                let stream = match Self::agent_event_subscription_authority_from_effects(
+                    effects,
+                    &agent_identity,
+                )? {
+                    AgentEventSubscriptionAuthority::Local(session_id) => {
+                        self.subscribe_authorized_agent_session_events(&agent_identity, &session_id)
+                            .await?
+                    }
+                    // The machine's THIRD outcome (phase 6): a placed member
+                    // subscribes through the member event pump's tap.
+                    AgentEventSubscriptionAuthority::External => {
+                        self.external_member_event_stream(&agent_identity).await?
+                    }
+                };
                 Ok(MobMachineCommandResult::EventStream(stream))
             }
             MobMachineCommand::SubscribeAllAgentEvents => {
@@ -2728,14 +3215,25 @@ impl MobHandle {
                     .apply_machine_input_effects(
                         mob_dsl::MobMachineInput::SubscribeAllAgentEvents {
                             session_bound_runtimes,
+                            // Phase 6 (DEC-P6E-12 kill site 1): the placed
+                            // roster IS the external-member set — the stale
+                            // "no producer" empty set is dead.
+                            external_members: Self::placed_member_identities_from_machine(
+                                &machine_state,
+                            ),
                         },
                     )
                     .await?;
-                let authorized_runtimes =
-                    Self::all_agent_event_subscription_runtimes_from_effects(effects)?;
+                let (authorized_runtimes, authorized_external) =
+                    Self::all_agent_event_subscription_authority_from_effects(effects)?;
                 let mut streams = Vec::new();
                 for (dsl_identity, runtime_id) in &machine_state.identity_to_runtime {
                     if !authorized_runtimes.contains(runtime_id) {
+                        continue;
+                    }
+                    // Placement decides the transport lane (ADJ-24): placed
+                    // members ride the authorized-external pump taps below.
+                    if machine_state.member_placement.contains_key(dsl_identity) {
                         continue;
                     }
                     let Some(dsl_session_id) =
@@ -2749,6 +3247,13 @@ impl MobHandle {
                     let stream = self
                         .subscribe_authorized_agent_session_events(&agent_identity, &session_id)
                         .await?;
+                    streams.push((agent_identity, stream));
+                }
+                // Authorized external members ride pump taps (same item
+                // shape as the local entries).
+                for dsl_identity in &authorized_external {
+                    let agent_identity = AgentIdentity::from(dsl_identity.0.as_str());
+                    let stream = self.external_member_event_stream(&agent_identity).await?;
                     streams.push((agent_identity, stream));
                 }
                 Ok(MobMachineCommandResult::AllAgentEventStreams(streams))
@@ -2766,15 +3271,22 @@ impl MobHandle {
                 })?;
                 let poll_interval_ms =
                     u64::try_from(config.poll_interval.as_millis()).unwrap_or(u64::MAX);
+                let external_members = Self::placed_member_identities_from_machine(&machine_state);
                 let effects = self
                     .apply_machine_input_effects(mob_dsl::MobMachineInput::SubscribeMobEvents {
                         initial_cursor,
                         channel_capacity,
                         poll_interval_ms,
                         session_bound_runtimes,
+                        external_members: external_members.clone(),
                     })
                     .await?;
-                let authority = Self::mob_event_router_authority_from_effects(effects)?;
+                let mut authority = Self::mob_event_router_authority_from_effects(effects)?;
+                // Phase 6 (DEC-P6E-12 kill site 4): the mob-wide stream
+                // includes placed members — pump taps fan into the same
+                // merge. The frozen router-authorization effect carries no
+                // external field; the set is the machine's placement facts.
+                authority.external_members = external_members;
                 Ok(MobMachineCommandResult::MobEventRouter(
                     super::event_router::spawn_event_router(self.clone(), authority),
                 ))
@@ -2783,7 +3295,13 @@ impl MobHandle {
                 after_cursor,
                 limit,
             } => {
-                let events = if self.status().await? == MobState::Destroyed {
+                // Destroyed-fallback preflight: an INTERNAL mechanism read,
+                // never an operator verb — the watch observation avoids
+                // riding the caller's principal through the List-gated
+                // `QueryPhase` (ADJ-P5-18 made that a typed denial). The
+                // operator gate for the poll itself is the actor-routed
+                // `PollEvents` chokepoint.
+                let events = if self.status_observation_snapshot() == MobState::Destroyed {
                     self.events
                         .poll(after_cursor, limit)
                         .await
@@ -2799,7 +3317,8 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::MobEvents(events))
             }
             MobMachineCommand::ReplayAllEvents => {
-                let events = if self.status().await? == MobState::Destroyed {
+                // Same internal-observation preflight as `PollEvents` above.
+                let events = if self.status_observation_snapshot() == MobState::Destroyed {
                     self.events.replay_all().await.map_err(MobError::from)?
                 } else {
                     self.send_actor_command(|reply_tx| MobCommand::ReplayAllEvents { reply_tx })
@@ -2968,7 +3487,10 @@ impl MobHandle {
             .send_actor_command(|reply_tx| MobCommand::QueryPhase { reply_tx })
             .await
         {
-            Ok(state) => Ok(state),
+            // ADJ-P5-18: the reply channel is typed — a scope denial (or any
+            // actor-side error) surfaces as its own `Err`, never as fake
+            // lifecycle data.
+            Ok(reply) => reply,
             Err(
                 error @ (MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed),
             ) => Self::status_from_closed_actor(error, *self.phase_watch_rx.borrow()),
@@ -3302,10 +3824,424 @@ impl MobHandle {
         })
     }
 
-    fn agent_event_subscription_session_from_effects(
+    /// Force-cancel's HARD sibling (phase 6, DEC-P6E-8): bounded convergence
+    /// over the immediate user-interrupt authority, `Cancel`-scoped at
+    /// chokepoint (a). For a placed member the bridge request is pinned to one
+    /// exact observed run and ACKs only after that run is unbound/terminal;
+    /// a stale retry never interrupts a newer run. Placed members are also
+    /// capability-gated on the recorded host fact BEFORE any bridge dispatch.
+    /// RPC/REST/MCP/CLI exposure is phase 7.
+    pub async fn hard_cancel_member(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        reason: impl Into<String>,
+    ) -> Result<(), MobError> {
+        let reason = reason.into();
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::HardCancelMember {
+                agent_identity: identity,
+                reason,
+                reply_tx,
+            })
+            .await?
+    }
+
+    /// Placement-switched member transcript read (phase 6, DEC-P6E-21):
+    /// `ReadHistory`-scoped at chokepoint (a); local and remote pages share
+    /// ONE wire projection. RPC/REST/MCP exposure is phase 7 (the DTOs
+    /// already exist).
+    pub async fn member_history(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        from_index: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<super::member_history_proxy::MemberHistoryPageDomain, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::MemberHistory {
+                agent_identity: identity,
+                from_index,
+                limit,
+                reply_tx,
+            })
+            .await?
+    }
+
+    /// Open a live realtime channel on a member by identity (phase 6b,
+    /// DEC-P6B-C1; placement-blind, DL3). `Live`-scoped at chokepoint (a) —
+    /// bootstrap issuance IS the scope-gated act (DL8). The returned
+    /// [`super::bridge_protocol::LiveOpenResult`] carries the OWNING host's
+    /// absolute WS URL + single-use token VERBATIM (DEC-P6B-C7/C8: never
+    /// parsed, rewritten, logged, or retained controlling-side); the caller
+    /// connects the WS directly — the socket is the input plane, there is
+    /// no bridge frame verb (DL10). `turning_mode: None` defaults to
+    /// `ProviderManaged` on the owning host (DEC-P6B-L15, one owner).
+    ///
+    /// Reply-loss reconciliation contract (DEC-P6B-C9): a
+    /// [`MobError::BridgeRequestTimedOut`] open may have minted an
+    /// owning-side channel whose reply was lost. An open is NOT resend-safe
+    /// (a retry against the orphan rejects `LiveChannelAlreadyBound`, and
+    /// no resend can recover the single-use token). The verbs themselves
+    /// are the reconciliation primitives, caller-driven:
+    /// [`Self::member_live_status`] with `channel_id: None` discovers the
+    /// orphan's id, [`Self::member_live_close`] clears exactly the channel
+    /// it names, and a fresh open then succeeds. The harness never
+    /// auto-probes and no live command joins any resend classifier; the
+    /// unconsumed token expires at its 60s TTL regardless.
+    ///
+    /// RPC/REST/MCP/CLI exposure is phase 7.
+    pub async fn member_live_open(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        turning_mode: Option<super::bridge_protocol::RealtimeTurningMode>,
+        transport: Option<super::bridge_protocol::LiveOpenTransport>,
+    ) -> Result<super::bridge_protocol::LiveOpenResult, MobError> {
+        let delivery = self
+            .clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::MemberLiveOpen {
+                agent_identity: identity,
+                turning_mode,
+                transport,
+                reply_tx,
+            })
+            .await??;
+        // Durable cleanup custody must be deleted before public ownership is
+        // returned. The actor confirms that deletion over this second
+        // channel; a crash before confirmation closes this receiver and the
+        // caller never observes a success that recovery could later reclaim.
+        let (custody_confirm_tx, custody_confirm_rx) = oneshot::channel();
+        delivery
+            .delivery_ack
+            .send(custody_confirm_tx)
+            .map_err(|_| MobError::ActorReplyChannelClosed)?;
+        custody_confirm_rx
+            .await
+            .map_err(|_| MobError::ActorReplyChannelClosed)??;
+        // There is no cancellation point after confirmed durable transfer.
+        Ok(delivery.open)
+    }
+
+    /// Close one NAMED live channel on a member (phase 6b, DEC-P6B-C9:
+    /// close-what-you-name — a reconciling console can never race-kill a
+    /// channel a concurrent legitimate open just minted). `Live`-scoped.
+    /// An already-clear channel rejects typed `LiveChannelNotFound` (safe
+    /// to treat as "nothing left to clear"). RPC/REST/MCP/CLI exposure is
+    /// phase 7.
+    pub async fn member_live_close(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        channel_id: String,
+    ) -> Result<super::bridge_protocol::LiveCloseStatus, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::MemberLiveClose {
+                agent_identity: identity,
+                channel_id,
+                reply_tx,
+            })
+            .await?
+    }
+
+    /// The dedicated live point read (phase 6b, §16.9/DEC-P6B-C10):
+    /// `channel_id: None` resolves "the member's active channel" on the
+    /// owning host (ADJ-P6B-2) — the reply-loss discovery primitive; no
+    /// active channel rejects typed `LiveChannelNotFound` (an honest
+    /// "nothing to reconcile"). `member_status` stays bridge-free and
+    /// live-field-free — this read is the ONLY remote channel-state path.
+    /// `Live`-scoped. RPC/REST/MCP/CLI exposure is phase 7.
+    pub async fn member_live_status(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        channel_id: Option<String>,
+    ) -> Result<super::member_live_proxy::MemberLiveStatusDomain, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::MemberLiveStatus {
+                agent_identity: identity,
+                channel_id,
+                reply_tx,
+            })
+            .await?
+    }
+
+    /// Drive one turn-level live control verb on a member's channel (phase
+    /// 6b, DL10's closed vocabulary: commit_input / interrupt / truncate /
+    /// refresh). Live `interrupt` is media-plane barge-in and sits inside
+    /// `Live`; lifecycle hard-cancel stays under `Cancel`. `Live`-scoped.
+    /// RPC/REST/MCP/CLI exposure is phase 7.
+    pub async fn member_live_control(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        channel_id: String,
+        verb: super::bridge_protocol::BridgeLiveControlVerb,
+    ) -> Result<super::bridge_protocol::BridgeLiveControlOutcome, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::MemberLiveControl {
+                agent_identity: identity,
+                channel_id,
+                verb,
+                reply_tx,
+            })
+            .await?
+    }
+
+    /// A17 pump-liveness poke (the flow lane's named hook,
+    /// `ensure_pump_for_obligation`): keeps a placed member's event pump
+    /// alive while a remote-turn obligation is outstanding. Internal lane.
+    pub(crate) async fn ensure_pump_for_obligation(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| super::state::MobCommand::EnsureMemberEventPump {
+            agent_identity: identity.clone(),
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// Placed roster identities that still hold a runtime binding — the
+    /// external-member set for the mob-wide fan-out (DEC-P6E-12).
+    pub(super) fn placed_member_identities_from_machine(
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> BTreeSet<mob_dsl::AgentIdentity> {
+        machine_state
+            .member_placement
+            .keys()
+            .filter(|identity| machine_state.identity_to_runtime.contains_key(*identity))
+            .cloned()
+            .collect()
+    }
+
+    /// Outstanding remote-turn custody across pending, committed, and
+    /// resolved/ACK-pending machine facts. Watch-read only; the actor is the
+    /// sole writer.
+    pub fn remote_turn_obligations_observation(&self) -> Vec<(AgentIdentity, String)> {
+        let state = self.machine_state_watch_rx.borrow();
+        let mut obligations = state
+            .pending_remote_turn_outcomes
+            .iter()
+            .chain(state.committed_remote_turn_outcomes.iter())
+            .chain(state.resolved_remote_turn_outcomes.iter())
+            .map(|obligation| {
+                (
+                    AgentIdentity::from(obligation.agent_identity.0.as_str()),
+                    obligation.input_id.0.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        obligations.extend(
+            state
+                .pending_placed_kickoff_outcomes
+                .iter()
+                .chain(state.resolved_placed_kickoff_outcomes.iter())
+                .map(|obligation| {
+                    (
+                        AgentIdentity::from(obligation.agent_identity.0.as_str()),
+                        obligation.input_id.0.clone(),
+                    )
+                }),
+        );
+        obligations.extend(
+            state
+                .pending_placed_completion_outcomes
+                .iter()
+                .chain(state.resolved_placed_completion_outcomes.iter())
+                .map(|obligation| {
+                    (
+                        AgentIdentity::from(obligation.agent_identity.0.as_str()),
+                        obligation.input_id.0.clone(),
+                    )
+                }),
+        );
+        obligations
+    }
+
+    /// Whether any machine-owned remote-turn custody belongs to this exact
+    /// host/member residency. Mob scope is implicit in this handle; every
+    /// remaining tuple component is compared explicitly.
+    pub(crate) fn remote_turn_obligation_for_member_observation(
+        &self,
+        expected_member: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+    ) -> bool {
+        let matches = |obligation: &mob_dsl::RemoteTurnObligation| {
+            obligation.agent_identity.0 == expected_member.agent_identity
+                && obligation.host_id.0 == expected_member.host_id
+                && obligation.host_binding_generation == expected_member.binding_generation
+                && obligation.member_session_id.0 == expected_member.member_session_id
+                && obligation.generation.0 == expected_member.generation
+                && obligation.fence_token.0 == expected_member.fence_token
+        };
+        let state = self.machine_state_watch_rx.borrow();
+        let flow = state
+            .pending_remote_turn_outcomes
+            .iter()
+            .chain(state.committed_remote_turn_outcomes.iter())
+            .chain(state.resolved_remote_turn_outcomes.iter())
+            .any(matches);
+        let kickoff = |obligation: &mob_dsl::PlacedKickoffObligation| {
+            obligation.agent_identity.0 == expected_member.agent_identity
+                && obligation.host_id.0 == expected_member.host_id
+                && obligation.host_binding_generation == expected_member.binding_generation
+                && obligation.member_session_id.0 == expected_member.member_session_id
+                && obligation.generation.0 == expected_member.generation
+                && obligation.fence_token.0 == expected_member.fence_token
+        };
+        let completion = |obligation: &mob_dsl::PlacedCompletionObligation| {
+            obligation.agent_identity.0 == expected_member.agent_identity
+                && obligation.host_id.0 == expected_member.host_id
+                && obligation.host_binding_generation == expected_member.binding_generation
+                && obligation.member_session_id.0 == expected_member.member_session_id
+                && obligation.generation.0 == expected_member.generation
+                && obligation.fence_token.0 == expected_member.fence_token
+        };
+        flow || state
+            .pending_placed_completion_outcomes
+            .iter()
+            .chain(state.resolved_placed_completion_outcomes.iter())
+            .any(completion)
+            || state
+                .pending_placed_kickoff_outcomes
+                .iter()
+                .chain(state.resolved_placed_kickoff_outcomes.iter())
+                .any(kickoff)
+    }
+
+    /// Exact host ACKs that must be resent until a poll response proves
+    /// application. Reconstructed from machine state after restart.
+    pub(crate) fn remote_turn_ack_pending_observation(
+        &self,
+        expected_member: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+    ) -> Vec<meerkat_contracts::wire::supervisor_bridge::BridgeTurnOutcomeAck> {
+        let state = self.machine_state_watch_rx.borrow();
+        let mut acks = state
+            .resolved_remote_turn_outcomes
+            .iter()
+            .filter(|obligation| {
+                obligation.agent_identity.0 == expected_member.agent_identity
+                    && obligation.host_id.0 == expected_member.host_id
+                    && obligation.host_binding_generation == expected_member.binding_generation
+                    && obligation.member_session_id.0 == expected_member.member_session_id
+                    && obligation.generation.0 == expected_member.generation
+                    && obligation.fence_token.0 == expected_member.fence_token
+            })
+            .map(
+                |obligation| meerkat_contracts::wire::supervisor_bridge::BridgeTurnOutcomeAck {
+                    generation: obligation.generation.0,
+                    fence_token: obligation.fence_token.0,
+                    input_id: obligation.input_id.0.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        acks.extend(
+            state
+                .resolved_placed_completion_outcomes
+                .iter()
+                .filter(|obligation| {
+                    obligation.agent_identity.0 == expected_member.agent_identity
+                        && obligation.host_id.0 == expected_member.host_id
+                        && obligation.host_binding_generation == expected_member.binding_generation
+                        && obligation.member_session_id.0 == expected_member.member_session_id
+                        && obligation.generation.0 == expected_member.generation
+                        && obligation.fence_token.0 == expected_member.fence_token
+                })
+                .map(|obligation| {
+                    meerkat_contracts::wire::supervisor_bridge::BridgeTurnOutcomeAck {
+                        generation: obligation.generation.0,
+                        fence_token: obligation.fence_token.0,
+                        input_id: obligation.input_id.0.clone(),
+                    }
+                }),
+        );
+        acks.extend(
+            state
+                .resolved_placed_kickoff_outcomes
+                .iter()
+                .filter(|obligation| {
+                    obligation.agent_identity.0 == expected_member.agent_identity
+                        && obligation.host_id.0 == expected_member.host_id
+                        && obligation.host_binding_generation == expected_member.binding_generation
+                        && obligation.member_session_id.0 == expected_member.member_session_id
+                        && obligation.generation.0 == expected_member.generation
+                        && obligation.fence_token.0 == expected_member.fence_token
+                })
+                .map(|obligation| {
+                    meerkat_contracts::wire::supervisor_bridge::BridgeTurnOutcomeAck {
+                        generation: obligation.generation.0,
+                        fence_token: obligation.fence_token.0,
+                        input_id: obligation.input_id.0.clone(),
+                    }
+                }),
+        );
+        acks
+    }
+
+    /// Machine-recorded runtime incarnation for `identity` (watch-read; the
+    /// router's re-subscription key).
+    pub(super) fn member_runtime_id_observation(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<AgentRuntimeId> {
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let runtime_id = machine_state.identity_to_runtime.get(&dsl_identity)?;
+        Self::domain_runtime_from_machine_binding(&dsl_identity, runtime_id, &machine_state)
+    }
+
+    /// Whether the machine records a placement for `identity` (the router's
+    /// roster-delta placement switch).
+    pub(super) fn member_placement_present(&self, agent_identity: &AgentIdentity) -> bool {
+        let dsl_identity = mob_dsl::AgentIdentity(agent_identity.to_string());
+        self.machine_state_watch_rx
+            .borrow()
+            .member_placement
+            .contains_key(&dsl_identity)
+    }
+
+    /// Open a raw `AttributedEvent` pump tap for one placed member (ensures
+    /// the pump first; authorization happened at the machine input).
+    pub(super) async fn external_member_event_tap(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError> {
+        self.send_actor_command(|reply_tx| super::state::MobCommand::EnsureMemberEventTap {
+            agent_identity: agent_identity.clone(),
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// Realize a machine-authorized external subscription as a pump-tap
+    /// stream (DEC-P6E-12 kill site 3): ensure the member's pump, open a
+    /// tap, and project `AttributedEvent → EventEnvelope` (attribution is
+    /// implicit for a single-member stream).
+    pub(super) async fn external_member_event_stream(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<EventStream, MobError> {
+        let tap = self.external_member_event_tap(agent_identity).await?;
+        Ok(Box::pin(futures::stream::unfold(
+            tap,
+            |mut tap| async move {
+                tap.recv()
+                    .await
+                    .map(|attributed| (attributed.envelope, tap))
+            },
+        )))
+    }
+
+    fn agent_event_subscription_authority_from_effects(
         effects: Vec<mob_dsl::MobMachineEffect>,
         agent_identity: &AgentIdentity,
-    ) -> Result<SessionId, MobError> {
+    ) -> Result<AgentEventSubscriptionAuthority, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity(agent_identity.to_string());
         for effect in effects {
             match effect {
@@ -3313,7 +4249,18 @@ impl MobHandle {
                     agent_identity: effect_identity,
                     session_id,
                 } if effect_identity == dsl_identity => {
-                    return Self::session_id_from_dsl(&session_id, "agent event subscription");
+                    return Ok(AgentEventSubscriptionAuthority::Local(
+                        Self::session_id_from_dsl(&session_id, "agent event subscription")?,
+                    ));
+                }
+                // Phase 6: the machine's THIRD outcome for placed members
+                // supersedes the old `NoSessionBinding` reject — no shell
+                // reinterpretation.
+                mob_dsl::MobMachineEffect::AuthorizeExternalAgentEventSubscription {
+                    agent_identity: effect_identity,
+                    ..
+                } if effect_identity == dsl_identity => {
+                    return Ok(AgentEventSubscriptionAuthority::External);
                 }
                 mob_dsl::MobMachineEffect::RejectAgentEventSubscription {
                     agent_identity: effect_identity,
@@ -3339,15 +4286,28 @@ impl MobHandle {
         ))
     }
 
-    fn all_agent_event_subscription_runtimes_from_effects(
+    fn all_agent_event_subscription_authority_from_effects(
         effects: Vec<mob_dsl::MobMachineEffect>,
-    ) -> Result<BTreeSet<mob_dsl::AgentRuntimeId>, MobError> {
+    ) -> Result<
+        (
+            BTreeSet<mob_dsl::AgentRuntimeId>,
+            BTreeSet<mob_dsl::AgentIdentity>,
+        ),
+        MobError,
+    > {
         effects
             .into_iter()
             .try_fold(None, |authorized, effect| match effect {
                 mob_dsl::MobMachineEffect::AuthorizeAllAgentEventSubscription {
                     session_bound_runtimes,
-                } => Ok(Some(session_bound_runtimes)),
+                    external_members,
+                } => {
+                    // Phase 6 (DEC-P6E-12 kill site 2): the authorized
+                    // external set is realized as pump taps by the caller —
+                    // the fail-closed "no remote subscription realization
+                    // yet" arm is dead.
+                    Ok(Some((session_bound_runtimes, external_members)))
+                }
                 mob_dsl::MobMachineEffect::RejectAllAgentEventSubscription { reason } => {
                     let error = match reason {
                         mob_dsl::EventSubscriptionRejectReasonKind::MemberNotFound => {
@@ -3397,6 +4357,7 @@ impl MobHandle {
                             channel_capacity,
                         },
                         session_bound_runtimes,
+                        external_members: BTreeSet::new(),
                     })
                 }
                 _ => None,
@@ -3849,31 +4810,45 @@ impl MobHandle {
         }
     }
 
-    /// Observation-only event subscription that reads the session binding from
-    /// the roster directly instead of sending a command through the mob actor.
+    /// Observation-only event subscription that reads the authoritative
+    /// placement and session binding directly instead of sending a command
+    /// through the mob actor.
     ///
     /// The subscription authority remains the session service for the resolved
-    /// bridge session. This helper only projects the identity-to-session
-    /// binding for observation surfaces that cannot queue behind the mob actor.
+    /// local bridge session. Placed members require the actor-owned external
+    /// event pump, so this non-blocking helper rejects them explicitly rather
+    /// than treating their host-resident session id as a local session id.
     pub async fn subscribe_agent_events_observation(
         &self,
         identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
-        let session_id = {
+        let runtime_mode = {
             let roster = self.roster.read().await;
             let entry = roster
                 .get_by_identity(identity)
                 .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
-            entry
-                .member_ref
-                .bridge_session_id()
-                .cloned()
-                .ok_or_else(|| MobError::UnsupportedForMode {
-                    mode: entry.runtime_mode,
-                    reason: "agent event subscriptions are not supported for peer-only members"
-                        .to_string(),
-                })?
+            entry.runtime_mode
         };
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        if super::member_runtime_is_host_owned(&machine_state, identity) {
+            return Err(MobError::UnsupportedForMode {
+                mode: runtime_mode,
+                reason: "observation-only agent event subscriptions for placed members require the actor-owned external event pump"
+                    .to_string(),
+            });
+        }
+        let session_id = machine_state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .ok_or_else(|| MobError::UnsupportedForMode {
+                mode: runtime_mode,
+                reason: "agent event subscriptions are not supported for peer-only members"
+                    .to_string(),
+            })
+            .and_then(|session_id| {
+                Self::session_id_from_dsl(session_id, "observation agent event subscription")
+            })?;
         crate::runtime::session_service::MobSessionService::subscribe_session_events(
             self.session_service.as_ref(),
             &session_id,
@@ -4863,6 +5838,241 @@ impl MobHandle {
             .await?
     }
 
+    /// Bind a member-host daemon to this mob (§7.2 step 2).
+    ///
+    /// Drives the machine-owned ceremony: `BeginHostBind` opens the bind
+    /// window and emits the `RequestHostBind` handoff, the actor realizes it
+    /// as a `BindHost` bridge command against the descriptor-derived host
+    /// identity, and `CommitHostBind` records the accepted identity, endpoint,
+    /// epoch, and capability record. A failed ceremony leaves the machine in
+    /// the `Requested` bind phase; retrying `bind_host` is idempotent
+    /// (DEC-P2-10) and `revoke_host` clears the window.
+    pub async fn bind_host(&self, request: HostBindRequest) -> Result<HostBindReport, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::BindHost {
+            request: Box::new(request),
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// Revoke a bound (or bind-requested) member host. A bound host first
+    /// receives the authenticated host-addressed revoke and must return its
+    /// durable terminal receipt after disposing every materialized member;
+    /// only then are the controlling machine facts and durable authority row
+    /// cleared. Reply loss is retryable through the host's durable receipt.
+    /// `host_id` is the canonical peer id from [`HostBindReport::host_id`].
+    /// Returns the typed [`HostRevokeReport`] naming placements affected on
+    /// the controlling side.
+    pub async fn revoke_host(&self, host_id: &str) -> Result<HostRevokeReport, MobError> {
+        let host_id = host_id.to_string();
+        self.send_actor_command(|reply_tx| MobCommand::RevokeHost { host_id, reply_tx })
+            .await?
+    }
+
+    /// Host roster projection for `mob/hosts` (phase 7, ADJ-P7-2): a
+    /// watch-read over the machine's bind facts + capability maps. One row
+    /// per TRACKED host (`host_bind_phase` key set): `Bound` rows carry the
+    /// CommitHostBind facts (endpoint, epoch, capability record — projected
+    /// through THE one [`HostCapabilityReport::to_wire`] conversion);
+    /// `Requested` rows carry typed-absent ceremony facts (an open or
+    /// failed bind window commits nothing — fabricating empties would
+    /// launder ceremony state into committed facts).
+    /// `materialized_member_count` counts `member_placement` entries
+    /// targeting the host.
+    ///
+    /// Reachability is the observer-local projection fed by the same periodic
+    /// `HostStatus` loop that performs orphan reconciliation. It never mutates
+    /// membership and uses only local monotonic elapsed time.
+    pub fn hosts(&self) -> Result<meerkat_contracts::wire::MobHostsResult, MobError> {
+        let state = self.machine_state_watch_rx.borrow().clone();
+        let mut hosts = Vec::with_capacity(state.host_bind_phase.len());
+        for (host_id, phase) in &state.host_bind_phase {
+            let placed_count = state
+                .member_placement
+                .values()
+                .filter(|placed| *placed == host_id)
+                .count() as u64;
+            let row = match phase {
+                mob_dsl::HostBindPhase::Requested => meerkat_contracts::wire::MobHostStatus {
+                    host_id: meerkat_contracts::wire::WireHostRef(host_id.as_str().to_string()),
+                    endpoint: None,
+                    bind_phase: meerkat_contracts::wire::WireHostBindPhase::Requested,
+                    authority_epoch: None,
+                    capabilities: None,
+                    control_reachability: None,
+                    last_seen_ms: None,
+                    freshness_reason: None,
+                    materialized_member_count: placed_count,
+                },
+                mob_dsl::HostBindPhase::Bound => {
+                    // A Bound host missing any committed fact is machine
+                    // drift — fail closed, never a fabricated row (the
+                    // `bound_host_rotation_targets` posture).
+                    let missing_fact = |fact: &str| {
+                        MobError::Internal(format!(
+                            "bound host '{}' has no recorded {fact}",
+                            host_id.as_str()
+                        ))
+                    };
+                    let endpoint = state
+                        .host_endpoints
+                        .get(host_id)
+                        .ok_or_else(|| missing_fact("endpoint"))?;
+                    let epoch = state
+                        .host_authority_epochs
+                        .get(host_id)
+                        .copied()
+                        .ok_or_else(|| missing_fact("authority epoch"))?;
+                    let capabilities =
+                        HostCapabilityReport {
+                            protocol_min: state
+                                .host_protocol_min
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("protocol_min capability"))?,
+                            protocol_max: state
+                                .host_protocol_max
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("protocol_max capability"))?,
+                            engine_version: state
+                                .host_engine_versions
+                                .get(host_id)
+                                .cloned()
+                                .ok_or_else(|| missing_fact("engine_version capability"))?,
+                            durable_sessions: state
+                                .host_durable_sessions
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("durable_sessions capability"))?,
+                            autonomous_members: state
+                                .host_autonomous_members
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("autonomous_members capability"))?,
+                            hard_cancel_member: state
+                                .host_hard_cancel_member
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("hard_cancel_member capability"))?,
+                            tracked_input_cancel: state
+                                .host_tracked_input_cancel
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("tracked_input_cancel capability"))?,
+                            memory_store: state
+                                .host_memory_store
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("memory_store capability"))?,
+                            mcp: state
+                                .host_mcp
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("mcp capability"))?,
+                            resolvable_providers: state
+                                .host_resolvable_providers
+                                .get(host_id)
+                                .cloned()
+                                .ok_or_else(|| missing_fact("resolvable_providers capability"))?,
+                            approval_forwarding: state
+                                .host_approval_forwarding
+                                .get(host_id)
+                                .copied()
+                                .ok_or_else(|| missing_fact("approval_forwarding capability"))?,
+                            // DL5: presence IS the live capability; absence is
+                            // the fact, not a missing-fact fault.
+                            live_endpoint: state
+                                .host_live_endpoints
+                                .get(host_id)
+                                .map(|url| url.0.clone()),
+                        };
+                    let observation = self.reachability_observations.host(host_id.as_str());
+                    meerkat_contracts::wire::MobHostStatus {
+                        host_id: meerkat_contracts::wire::WireHostRef(host_id.as_str().to_string()),
+                        endpoint: Some(endpoint.0.clone()),
+                        bind_phase: meerkat_contracts::wire::WireHostBindPhase::Bound,
+                        authority_epoch: Some(epoch),
+                        capabilities: Some(capabilities.to_wire()),
+                        control_reachability: observation.as_ref().map(|view| view.reachability),
+                        last_seen_ms: observation.as_ref().and_then(|view| view.last_seen_ms),
+                        freshness_reason: observation.map(|view| view.freshness_reason),
+                        materialized_member_count: placed_count,
+                    }
+                }
+            };
+            hosts.push(row);
+        }
+        Ok(meerkat_contracts::wire::MobHostsResult { hosts })
+    }
+
+    /// Record (full-replace) a principal's control-scope grant (§8).
+    ///
+    /// `caller` must hold `AdminGrants` (owner implicit) — the grant verbs
+    /// are themselves scope-gated, and the gate runs in the actor arm BEFORE
+    /// the machine input is built (§17.2). The explicit `caller` parameter
+    /// is deliberately asymmetric with the ambient-owner handle surface:
+    /// operator authority is injected, not ambient (gotcha #19), and this is
+    /// the principal-injection seam the scope-matrix fixtures use.
+    ///
+    /// The write path never reads a clock: an already-past `expires_at_ms`
+    /// is recorded verbatim and is inert at the enforcement seam (one expiry
+    /// evaluator, at `require()` time).
+    pub async fn grant_scopes(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        principal: meerkat_core::auth::PrincipalId,
+        scopes: BTreeSet<mob_dsl::ControlScope>,
+        expires_at_ms: Option<u64>,
+    ) -> Result<crate::control_policy::OperatorGrant, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::GrantScopes {
+            caller,
+            principal,
+            scopes,
+            expires_at_ms,
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// Revoke scopes (`None` = the entire grant). Returns `removed` =
+    /// whether the principal's grant RECORD was removed entirely: an
+    /// absent-grant no-op and a partial revoke return `false`, a full
+    /// removal returns `true` (the `MobRevokeScopesResult.removed` wire
+    /// semantics). Revoke is idempotent: revoking never-granted scopes is a
+    /// no-op, not an error — the actor intersects the request with the
+    /// recorded set and the machine revalidates the partition.
+    /// `AdminGrants`-gated like [`Self::grant_scopes`].
+    pub async fn revoke_scopes(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        principal: meerkat_core::auth::PrincipalId,
+        scopes: Option<BTreeSet<mob_dsl::ControlScope>>,
+    ) -> Result<bool, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::RevokeScopes {
+            caller,
+            principal,
+            scopes,
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// List raw grant records read from machine state (never from the
+    /// durable records — the machine is the owner; records are recovery
+    /// inputs). Expired grants appear with their verbatim `expires_at_ms`
+    /// and NO expired flag: evaluating expiry requires a clock read, and the
+    /// enforcement seam is the one place that reads the clock against
+    /// grants. Consoles render staleness client-side. `AdminGrants`-gated
+    /// like its siblings (§17.2 gates all three grant verbs).
+    pub async fn grants(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+    ) -> Result<Vec<crate::control_policy::OperatorGrant>, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::Grants { caller, reply_tx })
+            .await?
+    }
+
     /// Wire a local member to either another local member or an external peer.
     pub async fn wire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
@@ -4910,6 +6120,55 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    /// Route-install status projection (multi-host §10.4, ADJ-P4-9a):
+    /// the machine's outstanding cross-host route-install obligations
+    /// (`pending_route_installs`), projected into the wire shape. A wire
+    /// operation whose remote installs did not all confirm returns Ok with
+    /// its obligations retained here — `complete == false` names exactly
+    /// what is still converging (fail closed, never fail quiet). Synchronous
+    /// pre-unwire Removes never enter this install-only projection. Projection
+    /// only: the drain reads machine state directly, never this view.
+    pub async fn route_installs(
+        &self,
+    ) -> Result<meerkat_contracts::wire::MobRouteInstallsResult, MobError> {
+        let state = self.query_machine_state().await?;
+        let mut outstanding = Vec::with_capacity(state.pending_route_installs.len());
+        for obligation in &state.pending_route_installs {
+            if obligation.kind != crate::machines::mob_machine::RouteObligationKind::Install {
+                return Err(MobError::Internal(format!(
+                    "MobMachine invariant violation: pending route ledger contains non-Install obligation for host '{}'",
+                    obligation.host.as_str()
+                )));
+            }
+            outstanding.push(meerkat_contracts::wire::WireRouteInstallObligation {
+                edge_a: obligation.edge.a.0.clone(),
+                edge_b: obligation.edge.b.0.clone(),
+                host: meerkat_contracts::wire::WireHostRef(obligation.host.as_str().to_string()),
+            });
+        }
+        Ok(meerkat_contracts::wire::MobRouteInstallsResult {
+            complete: outstanding.is_empty(),
+            outstanding,
+        })
+    }
+
+    /// Explicit route-install drain (ADJ-P4-9b): realizes every PENDING
+    /// obligation in the machine ledger through the one canonical drain the
+    /// host-(re)bind and revival triggers also run actor-side. The drive
+    /// re-derives nothing — the obligation set is the in-flight truth, so
+    /// an idle drive sends nothing (re-derivation from durable graph facts
+    /// belongs to the rebind/recovery/revival triggers that know trust was
+    /// invalidated). Returns the post-drain projection — Ok with a
+    /// non-empty `outstanding` set names the obligations still pending
+    /// (per-obligation failures never fail the drive).
+    pub async fn drive_route_installs(
+        &self,
+    ) -> Result<meerkat_contracts::wire::MobRouteInstallsResult, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::DriveRouteInstalls { reply_tx })
+            .await??;
+        self.route_installs().await
     }
 
     /// Send typed peer communication from one mob member to another.
@@ -5118,7 +6377,10 @@ impl MobHandle {
                 actual: declared_fence_token,
             },
             mob_dsl::SubmitWorkRejectReasonKind::MobNotRunning => MobError::InvalidTransition {
-                from: self.status().await.unwrap_or(MobState::Stopped),
+                // Error rendering only: the machine already rejected; the
+                // watch observation avoids a principal-gated QueryPhase
+                // round-trip inside error construction.
+                from: self.status_observation_snapshot(),
                 to: MobState::Running,
             },
         }
@@ -5225,14 +6487,29 @@ impl MobHandle {
 
     /// Transition Running -> Stopped. Mutation commands are rejected while stopped.
     pub async fn stop(&self) -> Result<(), MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::Stop)
-            .await?
-        {
-            MobMachineCommandResult::Unit => Ok(()),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
+        let deadline = Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
+        let mut retry_delay = Duration::from_millis(25);
+        loop {
+            match self.execute_machine_command(MobMachineCommand::Stop).await {
+                Ok(MobMachineCommandResult::Unit) => return Ok(()),
+                Ok(_) => {
+                    return Err(MobError::Internal(
+                        "unexpected command result variant".into(),
+                    ));
+                }
+                Err(
+                    error @ (MobError::PlacedCompletionCleanupPending { .. }
+                    | MobError::PlacedKickoffCleanupPending { .. }
+                    | MobError::AutonomousStopInterruptsPending { .. }),
+                ) => {
+                    if Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_millis(250));
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -5477,6 +6754,21 @@ impl MobHandle {
         }
     }
 
+    /// Stop only volatile runtime tasks, preserving durable active-run and
+    /// remote-turn custody exactly as a process crash would.
+    ///
+    /// This is intentionally hidden from the product command surface. It is
+    /// used by persistence recovery harnesses that must not launder a crash
+    /// into graceful `Canceled` run terminalization before rebuilding.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn crash_stop_preserving_durable_work_for_test(&self) -> Result<(), MobError> {
+        self.send_actor_command(
+            |reply_tx| MobCommand::CrashStopPreservingDurableWorkForTest { reply_tx },
+        )
+        .await?
+    }
+
     /// Force-cancel a member's in-flight turn via the user interrupt path.
     ///
     /// Unlike [`retire`](Self::retire), this does not archive the session or
@@ -5533,15 +6825,21 @@ impl MobHandle {
         let lifecycle = machine_state.member_lifecycle_for_identity(&dsl_identity);
         match lifecycle.status {
             mob_dsl::MobMemberLifecycleStatus::Unknown => false,
-            mob_dsl::MobMemberLifecycleStatus::Active => machine_state
-                .identity_to_runtime
-                .get(&dsl_identity)
-                .is_some_and(|runtime_id| {
+            mob_dsl::MobMemberLifecycleStatus::Active => {
+                if super::member_runtime_is_host_owned(machine_state, &entry.agent_identity) {
+                    machine_state.placed_member_ready_for_identity(&dsl_identity)
+                } else {
                     machine_state
-                        .member_startup_runtime_ready
-                        .contains(runtime_id)
-                        || machine_state.member_startup_ready.contains(runtime_id)
-                }),
+                        .identity_to_runtime
+                        .get(&dsl_identity)
+                        .is_some_and(|runtime_id| {
+                            machine_state
+                                .member_startup_runtime_ready
+                                .contains(runtime_id)
+                                || machine_state.member_startup_ready.contains(runtime_id)
+                        })
+                }
+            }
             mob_dsl::MobMemberLifecycleStatus::Retiring
             | mob_dsl::MobMemberLifecycleStatus::Broken
             | mob_dsl::MobMemberLifecycleStatus::Completed => true,
@@ -5680,6 +6978,11 @@ impl MobHandle {
                 if lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
                     return None;
                 }
+                if super::member_runtime_is_host_owned(machine_state, identity) {
+                    // The bound session belongs to the member host. Never probe
+                    // it through the controlling host's local session service.
+                    return None;
+                }
                 let bridge_session_id =
                     Self::machine_bridge_session_id_for_identity(identity, machine_state)?;
                 Some((identity.clone(), bridge_session_id))
@@ -5704,10 +7007,12 @@ impl MobHandle {
                     // member broken and drops the observation if it has gone stale.
                     match self
                         .command_tx
-                        .try_send(MobCommand::RecordMissingMemberBridgeSession {
-                            agent_identity: identity.clone(),
-                            bridge_session_id: bridge_session_id.clone(),
-                        }) {
+                        .try_send(super::scope_gate::RoutedMobCommand::internal(
+                            MobCommand::RecordMissingMemberBridgeSession {
+                                agent_identity: identity.clone(),
+                                bridge_session_id: bridge_session_id.clone(),
+                            },
+                        )) {
                         Ok(()) => {
                             observed_missing_bridge_sessions.insert((identity, bridge_session_key));
                         }
@@ -5825,10 +7130,47 @@ impl MobHandle {
                 Some(meerkat_contracts::WirePeerConnectivity::ProbeTimedOut)
             }
         };
-        snapshot.resolved_capabilities = self.project_resolved_capabilities(&snapshot).await;
+        snapshot.resolved_capabilities = self
+            .project_resolved_capabilities(identity, &snapshot)
+            .await;
         snapshot.external_member = self
             .project_external_member_observation(identity, &snapshot)
             .await;
+        // Placement (phase 7, ADJ-P7-2): the machine's `member_placement`
+        // fact, watch-read at THE status projection — never re-derived by
+        // surface handlers.
+        let (placement, durable_sessions) = {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            let state = self.machine_state_watch_rx.borrow();
+            let placement = state.member_placement.get(&dsl_identity).cloned();
+            let durable_sessions = placement
+                .as_ref()
+                .and_then(|host| state.host_durable_sessions.get(host).copied());
+            (placement, durable_sessions)
+        };
+        snapshot.placement = placement.as_ref().map(|host| host.as_str().to_string());
+        if let Some(host) = placement {
+            let control = self.reachability_observations.host(host.as_str());
+            let comms = self.reachability_observations.member(identity);
+            snapshot.control_reachability = control.as_ref().map(|view| view.reachability);
+            snapshot.comms_reachability = comms.as_ref().map(|view| view.reachability);
+            snapshot.last_seen_ms = comms
+                .as_ref()
+                .and_then(|view| view.last_seen_ms)
+                .or_else(|| control.as_ref().and_then(|view| view.last_seen_ms));
+            snapshot.freshness_reason = comms
+                .as_ref()
+                .map(|view| view.freshness_reason.clone())
+                .or_else(|| control.as_ref().map(|view| view.freshness_reason.clone()));
+            snapshot.lifecycle_capabilities = durable_sessions.map(|durable| {
+                meerkat_contracts::wire::WireMemberLifecycleCapabilities {
+                    transcript_edits: false,
+                    revisions: false,
+                    resume_after_restart: durable,
+                }
+            });
+            snapshot.non_portable_disabled = Some(Vec::new());
+        }
         Ok(snapshot)
     }
 
@@ -5868,6 +7210,16 @@ impl MobHandle {
         identity: &AgentIdentity,
         snapshot: &MobMemberSnapshot,
     ) -> meerkat_contracts::WirePeerConnectivity {
+        let placed = {
+            let state = self.machine_state_watch_rx.borrow();
+            super::member_runtime_is_host_owned(&state, identity)
+        };
+        if placed {
+            // Placed connectivity is projected from host/member reachability
+            // observations below; its remote session id is never a license to
+            // probe the controlling host's local session service.
+            return meerkat_contracts::WirePeerConnectivity::NotApplicable;
+        }
         // No bridge session backs this member: live peer connectivity is not a
         // resolvable fact, so the projection is NotApplicable rather than a
         // None that a consumer could mistake for "resolved, zero peers".
@@ -5896,11 +7248,16 @@ impl MobHandle {
     /// snapshot by consulting the MeerkatMachine runtime adapter. Returns
     async fn project_resolved_capabilities(
         &self,
+        identity: &AgentIdentity,
         snapshot: &MobMemberSnapshot,
     ) -> Option<meerkat_contracts::WireResolvedModelCapabilities> {
         #[cfg(feature = "runtime-adapter")]
         {
             use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+            if super::member_runtime_is_host_owned(&self.machine_state_watch_rx.borrow(), identity)
+            {
+                return None;
+            }
             let session_id = snapshot.current_bridge_session_id().cloned()?;
             let runtime = self.runtime_adapter.as_ref()?.as_ref();
             runtime
@@ -5995,8 +7352,9 @@ impl MobHandle {
     /// In 0.6 autonomous members no longer run a synthetic second kickoff turn,
     /// but their initial prompt still resolves asynchronously through the
     /// runtime-backed input path. This barrier is satisfied once each targeted
-    /// autonomous member leaves `pending` / `starting` / `callback_pending`
-    /// and reaches a terminal kickoff phase.
+    /// autonomous member leaves `pending` / `starting` and reaches a terminal
+    /// completion-handle phase. `callback_pending` is terminal for this barrier
+    /// (and remains visible in the member snapshot for external fulfillment).
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -6116,6 +7474,11 @@ impl MobHandle {
         task: impl Into<String>,
         options: HelperOptions,
     ) -> Result<HelperResult, MobError> {
+        // This is one SendCommand-scoped composite.  Admit before profile or
+        // roster inspection; status collection and retirement below are
+        // internal completion mechanics of the admitted operation.
+        self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
+            .await?;
         let profile_name = options
             .role_name
             .or_else(|| self.definition.profiles.keys().next().cloned())
@@ -6142,12 +7505,17 @@ impl MobHandle {
 
         self.spawn_spec_internal_with_source(spec, SpawnSource::HelperSpawn)
             .await?;
-        let helper_snapshot = self.member_status(&identity).await?;
+        let admitted = self.clone().with_command_authority(
+            crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ),
+        );
+        let helper_snapshot = admitted.member_status(&identity).await?;
         let (agent_runtime_id, fence_token) =
             helper_snapshot.require_runtime_identity_fields("spawn_helper result")?;
         let agent_identity = helper_snapshot.agent_identity().clone();
         let agent_runtime_id = agent_runtime_id.clone();
-        let _ = self.retire(identity).await;
+        admitted.retire(identity).await?;
 
         Ok(HelperResult {
             output: helper_snapshot.output_preview,
@@ -6170,6 +7538,8 @@ impl MobHandle {
         fork_context: crate::launch::ForkContext,
         options: HelperOptions,
     ) -> Result<HelperResult, MobError> {
+        self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
+            .await?;
         let profile_name = options
             .role_name
             .or_else(|| self.definition.profiles.keys().next().cloned())
@@ -6201,12 +7571,17 @@ impl MobHandle {
 
         self.spawn_spec_internal_with_source(spec, SpawnSource::Fork)
             .await?;
-        let helper_snapshot = self.member_status(&identity).await?;
+        let admitted = self.clone().with_command_authority(
+            crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ),
+        );
+        let helper_snapshot = admitted.member_status(&identity).await?;
         let (agent_runtime_id, fence_token) =
             helper_snapshot.require_runtime_identity_fields("fork_helper result")?;
         let agent_identity = helper_snapshot.agent_identity().clone();
         let agent_runtime_id = agent_runtime_id.clone();
-        let _ = self.retire(identity).await;
+        admitted.retire(identity).await?;
 
         Ok(HelperResult {
             output: helper_snapshot.output_preview,
@@ -6234,6 +7609,228 @@ impl MobHandle {
     ) -> Result<Vec<crate::machines::mob_machine::MobMachineEffect>, MobError> {
         self.send_actor_command(|reply_tx| MobCommand::ApplyMachineInputEffects {
             input: Box::new(input),
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// Enter the actor command gate and return only after the handle's bound
+    /// authority has been validated against the actor-owned machine state.
+    /// Fenced remote member-operator execution uses this before projection-only
+    /// operations; mutating commands revalidate again at their own mailbox turn.
+    pub(crate) async fn validate_command_authority(&self) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ValidateCommandAuthority { reply_tx })
+            .await?
+    }
+
+    /// Enter the actor's serialized principal gate for a composite or
+    /// projection-only surface before it performs any raw lookup/effect.
+    pub async fn admit_control_scope(
+        &self,
+        required: mob_dsl::ControlScope,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::AdmitControlScope { required, reply_tx })
+            .await?
+    }
+
+    /// Ask the actor to derive the exact current placed-residency set from its
+    /// serialized machine state and reclaim only stale member-operator ledger
+    /// rows. Invoked before every admitted durable begin; actor startup runs
+    /// the same seam for crash/recovery convergence.
+    pub(crate) async fn prune_stale_member_operator_requests(&self) -> Result<u64, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::PruneStaleMemberOperatorRequests {
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn reserve_remote_turn_obligation(
+        &self,
+        intent: crate::run::MobRunRemoteTurnIntent,
+    ) -> Result<super::remote_flow_ticket::ReservedRemoteTurnIntent, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ReserveRemoteTurnObligation {
+            intent: Box::new(intent),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn commit_remote_turn_receipt(
+        &self,
+        receipt: crate::run::MobRunRemoteTurnReceipt,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CommitRemoteTurnReceipt {
+            receipt: Box::new(receipt),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn close_remote_turn_after_tracked_cancel(
+        &self,
+        receipt: crate::run::MobRunRemoteTurnReceipt,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CloseRemoteTurnAfterTrackedCancel {
+            receipt: Box::new(receipt),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn ensure_remote_turn_record(
+        &self,
+        obligation: crate::event::RemoteTurnObligationEvent,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::EnsureRemoteTurnRecord {
+            obligation: Box::new(obligation),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn converge_recovered_flow_run(
+        &self,
+        run_id: crate::ids::RunId,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ConvergeRecoveredFlowRun {
+            run_id,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn resolve_remote_turn_outcome(
+        &self,
+        obligation: crate::machines::mob_machine::RemoteTurnObligation,
+        record: super::bridge_protocol::BridgeTurnOutcomeRecord,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ResolveRemoteTurnOutcome {
+            obligation: Box::new(obligation),
+            record,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn acknowledge_remote_turn_outcome(
+        &self,
+        obligation: crate::machines::mob_machine::RemoteTurnObligation,
+        ack: super::bridge_protocol::BridgeTurnOutcomeAck,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::AcknowledgeRemoteTurnOutcome {
+            obligation: Box::new(obligation),
+            ack,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn finalize_remote_turn_privacy_cleanup(
+        &self,
+        cleanup: super::remote_turn_reconciler::FinalizedRemoteTurnPrivacyCleanup,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::FinalizeRemoteTurnPrivacyCleanup {
+            cleanup: Box::new(cleanup),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn request_placed_completion_cancellation(
+        &self,
+        obligation: crate::event::PlacedCompletionObligationEvent,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::RequestPlacedCompletionCancellation {
+            obligation: Box::new(obligation),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn resolve_placed_completion_outcome(
+        &self,
+        obligation: crate::event::PlacedCompletionObligationEvent,
+        record: super::bridge_protocol::BridgeTurnOutcomeRecord,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ResolvePlacedCompletionOutcome {
+            obligation: Box::new(obligation),
+            record,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn close_placed_completion_outcome(
+        &self,
+        obligation: crate::event::PlacedCompletionObligationEvent,
+        closure: crate::event::PlacedCompletionClosureEvent,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ClosePlacedCompletionOutcome {
+            obligation: Box::new(obligation),
+            closure,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn acknowledge_placed_completion_outcome(
+        &self,
+        obligation: crate::event::PlacedCompletionObligationEvent,
+        ack: super::bridge_protocol::BridgeTurnOutcomeAck,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::AcknowledgePlacedCompletionOutcome {
+            obligation: Box::new(obligation),
+            ack,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn resolve_placed_kickoff_outcome(
+        &self,
+        obligation: crate::event::PlacedKickoffObligationEvent,
+        record: super::bridge_protocol::BridgeTurnOutcomeRecord,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ResolvePlacedKickoffOutcome {
+            obligation: Box::new(obligation),
+            record,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn resolve_placed_kickoff_cancelled(
+        &self,
+        obligation: crate::event::PlacedKickoffObligationEvent,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ResolvePlacedKickoffCancelled {
+            obligation: Box::new(obligation),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn acknowledge_placed_kickoff_outcome(
+        &self,
+        obligation: crate::event::PlacedKickoffObligationEvent,
+        ack: super::bridge_protocol::BridgeTurnOutcomeAck,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::AcknowledgePlacedKickoffOutcome {
+            obligation: Box::new(obligation),
+            ack,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(crate) async fn reject_placed_kickoff_before_admission(
+        &self,
+        obligation: crate::event::PlacedKickoffObligationEvent,
+        error: String,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::RejectPlacedKickoffBeforeAdmission {
+            obligation: Box::new(obligation),
+            error,
             reply_tx,
         })
         .await?
@@ -6724,7 +8321,6 @@ impl MobHandle {
             runtime_mode_present,
             launch_mode_present,
             tool_access_policy_present,
-            budget_split_policy_present,
             tooling_present,
             auth_binding_present,
         } = observations;
@@ -6738,7 +8334,6 @@ impl MobHandle {
                 privileged_runtime_mode_present: runtime_mode_present,
                 privileged_launch_mode_present: launch_mode_present,
                 privileged_tool_access_policy_present: tool_access_policy_present,
-                privileged_budget_split_policy_present: budget_split_policy_present,
                 privileged_tooling_present: tooling_present,
                 privileged_auth_binding_present: auth_binding_present,
             })
@@ -6759,7 +8354,11 @@ impl MobHandle {
             })?;
         Ok(match admission {
             mob_dsl::MobSpawnMemberAdmissionKind::Allowed => SpawnMemberAdmission::Allowed,
-            mob_dsl::MobSpawnMemberAdmissionKind::Denied => SpawnMemberAdmission::Denied,
+            // Every other kind is a typed denial cause: the scope-policy
+            // `Denied` plus the multi-host portability/placement causes the
+            // BeginSpawnExec denial ladder emits (§15.4/§18.9). The tool-seam
+            // verdict is binary, so all of them mirror to `Denied`.
+            _ => SpawnMemberAdmission::Denied,
         })
     }
 
@@ -6847,6 +8446,57 @@ impl MobHandle {
         })
     }
 
+    /// Resolve the member-operator upcall admission verdict (multi-host §15
+    /// R6, ADJ-14 wire mapping is the caller's).
+    ///
+    /// The responder extracts the RAW facts — the requesting identity, the
+    /// signed requester generation/fence, ingress-authenticated sender peer
+    /// id, and upcall request id — and feeds them here WITHOUT pre-composing.
+    /// MobMachine, not the responder, guards the current identity binding,
+    /// peer key, placement, and host liveness and composes the verdict; the
+    /// responder mirrors it. All arms are pure self-loops callable in every
+    /// mob phase. Fails closed if the machine emits no verdict.
+    pub(crate) async fn resolve_member_operator_admission(
+        &self,
+        request: &MemberOperatorAdmissionRequest,
+    ) -> Result<MemberOperatorAdmissionVerdict, MobError> {
+        let key = &request.request_key;
+        let dsl_identity = mob_dsl::AgentIdentity::from(key.agent_identity.as_str());
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveMemberOperatorAdmission {
+                agent_identity: dsl_identity.clone(),
+                requester_generation: mob_dsl::Generation(key.generation),
+                requester_fence_token: mob_dsl::FenceToken(key.fence_token),
+                requester_host_id: mob_dsl::HostId(key.host_id.clone()),
+                requester_host_binding_generation: key.host_binding_generation,
+                requester_member_session_id: mob_dsl::SessionId(key.member_session_id.clone()),
+                sender_peer_id: mob_dsl::PeerId(request.sender_peer_id.as_str()),
+                request_id: key.request_id.clone(),
+            })
+            .await?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::MemberOperatorAdmitted {
+                    agent_identity: effect_identity,
+                    request_id: effect_request_id,
+                } if effect_identity == dsl_identity && effect_request_id == key.request_id => {
+                    Some(MemberOperatorAdmissionVerdict::Admitted)
+                }
+                mob_dsl::MobMachineEffect::MemberOperatorRejected {
+                    agent_identity: effect_identity,
+                    request_id: effect_request_id,
+                    cause,
+                } if effect_identity == dsl_identity && effect_request_id == key.request_id => {
+                    Some(MemberOperatorAdmissionVerdict::Rejected(cause))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal("ResolveMemberOperatorAdmission emitted no verdict".to_string())
+            })
+    }
+
     pub(super) async fn subscribe_authorized_agent_session_events(
         &self,
         agent_identity: &AgentIdentity,
@@ -6873,6 +8523,13 @@ impl MobHandle {
         let mut members = Vec::new();
         for (dsl_identity, dsl_runtime_id) in &machine_state.identity_to_runtime {
             if !runtime_ids.contains(dsl_runtime_id) {
+                continue;
+            }
+            // Placement decides the transport lane (ADJ-24): a placed
+            // member's session binding names its REMOTE resident session —
+            // it fans in through the pump-tap lane
+            // (`authority.external_members`), never a local session stream.
+            if machine_state.member_placement.contains_key(dsl_identity) {
                 continue;
             }
             let Some(dsl_session_id) = machine_state.member_session_bindings.get(dsl_identity)
@@ -7289,6 +8946,13 @@ mod tests {
             external_member: None,
             resolved_capabilities: None,
             progress: None,
+            placement: None,
+            control_reachability: None,
+            comms_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            lifecycle_capabilities: None,
+            non_portable_disabled: None,
         }
         .with_current_bridge_session_id(Some(sid.clone()));
         let snapshot_value =
@@ -7322,6 +8986,13 @@ mod tests {
             external_member: None,
             resolved_capabilities: None,
             progress: None,
+            placement: None,
+            control_reachability: None,
+            comms_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            lifecycle_capabilities: None,
+            non_portable_disabled: None,
         };
 
         let snapshot_value =
@@ -7357,6 +9028,13 @@ mod tests {
             external_member: None,
             resolved_capabilities: None,
             progress: None,
+            placement: None,
+            control_reachability: None,
+            comms_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            lifecycle_capabilities: None,
+            non_portable_disabled: None,
         };
         assert_eq!(
             snapshot.agent_identity(),
@@ -7409,6 +9087,7 @@ mod tests {
                 provider_params_digest: None,
                 output_schema_digest: None,
                 external_addressable: false,
+                resolved_spec_digest: None,
             },
         )
         .expect("profile authority should admit");
@@ -7424,6 +9103,25 @@ mod tests {
                 runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
                 bridge_session_id: None,
                 replacing: None,
+                placement: None,
+                workgraph_required: false,
+                rust_bundles_present: false,
+                per_spawn_external_tools_present: false,
+                mob_default_external_tools_present: false,
+                default_llm_client_override_present: false,
+                host_surface_mcp_allowlist_present: false,
+                inherited_tool_filter_present: false,
+                shell_env_present: false,
+                mcp_stdio_env_present: false,
+                mcp_http_headers_present: false,
+                memory_required: false,
+                mcp_required: false,
+                resume_session_id: None,
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
             },
         )
         .expect("begin spawn exec should admit");
@@ -7439,6 +9137,11 @@ mod tests {
                 runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
                 bridge_session_id: None,
                 replacing: None,
+                member_peer_endpoint: None,
+                spec_digest_echo: None,
+                ack_engine_version: None,
+                placed_spawn_id: None,
+                provision_operation_id: None,
             },
         )
         .expect("commit spawn membership should admit");
@@ -7489,6 +9192,7 @@ mod tests {
                     provider_params_digest: None,
                     output_schema_digest: None,
                     external_addressable: true,
+                    resolved_spec_digest: None,
                 },
             )
             .expect("profile authority should admit");
@@ -7504,6 +9208,25 @@ mod tests {
                     runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
                     bridge_session_id: bridge_session_id.clone(),
                     replacing: None,
+                    placement: None,
+                    workgraph_required: false,
+                    rust_bundles_present: false,
+                    per_spawn_external_tools_present: false,
+                    mob_default_external_tools_present: false,
+                    default_llm_client_override_present: false,
+                    host_surface_mcp_allowlist_present: false,
+                    inherited_tool_filter_present: false,
+                    shell_env_present: false,
+                    mcp_stdio_env_present: false,
+                    mcp_http_headers_present: false,
+                    memory_required: false,
+                    mcp_required: false,
+                    resume_session_id: None,
+                    placed_spawn_id: None,
+                    placed_provision_operation_id: None,
+                    placed_operation_owner_session_id: None,
+                    effective_profile_override_present: false,
+                    effective_model_override_present: false,
                 },
             )
             .expect("begin spawn exec should admit");
@@ -7519,6 +9242,11 @@ mod tests {
                     runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
                     bridge_session_id,
                     replacing: None,
+                    member_peer_endpoint: None,
+                    spec_digest_echo: None,
+                    ack_engine_version: None,
+                    placed_spawn_id: None,
+                    provision_operation_id: None,
                 },
             )
             .expect("commit spawn membership should admit");
@@ -7727,6 +9455,7 @@ mod tests {
                 provider_params_digest: None,
                 output_schema_digest: None,
                 external_addressable: false,
+                resolved_spec_digest: None,
             },
         )
         .expect("profile authority should admit");
@@ -7742,6 +9471,25 @@ mod tests {
                 runtime_mode,
                 bridge_session_id: Some(mob_dsl::SessionId("ready-session".to_string())),
                 replacing: None,
+                placement: None,
+                workgraph_required: false,
+                rust_bundles_present: false,
+                per_spawn_external_tools_present: false,
+                mob_default_external_tools_present: false,
+                default_llm_client_override_present: false,
+                host_surface_mcp_allowlist_present: false,
+                inherited_tool_filter_present: false,
+                shell_env_present: false,
+                mcp_stdio_env_present: false,
+                mcp_http_headers_present: false,
+                memory_required: false,
+                mcp_required: false,
+                resume_session_id: None,
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
             },
         )
         .expect("begin spawn exec should admit");
@@ -7757,6 +9505,11 @@ mod tests {
                 runtime_mode,
                 bridge_session_id: Some(mob_dsl::SessionId("ready-session".to_string())),
                 replacing: None,
+                member_peer_endpoint: None,
+                spec_digest_echo: None,
+                ack_engine_version: None,
+                placed_spawn_id: None,
+                provision_operation_id: None,
             },
         )
         .expect("commit spawn membership should admit");
@@ -7805,6 +9558,94 @@ mod tests {
         assert!(
             MobHandle::ready_wait_is_satisfied(&entry, authority.state()),
             "turn-driven members do not require autonomous startup readiness"
+        );
+    }
+
+    fn placed_ready_wait_state(identity: &AgentIdentity) -> mob_dsl::MobMachineState {
+        let mut state = mob_dsl::MobMachineAuthority::new().state().clone();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let runtime_id =
+            mob_dsl::AgentRuntimeId::from_domain(&AgentRuntimeId::initial(identity.clone()));
+        let host = mob_dsl::HostId("placed-ready-host".to_string());
+        let binding_generation = 7;
+
+        state
+            .member_placement
+            .insert(dsl_identity.clone(), host.clone());
+        state
+            .host_bind_phase
+            .insert(host.clone(), mob_dsl::HostBindPhase::Bound);
+        state
+            .host_binding_generations
+            .insert(host, binding_generation);
+        state
+            .current_placed_spawn_host_binding_generations
+            .insert(dsl_identity.clone(), binding_generation);
+        state.current_placed_spawn_ids.insert(
+            dsl_identity.clone(),
+            mob_dsl::PlacedSpawnId("placed-ready-spawn".to_string()),
+        );
+        state
+            .current_placed_spawn_provision_operation_ids
+            .insert(dsl_identity.clone(), "placed-ready-operation".to_string());
+        state
+            .current_placed_spawn_operation_owner_session_ids
+            .insert(
+                dsl_identity.clone(),
+                mob_dsl::SessionId("placed-ready-owner".to_string()),
+            );
+        state.member_session_bindings.insert(
+            dsl_identity.clone(),
+            mob_dsl::SessionId("placed-ready-session".to_string()),
+        );
+        state
+            .member_peer_endpoints
+            .insert(dsl_identity.clone(), mob_dsl::MemberPeerEndpoint::default());
+        state
+            .identity_runtime_generations
+            .insert(dsl_identity.clone(), mob_dsl::Generation(1));
+        state
+            .identity_runtime_fence_tokens
+            .insert(dsl_identity.clone(), mob_dsl::FenceToken(0));
+        state
+            .identity_to_runtime
+            .insert(dsl_identity, runtime_id.clone());
+        state.live_runtime_ids.insert(runtime_id);
+        state
+    }
+
+    #[test]
+    fn ready_wait_uses_committed_placement_instead_of_local_startup_marker() {
+        let identity = AgentIdentity::from("placed-ready-worker");
+        let entry = ready_wait_test_entry(&identity, MobRuntimeMode::AutonomousHost);
+        let mut state = placed_ready_wait_state(&identity);
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+
+        assert!(
+            state.member_startup_ready.is_empty() && state.member_startup_runtime_ready.is_empty(),
+            "placed peer-only members intentionally have no local startup marker"
+        );
+        assert!(
+            MobHandle::ready_wait_is_satisfied(&entry, &state),
+            "the exact settled placed incarnation is ready"
+        );
+
+        state
+            .host_binding_generations
+            .insert(mob_dsl::HostId("placed-ready-host".to_string()), 8);
+        assert!(
+            !MobHandle::ready_wait_is_satisfied(&entry, &state),
+            "a stale carrier generation must close placed readiness"
+        );
+        state
+            .host_binding_generations
+            .insert(mob_dsl::HostId("placed-ready-host".to_string()), 7);
+        state
+            .member_materialization_failures
+            .insert(dsl_identity, "remote materialization unhealthy".to_string());
+        assert!(
+            !MobHandle::ready_wait_is_satisfied(&entry, &state),
+            "materialization failure must close placed readiness"
         );
     }
 }

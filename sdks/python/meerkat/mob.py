@@ -3,23 +3,42 @@ from __future__ import annotations
 from typing import Any, Literal, NotRequired, TypedDict
 
 from .generated.types import (
+    BridgeLiveControlOutcome,
+    BridgeLiveControlVerb,
+    LiveCloseResult,
+    LiveOpenResult,
+    LiveStatusResult,
+    MobBindHostResult,
+    MobHostStatus,
+    MobMemberHistoryResult,
+    MobRevokeHostResult,
+    MobRouteInstallsResult,
     MobSpawnManyResult,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
+    RealtimeTurningMode,
     WireAuthBindingRef,
-    WireBudgetSplitPolicy,
     WireContentInput,
+    WireHostRef,
+    WireHostBindingDescriptor,
     WireMemberLaunchMode,
     WireMobBackendKind,
     WireMobProfile,
     WireMobRuntimeMode,
+    WireNonPortableResourceKind,
+    WireReachability,
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
     WireMemberProgressSnapshot,
 )
 from .streaming import EventSubscription
-from .types import ResolvedModelCapabilities
+from .types import (
+    MobControlScope,
+    MobGrantRecord,
+    MobMemberLiveTransport,
+    ResolvedModelCapabilities,
+)
 
 MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
 
@@ -134,6 +153,15 @@ MobPeerConnectivity = (
     | MobPeerConnectivityKnown
 )
 
+MobMemberLifecycleCapabilities = TypedDict(
+    "MobMemberLifecycleCapabilities",
+    {
+        "transcript_edits": bool,
+        "revisions": bool,
+        "resume_after_restart": bool,
+    },
+)
+
 MobMemberSnapshot = TypedDict(
     "MobMemberSnapshot",
     {
@@ -151,6 +179,14 @@ MobMemberSnapshot = TypedDict(
         # Diagnostic bridge-session id for status/continuity only.
         "current_session_id": NotRequired[str],
         "progress": NotRequired[WireMemberProgressSnapshot],
+        # None/absence means the controlling host.
+        "placement": NotRequired[WireHostRef],
+        "control_reachability": NotRequired[WireReachability],
+        "comms_reachability": NotRequired[WireReachability],
+        "last_seen_ms": NotRequired[int],
+        "freshness_reason": NotRequired[str],
+        "lifecycle_capabilities": NotRequired[MobMemberLifecycleCapabilities],
+        "non_portable_disabled": NotRequired[list[WireNonPortableResourceKind]],
     },
 )
 
@@ -212,6 +248,7 @@ MobSpawnSpec = TypedDict(
         "labels": NotRequired[dict[str, str] | None],
         "context": NotRequired[dict[str, Any] | None],
         "additional_instructions": NotRequired[list[str] | None],
+        "placement": NotRequired[WireHostRef | None],
         "auth_binding": NotRequired[WireAuthBindingRef | dict[str, str] | None],
         "model_override": NotRequired[str | None],
     },
@@ -268,14 +305,15 @@ class Mob:
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
+        placement: str | None = None,
         binding: WireRuntimeBinding | dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         auto_wire_parent: bool | None = None,
         launch_mode: WireMemberLaunchMode | dict[str, Any] | None = None,
         tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
-        budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
         inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
         override_profile: WireMobProfile | dict[str, Any] | None = None,
+        model_override: str | None = None,
         auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
         return await self._client.spawn_mob_member(
@@ -288,14 +326,15 @@ class Mob:
             labels=labels,
             context=context,
             additional_instructions=additional_instructions,
+            placement=placement,
             binding=binding,
             shell_env=shell_env,
             auto_wire_parent=auto_wire_parent,
             launch_mode=launch_mode,
             tool_access_policy=tool_access_policy,
-            budget_split_policy=budget_split_policy,
             inherited_tool_filter=inherited_tool_filter,
             override_profile=override_profile,
+            model_override=model_override,
             auth_binding=auth_binding,
         )
 
@@ -329,6 +368,117 @@ class Mob:
 
     async def force_cancel(self, agent_identity: str) -> None:
         await self._client.force_cancel_mob_member(self.id, agent_identity)
+
+    async def grant_scopes(
+        self,
+        principal: str,
+        scopes: list[MobControlScope],
+        *,
+        expires_at_ms: int | None = None,
+    ) -> MobGrantRecord:
+        return await self._client.grant_mob_scopes(
+            self.id, principal, scopes, expires_at_ms=expires_at_ms
+        )
+
+    async def revoke_scopes(
+        self,
+        principal: str,
+        scopes: list[MobControlScope] | None = None,
+    ) -> bool:
+        return await self._client.revoke_mob_scopes(self.id, principal, scopes)
+
+    async def grants(self) -> list[MobGrantRecord]:
+        return await self._client.list_mob_grants(self.id)
+
+    # ── Multi-host console verbs (phase 7, DEC-P7A-9) ────────────────────
+
+    async def member_history(
+        self,
+        agent_identity: str,
+        *,
+        from_index: int | None = None,
+        limit: int | None = None,
+    ) -> MobMemberHistoryResult:
+        """Read a member transcript page by identity (one shape local and
+        remote; typed placement + provenance on the envelope)."""
+        return await self._client.mob_member_history(
+            self.id, agent_identity, from_index=from_index, limit=limit
+        )
+
+    async def hosts(self) -> list[MobHostStatus]:
+        """List tracked member hosts with bind phase and capabilities."""
+        return await self._client.mob_hosts(self.id)
+
+    async def route_installs(self) -> MobRouteInstallsResult:
+        """Outstanding cross-host route-install obligations."""
+        return await self._client.mob_route_installs(self.id)
+
+    async def bind_host(
+        self, descriptor: WireHostBindingDescriptor | dict[str, Any]
+    ) -> MobBindHostResult:
+        """Bind a member-host daemon from its binding descriptor."""
+        return await self._client.bind_mob_host(self.id, descriptor)
+
+    async def revoke_host(self, host_id: str) -> MobRevokeHostResult:
+        """Revoke a bound (or bind-requested) member host."""
+        return await self._client.revoke_mob_host(self.id, host_id)
+
+    async def hard_cancel(self, agent_identity: str, reason: str) -> bool:
+        """Hard-cancel a member (immediate user-interrupt authority)."""
+        return await self._client.hard_cancel_mob_member(
+            self.id, agent_identity, reason
+        )
+
+    async def member_live_open(
+        self,
+        agent_identity: str,
+        *,
+        turning_mode: RealtimeTurningMode | None = None,
+        transport: MobMemberLiveTransport | None = None,
+    ) -> LiveOpenResult:
+        """Open a live realtime channel on a member.
+
+        The result carries the owning host's WS URL + single-use token
+        VERBATIM — treat it as opaque.
+        """
+        return await self._client.open_mob_member_live(
+            self.id,
+            agent_identity,
+            turning_mode=turning_mode,
+            transport=transport,
+        )
+
+    async def member_live_close(
+        self,
+        agent_identity: str,
+        channel_id: str,
+    ) -> LiveCloseResult:
+        """Close one NAMED live channel on a member."""
+        return await self._client.close_mob_member_live(
+            self.id, agent_identity, channel_id
+        )
+
+    async def member_live_status(
+        self,
+        agent_identity: str,
+        channel_id: str | None = None,
+    ) -> LiveStatusResult:
+        """Read live channel status; omit ``channel_id`` to discover the
+        member's active channel (the reply-loss reconciliation read)."""
+        return await self._client.mob_member_live_status(
+            self.id, agent_identity, channel_id
+        )
+
+    async def member_live_control(
+        self,
+        agent_identity: str,
+        channel_id: str,
+        verb: BridgeLiveControlVerb,
+    ) -> BridgeLiveControlOutcome:
+        """Drive one turn-level live control verb on a member channel."""
+        return await self._client.control_mob_member_live(
+            self.id, agent_identity, channel_id, verb
+        )
 
     async def member_status(self, agent_identity: str) -> MobMemberSnapshot:
         return await self._client.mob_member_status(self.id, agent_identity)

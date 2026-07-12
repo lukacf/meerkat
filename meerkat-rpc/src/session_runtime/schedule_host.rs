@@ -431,6 +431,7 @@ impl SessionRuntime {
                 render_metadata: dispatch.render_metadata.clone(),
                 execution_kind: None,
                 peer_response_terminal_apply_intent: None,
+                directed_interaction_ids: Vec::new(),
                 auth_binding: None,
                 transcript_identity: Default::default(),
             },

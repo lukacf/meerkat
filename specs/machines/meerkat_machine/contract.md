@@ -28,6 +28,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `boundary_count`: `u64`
 - `cancel_after_boundary`: `Bool`
 - `boundary_cancel_dispatch_pending`: `Bool`
+- `boundary_cancel_dispatch_generation`: `u64`
+- `turn_terminal_run_id`: `Option<RunId>`
 - `terminal_outcome`: `Option<TurnTerminalOutcome>`
 - `terminal_cause_kind`: `Option<TurnTerminalCauseKind>`
 - `last_runtime_apply_failure_cause`: `Option<RuntimeApplyFailureCause>`
@@ -307,6 +309,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
+- `BeginUnregisterUnservedAttachment`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -319,6 +322,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Retire`(session_id: SessionId)
 - `Reset`
 - `StopRuntimeExecutor`(reason: String)
+- `RecoverRuntimeCompletionResultCorrelation`(run_id: RunId)
 - `Destroy`(session_id: SessionId)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
@@ -373,6 +377,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
 - `InterruptCurrentRun`
 - `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
+- `AbortCancelAfterBoundaryDispatch`(dispatch_generation: u64)
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)
 - `UpdateDeferredSessionKeepAlive`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool)
 - `UpdateDeferredSessionLlmIdentity`(session_id: SessionId, llm_identity: SessionLlmIdentity)
@@ -437,6 +442,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StartImmediateContext`(run_id: RunId)
 - `PrimitiveApplied`(run_id: RunId)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u64)
+- `CallbackPending`(run_id: RunId)
 - `LlmReturnedTerminal`(run_id: RunId)
 - `RegisterPendingOps`(run_id: RunId, op_refs: Set<String>, barrier_operation_ids: Set<OperationId>)
 - `ToolCallsResolved`(run_id: RunId)
@@ -612,6 +618,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveSupervisorCleanupCommandAdmission`(command_kind: SupervisorCleanupCommandKind, supervisor_peer_id: String, supervisor_epoch: u64, sender_peer_id: Option<String>)
 - `AuthorizeSupervisorMobPeerOverlay`(supervisor_peer_id: String, supervisor_epoch: u64, recipient_peer_id: String, overlay_epoch: u64, endpoints: Set<PeerEndpoint>, endpoint_count: u64, command_peer_id: String, command_endpoint: PeerEndpoint, command_kind: MobPeerOverlayCommandKind)
 - `ApplyMobPeerOverlay`(epoch: u64, endpoints: Set<PeerEndpoint>)
+- `AuthorizeInteractionTerminalOutboxAdoption`(batch_key: String, candidate_digest: String, session_id: SessionId, previous_agent_runtime_id: AgentRuntimeId, previous_fence_token: FenceToken, previous_runtime_generation: Generation, previous_runtime_epoch_id: Option<RuntimeEpochId>)
 
 ## Signals
 - `Initialize`
@@ -781,6 +788,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestRuntimeLoopStopForUnregister`(session_id: SessionId)
 - `RequestCommsDrainExitForUnregister`(session_id: SessionId)
 - `RequestCompletionWaiterResolutionForUnregister`(session_id: SessionId)
+- `InteractionTerminalOutboxAdoptionAuthorized`(batch_key: String, candidate_digest: String, session_id: SessionId, previous_agent_runtime_id: AgentRuntimeId, previous_fence_token: FenceToken, previous_runtime_generation: Generation, previous_runtime_epoch_id: Option<RuntimeEpochId>, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_runtime_generation: Generation, next_runtime_epoch_id: Option<RuntimeEpochId>)
 
 ## Helpers
 - `deferred_authority_has_identity`(witness: ToolVisibilityWitness) -> `Bool`
@@ -927,6 +935,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `TurnRunCancelled` via `AuthorizedRuntimeLoopRunCommit` (RuntimeLoopRunCommitEffect) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Cancelled`, `Abandoned`
 - Emitted By Transitions: `PostAdmissionSignal`, `RecordTerminalOutcome`, `TurnRunFailed`
 
+### `AuthorizedInteractionTerminalOutboxAdoption`
+- Authority: `AuthorizedInteractionTerminalOutboxAdoption`
+- Source Inputs: `AuthorizeInteractionTerminalOutboxAdoption`
+- Transitions: `AuthorizeInteractionTerminalOutboxAdoptionInitializing`, `AuthorizeInteractionTerminalOutboxAdoptionIdle`, `AuthorizeInteractionTerminalOutboxAdoptionAttached`, `AuthorizeInteractionTerminalOutboxAdoptionRunning`, `AuthorizeInteractionTerminalOutboxAdoptionRetired`, `AuthorizeInteractionTerminalOutboxAdoptionStopped`
+- Guard Expansion:
+  - `AuthorizeInteractionTerminalOutboxAdoptionInitializing`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionIdle`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionAttached`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionRunning`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionRetired`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionStopped`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+- Command Effects: `InteractionTerminalOutboxAdoptionAuthorized`
+- Effect Closure:
+  - `InteractionTerminalOutboxAdoptionAuthorized` via `AuthorizedInteractionTerminalOutboxAdoption` (DurableOutboxBindingAdoption) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Abandoned`
+- Emitted By Transitions: `InteractionTerminalOutboxAdoptionAuthorized`
+
 ### `AuthorizedRuntimeCompletionResultClosure`
 - Authority: `RuntimeCompletionResultAuthority`
 - Source Inputs: `ResolveRuntimeCompletionResult`
@@ -1035,6 +1059,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `new_session_binding`
 - To: `Idle`
 
@@ -1042,6 +1067,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `new_session_binding`
 - To: `Attached`
 
@@ -1049,6 +1075,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `new_session_binding`
 - To: `Running`
 
@@ -1056,6 +1083,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `new_session_binding`
 - To: `Retired`
 
@@ -1063,6 +1091,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `same_session_binding`
 - To: `Idle`
 
@@ -1070,6 +1099,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `same_session_binding`
 - To: `Attached`
 
@@ -1077,6 +1107,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `same_session_binding`
 - To: `Running`
 
@@ -1084,6 +1115,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `RegisterSession`(session_id)
 - Guards:
+  - `not_draining`
   - `same_session_binding`
 - To: `Retired`
 
@@ -1338,6 +1370,45 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `not_already_draining`
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Stopped`
+
+### `BeginUnregisterUnservedAttachmentIdle`
+- From: `Idle`
+- On: `BeginUnregisterUnservedAttachment`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `executor_registration_active`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Idle`
+
+### `BeginUnregisterUnservedAttachmentAttached`
+- From: `Attached`
+- On: `BeginUnregisterUnservedAttachment`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `executor_registration_active`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Attached`
+
+### `BeginUnregisterUnservedAttachmentRunning`
+- From: `Running`
+- On: `BeginUnregisterUnservedAttachment`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_matches_observation`
+  - `fence_binding_matches_observation`
+  - `generation_binding_matches_observation`
+  - `epoch_binding_matches_observation`
+  - `executor_registration_active`
+- Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
+- To: `Running`
 
 ### `RuntimeLoopStoppedForUnregisterIdle`
 - From: `Idle`
@@ -2603,6 +2674,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Initializing`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_exact`
   - `fence_binding_exact`
@@ -2615,6 +2687,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_exact`
   - `fence_binding_exact`
@@ -2627,6 +2700,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_exact`
   - `fence_binding_exact`
@@ -2639,6 +2713,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_exact`
   - `fence_binding_exact`
@@ -2651,6 +2726,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_exact`
   - `fence_binding_exact`
@@ -2663,6 +2739,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Initializing`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_absent_or_same`
   - `fence_binding_absent_or_same`
@@ -2677,6 +2754,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_absent_or_same`
   - `fence_binding_absent_or_same`
@@ -2691,6 +2769,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_absent_or_same`
   - `fence_binding_absent_or_same`
@@ -2705,6 +2784,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_absent_or_same`
   - `fence_binding_absent_or_same`
@@ -2719,6 +2799,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id)
 - Guards:
+  - `not_draining`
   - `session_matches_current`
   - `runtime_binding_absent_or_same`
   - `fence_binding_absent_or_same`
@@ -3646,6 +3727,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `UserInterruptPublicResultResolved`
 - To: `Stopped`
 
+### `ResolveUserInterruptPublicResultAcceptedDestroyed`
+- From: `Destroyed`
+- On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
+- Guards:
+  - `accepted`
+- Emits: `UserInterruptPublicResultResolved`
+- To: `Destroyed`
+
 ### `ResolveUserInterruptPublicResultNoopInitializing`
 - From: `Initializing`
 - On: `ResolveUserInterruptPublicResult`(observation, target_present, staged_promotion_busy)
@@ -4014,6 +4103,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `BoundaryCancelAlreadyPending`
 - To: `Running`
 
+### `AbortCancelAfterBoundaryDispatchInitializing`
+- From: `Initializing`
+- On: `AbortCancelAfterBoundaryDispatch`(dispatch_generation)
+- Guards:
+  - `dispatch_outstanding`
+  - `dispatch_generation_matches`
+- To: `Initializing`
+
+### `AbortCancelAfterBoundaryDispatchIdle`
+- From: `Idle`
+- On: `AbortCancelAfterBoundaryDispatch`(dispatch_generation)
+- Guards:
+  - `dispatch_outstanding`
+  - `dispatch_generation_matches`
+- To: `Idle`
+
+### `AbortCancelAfterBoundaryDispatchAttached`
+- From: `Attached`
+- On: `AbortCancelAfterBoundaryDispatch`(dispatch_generation)
+- Guards:
+  - `dispatch_outstanding`
+  - `dispatch_generation_matches`
+- To: `Attached`
+
+### `AbortCancelAfterBoundaryDispatchRunning`
+- From: `Running`
+- On: `AbortCancelAfterBoundaryDispatch`(dispatch_generation)
+- Guards:
+  - `dispatch_outstanding`
+  - `dispatch_generation_matches`
+- To: `Running`
+
+### `AbortCancelAfterBoundaryDispatchRetired`
+- From: `Retired`
+- On: `AbortCancelAfterBoundaryDispatch`(dispatch_generation)
+- Guards:
+  - `dispatch_outstanding`
+  - `dispatch_generation_matches`
+- To: `Retired`
+
+### `AbortCancelAfterBoundaryDispatchStopped`
+- From: `Stopped`
+- On: `AbortCancelAfterBoundaryDispatch`(dispatch_generation)
+- Guards:
+  - `dispatch_outstanding`
+  - `dispatch_generation_matches`
+- To: `Stopped`
+
+### `AbortCancelAfterBoundaryDispatchDestroyed`
+- From: `Destroyed`
+- On: `AbortCancelAfterBoundaryDispatch`(dispatch_generation)
+- Guards:
+  - `dispatch_outstanding`
+  - `dispatch_generation_matches`
+- To: `Destroyed`
+
 ### `BoundaryAppliedPublish`
 - From: `Running`
 - On: `BoundaryApplied`(revision)
@@ -4185,6 +4330,144 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RuntimeExecutorExitedFromStopped`
 - From: `Stopped`
 - On: `RuntimeExecutorExited`()
+- To: `Stopped`
+
+### `AuthorizeInteractionTerminalOutboxAdoptionInitializing`
+- From: `Initializing`
+- On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `current_runtime_binding_complete`
+  - `runtime_lineage_matches`
+  - `fence_not_regressed`
+  - `generation_not_regressed`
+  - `epoch_lineage_valid`
+  - `batch_key_present`
+  - `candidate_digest_present`
+- Emits: `InteractionTerminalOutboxAdoptionAuthorized`
+- To: `Initializing`
+
+### `AuthorizeInteractionTerminalOutboxAdoptionIdle`
+- From: `Idle`
+- On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `current_runtime_binding_complete`
+  - `runtime_lineage_matches`
+  - `fence_not_regressed`
+  - `generation_not_regressed`
+  - `epoch_lineage_valid`
+  - `batch_key_present`
+  - `candidate_digest_present`
+- Emits: `InteractionTerminalOutboxAdoptionAuthorized`
+- To: `Idle`
+
+### `AuthorizeInteractionTerminalOutboxAdoptionAttached`
+- From: `Attached`
+- On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `current_runtime_binding_complete`
+  - `runtime_lineage_matches`
+  - `fence_not_regressed`
+  - `generation_not_regressed`
+  - `epoch_lineage_valid`
+  - `batch_key_present`
+  - `candidate_digest_present`
+- Emits: `InteractionTerminalOutboxAdoptionAuthorized`
+- To: `Attached`
+
+### `AuthorizeInteractionTerminalOutboxAdoptionRunning`
+- From: `Running`
+- On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `current_runtime_binding_complete`
+  - `runtime_lineage_matches`
+  - `fence_not_regressed`
+  - `generation_not_regressed`
+  - `epoch_lineage_valid`
+  - `batch_key_present`
+  - `candidate_digest_present`
+- Emits: `InteractionTerminalOutboxAdoptionAuthorized`
+- To: `Running`
+
+### `AuthorizeInteractionTerminalOutboxAdoptionRetired`
+- From: `Retired`
+- On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `current_runtime_binding_complete`
+  - `runtime_lineage_matches`
+  - `fence_not_regressed`
+  - `generation_not_regressed`
+  - `epoch_lineage_valid`
+  - `batch_key_present`
+  - `candidate_digest_present`
+- Emits: `InteractionTerminalOutboxAdoptionAuthorized`
+- To: `Retired`
+
+### `AuthorizeInteractionTerminalOutboxAdoptionStopped`
+- From: `Stopped`
+- On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
+- Guards:
+  - `session_matches_current`
+  - `current_runtime_binding_complete`
+  - `runtime_lineage_matches`
+  - `fence_not_regressed`
+  - `generation_not_regressed`
+  - `epoch_lineage_valid`
+  - `batch_key_present`
+  - `candidate_digest_present`
+- Emits: `InteractionTerminalOutboxAdoptionAuthorized`
+- To: `Stopped`
+
+### `RecoverRuntimeCompletionResultCorrelationInitializing`
+- From: `Initializing`
+- On: `RecoverRuntimeCompletionResultCorrelation`(run_id)
+- Guards:
+  - `session_registered`
+  - `correlation_absent_or_same`
+- To: `Initializing`
+
+### `RecoverRuntimeCompletionResultCorrelationIdle`
+- From: `Idle`
+- On: `RecoverRuntimeCompletionResultCorrelation`(run_id)
+- Guards:
+  - `session_registered`
+  - `correlation_absent_or_same`
+- To: `Idle`
+
+### `RecoverRuntimeCompletionResultCorrelationAttached`
+- From: `Attached`
+- On: `RecoverRuntimeCompletionResultCorrelation`(run_id)
+- Guards:
+  - `session_registered`
+  - `correlation_absent_or_same`
+- To: `Attached`
+
+### `RecoverRuntimeCompletionResultCorrelationRunning`
+- From: `Running`
+- On: `RecoverRuntimeCompletionResultCorrelation`(run_id)
+- Guards:
+  - `session_registered`
+  - `correlation_absent_or_same`
+- To: `Running`
+
+### `RecoverRuntimeCompletionResultCorrelationRetired`
+- From: `Retired`
+- On: `RecoverRuntimeCompletionResultCorrelation`(run_id)
+- Guards:
+  - `session_registered`
+  - `correlation_absent_or_same`
+- To: `Retired`
+
+### `RecoverRuntimeCompletionResultCorrelationStopped`
+- From: `Stopped`
+- On: `RecoverRuntimeCompletionResultCorrelation`(run_id)
+- Guards:
+  - `session_registered`
+  - `correlation_absent_or_same`
 - To: `Stopped`
 
 ### `ResolveRuntimeCompletionResultCompletedInitializing`
@@ -5915,6 +6198,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `EnsureSessionWithExecutorRetired`
 - From: `Retired`
 - On: `EnsureSessionWithExecutor`(session_id)
+- Guards:
+  - `not_draining`
 - To: `Retired`
 
 ### `EnsureSessionWithExecutorStopped`
@@ -6140,13 +6425,25 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressNotice`
 - To: `Stopped`
 
-### `AcceptWithCompletionIdleQueued`
+### `AcceptWithCompletionIdleQueuedPassive`
 - From: `Idle`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
   - `interrupt_yielding`
+  - `wake_if_idle`
+- Emits: `IngressAccepted`
+- To: `Idle`
+
+### `AcceptWithCompletionIdleQueuedWakeIfIdle`
+- From: `Idle`
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle)
+- Guards:
+  - `session_registered`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
+  - `wake_if_idle`
 - Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Idle`
 
@@ -6170,13 +6467,25 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressAccepted`, `PostAdmissionSignal`, `SubmitRunPrimitive`
 - To: `Attached`
 
-### `AcceptWithCompletionAttachedQueued`
+### `AcceptWithCompletionAttachedQueuedPassive`
 - From: `Attached`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
   - `interrupt_yielding`
+  - `wake_if_idle`
+- Emits: `IngressAccepted`
+- To: `Attached`
+
+### `AcceptWithCompletionAttachedQueuedWakeIfIdle`
+- From: `Attached`
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle)
+- Guards:
+  - `session_registered`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
+  - `wake_if_idle`
 - Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Attached`
 
@@ -8458,6 +8767,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `tool_count_zero`
 - To: `Running`
 
+### `CallbackPendingCompleted`
+- From: `Running`
+- On: `CallbackPending`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `turn_waiting_for_ops`
+- Emits: `TurnRunCompleted`
+- To: `Running`
+
 ### `LlmReturnedTerminal`
 - From: `Running`
 - On: `LlmReturnedTerminal`(run_id)
@@ -8711,7 +9029,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `pre_run_phase_matches_idle`
   - `run_matches_binding`
-  - `turn_completed`
+  - `turn_completed_or_failed`
+  - `completed_terminal_is_coherent`
+  - `failed_terminal_has_specific_cause`
+  - `failed_terminal_outcome_matches_cause`
 - To: `Idle`
 
 ### `ServiceTurnCommittedRunningToAttached`
@@ -8720,7 +9041,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `pre_run_phase_matches_attached`
   - `run_matches_binding`
-  - `turn_completed`
+  - `turn_completed_or_failed`
+  - `completed_terminal_is_coherent`
+  - `failed_terminal_has_specific_cause`
+  - `failed_terminal_outcome_matches_cause`
 - To: `Attached`
 
 ### `ServiceTurnCommittedRunningToRetired`
@@ -8729,7 +9053,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `pre_run_phase_matches_retired`
   - `run_matches_binding`
-  - `turn_completed`
+  - `turn_completed_or_failed`
+  - `completed_terminal_is_coherent`
+  - `failed_terminal_has_specific_cause`
+  - `failed_terminal_outcome_matches_cause`
 - To: `Retired`
 
 ### `RunFailed`
@@ -11895,12 +12222,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SurfaceRequestCompleted`
 - To: `Initializing`
 
+### `ResolveLiveOpenAdmissionUnregisteredIdle`
+- From: `Idle`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_unregistered`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Idle`
+
 ### `ResolveLiveOpenAdmissionAcceptedIdle`
 - From: `Idle`
 - On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_not_active`
   - `channel_not_bound`
 - Emits: `LiveOpenAdmissionResolved`
@@ -11912,6 +12253,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_not_active`
   - `channel_not_bound`
 - Emits: `LiveOpenAdmissionResolved`
@@ -11923,32 +12268,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_not_active`
   - `channel_not_bound`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Running`
-
-### `ResolveLiveOpenAdmissionAcceptedRetired`
-- From: `Retired`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
-- Guards:
-  - `session_id_present`
-  - `channel_id_present`
-  - `session_not_active`
-  - `channel_not_bound`
-- Emits: `LiveOpenAdmissionResolved`
-- To: `Retired`
-
-### `ResolveLiveOpenAdmissionAcceptedStopped`
-- From: `Stopped`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
-- Guards:
-  - `session_id_present`
-  - `channel_id_present`
-  - `session_not_active`
-  - `channel_not_bound`
-- Emits: `LiveOpenAdmissionResolved`
-- To: `Stopped`
 
 ### `ResolveLiveOpenAdmissionSessionAlreadyBoundIdle`
 - From: `Idle`
@@ -11956,6 +12283,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_active`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Idle`
@@ -11966,6 +12297,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_active`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Attached`
@@ -11976,29 +12311,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_active`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Running`
-
-### `ResolveLiveOpenAdmissionSessionAlreadyBoundRetired`
-- From: `Retired`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
-- Guards:
-  - `session_id_present`
-  - `channel_id_present`
-  - `session_active`
-- Emits: `LiveOpenAdmissionResolved`
-- To: `Retired`
-
-### `ResolveLiveOpenAdmissionSessionAlreadyBoundStopped`
-- From: `Stopped`
-- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
-- Guards:
-  - `session_id_present`
-  - `channel_id_present`
-  - `session_active`
-- Emits: `LiveOpenAdmissionResolved`
-- To: `Stopped`
 
 ### `ResolveLiveOpenAdmissionChannelAlreadyBoundIdle`
 - From: `Idle`
@@ -12006,6 +12325,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_not_active`
   - `channel_bound`
 - Emits: `LiveOpenAdmissionResolved`
@@ -12017,6 +12340,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_not_active`
   - `channel_bound`
 - Emits: `LiveOpenAdmissionResolved`
@@ -12028,30 +12355,92 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_id_present`
   - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_not_stopping`
   - `session_not_active`
   - `channel_bound`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Running`
 
-### `ResolveLiveOpenAdmissionChannelAlreadyBoundRetired`
+### `ResolveLiveOpenAdmissionDrainingIdle`
+- From: `Idle`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_draining`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Idle`
+
+### `ResolveLiveOpenAdmissionDrainingAttached`
+- From: `Attached`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_draining`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Attached`
+
+### `ResolveLiveOpenAdmissionDrainingRunning`
+- From: `Running`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_draining`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Running`
+
+### `ResolveLiveOpenAdmissionStopDeferredAttached`
+- From: `Attached`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_stop_deferred`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Attached`
+
+### `ResolveLiveOpenAdmissionStopDeferredRunning`
+- From: `Running`
+- On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `session_registered`
+  - `session_matches_current`
+  - `registration_not_draining`
+  - `runtime_stop_deferred`
+- Emits: `LiveOpenAdmissionResolved`
+- To: `Running`
+
+### `ResolveLiveOpenAdmissionRetiredRetired`
 - From: `Retired`
 - On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
-  - `session_not_active`
-  - `channel_bound`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Retired`
 
-### `ResolveLiveOpenAdmissionChannelAlreadyBoundStopped`
+### `ResolveLiveOpenAdmissionStoppedStopped`
 - From: `Stopped`
 - On: `ResolveLiveOpenAdmission`(session_id, channel_id, llm_identity)
 - Guards:
   - `session_id_present`
   - `channel_id_present`
-  - `session_not_active`
-  - `channel_bound`
 - Emits: `LiveOpenAdmissionResolved`
 - To: `Stopped`
 

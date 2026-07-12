@@ -59,7 +59,7 @@ mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 openai-realtime = ["meerkat/openai-realtime", "meerkat-client/openai-realtime"]
 schedule = ["meerkat/schedule"]
 workgraph = ["meerkat/workgraph"]
-live-webrtc = ["meerkat-live/webrtc"]
+live-webrtc = ["meerkat-live/webrtc", "meerkat/live-webrtc"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

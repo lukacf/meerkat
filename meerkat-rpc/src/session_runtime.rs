@@ -84,6 +84,7 @@ use meerkat_core::ToolConfigChangeOperation;
 
 use meerkat::session_runtime::recovery::{parse_provider_override, unknown_provider_message};
 use meerkat::session_runtime::staged_promotion::pending_system_context_appends;
+use meerkat::surface::{RequestContext, request_action};
 
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
@@ -512,6 +513,23 @@ impl RpcMobSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
+        self.reject_archived_persisted_session_with_boundary_mode(session_id, false)
+            .await
+    }
+
+    async fn reject_archived_persisted_session_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.reject_archived_persisted_session_with_boundary_mode(session_id, true)
+            .await
+    }
+
+    async fn reject_archived_persisted_session_with_boundary_mode(
+        &self,
+        session_id: &SessionId,
+        turn_boundary_already_held: bool,
+    ) -> Result<(), SessionError> {
         let Some(session) = self.service.load_authoritative_session(session_id).await? else {
             return Ok(());
         };
@@ -526,11 +544,25 @@ impl RpcMobSessionService {
             // Keep the runtime registration as the retry anchor until live
             // state has been discarded successfully. The machine-owned
             // unregister saga runs only after that phase is proven complete.
-            match self.service.discard_live_session(session_id).await {
+            let discard_result = if turn_boundary_already_held {
+                self.service
+                    .discard_live_session_under_runtime_turn_boundary(session_id)
+                    .await
+            } else {
+                self.service.discard_live_session(session_id).await
+            };
+            match discard_result {
                 Ok(()) | Err(SessionError::NotFound { .. }) => {}
                 Err(error) => return Err(error),
             }
-            self.archive_runtime_cleanup().run(session_id).await?;
+            // A runtime-owned apply already holds the exact executor. It must
+            // return NotFound so the outer runtime can publish a typed teardown
+            // and hand that executor back before the machine-owned unregister
+            // saga runs. Direct service calls have no such handback boundary
+            // and can complete #875's cleanup immediately.
+            if !turn_boundary_already_held {
+                self.archive_runtime_cleanup().run(session_id).await?;
+            }
             return Err(SessionError::NotFound {
                 id: session_id.clone(),
             });
@@ -746,22 +778,42 @@ impl SessionService for RpcMobSessionService {
                 ));
             }
         }
-        let bindings = match provided_bindings.cloned() {
-            Some(bindings) => bindings,
-            None => match self
-                .runtime_adapter
-                .prepare_bindings(session_id.clone())
+        let (bindings, mut prepared_materialization) = match provided_bindings.cloned() {
+            Some(bindings) => (bindings, None),
+            None => {
+                let mut prepared = self
+                    .runtime_adapter
+                    .prepare_session_materialization(session_id.clone())
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "failed to prepare runtime materialization for direct mob session {session_id}: {error}"
+                            )),
+                        )
+                    })?;
+                if let Err(error) = meerkat::surface::install_prepared_runtime_interrupt_handle(
+                    &self.service,
+                    &self.runtime_adapter,
+                    prepared.bindings(),
+                )
                 .await
-            {
-                Ok(bindings) => bindings,
-                Err(error) => {
+                {
+                    let rollback_error = prepared.rollback_now().await.err();
+                    let rollback_detail = rollback_error
+                        .map(|rollback_error| {
+                            format!("; exact rollback also failed: {rollback_error}")
+                        })
+                        .unwrap_or_default();
                     return Err(SessionError::Agent(
                         meerkat_core::error::AgentError::InternalError(format!(
-                            "failed to prepare runtime bindings for direct mob session {session_id}: {error}"
+                            "failed to install prepared runtime handles for direct mob session {session_id}: {error}{rollback_detail}"
                         )),
                     ));
                 }
-            },
+                let bindings = prepared.bindings_clone();
+                (bindings, Some(prepared))
+            }
         };
         req.build
             .get_or_insert_with(Default::default)
@@ -777,16 +829,62 @@ impl SessionService for RpcMobSessionService {
         )
         .await;
         match result {
-            Ok(result) => Ok(result),
-            Err(primary_error) => {
-                match self.runtime_adapter.unregister_session(&session_id).await {
-                    Ok(()) => Err(primary_error),
-                    Err(cleanup_error) => Err(SessionError::Agent(
-                        meerkat_core::AgentError::InternalError(format!(
-                            "{primary_error}; additionally failed to unregister direct mob runtime session {session_id}: {cleanup_error}"
-                        )),
-                    )),
+            Ok(result) => {
+                if let Some(prepared) = prepared_materialization.as_mut() {
+                    if result.session_id != session_id {
+                        let returned_session_id = result.session_id.clone();
+                        let discard_error = self
+                            .service
+                            .discard_live_session(&returned_session_id)
+                            .await
+                            .err();
+                        let rollback_error = prepared.rollback_now().await.err();
+                        let discard_detail = discard_error
+                            .map(|error| format!("; returned actor discard also failed: {error}"))
+                            .unwrap_or_default();
+                        let rollback_detail = rollback_error
+                            .map(|error| format!("; exact rollback also failed: {error}"))
+                            .unwrap_or_default();
+                        return Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "direct mob session create returned {returned_session_id}, not prepared session {session_id}{discard_detail}{rollback_detail}"
+                            )),
+                        ));
+                    }
+                    if let Err(commit_error) = prepared.commit_actor_unattached().await {
+                        let discard_error =
+                            self.service.discard_live_session(&session_id).await.err();
+                        let rollback_error = prepared.rollback_now().await.err();
+                        let discard_detail = discard_error
+                            .map(|error| format!("; live actor discard also failed: {error}"))
+                            .unwrap_or_default();
+                        let rollback_detail = rollback_error
+                            .map(|error| format!("; exact rollback also failed: {error}"))
+                            .unwrap_or_default();
+                        return Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(format!(
+                                "failed to commit prepared runtime materialization for direct mob session {session_id}: {commit_error}{discard_detail}{rollback_detail}"
+                            )),
+                        ));
+                    }
                 }
+                Ok(result)
+            }
+            Err(error) => {
+                if let Some(prepared) = prepared_materialization.as_mut()
+                    && let Err(rollback_error) = prepared.rollback_now().await
+                {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "direct mob session {session_id} create failed: {error}; exact prepared materialization rollback failed: {rollback_error}"
+                        )),
+                    ));
+                }
+                // Provided bindings remain owned by the caller's exact
+                // preparation guard. A generic unregister here would race its
+                // generation-checked rollback and could erase a same-ID
+                // replacement.
+                Err(error)
             }
         }
     }
@@ -986,6 +1084,99 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    async fn create_session_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_under_runtime_turn_boundary(&self.service, req).await
+    }
+
+    async fn create_session_with_actor_witness_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        actor_witness_slot: &meerkat::LiveSessionActorWitnessSlot,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_actor_witness_under_runtime_turn_boundary(
+            &self.service,
+            req,
+            actor_witness_slot,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_machine_archived_resume_authority(
+            &self.service,
+            req,
+            authorization,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_machine_archived_resume_authority_under_runtime_turn_boundary(
+            &self.service,
+            req,
+            authorization,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority_and_actor_witness_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+        actor_witness_slot: &meerkat::LiveSessionActorWitnessSlot,
+    ) -> Result<meerkat_core::RunResult, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::create_session_with_machine_archived_resume_authority_and_actor_witness_under_runtime_turn_boundary(
+            &self.service,
+            req,
+            authorization,
+            actor_witness_slot,
+        )
+        .await
+    }
+
+    async fn promote_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
+    ) -> Result<meerkat_runtime::PromotedArchivedResumeCommitLease, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::promote_revivable_retired_session(
+            &self.service,
+            session_id,
+            authority,
+        )
+        .await
+    }
+
+    async fn archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .archive_with_machine_protocol_under_runtime_turn_boundary(
+                session_id,
+                MachineSessionArchiveProtocol::from_machine(self.runtime_adapter.as_ref()),
+            )
+            .await
+    }
+
+    async fn discard_live_session_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_under_runtime_turn_boundary(&self.service, session_id).await
+    }
+
     fn supports_persistent_sessions(&self) -> bool {
         true
     }
@@ -1007,10 +1198,21 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
     async fn cancel_after_boundary_with_machine_authority(
         &self,
         session_id: &SessionId,
+        expected_run_id: &RunId,
         authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         self.service
-            .cancel_after_boundary_with_machine_authority(session_id, authority)
+            .cancel_after_boundary_with_machine_authority(session_id, expected_run_id, authority)
+            .await
+    }
+
+    async fn cancel_current_after_boundary_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::MachineSessionControlAuthority,
+    ) -> Result<(), SessionError> {
+        self.service
+            .cancel_current_after_boundary_with_machine_authority(session_id, authority)
             .await
     }
 
@@ -1029,6 +1231,28 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
             return Ok(None);
         }
         Ok(Some(session))
+    }
+
+    async fn load_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_revivable_retired_session(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
+    async fn session_known_to_archive_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::session_known_to_archive_authority(
+            &self.service,
+            session_id,
+        )
+        .await
     }
 
     async fn archive_with_mob_lifecycle_authority(
@@ -1083,6 +1307,28 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         self.service.discard_live_session(session_id).await
     }
 
+    async fn discard_live_session_actor_under_runtime_turn_boundary(
+        &self,
+        witness: &meerkat::LiveSessionActorWitness,
+    ) -> Result<bool, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session_actor_under_runtime_turn_boundary(
+            &self.service,
+            witness,
+        )
+        .await
+    }
+
+    async fn await_event_projection_drain(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::await_event_projection_drain(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn apply_runtime_turn(
         &self,
         session_id: &SessionId,
@@ -1091,7 +1337,8 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        self.reject_archived_persisted_session(session_id).await?;
+        self.reject_archived_persisted_session_under_runtime_turn_boundary(session_id)
+            .await?;
         let admission = self.reserve_turn_admission(session_id).await?;
         Self::await_guarded_apply_runtime_turn(
             Arc::clone(&self.service),
@@ -1130,7 +1377,8 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        self.reject_archived_persisted_session(session_id).await?;
+        self.reject_archived_persisted_session_under_runtime_turn_boundary(session_id)
+            .await?;
         let admission = self.reserve_turn_admission(session_id).await?;
         Self::await_guarded_apply_runtime_context_appends(
             Arc::clone(&self.service),
@@ -1152,6 +1400,74 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
     ) -> Result<(), SessionError> {
         self.service
             .apply_runtime_system_context_for_turn(session_id, appends)
+            .await
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot(
+        &self,
+        session_id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), SessionError> {
+        self.service
+            .checkpoint_committed_runtime_session_snapshot(session_id, session_snapshot)
+            .await
+    }
+
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
+    {
+        Ok(Box::new(
+            self.service
+                .acquire_runtime_turn_finalization_guard(session_id)
+                .await,
+        ))
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        session_snapshot: &[u8],
+    ) -> Result<(), SessionError> {
+        self.service
+            .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
+                session_id,
+                session_snapshot,
+            )
+            .await
+    }
+
+    async fn discard_live_session_after_runtime_stop_terminalized(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .discard_live_session_after_runtime_stop_terminalized(session_id)
+            .await
+    }
+
+    async fn discard_live_session_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .discard_live_session_after_runtime_stop_terminalized_under_runtime_turn_boundary(
+                session_id,
+            )
+            .await
+    }
+
+    async fn publish_interaction_terminals(
+        &self,
+        session_id: &SessionId,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        SessionError,
+    > {
+        self.service
+            .publish_interaction_terminals_exact_batch(session_id, events)
             .await
     }
 
@@ -1632,6 +1948,7 @@ impl SessionRuntime {
             auth_binding,
             execution_kind: None,
             peer_response_terminal_apply_intent: None,
+            directed_interaction_ids: Vec::new(),
             transcript_identity: Default::default(),
         };
         (!metadata.is_empty()).then_some(metadata)
@@ -3043,7 +3360,9 @@ impl SessionRuntime {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = match service
-                .create_session_with_reserved_admission(create_req, admission)
+                .create_session_with_reserved_admission_under_runtime_turn_boundary(
+                    create_req, admission,
+                )
                 .await
             {
                 Ok(_) => {
@@ -3215,9 +3534,23 @@ impl SessionRuntime {
     pub(crate) async fn cancel_after_boundary_live_with_machine_authority(
         &self,
         session_id: &SessionId,
+        expected_run_id: &RunId,
     ) -> Result<(), SessionError> {
         self.service
             .cancel_after_boundary_with_machine_authority(
+                session_id,
+                expected_run_id,
+                self.runtime_adapter.session_control_authority(),
+            )
+            .await
+    }
+
+    pub(crate) async fn cancel_current_after_boundary_live_with_machine_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .cancel_current_after_boundary_with_machine_authority(
                 session_id,
                 self.runtime_adapter.session_control_authority(),
             )
@@ -3392,6 +3725,174 @@ impl SessionRuntime {
             .await
     }
 
+    /// Phase 6b (DL4): the full `live/open` pipeline (S1-S12) via the
+    /// shared orchestrator. The RPC surface contributes its per-connection
+    /// transport context and its session-owned ingress reconciler.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_live_channel(
+        self: &Arc<Self>,
+        host: &meerkat_live::LiveAdapterHost,
+        transport_ctx: meerkat::session_runtime::live_orchestration::LiveTransportContext<'_>,
+        session_factory: Option<&dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
+        session_id: &SessionId,
+        turning_mode: Option<meerkat_contracts::RealtimeTurningMode>,
+        seed_window: Option<meerkat::session_runtime::live_orchestration::LiveSeedWindow>,
+        requested_transport: Option<meerkat_contracts::LiveOpenTransport>,
+    ) -> Result<meerkat_contracts::LiveOpenResult, meerkat::session_runtime::errors::LiveOpenError>
+    {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        let reconciler = RpcLiveIngressReconciler {
+            runtime: Arc::clone(self),
+        };
+        let mut orchestrator = self.live_orchestrator(&snapshot, cleanup);
+        orchestrator.ingress_reconciler = Some(&reconciler);
+        orchestrator
+            .open_live_channel_with_seed(
+                host,
+                transport_ctx,
+                session_factory,
+                session_id,
+                turning_mode,
+                seed_window,
+                requested_transport,
+            )
+            .await
+    }
+
+    /// Phase 6b: `live/close` via the shared pipeline. RPC verbs are
+    /// channel-addressed and pass no session pin (DEC-P6B-L6).
+    pub async fn close_live_channel(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<
+        meerkat_contracts::LiveCloseResult,
+        meerkat::session_runtime::errors::LiveChannelVerbError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .close_live_channel(host, channel_id, None)
+            .await
+    }
+
+    /// Phase 6b: `live/status` via the shared pipeline.
+    pub async fn live_channel_status(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<
+        meerkat_contracts::WireLiveAdapterStatus,
+        meerkat::session_runtime::errors::LiveChannelVerbError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .live_channel_status(host, channel_id, None)
+            .await
+    }
+
+    /// Phase 6b: `live/refresh` via the shared pipeline.
+    pub async fn refresh_live_channel(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<
+        meerkat_contracts::LiveRefreshResult,
+        meerkat::session_runtime::errors::LiveChannelVerbError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .refresh_live_channel(host, channel_id, None)
+            .await
+    }
+
+    /// Phase 6b: `live/send_input` via the shared pipeline (DL10: stays a
+    /// LOCAL session-id-addressed RPC verb; no bridge verb consumes it).
+    pub async fn send_live_input(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        channel_id: &meerkat_live::LiveChannelId,
+        chunk: meerkat_core::live_adapter::LiveInputChunk,
+    ) -> Result<
+        meerkat_contracts::LiveSendInputResult,
+        meerkat::session_runtime::errors::LiveChannelVerbError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .send_live_input(host, channel_id, None, chunk)
+            .await
+    }
+
+    /// Phase 6b: `live/commit_input` via the shared pipeline.
+    pub async fn commit_live_input(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        channel_id: &meerkat_live::LiveChannelId,
+        response_modality: Option<meerkat_core::live_adapter::LiveResponseModality>,
+    ) -> Result<
+        meerkat_contracts::LiveCommitInputResult,
+        meerkat::session_runtime::errors::LiveChannelVerbError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .commit_live_input(host, channel_id, None, response_modality)
+            .await
+    }
+
+    /// Phase 6b: `live/interrupt` via the shared pipeline (media-plane
+    /// barge-in; the webrtc output-buffer discard rides the context).
+    pub async fn interrupt_live_channel(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        transport_ctx: meerkat::session_runtime::live_orchestration::LiveTransportContext<'_>,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<
+        meerkat_contracts::LiveInterruptResult,
+        meerkat::session_runtime::errors::LiveChannelVerbError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .interrupt_live_channel(host, transport_ctx, channel_id, None)
+            .await
+    }
+
+    /// Phase 6b: `live/truncate` via the shared pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn truncate_live_output(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        transport_ctx: meerkat::session_runtime::live_orchestration::LiveTransportContext<'_>,
+        channel_id: &meerkat_live::LiveChannelId,
+        item_id: String,
+        content_index: u32,
+        audio_played_ms: u64,
+    ) -> Result<
+        meerkat_contracts::LiveTruncateResult,
+        meerkat::session_runtime::errors::LiveChannelVerbError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .truncate_live_output(
+                host,
+                transport_ctx,
+                channel_id,
+                None,
+                meerkat::session_runtime::live_orchestration::LiveTruncateCursor {
+                    item_id,
+                    content_index,
+                    audio_played_ms,
+                },
+            )
+            .await
+    }
+
     /// Phase 4 R1: build a [`LiveOrchestrator`] borrowing this
     /// runtime's resolved state. Surface-private dependencies
     /// (callback dispatcher, archive cleanup) are
@@ -3421,6 +3922,10 @@ impl SessionRuntime {
             realm_id: snapshot.realm_id.as_ref(),
             instance_id: snapshot.instance_id.as_deref(),
             backend: snapshot.backend.as_deref(),
+            // Only the open pipeline needs the session-owned ingress hook;
+            // `open_live_channel` installs `RpcLiveIngressReconciler` on
+            // its per-call orchestrator.
+            ingress_reconciler: None,
         }
     }
 
@@ -4056,9 +4561,39 @@ impl SessionRuntime {
             .await
     }
 
+    pub async fn discard_live_session_after_runtime_stop_terminalized(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.runtime_state_ops()
+            .discard_live_session_after_runtime_stop_terminalized(session_id)
+            .await
+    }
+
+    pub async fn discard_live_session_after_runtime_stop_terminalized_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.runtime_state_ops()
+            .discard_live_session_after_runtime_stop_terminalized_under_runtime_turn_boundary(
+                session_id,
+            )
+            .await
+    }
+
     async fn discard_stale_live_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
         self.runtime_state_ops()
             .discard_stale_live_session(session_id)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    async fn discard_stale_live_session_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        self.runtime_state_ops()
+            .discard_stale_live_session_under_runtime_turn_boundary(session_id)
             .await
             .map_err(session_error_to_rpc)
     }
@@ -4169,6 +4704,12 @@ impl SessionRuntime {
         Ok(session.in_flight_realtime_assistant_response_ids())
     }
 
+    /// The concrete persistent service (phase 6b: `ServiceMemberLiveHost`
+    /// composition on the live-capable RPC surface).
+    pub(crate) fn persistent_service(&self) -> Arc<PersistentSessionService<FactoryAgentBuilder>> {
+        Arc::clone(&self.service)
+    }
+
     #[cfg(feature = "mob")]
     pub fn session_service(&self) -> Arc<dyn meerkat_mob::MobSessionService> {
         Arc::new(RpcMobSessionService::new(
@@ -4228,7 +4769,8 @@ impl SessionRuntime {
             return Err(Self::archived_session_teardown_required_rpc(session_id));
         }
         if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await?;
+            self.discard_stale_live_session_under_runtime_turn_boundary(session_id)
+                .await?;
         }
         let admission = match pre_admission {
             Some(admission) => admission.into_admission(),
@@ -4613,34 +5155,30 @@ impl SessionRuntime {
         Ok(())
     }
 
-    /// Ensure a live controller session can receive ordinary peer ingress.
-    ///
-    /// `live/open` may be the first thing that materializes a deferred
-    /// keep-alive session. That path opens a provider-hosted session but does
-    /// not run a normal `turn/start`, so the usual turn-owned comms drain
-    /// reconciliation never fires. Keep this as runtime-owned wiring: live
-    /// transports only request an opened channel; MeerkatMachine remains the
-    /// peer-ingress lifecycle authority.
+    /// SESSION-OWNED half of the `live/open` peer-ingress reconciliation
+    /// (DEC-P6B-L5): `live/open` may be the first thing that materializes a
+    /// deferred keep-alive session, which never runs a `turn/start`, so the
+    /// turn-owned comms drain reconciliation never fires. The mob-owned
+    /// skip now lives in the shared pipeline
+    /// (`LiveOrchestrator::ensure_live_peer_ingress`) — the ONE owner of
+    /// that fact; this body carries only the RPC-private executor + drain
+    /// context reconciliation, reached via [`RpcLiveIngressReconciler`].
     #[cfg(feature = "comms")]
-    pub async fn ensure_live_peer_ingress(
+    async fn ensure_session_owned_live_ingress_impl(
         self: &Arc<Self>,
         session_id: &meerkat_core::types::SessionId,
-    ) -> Result<(), RpcError> {
-        let keep_alive = self.persisted_keep_alive(session_id).await?;
+    ) -> Result<(), meerkat::session_runtime::errors::LiveIngressError> {
+        use meerkat::session_runtime::errors::LiveIngressError;
+
+        let keep_alive = self
+            .persisted_keep_alive(session_id)
+            .await
+            .map_err(|err| LiveIngressError::Internal(err.message))?;
         let peer_ingress_enabled = self
             .preserve_existing_peer_ingress(session_id, keep_alive)
-            .await?;
+            .await
+            .map_err(|err| LiveIngressError::Internal(err.message))?;
         if !peer_ingress_enabled {
-            return Ok(());
-        }
-
-        let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
-        if owner.is_mob_owned() {
-            tracing::debug!(
-                %session_id,
-                ?owner,
-                "live/open: mob-owned peer ingress already owns the session; skipping session-owned drain reconfigure"
-            );
             return Ok(());
         }
 
@@ -4651,30 +5189,26 @@ impl SessionRuntime {
                 .runtime_adapter
                 .session_has_comms(session_id)
                 .await
-                .map_err(runtime_driver_error_to_rpc)?
+                .map_err(|err| {
+                    LiveIngressError::Internal(runtime_driver_error_to_rpc(err).message)
+                })?
         {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: "keep_alive requires a session created with comms_name".to_string(),
-                data: None,
-            });
+            // ADJ-P6B-8: the frozen INVALID_PARAMS message is the typed
+            // variant's fixed text — this hook never re-authors it.
+            return Err(LiveIngressError::InvalidSession);
         }
 
-        self.ensure_runtime_executor(session_id).await?;
+        self.ensure_runtime_executor(session_id)
+            .await
+            .map_err(|err| LiveIngressError::Internal(err.message))?;
         if let Some(comms_rt) = comms_rt {
             self.runtime_adapter
                 .update_peer_ingress_context(session_id, true, Some(comms_rt))
                 .await
-                .map_err(runtime_driver_error_to_rpc)?;
+                .map_err(|err| {
+                    LiveIngressError::Internal(runtime_driver_error_to_rpc(err).message)
+                })?;
         }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "comms"))]
-    pub async fn ensure_live_peer_ingress(
-        self: &Arc<Self>,
-        _session_id: &meerkat_core::types::SessionId,
-    ) -> Result<(), RpcError> {
         Ok(())
     }
 
@@ -4870,10 +5404,52 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
+        self.start_turn_via_runtime_with_request_context(
+            session_id,
+            prompt,
+            injected_context,
+            mcp_event_tx,
+            skill_references,
+            turn_tool_overlay,
+            additional_instructions,
+            overrides,
+            None,
+        )
+        .await
+    }
+
+    /// Request-aware variant of [`Self::start_turn_via_runtime`].
+    ///
+    /// Before admission, cancellation is request-local because no session run
+    /// belongs to the request. Once the runtime accepts an exact input, the
+    /// action is upgraded to cancel only that accepted input.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    pub async fn start_turn_via_runtime_with_request_context(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        prompt: ContentInput,
+        injected_context: Vec<ContentInput>,
+        mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+        request_context: Option<RequestContext>,
+    ) -> Result<RunResult, RpcError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
         let mut prompt = prompt;
+        if request_context
+            .as_ref()
+            .is_some_and(RequestContext::cancel_already_requested)
+        {
+            return Err(RpcError {
+                code: error::REQUEST_CANCELLED,
+                message: "request cancelled before start".to_string(),
+                data: None,
+            });
+        }
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
         let effective_identity = self
@@ -5187,6 +5763,40 @@ impl SessionRuntime {
                     .await);
             }
         };
+        if let AcceptOutcome::Accepted {
+            input_id: accepted_input_id,
+            ..
+        } = &outcome
+            && let Some(context) = request_context.as_ref()
+        {
+            let runtime_adapter = Arc::clone(&self.runtime_adapter);
+            let cancel_session_id = session_id.clone();
+            let cancel_input_id = accepted_input_id.clone();
+            let _ = context
+                .install_cancel_action_or_cancelled(request_action(move || {
+                    let runtime_adapter = Arc::clone(&runtime_adapter);
+                    let session_id = cancel_session_id.clone();
+                    let input_id = cancel_input_id.clone();
+                    async move {
+                        if let Err(error) = runtime_adapter
+                            .cancel_input_if_present(
+                                &session_id,
+                                &input_id,
+                                "RPC request cancelled",
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %session_id,
+                                %input_id,
+                                %error,
+                                "exact RPC request input cancellation did not settle"
+                            );
+                        }
+                    }
+                }))
+                .await;
+        }
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())
@@ -5679,7 +6289,13 @@ impl SessionRuntime {
         // apply intent that requires a requester reaction turn.
         if primitive.is_context_only_apply_without_turn() {
             let RunPrimitive::StagedInput(staged) = primitive else {
-                unreachable!("context-only apply without turn only matches staged primitives");
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message:
+                        "context-only apply without turn was not carried by a staged primitive"
+                            .to_string(),
+                    data: None,
+                });
             };
             let context_pre_admission = match pre_admission.as_mut() {
                 Some(admission) => Some(Self::take_runtime_pre_admission_guard(
@@ -8890,7 +9506,36 @@ fn staged_apply_runtime_turn_error_to_rpc(
     }
 }
 
-fn session_error_to_rpc(err: SessionError) -> RpcError {
+/// RPC implementation of the pipeline's session-owned ingress hook
+/// (DEC-P6B-L5). Holds the runtime `Arc` so the borrowing orchestrator can
+/// reach the RPC-private executor/drain reconciliation per call.
+pub(crate) struct RpcLiveIngressReconciler {
+    pub(crate) runtime: Arc<SessionRuntime>,
+}
+
+#[async_trait::async_trait]
+impl meerkat::session_runtime::live_orchestration::LiveSessionIngressReconciler
+    for RpcLiveIngressReconciler
+{
+    async fn ensure_session_owned_live_ingress(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), meerkat::session_runtime::errors::LiveIngressError> {
+        #[cfg(feature = "comms")]
+        {
+            self.runtime
+                .ensure_session_owned_live_ingress_impl(session_id)
+                .await
+        }
+        #[cfg(not(feature = "comms"))]
+        {
+            let _ = session_id;
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
     let code = match &err {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         SessionError::Busy { .. } => error::SESSION_BUSY,
@@ -10071,6 +10716,32 @@ mod tests {
                 .await
         }
 
+        async fn atomic_apply_with_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            session_delta: meerkat_runtime::store::SessionDelta,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            machine_lifecycle: meerkat_runtime::store::MachineLifecycleCommit,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: SessionId,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            if self.fail_lifecycle_once.swap(false, AtomicOrdering::AcqRel) {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "synthetic service-turn lifecycle commit failure".to_string(),
+                ));
+            }
+            self.inner
+                .atomic_apply_with_machine_lifecycle(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    machine_lifecycle,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
         async fn load_input_states(
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -10207,8 +10878,7 @@ mod tests {
         async fn commit_unregister_finalization(
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-            commit: meerkat_runtime::store::MachineLifecycleCommit,
-            input_states: &[InputStatePersistenceRecord],
+            finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             let scheduled_failure = self
                 .fail_lifecycle_after_successes
@@ -10236,7 +10906,7 @@ mod tests {
                 ));
             }
             self.inner
-                .commit_unregister_finalization(runtime_id, commit, input_states)
+                .commit_unregister_finalization(runtime_id, finalization)
                 .await
         }
 
@@ -10246,6 +10916,19 @@ mod tests {
             snapshot: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+        }
+
+        async fn initialize_ops_lifecycle_if_absent(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            candidate: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<
+            meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+                .await
         }
 
         async fn load_ops_lifecycle(
@@ -11870,6 +12553,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    directed_interaction_id: None,
                     objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
@@ -12002,6 +12686,7 @@ mod tests {
             .accept_input(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    directed_interaction_id: None,
                     objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
@@ -12195,6 +12880,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    directed_interaction_id: None,
                     objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
@@ -12326,6 +13012,7 @@ mod tests {
             .accept_input_with_completion(
                 &session_id,
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    directed_interaction_id: None,
                     objective_id: None,
                     injected_context: Vec::new(),
                     sender_taint: None,
@@ -15478,7 +16165,10 @@ mod tests {
 
         // Create a MobMcpState and set it via set_mob_tools.
         let mob_svc = runtime.session_service();
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_svc));
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+            mob_svc,
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mob_state,
         )));
@@ -16353,6 +17043,7 @@ mod tests {
             .expect("commit persisted runtime authority snapshot");
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -17068,6 +17759,21 @@ mod tests {
             ))
             .await
             .expect("mob/direct deferred create should reserve capacity");
+        assert!(
+            runtime
+                .runtime_adapter
+                .contains_session(&direct.session_id)
+                .await,
+            "successful direct create must retain its committed runtime registration"
+        );
+        assert!(
+            runtime
+                .service
+                .has_live_session(&direct.session_id)
+                .await
+                .expect("query successful direct create"),
+            "successful direct create must retain its live actor"
+        );
         let blocked = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await;
@@ -17087,6 +17793,55 @@ mod tests {
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("rpc create should succeed after direct staged archive");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_failed_deferred_create_rolls_back_prepared_materialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store_and_runtime_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+        let service = runtime.session_service();
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let mut request = service_create_request(mock_build_config(), InitialTurnPolicy::Defer);
+        request
+            .build
+            .as_mut()
+            .expect("direct create request build options")
+            .resume_session = Some(session);
+        store.set_fail_save(true);
+
+        let failed = service.create_session(request).await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("forced save failure")),
+            "direct create should surface the durable save failure: {failed:?}"
+        );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "observed direct create failure must roll back the exact runtime registration"
+        );
+        assert!(
+            !runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query failed direct create"),
+            "observed direct create failure must not leave a live actor"
+        );
+
+        store.clear_failures();
+        runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("failed direct create should release admission capacity");
     }
 
     #[cfg(feature = "mob")]
@@ -17142,7 +17897,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         let service = runtime.session_service();
-        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(service.clone()));
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+            service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
         runtime.set_mob_state(mob_state.clone());
         let created = service
             .create_session(service_create_request(
@@ -17227,20 +17985,39 @@ mod tests {
             )
             .with_direct_create_after_ack_hook(Arc::clone(&hook)),
         );
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let mut request = service_create_request(mock_build_config(), InitialTurnPolicy::Defer);
+        request
+            .build
+            .as_mut()
+            .expect("direct create request build options")
+            .resume_session = Some(session);
         let task_service = Arc::clone(&service);
-        let create_task = tokio::spawn(async move {
-            task_service
-                .create_session(service_create_request(
-                    mock_build_config(),
-                    InitialTurnPolicy::Defer,
-                ))
-                .await
-        });
+        let create_task = tokio::spawn(async move { task_service.create_session(request).await });
 
         wait_hook_reached(&hook).await;
         create_task.abort();
         hook.release.notify_waiters();
         let _ = create_task.await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let runtime_registration_exists =
+                    runtime.runtime_adapter.contains_session(&session_id).await;
+                let live_actor_exists = runtime
+                    .service
+                    .has_live_session(&session_id)
+                    .await
+                    .expect("query cancelled direct create");
+                if !runtime_registration_exists && !live_actor_exists {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled direct create should discard actor and exact runtime registration");
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {

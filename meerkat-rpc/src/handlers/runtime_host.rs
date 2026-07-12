@@ -35,6 +35,7 @@ fn host_surface_options(
     );
     options.runtime_backed_sessions = runtime_available;
     options.mobs = cfg!(feature = "mob");
+    options.multi_host_mobs = cfg!(feature = "mob");
     options.mcp_live = cfg!(feature = "mcp");
     options.comms = cfg!(feature = "comms");
     options.blobs = true;

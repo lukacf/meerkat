@@ -1060,6 +1060,10 @@ fn format_peer_projection_payload(payload: Option<&serde_json::Value>) -> String
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStateSnapshot {
     pub active_run_id: Option<RunId>,
+    /// Exact run whose terminal outcome/cause is projected below. Unlike
+    /// `active_run_id`, this remains populated after the terminal transition
+    /// clears the active binding.
+    pub terminal_run_id: Option<RunId>,
     /// Observable loop-state projection supplied by the turn-state owner.
     ///
     /// Consumers should not reclassify [`TurnPhase`] locally. Runtime-backed

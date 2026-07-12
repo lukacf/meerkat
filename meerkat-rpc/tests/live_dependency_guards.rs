@@ -13,8 +13,12 @@ fn rpc_crate_does_not_depend_directly_on_webrtc_media_stack() {
              route media through meerkat-live/webrtc instead: {direct_dep:?}"
         );
     }
+    // Phase 6b: the live pipeline (incl. the webrtc bootstrap branch)
+    // lives in the facade, so the forward covers BOTH owners — the media
+    // stack stays behind meerkat-live/webrtc, the pipeline branch behind
+    // meerkat/live-webrtc. Still forward-only: no direct media dep above.
     assert!(
-        cargo_toml.contains("live-webrtc = [\"meerkat-live/webrtc\"]"),
-        "meerkat-rpc should expose WebRTC only by forwarding the meerkat-live feature"
+        cargo_toml.contains("live-webrtc = [\"meerkat-live/webrtc\", \"meerkat/live-webrtc\"]"),
+        "meerkat-rpc should expose WebRTC only by forwarding the meerkat-live + facade features"
     );
 }

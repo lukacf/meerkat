@@ -2814,21 +2814,6 @@ fn session_persistence_derive_field_plan(
         );
     };
 
-    // Fail-closed contract: the restore transitions must guard
-    // `persisted_version` against exactly the current-version state field. A
-    // schema that re-grows a legacy default (or any second accepted version
-    // field) fails the walk loudly instead of silently re-admitting it.
-    let expected_state_fields = std::collections::BTreeSet::from([current_state_field.clone()]);
-    if accepted_state_fields != expected_state_fields {
-        bail!(
-            "{} restore transitions for {} accept {:?}, expected exactly {:?}",
-            machine.machine.as_str(),
-            spec.enum_variant,
-            accepted_state_fields,
-            expected_state_fields
-        );
-    }
-
     // Map every guarded-against state field to its init version. This is the
     // exact set of observed versions the machine's restore transitions accept,
     // read straight out of the schema rather than assumed by the emitter.
@@ -2965,22 +2950,21 @@ fn validate_session_persistence_version_authority_schema(
     })
 }
 
-/// Validate that the field's restore transitions accept exactly the version
-/// set the shared `restore_version` helper compares against — i.e. exactly
-/// `{current}`.
+/// Validate that the schema-derived accepted set is an explicit, fail-closed
+/// migration window containing the current version.
 ///
-/// The generated `restore_*` function delegates the equality to
-/// `restore_version` (`observed == current`); this gate proves that delegation
-/// is faithful to the machine's restore transitions, so a schema that started
-/// accepting some other version (a legacy default, a migration window) would
-/// fail the walk rather than silently emit a now-wrong comparison.
+/// Every accepted legacy version requires a guarded schema transition and an
+/// initialized state field; it cannot reappear through a serde default or a
+/// handwritten allow-list.
 fn session_persistence_accepted_check(plan: &SessionPersistenceVersionFieldPlan) -> Result<()> {
-    if plan.accepted_versions != [plan.current_version] {
+    if !plan.accepted_versions.contains(&plan.current_version)
+        || plan.accepted_versions.contains(&0)
+    {
         let enum_variant = plan.spec.enum_variant;
         let accepted = &plan.accepted_versions;
         let current = plan.current_version;
         bail!(
-            "{enum_variant} restore transitions accept {accepted:?}, but the fail-closed contract is exactly [{current}]"
+            "{enum_variant} restore transitions accept invalid migration set {accepted:?} for current {current}"
         );
     }
     Ok(())
@@ -3023,9 +3007,8 @@ fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Re
     }
     writeln!(&mut out, "}}")?;
 
-    // (3) Field-agnostic mechanism: the typed error and the pure
-    // `restore_version` equality. These carry no per-field decision, so they
-    // are emitted verbatim once.
+    // (3) Field-agnostic mechanism: typed error plus membership in the exact
+    // schema-derived accepted migration set.
     out.push_str(SESSION_PERSISTENCE_MECHANISM);
 
     // (4) Current-version accessors, one per field, returning the field's
@@ -3042,16 +3025,12 @@ fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Re
         writeln!(&mut out, "}}")?;
     }
 
-    // (5) Restore authorizers. The accepted-version equality
-    // (`observed == current`) is the body of the shared `restore_version`
-    // helper; here we (a) re-validate that the field's restore transitions
-    // accept exactly that derived set and (b) feed the field's schema-derived
-    // current constant, restoring to current. Any other persisted version —
-    // including pre-typed-owner v0/v1 rows — fails closed with the typed
-    // authority error.
+    // (5) Restore authorizers. Accepted versions are derived only from guarded
+    // machine transitions; a successful legacy restore always returns the
+    // current version, making the migration direction explicit.
     for field in &plan.fields {
-        // Validation gate: fails the walk if the schema's restore transitions
-        // accept anything other than `{current}`.
+        // Validation gate: requires an explicit schema-derived migration set
+        // containing current and excluding the never-versioned v0 sentinel.
         session_persistence_accepted_check(field)?;
         writeln!(&mut out)?;
         writeln!(&mut out, "pub fn {}(", field.spec.restore_fn)?;
@@ -3068,6 +3047,13 @@ fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Re
         )?;
         writeln!(&mut out, "        observed,")?;
         writeln!(&mut out, "        {},", field.spec.current_const)?;
+        let accepted = field
+            .accepted_versions
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(&mut out, "        &[{accepted}],")?;
         writeln!(&mut out, "    )")?;
         writeln!(&mut out, "}}")?;
     }
@@ -3076,8 +3062,7 @@ fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Re
 }
 
 /// Field-agnostic mechanism shared by every persistence-version field: the
-/// typed authority error and the pure fail-closed `restore_version` equality.
-/// Carries no per-field decision, so it is emitted once.
+/// typed authority error and membership in a schema-derived migration set.
 const SESSION_PERSISTENCE_MECHANISM: &str = r#"
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPersistenceVersionAuthorityError {
@@ -3102,8 +3087,9 @@ fn restore_version(
     field: SessionPersistenceVersionField,
     observed: u32,
     current: u32,
+    accepted: &[u32],
 ) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    if observed == current {
+    if accepted.contains(&observed) {
         Ok(current)
     } else {
         Err(SessionPersistenceVersionAuthorityError {

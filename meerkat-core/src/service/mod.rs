@@ -97,6 +97,30 @@ pub enum SessionError {
 }
 
 impl SessionError {
+    /// Fail-closed signal for a runtime executor whose live session mutated
+    /// but whose terminal witness could not be trusted. The structured cause
+    /// survives RPC transport and tells CoreExecutor adapters to stop the
+    /// executor without classifying the input as an applied/retryable turn.
+    pub fn runtime_executor_stopped(message: impl Into<String>) -> Self {
+        Self::FailedWithData {
+            message: message.into(),
+            data: serde_json::json!({
+                "core_apply_failure_cause": "ExecutorStopped",
+            }),
+        }
+    }
+
+    pub fn requests_runtime_executor_stop(&self) -> bool {
+        matches!(
+            self,
+            Self::FailedWithData { data, .. }
+                if data
+                    .get("core_apply_failure_cause")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ExecutorStopped")
+        )
+    }
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
@@ -214,6 +238,24 @@ impl CreateSessionRequest {
     }
 }
 
+/// Prompt-section policy for factory prompt assembly (multi-host mobs A1).
+///
+/// `SpecPinned` is set ONLY by the mob member-host spec decompiler (and by
+/// revival, which re-runs it): a session built from a `PortableMemberSpec`
+/// must assemble byte-identical prompts on every host, so host-varying
+/// prompt sections (the skill-engine inventory section) are suppressed.
+/// Local mobs and ordinary sessions stay `Full` — surfaces other than the
+/// spec decompiler must not set `SpecPinned`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostPromptSections {
+    /// All prompt sections, including host-derived ones (default).
+    #[default]
+    Full,
+    /// Only spec-derived sections; host-varying sections are suppressed so
+    /// the assembled prompt is a pure function of the portable member spec.
+    SpecPinned,
+}
+
 /// Optional build-time options used by factory-backed session builders.
 #[derive(Clone)]
 pub struct SessionBuildOptions {
@@ -266,6 +308,21 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Opaque transport for an optional per-session comms-runtime override
+    /// (multi-host mobs, DEC-P3H-3 — the `llm_client_override` type-erasure
+    /// precedent).
+    ///
+    /// Factory builders downcast this to the concrete comms runtime type. A
+    /// failed downcast or a `comms_name` mismatch against the build config is
+    /// a typed build rejection — never a silent fallback to config-mode
+    /// runtime construction. Set by the mob member-host materializer, which
+    /// must mint the member runtime itself (durable per-session keypair,
+    /// acceptor registration, session claim).
+    pub session_comms_runtime_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Prompt-section policy for factory prompt assembly (multi-host mobs
+    /// A1). `SpecPinned` is set ONLY by the mob member-host spec decompiler
+    /// (and revival's re-run); everything else inherits `Full`.
+    pub host_prompt_sections: HostPromptSections,
     /// Optional wrapper applied to the final agent-facing LLM client.
     ///
     /// This is intentionally provider-agnostic and runs after raw clients are
@@ -1073,6 +1130,8 @@ impl Default for SessionBuildOptions {
             recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
+            session_comms_runtime_override: None,
+            host_prompt_sections: HostPromptSections::Full,
             agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
@@ -1134,6 +1193,11 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
+            .field(
+                "session_comms_runtime_override",
+                &self.session_comms_runtime_override.is_some(),
+            )
+            .field("host_prompt_sections", &self.host_prompt_sections)
             .field(
                 "agent_llm_client_decorator",
                 &self.agent_llm_client_decorator.is_some(),
@@ -1396,6 +1460,29 @@ impl TurnToolOverlay {
         self
     }
 
+    /// Fail-closed projection to the public caller-safe overlay shape
+    /// (multi-host mobs phase 6, FLAG-P6F-8 / ADJ-P6-12).
+    ///
+    /// Flow-lowered overlays always carry an EMPTY `dispatch_context`, so
+    /// the projection is lossless for flow steps; a non-empty
+    /// `dispatch_context` is a typed error — runtime-owned dispatch metadata
+    /// must never be silently dropped on its way to a wire directive.
+    pub fn into_public(
+        self,
+    ) -> Result<PublicTurnToolOverlay, TurnToolOverlayPublicProjectionError> {
+        if !self.dispatch_context.is_empty() {
+            return Err(
+                TurnToolOverlayPublicProjectionError::DispatchContextPresent {
+                    keys: self.dispatch_context.len(),
+                },
+            );
+        }
+        Ok(PublicTurnToolOverlay {
+            allowed_tools: self.allowed_tools,
+            blocked_tools: self.blocked_tools,
+        })
+    }
+
     /// Compose an additional overlay into an optional existing overlay.
     ///
     /// This is the canonical composition path for every producer that layers
@@ -1428,6 +1515,18 @@ pub enum TurnToolOverlayComposeError {
     /// Both overlays carry the same dispatch-context key with distinct values.
     #[error("conflicting turn tool overlay dispatch context for {key}")]
     ConflictingDispatchContext { key: String },
+}
+
+/// Typed error projecting a runtime overlay to [`PublicTurnToolOverlay`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TurnToolOverlayPublicProjectionError {
+    /// The overlay carries runtime-owned dispatch metadata the public shape
+    /// cannot represent; projecting would silently drop it.
+    #[error(
+        "turn tool overlay carries {keys} runtime-owned dispatch-context entrie(s); \
+         the public projection would drop them"
+    )]
+    DispatchContextPresent { keys: usize },
 }
 
 fn intersect_allowed_tools(
@@ -1869,6 +1968,21 @@ pub trait SessionService: Send + Sync {
     async fn cancel_after_boundary(&self, _id: &SessionId) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(
             "cancel_after_boundary".to_string(),
+        ))
+    }
+
+    /// Cancel one exact in-flight run at its next cooperative boundary.
+    ///
+    /// Runtime-owned boundary handles use this witness-bearing seam so a
+    /// delayed callback cannot resolve the SessionId again and cancel a
+    /// successor run. Services without an exact-run capability fail closed.
+    async fn cancel_after_boundary_for_run(
+        &self,
+        _id: &SessionId,
+        _expected_run_id: &crate::RunId,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "cancel_after_boundary_for_run".to_string(),
         ))
     }
 

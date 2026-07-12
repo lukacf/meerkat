@@ -561,6 +561,7 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
         command_plans: vec![],
         effect_dispositions: vec![],
         ci_step_limit: None,
+        deep_domain_overrides: Default::default(),
         named_types: vec![],
     };
 

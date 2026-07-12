@@ -5,6 +5,7 @@ use syn::Error;
 use crate::ast::*;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+    "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",
     "meerkat_peer_endpoint_option_peer_id_matches",
@@ -15,10 +16,24 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_external_peer_edge_peer_id",
     "mob_machine_external_peer_identity_absent",
     "mob_machine_external_peer_key_matches_edge",
+    "mob_machine_external_peer_edges_by_key_without_identity",
+    "mob_machine_external_peer_edges_without_identity",
     "mob_machine_external_peer_key_matches_local",
     "mob_machine_identity_has_session_binding",
+    "mob_machine_remote_turn_custody_admits",
+    "mob_machine_placed_completion_obligation_well_formed",
+    "mob_machine_placed_completion_custody_admits",
+    "mob_machine_placed_kickoff_obligation_well_formed",
+    "mob_machine_finalized_placed_kickoff_recovery_well_formed",
+    "mob_machine_placed_kickoff_correlation_available",
+    "mob_machine_placed_kickoff_custody_absent_for_identity",
+    "mob_machine_placed_kickoff_custody_absent_for_host",
+    "mob_machine_remote_turn_input_id_available_to_kickoff",
     "mob_machine_session_bound_live_runtime_ids_match",
+    "mob_machine_adaptive_lifecycle_drained",
+    "mob_machine_adaptive_run_custody_drained",
     "mob_machine_member_peer_endpoint_peer_id",
+    "mob_machine_host_id_matches_peer_id",
     "mob_machine_member_peer_id_available_for_identity",
     "mob_machine_member_has_no_external_peer_edges",
     "mob_machine_member_prior_peer_endpoints_after_migration",
@@ -26,10 +41,15 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_member_peer_overlay",
     "mob_machine_member_peer_overlay_complete",
     "mob_machine_member_peer_overlay_peer_ids_unique",
+    "mob_machine_member_peer_overlay_without_identity",
+    "mob_machine_member_peer_overlay_without_identity_complete",
+    "mob_machine_member_peer_overlay_without_identity_peer_ids_unique",
     "mob_machine_wiring_edge_a",
     "mob_machine_wiring_edge_b",
     "mob_machine_wiring_edge_contains_identity",
+    "mob_machine_wiring_contains_pair",
     "mob_machine_wiring_edge_matches_members",
+    "mob_machine_wiring_edges_without_identity",
     "mob_machine_run_step_status_after_set",
     "mob_machine_run_step_bool_after_set",
     "mob_machine_run_step_condition_result_after_set",
@@ -49,8 +69,25 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_coordination_resource_claim_inactive_at",
     // WAVE G2 machine folds (#181 respawn generation, #351 membership reconcile).
     "mob_machine_next_respawn_generation",
+    "mob_machine_u64_is_exact_successor",
+    "mob_machine_optional_u64_is_exact_successor",
     "mob_machine_members_to_spawn",
     "mob_machine_members_to_retire",
+    "mob_machine_placed_cleanup_absent_for_identity",
+    "mob_machine_placed_cleanup_obligation",
+    "mob_machine_placed_carrier_binding_active",
+    "mob_machine_placed_carrier_binding_confirmed_revoked",
+    "mob_machine_host_binding_generation_tombstone",
+    // MobHostBindingAuthority natives (mob-scoped row clears + generation-scoped
+    // turn-outcome retention). Non-canonical scoped authority: Rust bodies live
+    // in the shared macro arm; no TLA operators exist because no machine-codegen
+    // artifacts are generated for it (plan §21.5).
+    "mob_host_binding_authority_member_rows_without_mob",
+    "mob_host_binding_authority_turn_rows_without_mob",
+    "mob_host_binding_authority_turn_rows_after_release",
+    "mob_host_binding_authority_turn_rows_for_materialization",
+    "mob_host_binding_authority_turn_key_is_current",
+    "mob_host_binding_authority_turn_occupancy",
 ];
 
 /// Validate the parsed machine definition for semantic correctness.

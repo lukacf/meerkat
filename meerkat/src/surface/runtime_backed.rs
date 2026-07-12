@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
+    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
 };
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, RunPrimitive, RuntimeTurnMetadata,
@@ -16,7 +17,10 @@ use meerkat_core::{
     build_recovered_session,
 };
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
-use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
+use meerkat_runtime::{
+    EnsureRuntimeExecutorAttachment, MeerkatMachine, PendingRuntimeExecutorAttachment,
+    RuntimeDriverError, RuntimeExecutorAttachmentWitness,
+};
 use tokio::sync::mpsc;
 
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
@@ -183,322 +187,527 @@ async fn materialize_error_preserves_runtime_session<B: SessionAgentBuilder + 's
     }
 }
 
-async fn unregister_materialization_compensation(
-    adapter: &MeerkatMachine,
-    session_id: &SessionId,
-    primary_error: &SurfaceRuntimeMaterializeError,
-) -> Result<(), SurfaceRuntimeMaterializeError> {
-    adapter.unregister_session(session_id).await.map_err(|cleanup_error| {
-        SurfaceRuntimeMaterializeError::RuntimeDriver(RuntimeDriverError::Internal(format!(
-            "{primary_error}; additionally failed to unregister newly materialized runtime session {session_id}: {cleanup_error}"
-        )))
-    })
-}
-
 pub async fn run_runtime_backed_initial_turn_with_machine<B: SessionAgentBuilder + 'static>(
     service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
     initial_turn: RuntimeBackedInitialTurn,
 ) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
+    run_runtime_backed_initial_turn_with_machine_boundary_mode(
+        service,
+        adapter,
+        session_id,
+        initial_turn,
+        false,
+    )
+    .await
+}
+
+async fn run_runtime_backed_initial_turn_with_machine_boundary_mode<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    initial_turn: RuntimeBackedInitialTurn,
+    turn_boundary_already_held: bool,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
     let admission = service.reserve_runtime_turn_admission(session_id).await?;
     let request = start_turn_request_from_initial_turn(initial_turn);
-    let result = service
-        .run_machine_committed_live_turn(
-            MachineServiceTurnCommitProtocol::from_machine(adapter),
-            session_id,
-            request,
-            admission,
-        )
-        .await;
+    let result = if turn_boundary_already_held {
+        service
+            .run_machine_committed_live_turn_under_runtime_turn_boundary(
+                MachineServiceTurnCommitProtocol::from_machine(adapter),
+                session_id,
+                request,
+                admission,
+            )
+            .await
+    } else {
+        service
+            .run_machine_committed_live_turn(
+                MachineServiceTurnCommitProtocol::from_machine(adapter),
+                session_id,
+                request,
+                admission,
+            )
+            .await
+    };
     result.map_err(|(error, _admission)| SurfaceRuntimeMaterializeError::Session(error))
+}
+
+async fn rollback_prepared_runtime_registration(
+    prepared: &mut meerkat_runtime::PreparedSessionMaterialization,
+    turn_boundary_already_held: bool,
+) {
+    let session_id = prepared.session_id().clone();
+    let result = if turn_boundary_already_held {
+        prepared
+            .rollback_now_under_turn_finalization_boundary()
+            .await
+    } else {
+        prepared.rollback_now().await
+    };
+    if let Err(error) = result {
+        tracing::warn!(
+            %session_id,
+            %error,
+            "failed to roll back exact prepared runtime registration"
+        );
+    }
 }
 
 pub async fn materialize_session<F, B: SessionAgentBuilder + 'static>(
     service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session: Session,
-    mut request: CreateSessionRequest,
+    request: CreateSessionRequest,
+    executor_factory: F,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError>
+where
+    F: FnOnce(SessionId) -> Box<dyn CoreExecutor> + Send + 'static,
+{
+    let reserved_admission = service.reserve_create_session_admission().await?;
+    materialize_session_with_reserved_admission(
+        service,
+        adapter,
+        session,
+        request,
+        reserved_admission,
+        executor_factory,
+    )
+    .await
+}
+
+/// Reconstruct only the session-service actor for an executor that already
+/// owns its stable, non-reentrant turn-finalization boundary.
+///
+/// This path requires an exact committed attachment and never invokes
+/// `executor_factory`, spawns a runtime loop, or owns attachment rollback.
+pub async fn materialize_session_under_runtime_turn_boundary<F, B: SessionAgentBuilder + 'static>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    session: Session,
+    request: CreateSessionRequest,
     executor_factory: F,
 ) -> Result<RunResult, SurfaceRuntimeMaterializeError>
 where
     F: FnOnce(SessionId) -> Box<dyn CoreExecutor>,
 {
-    let prepared_session_id = session.id().clone();
     let reserved_admission = service.reserve_create_session_admission().await?;
-    let runtime_was_registered = adapter.contains_session(&prepared_session_id).await;
-    let bindings = match adapter.prepare_bindings(prepared_session_id.clone()).await {
-        Ok(bindings) => bindings,
-        Err(error) => {
-            let error = SurfaceRuntimeMaterializeError::RuntimeBindings(error);
-            if !runtime_was_registered {
-                unregister_materialization_compensation(
-                    adapter.as_ref(),
-                    &prepared_session_id,
-                    &error,
-                )
-                .await?;
-            }
-            return Err(error);
-        }
-    };
-    if let Err(error) =
-        install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await
-    {
-        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
-        }
-        return Err(error);
-    }
+    materialize_session_with_reserved_admission_under_runtime_turn_boundary(
+        service,
+        adapter,
+        session,
+        request,
+        reserved_admission,
+        executor_factory,
+    )
+    .await
+}
 
-    let mut build = request.build.unwrap_or_default();
-    build.resume_session = Some(session);
-    build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
-    request.build = Some(build);
-    let (request, initial_turn) = split_runtime_backed_eager_create_request(request);
+/// Reconstruct a service actor under one captured, exact committed executor
+/// attachment. Unlike [`materialize_session`], this API has no unique-attach
+/// fallback: if `witness` is stale it fails before actor construction and can
+/// never create a replacement executor with stale surface state.
+pub async fn materialize_attached_session_actor_only<B: SessionAgentBuilder + 'static>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    witness: RuntimeExecutorAttachmentWitness,
+    session: Session,
+    request: CreateSessionRequest,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
+    let reserved_admission = service.reserve_create_session_admission().await?;
+    materialize_attached_session_actor_only_with_reserved_admission(
+        service,
+        adapter,
+        witness,
+        session,
+        request,
+        reserved_admission,
+    )
+    .await
+}
 
-    let result = match service
-        .create_session_with_reserved_admission(request, reserved_admission)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            let error = SurfaceRuntimeMaterializeError::Session(error);
-            if !runtime_was_registered {
-                unregister_materialization_compensation(
-                    adapter.as_ref(),
-                    &prepared_session_id,
-                    &error,
-                )
-                .await?;
-            }
-            return Err(error);
-        }
-    };
-
-    if let Err(error) =
-        ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
-    {
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
-        }
-        return Err(error);
-    }
-
-    let result = match initial_turn {
-        Some(initial_turn) => {
-            match run_runtime_backed_initial_turn_with_machine(
-                service,
-                adapter,
-                &prepared_session_id,
-                initial_turn,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    if !runtime_was_registered
-                        && !materialize_error_preserves_runtime_session(
-                            service,
-                            &prepared_session_id,
-                            &error,
-                        )
-                        .await
-                    {
-                        unregister_materialization_compensation(
-                            adapter.as_ref(),
-                            &prepared_session_id,
-                            &error,
-                        )
-                        .await?;
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        None => result,
-    };
-
-    if let Err(error) =
-        ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
-    {
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
-        }
-        return Err(error);
-    }
-
-    if let Err(error) = adapter
-        .ensure_session_with_executor(
-            result.session_id.clone(),
-            executor_factory(result.session_id.clone()),
-        )
-        .await
-    {
-        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
-        }
-        return Err(error);
-    }
-
-    Ok(result)
+/// Reserved-admission variant of [`materialize_attached_session_actor_only`].
+pub async fn materialize_attached_session_actor_only_with_reserved_admission<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    witness: RuntimeExecutorAttachmentWitness,
+    session: Session,
+    request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
+    materialize_attached_session_actor_only_with_admission_and_boundary_mode(
+        service,
+        adapter,
+        witness,
+        session,
+        request,
+        reserved_admission,
+        false,
+    )
+    .await
 }
 
 pub async fn materialize_session_with_reserved_admission<F, B: SessionAgentBuilder + 'static>(
     service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session: Session,
-    mut request: CreateSessionRequest,
+    request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+    executor_factory: F,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError>
+where
+    F: FnOnce(SessionId) -> Box<dyn CoreExecutor> + Send + 'static,
+{
+    if let Some(witness) = adapter
+        .current_executor_attachment_witness(session.id())
+        .await
+    {
+        return materialize_attached_session_actor_only_with_admission_and_boundary_mode(
+            service,
+            adapter,
+            witness,
+            session,
+            request,
+            reserved_admission,
+            false,
+        )
+        .await;
+    }
+
+    let (result, pending) = materialize_session_with_reserved_admission_transaction(
+        service,
+        adapter,
+        session,
+        request,
+        reserved_admission,
+        move |session_id, _witness| executor_factory(session_id),
+    )
+    .await?;
+    pending.commit().await?;
+    Ok(result)
+}
+
+/// Reserved-admission actor reconstruction for a runtime executor that already
+/// owns the service's stable, non-reentrant turn-finalization boundary.
+///
+/// This is deliberately actor-only: returning a pending executor attachment
+/// while the caller holds that boundary would allow a second loop to escape
+/// the boundary or deadlock its commit. `executor_factory` is retained only for
+/// source compatibility and is never invoked.
+pub async fn materialize_session_with_reserved_admission_under_runtime_turn_boundary<
+    F,
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    session: Session,
+    request: CreateSessionRequest,
     reserved_admission: crate::RuntimeContextAdmissionGuard,
     executor_factory: F,
 ) -> Result<RunResult, SurfaceRuntimeMaterializeError>
 where
     F: FnOnce(SessionId) -> Box<dyn CoreExecutor>,
 {
+    drop(executor_factory);
+    let session_id = session.id().clone();
+    let witness = adapter
+        .current_executor_attachment_witness(&session_id)
+        .await
+        .ok_or_else(|| {
+            SurfaceRuntimeMaterializeError::RuntimeDriver(
+                RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "actor-only materialization under a runtime turn boundary requires an existing committed executor attachment for session {session_id}"
+                    ),
+                },
+            )
+        })?;
+    materialize_attached_session_actor_only_with_admission_and_boundary_mode(
+        service,
+        adapter,
+        witness,
+        session,
+        request,
+        reserved_admission,
+        true,
+    )
+    .await
+}
+
+async fn materialize_session_with_reserved_admission_transaction<
+    F,
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    session: Session,
+    request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+    executor_factory: F,
+) -> Result<(RunResult, PendingRuntimeExecutorAttachment), SurfaceRuntimeMaterializeError>
+where
+    F: FnOnce(SessionId, RuntimeExecutorAttachmentWitness) -> Box<dyn CoreExecutor>
+        + Send
+        + 'static,
+{
+    materialize_unique_session_attachment_transaction_with_admission(
+        service,
+        adapter,
+        session,
+        request,
+        reserved_admission,
+        executor_factory,
+    )
+    .await
+}
+
+async fn materialize_unique_session_attachment_transaction_with_admission<
+    F,
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    session: Session,
+    mut request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+    executor_factory: F,
+) -> Result<(RunResult, PendingRuntimeExecutorAttachment), SurfaceRuntimeMaterializeError>
+where
+    F: FnOnce(SessionId, RuntimeExecutorAttachmentWitness) -> Box<dyn CoreExecutor>
+        + Send
+        + 'static,
+{
     let prepared_session_id = session.id().clone();
-    let runtime_was_registered = adapter.contains_session(&prepared_session_id).await;
-    let bindings = match adapter.prepare_bindings(prepared_session_id.clone()).await {
-        Ok(bindings) => bindings,
+    let mut prepared = match adapter
+        .prepare_session_materialization(prepared_session_id.clone())
+        .await
+    {
+        Ok(prepared) => prepared,
         Err(error) => {
-            let error = SurfaceRuntimeMaterializeError::RuntimeBindings(error);
-            if !runtime_was_registered {
-                unregister_materialization_compensation(
-                    adapter.as_ref(),
-                    &prepared_session_id,
-                    &error,
-                )
-                .await?;
-            }
-            return Err(error);
+            return Err(SurfaceRuntimeMaterializeError::RuntimeBindings(error));
         }
     };
     if let Err(error) =
-        install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await
+        install_prepared_runtime_interrupt_handle(service, adapter, prepared.bindings()).await
     {
-        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
-        }
-        return Err(error);
+        rollback_prepared_runtime_registration(&mut prepared, false).await;
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
     }
 
     let mut build = request.build.unwrap_or_default();
     build.resume_session = Some(session);
-    build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+    build.runtime_build_mode =
+        meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
     request.build = Some(build);
     let (request, initial_turn) = split_runtime_backed_eager_create_request(request);
 
-    let result = match service
+    let create_result = service
         .create_session_with_reserved_admission(request, reserved_admission)
-        .await
-    {
+        .await;
+    let result = match create_result {
         Ok(result) => result,
         Err(error) => {
-            let error = SurfaceRuntimeMaterializeError::Session(error);
-            if !runtime_was_registered {
-                unregister_materialization_compensation(
-                    adapter.as_ref(),
-                    &prepared_session_id,
-                    &error,
-                )
-                .await?;
-            }
-            return Err(error);
+            rollback_prepared_runtime_registration(&mut prepared, false).await;
+            return Err(SurfaceRuntimeMaterializeError::Session(error));
         }
     };
 
     if let Err(error) =
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
-        }
+        rollback_prepared_runtime_registration(&mut prepared, false).await;
         return Err(error);
     }
 
     let result = match initial_turn {
-        Some(initial_turn) => {
-            match run_runtime_backed_initial_turn_with_machine(
-                service,
-                adapter,
-                &prepared_session_id,
-                initial_turn,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    if !runtime_was_registered
-                        && !materialize_error_preserves_runtime_session(
-                            service,
-                            &prepared_session_id,
-                            &error,
-                        )
+        Some(initial_turn) => match run_runtime_backed_initial_turn_with_machine_boundary_mode(
+            service,
+            adapter,
+            &prepared_session_id,
+            initial_turn,
+            false,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if materialize_error_preserves_runtime_session(
+                    service,
+                    &prepared_session_id,
+                    &error,
+                )
+                .await
+                {
+                    prepared
+                        .commit_actor_unattached()
                         .await
-                    {
-                        unregister_materialization_compensation(
-                            adapter.as_ref(),
-                            &prepared_session_id,
-                            &error,
-                        )
-                        .await?;
-                    }
-                    return Err(error);
+                        .map_err(SurfaceRuntimeMaterializeError::RuntimeDriver)?;
+                } else {
+                    rollback_prepared_runtime_registration(&mut prepared, false).await;
                 }
+                return Err(error);
             }
-        }
+        },
         None => result,
     };
 
     if let Err(error) =
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
-        }
+        rollback_prepared_runtime_registration(&mut prepared, false).await;
         return Err(error);
     }
 
-    if let Err(error) = adapter
-        .ensure_session_with_executor(
-            result.session_id.clone(),
-            executor_factory(result.session_id.clone()),
-        )
+    let executor_session_id = result.session_id.clone();
+    let attachment = match prepared
+        .ensure_executor_attachment(move |witness| executor_factory(executor_session_id, witness))
         .await
     {
-        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
-        if !runtime_was_registered {
-            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
-                .await?;
+        Ok(EnsureRuntimeExecutorAttachment::Pending(pending)) => pending,
+        Ok(EnsureRuntimeExecutorAttachment::Existing(witness)) => {
+            rollback_prepared_runtime_registration(&mut prepared, false).await;
+            return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(
+                RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "unique session materialization unexpectedly found committed attachment {witness:?}"
+                    ),
+                },
+            ));
         }
-        return Err(error);
+        Err(error) => {
+            rollback_prepared_runtime_registration(&mut prepared, false).await;
+            return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+        }
+    };
+
+    Ok((result, attachment))
+}
+
+async fn materialize_attached_session_actor_only_with_admission_and_boundary_mode<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    witness: RuntimeExecutorAttachmentWitness,
+    session: Session,
+    mut request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+    turn_boundary_already_held: bool,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
+    let expected_session_id = session.id().clone();
+    if witness.session_id() != &expected_session_id {
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(
+            RuntimeDriverError::StaleAuthority {
+                reason: format!(
+                    "executor attachment witness for session {} cannot recover actor {}",
+                    witness.session_id(),
+                    expected_session_id
+                ),
+            },
+        ));
     }
 
+    // Canonical lifecycle lock order is service turn-finalization boundary B
+    // before machine mutation fence M. Unregister releases M before acquiring
+    // B for surface cleanup, so actor recovery must never hold M while waiting
+    // for an ordinary service create to acquire B.
+    let locally_owned_turn_boundary = if turn_boundary_already_held {
+        None
+    } else {
+        Some(
+            service
+                .acquire_runtime_turn_finalization_guard(&expected_session_id)
+                .await,
+        )
+    };
+    let mut prepared = adapter
+        .prepare_attached_session_actor_recovery(&witness)
+        .await?;
+    let mut build = request.build.unwrap_or_default();
+    build.resume_session = Some(session);
+    build.runtime_build_mode =
+        meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
+    request.build = Some(build);
+    let (request, initial_turn) = split_runtime_backed_eager_create_request(request);
+
+    let result = service
+        .create_session_with_reserved_admission_under_runtime_turn_boundary(
+            request,
+            reserved_admission,
+        )
+        .await?;
+    ensure_materialized_session_id_matches(&expected_session_id, &result.session_id)?;
+
+    // Actor publication is the only lifecycle fact owned by this path. The
+    // exact executor already serves and must never be replaced or rolled back.
+    prepared.commit_actor()?;
+    drop(locally_owned_turn_boundary);
+
+    let result = match initial_turn {
+        Some(initial_turn) => {
+            run_runtime_backed_initial_turn_with_machine_boundary_mode(
+                service,
+                adapter,
+                &expected_session_id,
+                initial_turn,
+                turn_boundary_already_held,
+            )
+            .await?
+        }
+        None => result,
+    };
+    ensure_materialized_session_id_matches(&expected_session_id, &result.session_id)?;
     Ok(result)
 }
 
 pub async fn install_prepared_runtime_interrupt_handle<B: SessionAgentBuilder + 'static>(
     service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
-    session_id: &SessionId,
+    bindings: &meerkat_core::SessionRuntimeBindings,
 ) -> Result<(), RuntimeDriverError> {
+    let session_id = bindings.session_id();
     adapter
-        .install_prepared_session_interrupt_handle(
-            session_id,
+        .install_prepared_session_executor_handles(
+            bindings,
             Arc::new(PersistentRuntimeInterruptHandle {
                 service: Arc::clone(service),
                 adapter: Arc::clone(adapter),
                 session_id: session_id.clone(),
             }),
+            persistent_runtime_post_stop_cleanup_handle(Arc::clone(service), session_id.clone()),
+        )
+        .await
+}
+
+/// Install prepared runtime handles whose cleanup is bound to the exact actor
+/// witness later published into `actor_witness_slot` by the session service.
+pub async fn install_prepared_runtime_interrupt_handle_for_actor_slot<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    bindings: &meerkat_core::SessionRuntimeBindings,
+    actor_witness_slot: crate::LiveSessionActorWitnessSlot,
+) -> Result<(), RuntimeDriverError> {
+    let session_id = bindings.session_id();
+    adapter
+        .install_prepared_session_executor_handles(
+            bindings,
+            Arc::new(PersistentRuntimeInterruptHandle {
+                service: Arc::clone(service),
+                adapter: Arc::clone(adapter),
+                session_id: session_id.clone(),
+            }),
+            persistent_runtime_post_stop_cleanup_handle_for_actor_slot(
+                Arc::clone(service),
+                session_id.clone(),
+                actor_witness_slot,
+            ),
         )
         .await
 }
@@ -573,10 +782,15 @@ struct PersistentRuntimeBoundaryHandle<B: SessionAgentBuilder> {
 impl<B: SessionAgentBuilder + 'static> CoreExecutorBoundaryHandle
     for PersistentRuntimeBoundaryHandle<B>
 {
-    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &meerkat_core::RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
         self.service
             .cancel_after_boundary_with_machine_authority(
                 &self.session_id,
+                expected_run_id,
                 self.adapter.session_control_authority(),
             )
             .await
@@ -587,44 +801,17 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutorBoundaryHandle
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 
-    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
-        Ok(self
-            .service
-            .active_turn_system_context_boundary_available(&self.session_id)
-            .await
-            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
-            .unwrap_or(false))
-    }
-
-    async fn stage_system_context_at_boundary(
+    async fn prepare_system_context_at_boundary(
         &self,
         expected_run_id: &meerkat_core::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
-    ) -> Result<meerkat_core::lifecycle::CoreBoundaryStageOutput, CoreExecutorError> {
-        let session_snapshot = self
-            .service
-            .stage_live_system_context_boundary_snapshot(&self.session_id, expected_run_id, appends)
-            .await
-            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?;
-        Ok(meerkat_core::lifecycle::CoreBoundaryStageOutput::new(
-            session_snapshot,
-        ))
-    }
-
-    async fn discard_staged_system_context_at_boundary(
-        &self,
-        expected_run_id: &meerkat_core::RunId,
-        idempotency_keys: Vec<String>,
-    ) -> Result<(), CoreExecutorError> {
+    ) -> Result<
+        meerkat_core::lifecycle::CoreBoundaryStageOutput,
+        meerkat_core::lifecycle::CoreBoundaryStageError,
+    > {
         self.service
-            .discard_live_system_context_boundary_staging(
-                &self.session_id,
-                expected_run_id,
-                idempotency_keys,
-            )
+            .prepare_live_system_context_boundary(&self.session_id, expected_run_id, appends)
             .await
-            .map(|_| ())
-            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 }
 
@@ -632,6 +819,176 @@ struct PersistentRuntimeInterruptHandle<B: SessionAgentBuilder> {
     service: Arc<PersistentSessionService<B>>,
     adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
+}
+
+struct PersistentRuntimePublicationHandle<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+}
+
+struct PersistentRuntimePostStopCleanupHandle<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+    actor_witness_slot: Option<crate::LiveSessionActorWitnessSlot>,
+}
+
+struct PersistentRuntimeTurnFinalizationBoundaryHandle<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+}
+
+/// Build the cloneable terminal-publication authority for a persistent
+/// runtime-backed session.
+///
+/// Surface-specific executors use this handle for lifecycle paths that run
+/// outside their mutable executor loop (for example, stop terminalization).
+pub fn persistent_runtime_publication_handle<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+) -> Arc<dyn CoreExecutorPublicationHandle> {
+    Arc::new(PersistentRuntimePublicationHandle {
+        service,
+        session_id,
+    })
+}
+
+/// Build the cloneable service-side cleanup authority retained by the runtime
+/// entry until its exact generated unregister transaction completes.
+pub fn persistent_runtime_post_stop_cleanup_handle<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+) -> Arc<dyn CoreExecutorPostStopCleanupHandle> {
+    Arc::new(PersistentRuntimePostStopCleanupHandle {
+        service,
+        session_id,
+        actor_witness_slot: None,
+    })
+}
+
+/// Build exact service-side cleanup authority for an actor-materialization
+/// transaction.
+///
+/// The slot is populated by `PersistentSessionService` at the actor registry
+/// insertion boundary.  Cleanup that runs before publication is a no-op;
+/// cleanup that runs afterwards compare-and-removes only that incarnation.
+pub fn persistent_runtime_post_stop_cleanup_handle_for_actor_slot<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+    actor_witness_slot: crate::LiveSessionActorWitnessSlot,
+) -> Arc<dyn CoreExecutorPostStopCleanupHandle> {
+    Arc::new(PersistentRuntimePostStopCleanupHandle {
+        service,
+        session_id,
+        actor_witness_slot: Some(actor_witness_slot),
+    })
+}
+
+/// Build the stable outer mutation boundary shared by runtime-loop, direct,
+/// and non-turn session writers for one SessionId.
+pub fn persistent_runtime_turn_finalization_boundary_handle<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+) -> Arc<dyn CoreExecutorTurnFinalizationBoundaryHandle> {
+    Arc::new(PersistentRuntimeTurnFinalizationBoundaryHandle {
+        service,
+        session_id,
+    })
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static> CoreExecutorTurnFinalizationBoundaryHandle
+    for PersistentRuntimeTurnFinalizationBoundaryHandle<B>
+{
+    async fn acquire(
+        &self,
+    ) -> Result<Box<dyn CoreExecutorTurnFinalizationGuard>, CoreExecutorError> {
+        Ok(Box::new(
+            self.service
+                .acquire_runtime_turn_finalization_guard(&self.session_id)
+                .await,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static> CoreExecutorPostStopCleanupHandle
+    for PersistentRuntimePostStopCleanupHandle<B>
+{
+    async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
+        if let Some(actor_witness_slot) = self.actor_witness_slot.as_ref() {
+            let Some(witness) = actor_witness_slot.witness() else {
+                return Ok(());
+            };
+            let Some(lease) = self
+                .service
+                .acquire_live_session_actor_turn_boundary_lease_exact(&witness)
+                .await
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
+            else {
+                return Ok(());
+            };
+            return self
+                .service
+                .discard_live_session_actor(&lease)
+                .await
+                .map(|_| ())
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()));
+        }
+        match self
+            .service
+            .discard_live_session_after_runtime_stop_terminalized(&self.session_id)
+            .await
+        {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
+        }
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+    ) -> Result<(), CoreExecutorError> {
+        if let Some(actor_witness_slot) = self.actor_witness_slot.as_ref() {
+            let Some(witness) = actor_witness_slot.witness() else {
+                return Ok(());
+            };
+            return self
+                .service
+                .discard_live_session_actor_under_runtime_turn_boundary(&witness)
+                .await
+                .map(|_| ())
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()));
+        }
+        match self
+            .service
+            .discard_live_session_after_runtime_stop_terminalized_under_runtime_turn_boundary(
+                &self.session_id,
+            )
+            .await
+        {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static> CoreExecutorPublicationHandle
+    for PersistentRuntimePublicationHandle<B>
+{
+    async fn publish_interaction_terminals(
+        &self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        self.service
+            .publish_interaction_terminals_exact_batch(&self.session_id, events)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
 }
 
 #[async_trait::async_trait]
@@ -800,6 +1157,33 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         }))
     }
 
+    fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+        Some(persistent_runtime_publication_handle(
+            Arc::clone(&self.service),
+            self.session_id.clone(),
+        ))
+    }
+
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        true
+    }
+
+    fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+        Some(persistent_runtime_post_stop_cleanup_handle(
+            Arc::clone(&self.service),
+            self.session_id.clone(),
+        ))
+    }
+
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn CoreExecutorTurnFinalizationBoundaryHandle>> {
+        Some(persistent_runtime_turn_finalization_boundary_handle(
+            Arc::clone(&self.service),
+            self.session_id.clone(),
+        ))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -849,7 +1233,7 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                     let service = Arc::clone(&self.service);
                     let adapter = Arc::clone(&self.adapter);
                     let workgraph_service = self.workgraph_service.clone();
-                    match Box::pin(materialize_session(
+                    match Box::pin(materialize_session_under_runtime_turn_boundary(
                         &self.service,
                         &self.adapter,
                         session,
@@ -986,7 +1370,10 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         session_snapshot: &[u8],
     ) -> Result<(), CoreExecutorError> {
         self.service
-            .checkpoint_committed_runtime_session_snapshot(&self.session_id, session_snapshot)
+            .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
+                &self.session_id,
+                session_snapshot,
+            )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
@@ -1010,7 +1397,7 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
-            .cancel_after_boundary_with_machine_authority(
+            .cancel_current_after_boundary_with_machine_authority(
                 &self.session_id,
                 self.adapter.session_control_authority(),
             )
@@ -1018,12 +1405,31 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        PersistentRuntimePublicationHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }
+        .publish_interaction_terminals(events)
+        .await
+    }
+
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        match self.service.discard_live_session(&self.session_id).await {
+        let discard_result = self
+            .service
+            .discard_live_session_after_runtime_stop_terminalized(&self.session_id)
+            .await;
+        match discard_result {
             Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
             Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
@@ -1548,6 +1954,32 @@ mod tests {
         );
     }
 
+    async fn expect_unregister_completion(adapter: &MeerkatMachine, session_id: &SessionId) {
+        let expected_runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match adapter.unregister_session(session_id).await {
+                    Ok(()) => break,
+                    Err(RuntimeDriverError::UnregisterInProgress { runtime_id }) => {
+                        assert_eq!(
+                            &runtime_id, &expected_runtime_id,
+                            "unregister coordinator reported the wrong runtime identity"
+                        );
+                    }
+                    Err(error) => panic!(
+                        "unregister coordinator failed for runtime {expected_runtime_id}: {error}"
+                    ),
+                }
+            }
+        })
+        .await
+        .expect("unregister coordinator should complete within the test deadline");
+        assert!(
+            !adapter.contains_session(session_id).await,
+            "completed unregister must remove runtime {expected_runtime_id}"
+        );
+    }
+
     #[tokio::test]
     async fn materialize_session_unregisters_prepared_runtime_on_create_failure() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1632,10 +2064,7 @@ mod tests {
             adapter.contains_session(&session_id).await,
             "failed materialization must not unregister pre-existing runtime registration"
         );
-        adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &session_id).await;
     }
 
     #[tokio::test]
@@ -1677,10 +2106,7 @@ mod tests {
             .discard_live_session(&existing.session_id)
             .await
             .expect("cleanup capacity filler");
-        adapter
-            .unregister_session(&existing.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &existing.session_id).await;
     }
 
     #[tokio::test]
@@ -1708,41 +2134,18 @@ mod tests {
             "shared default executor prompt",
         )
         .await;
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
-    async fn persistent_runtime_boundary_handle_reports_active_tool_boundary() {
+    async fn materialize_session_reconstructs_actor_without_replacing_existing_attachment() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let (service, adapter) = build_test_service_with_llm(
-            &temp,
-            Arc::new(OneToolThenOkClient {
-                calls: AtomicUsize::new(0),
-            }),
-        )
-        .await;
-        let tool_started = Arc::new(Notify::new());
-        let tool_release = Arc::new(Notify::new());
-        let mut build = SessionBuildOptions {
-            external_tools: Some(Arc::new(BlockingToolDispatcher {
-                started: Arc::clone(&tool_started),
-                release: Arc::clone(&tool_release),
-            })),
-            ..Default::default()
-        };
-        build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
-        let result = Box::pin(materialize_session(
+        let (service, adapter) = build_test_service(&temp).await;
+        let initial = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
-            make_request(build),
+            make_request(SessionBuildOptions::default()),
             {
                 let service = Arc::clone(&service);
                 let adapter = Arc::clone(&adapter);
@@ -1750,52 +2153,150 @@ mod tests {
             },
         ))
         .await
-        .expect("create runtime-backed tool session");
-
-        let (_outcome, completion) = adapter
-            .accept_input_with_completion(
-                &result.session_id,
-                Input::Prompt(PromptInput::new("run blocking tool", None)),
-            )
+        .expect("materialize initial runtime-backed session");
+        let session_id = initial.session_id;
+        let original_witness = adapter
+            .current_executor_attachment_witness(&session_id)
             .await
-            .expect("accept runtime-backed prompt");
-        let completion = completion.expect("completion handle");
-
-        tokio::time::timeout(Duration::from_secs(2), tool_started.notified())
+            .expect("initial materialization should commit an exact attachment");
+        let persisted = service
+            .load_authoritative_session(&session_id)
             .await
-            .expect("tool should start");
+            .expect("load authoritative session")
+            .expect("authoritative session should exist");
+        let recovered = build_recovered_session(
+            persisted.clone(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("build recovered actor request");
 
-        let boundary = PersistentRuntimeBoundaryHandle {
-            service: Arc::clone(&service),
-            adapter: Arc::clone(&adapter),
-            session_id: result.session_id.clone(),
-        };
-        assert!(
-            boundary
-                .active_turn_boundary_available()
-                .await
-                .expect("boundary probe should succeed"),
-            "runtime-backed surface must expose the active post-tool LLM boundary"
-        );
-
-        tool_release.notify_waiters();
-        let outcome = tokio::time::timeout(Duration::from_secs(2), completion.wait())
-            .await
-            .expect("prompt should complete")
-            .expect("completion waiter should resolve");
-        assert!(
-            matches!(outcome, CompletionOutcome::Completed(ref run) if run.text == "ok"),
-            "unexpected completion outcome: {outcome:?}"
-        );
-
+        let turn_boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
         service
-            .discard_live_session(&result.session_id)
+            .discard_live_session_under_runtime_turn_boundary(&session_id)
             .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
+            .expect("discard only the live actor");
+        assert_eq!(
+            adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .as_ref(),
+            Some(&original_witness),
+            "actor discard must leave the exact executor attachment serving"
+        );
+        drop(turn_boundary);
+
+        let executor_factory_calls = Arc::new(AtomicUsize::new(0));
+        let service_for_factory = Arc::clone(&service);
+        let adapter_for_factory = Arc::clone(&adapter);
+        let calls_for_factory = Arc::clone(&executor_factory_calls);
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            persisted,
+            recovered.into_deferred_create_request(),
+            move |session_id| {
+                calls_for_factory.fetch_add(1, Ordering::SeqCst);
+                default_persistent_executor(service_for_factory, adapter_for_factory, session_id)
+            },
+        ))
+        .await
+        .expect("reconstruct actor against the existing attachment");
+
+        assert_eq!(result.session_id, session_id);
+        assert_eq!(
+            executor_factory_calls.load(Ordering::SeqCst),
+            0,
+            "existing-attachment materialization must not construct a replacement executor"
+        );
+        assert_eq!(
+            adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .as_ref(),
+            Some(&original_witness),
+            "actor reconstruction must preserve exact attachment identity"
+        );
+        expect_prompt_completion(&adapter, &session_id, "reconstructed actor prompt").await;
+        expect_unregister_completion(&adapter, &session_id).await;
+    }
+
+    #[tokio::test]
+    async fn materialize_under_runtime_turn_boundary_is_actor_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let initial = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize initial runtime-backed session");
+        let session_id = initial.session_id;
+        let original_witness = adapter
+            .current_executor_attachment_witness(&session_id)
             .await
-            .expect("runtime session should unregister cleanly");
+            .expect("initial materialization should commit an exact attachment");
+        let persisted = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load authoritative session")
+            .expect("authoritative session should exist");
+        let recovered = build_recovered_session(
+            persisted.clone(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("build recovered actor request");
+        let executor_factory_calls = Arc::new(AtomicUsize::new(0));
+
+        let turn_boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        service
+            .discard_live_session_under_runtime_turn_boundary(&session_id)
+            .await
+            .expect("discard only the live actor");
+        let calls_for_factory = Arc::clone(&executor_factory_calls);
+        let result = Box::pin(materialize_session_under_runtime_turn_boundary(
+            &service,
+            &adapter,
+            persisted,
+            recovered.into_deferred_create_request(),
+            move |_session_id| {
+                calls_for_factory.fetch_add(1, Ordering::SeqCst);
+                panic!("actor-only materialization must not invoke the executor factory")
+            },
+        ))
+        .await
+        .expect("reconstruct actor inside the existing executor boundary");
+
+        assert_eq!(result.session_id, session_id);
+        assert_eq!(
+            executor_factory_calls.load(Ordering::SeqCst),
+            0,
+            "under-boundary recovery must remain actor-only"
+        );
+        assert_eq!(
+            adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .as_ref(),
+            Some(&original_witness),
+            "under-boundary actor recovery must preserve exact attachment identity"
+        );
+        drop(turn_boundary);
+
+        expect_prompt_completion(&adapter, &session_id, "under-boundary actor recovery").await;
+        expect_unregister_completion(&adapter, &session_id).await;
     }
 
     #[tokio::test]
@@ -1820,14 +2321,65 @@ mod tests {
         .expect("runtime-backed eager create should receive stamped metadata");
 
         assert_eq!(result.text, "ok");
-        service
-            .discard_live_session(&result.session_id)
+        expect_unregister_completion(&adapter, &result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn materialize_session_atomically_commits_failed_initial_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) =
+            build_test_service_with_llm(&temp, Arc::new(TerminalLlmFailureClient)).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let mut request = make_request(SessionBuildOptions::default());
+        request.initial_turn = meerkat_core::service::InitialTurnPolicy::RunImmediately;
+        request.prompt = "persist this failed initial turn".to_string().into();
+
+        let error = Box::pin(materialize_session(&service, &adapter, session, request, {
+            let service = Arc::clone(&service);
+            let adapter = Arc::clone(&adapter);
+            move |session_id| default_persistent_executor(service, adapter, session_id)
+        }))
+        .await
+        .expect_err("fatal initial turn should preserve its typed public failure");
+
+        assert!(
+            matches!(
+                &error,
+                SurfaceRuntimeMaterializeError::Session(SessionError::Agent(
+                    meerkat_core::AgentError::TerminalFailure {
+                        cause_kind: meerkat_core::TurnTerminalCauseKind::LlmFailure,
+                        ..
+                    }
+                ))
+            ),
+            "unexpected failed initial-turn surface error: {error}"
+        );
+        assert_eq!(
+            adapter.runtime_state(&session_id).await.unwrap(),
+            RuntimeState::Attached,
+            "failed service turn must close the machine-owned run"
+        );
+
+        let runtime_snapshot = service
+            .runtime_store()
+            .load_session_snapshot(&meerkat_runtime::LogicalRuntimeId::for_session(&session_id))
             .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
+            .expect("runtime snapshot read should succeed")
+            .expect("failed turn transcript must commit with lifecycle authority");
+        let committed: Session = serde_json::from_slice(&runtime_snapshot)
+            .expect("failed runtime snapshot should deserialize");
+        assert!(committed.messages().iter().any(|message| {
+            format!("{message:?}").contains("persist this failed initial turn")
+        }));
+
+        expect_unregister_completion(&adapter, &session_id).await;
+        let recovered = service
+            .load_authoritative_session(&session_id)
             .await
-            .expect("runtime session should unregister cleanly");
+            .expect("authoritative recovery read should succeed")
+            .expect("failed transcript must survive live-session teardown");
+        assert_eq!(recovered.messages(), committed.messages());
     }
 
     #[tokio::test]
@@ -1890,14 +2442,7 @@ mod tests {
             "callback-pending service turn should persist the user/tool-call boundary"
         );
 
-        service
-            .discard_live_session(&session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &session_id).await;
     }
 
     #[tokio::test]
@@ -1928,14 +2473,7 @@ mod tests {
         .expect("runtime-backed eager create should stamp supplied metadata");
 
         assert_eq!(result.text, "ok");
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
@@ -2004,11 +2542,7 @@ mod tests {
         );
 
         release.notify_waiters();
-        let _ = service.discard_live_session(&session_id).await;
-        adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &session_id).await;
     }
 
     #[tokio::test]
@@ -2041,10 +2575,7 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
-        adapter
-            .unregister_session(&session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &session_id).await;
     }
 
     #[test]
@@ -2062,73 +2593,6 @@ mod tests {
                 actual: ref actual_actual,
             } if *actual_expected == expected && *actual_actual == actual
         ));
-    }
-
-    #[tokio::test]
-    async fn persistent_runtime_executor_projects_committed_snapshot_to_session_store() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_path = temp.path().join("sessions");
-        let (service, adapter) = build_test_service(&temp).await;
-        let result = Box::pin(materialize_session(
-            &service,
-            &adapter,
-            Session::new(),
-            make_request(SessionBuildOptions::default()),
-            {
-                let service = Arc::clone(&service);
-                let adapter = Arc::clone(&adapter);
-                move |session_id| default_persistent_executor(service, adapter, session_id)
-            },
-        ))
-        .await
-        .expect("materialize session");
-
-        let mut committed = service
-            .load_authoritative_session(&result.session_id)
-            .await
-            .expect("load runtime-authoritative session")
-            .expect("runtime session exists");
-        committed.set_metadata(
-            "committed_checkpoint_probe",
-            serde_json::json!({ "state": "finalized" }),
-        );
-        let committed_snapshot =
-            serde_json::to_vec(&committed).expect("serialize committed runtime snapshot");
-        let mut executor = PersistentRuntimeExecutor::new(
-            Arc::clone(&service),
-            Arc::clone(&adapter),
-            result.session_id.clone(),
-        );
-
-        executor
-            .checkpoint_committed_session_snapshot(&committed_snapshot)
-            .await
-            .expect("committed snapshot must reach the compatibility projection");
-
-        let projected_store = JsonlStore::new(session_path);
-        projected_store
-            .init()
-            .await
-            .expect("open projected session store");
-        let projected = projected_store
-            .load(&result.session_id)
-            .await
-            .expect("load compatibility projection")
-            .expect("compatibility projection exists");
-        assert_eq!(
-            projected.metadata().get("committed_checkpoint_probe"),
-            Some(&serde_json::json!({ "state": "finalized" })),
-            "CoreExecutor checkpoint hook must delegate instead of silently taking the default no-op"
-        );
-
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live test session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("unregister test runtime");
     }
 
     #[tokio::test]
@@ -2166,68 +2630,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_persistent_stop_acks_after_discard_and_retains_stopped_registration() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (service, adapter) = build_test_service(&temp).await;
-        let result = Box::pin(materialize_session(
-            &service,
-            &adapter,
-            Session::new(),
-            make_request(SessionBuildOptions::default()),
-            {
-                let service = Arc::clone(&service);
-                let adapter = Arc::clone(&adapter);
-                move |session_id| default_persistent_executor(service, adapter, session_id)
-            },
-        ))
-        .await
-        .expect("materialize production persistent executor");
-        assert!(
-            service
-                .has_live_session(&result.session_id)
-                .await
-                .expect("query live session before stop")
-        );
-
-        tokio::time::timeout(
-            Duration::from_millis(1500),
-            adapter.stop_runtime_executor(
-                &result.session_id,
-                "production persistent cleanup acknowledgement",
-            ),
-        )
-        .await
-        .expect("production cleanup must not hit the old two-second self-join timeout")
-        .expect("production persistent stop should acknowledge cleanup");
-
-        assert!(
-            !service
-                .has_live_session(&result.session_id)
-                .await
-                .expect("query live session after stop"),
-            "stop success must follow PersistentRuntimeExecutor live-session discard"
-        );
-        assert!(
-            adapter.contains_session(&result.session_id).await,
-            "ordinary stop must preserve the registered session"
-        );
-        assert_eq!(
-            adapter
-                .meerkat_machine_spine_snapshot(&result.session_id)
-                .await
-                .expect("stopped runtime snapshot")
-                .control
-                .phase,
-            RuntimeState::Stopped
-        );
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("explicit unregister should remove the stopped runtime");
-        assert!(!adapter.contains_session(&result.session_id).await);
-    }
-
-    #[tokio::test]
     async fn persistent_runtime_executor_interrupt_noops_without_active_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
@@ -2257,14 +2659,7 @@ mod tests {
             .await
             .expect("interrupt without an active run is a no-op");
 
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
@@ -2297,14 +2692,7 @@ mod tests {
                 "boundary cancel without an active run must surface the session running-state error",
             );
 
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
@@ -2313,6 +2701,7 @@ mod tests {
         use meerkat_core::event::AgentEvent;
         use meerkat_core::lifecycle::InputId;
         use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
         use meerkat_core::lifecycle::run_primitive::{
             ConversationAppend, ConversationAppendRole, RunApplyBoundary, RuntimeExecutionKind,
             RuntimeTurnMetadata, StagedRunInput,
@@ -2344,7 +2733,7 @@ mod tests {
             Arc::clone(&adapter),
             result.session_id.clone(),
         );
-        let error = executor
+        let output = executor
             .apply(
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
@@ -2364,23 +2753,30 @@ mod tests {
                 }),
             )
             .await
-            .expect_err("terminal LLM failure should surface as typed executor failure");
+            .expect("terminal LLM failure should return the failed-but-applied carrier");
 
-        match error {
-            CoreExecutorError::TerminalFailure {
-                outcome,
-                cause_kind,
-                message,
-            } => {
-                assert_eq!(outcome, meerkat_core::TurnTerminalOutcome::Failed);
-                assert_eq!(cause_kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunStart);
+        assert!(
+            output.session_snapshot.is_some(),
+            "failed-but-applied carrier must preserve the mutated session snapshot"
+        );
+        match output.terminal {
+            Some(CoreApplyTerminal::MachineTerminalFailure { error }) => {
+                assert!(error.terminal);
                 assert_eq!(
-                    message,
-                    meerkat_core::TurnTerminalCauseKind::LlmFailure
-                        .default_message(meerkat_core::TurnTerminalOutcome::Failed)
+                    error.outcome,
+                    Some(meerkat_core::TurnTerminalOutcome::Failed)
+                );
+                assert_eq!(error.kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
+                assert!(
+                    error
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.contains("provider auth denied")),
+                    "machine-terminal carrier must preserve the concrete LLM failure detail"
                 );
             }
-            other => panic!("expected typed terminal failure, got {other:?}"),
+            other => panic!("expected typed machine-terminal carrier, got {other:?}"),
         }
 
         let failed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2411,14 +2807,7 @@ mod tests {
             other => panic!("expected run_failed with typed report, got {other:?}"),
         }
 
-        match service.discard_live_session(&result.session_id).await {
-            Ok(()) | Err(SessionError::NotFound { .. }) => {}
-            Err(error) => panic!("discard live session failed: {error}"),
-        }
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[cfg(feature = "comms")]
@@ -2451,14 +2840,7 @@ mod tests {
             .await
             .expect("configure peer ingress");
         expect_prompt_completion(&adapter, &result.session_id, "peer ingress prompt").await;
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[cfg(feature = "comms")]
@@ -2501,14 +2883,7 @@ mod tests {
             "explicit peer ingress configuration must not mutate persisted keep_alive metadata"
         );
 
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
@@ -2519,7 +2894,8 @@ mod tests {
         use meerkat_core::lifecycle::InputId;
         use meerkat_core::lifecycle::RunId;
         use meerkat_core::lifecycle::run_primitive::{
-            ConversationContextAppend, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+            ConversationContextAppend, RunApplyBoundary, RuntimeExecutionKind, RuntimeTurnMetadata,
+            StagedRunInput,
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2575,6 +2951,31 @@ mod tests {
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart
         );
 
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), events.next())
+                .await
+                .is_err(),
+            "context lifecycle events must remain hidden until the exact runtime snapshot commits"
+        );
+        let session_snapshot = output
+            .session_snapshot
+            .as_deref()
+            .expect("context-only output should carry a session snapshot");
+        service
+            .runtime_store()
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&result.session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: session_snapshot.to_vec(),
+                },
+            )
+            .await
+            .expect("commit context-only runtime snapshot");
+        executor
+            .checkpoint_committed_session_snapshot(session_snapshot)
+            .await
+            .expect("checkpoint committed context-only snapshot");
+
         let started = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
             .await
             .expect("run_started timeout")
@@ -2596,18 +2997,59 @@ mod tests {
             other => panic!("expected run_completed, got {other:?}"),
         }
 
+        let second_output = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: RunApplyBoundary::RunStart,
+                    appends: Vec::new(),
+                    context_appends: vec![ConversationContextAppend {
+                        key: "peer_response_terminal:analyst-rt:req-124".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "Peer terminal response from analyst-rt\nRequest ID: req-124\nStatus: completed\ndone"
+                                .to_string(),
+                        },
+                    }],
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+            .expect("checkpoint must clear the prior pending context-event commit");
+        let second_snapshot = second_output
+            .session_snapshot
+            .as_deref()
+            .expect("second context-only output should carry a session snapshot");
         service
-            .discard_live_session(&result.session_id)
+            .runtime_store()
+            .commit_session_snapshot(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&result.session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: second_snapshot.to_vec(),
+                },
+            )
             .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
+            .expect("commit second context-only runtime snapshot");
+        executor
+            .checkpoint_committed_session_snapshot(second_snapshot)
             .await
-            .expect("runtime session should unregister cleanly");
+            .expect("checkpoint second committed context-only snapshot");
+        for expected in ["run_started", "run_completed"] {
+            tokio::time::timeout(Duration::from_secs(2), events.next())
+                .await
+                .unwrap_or_else(|_| panic!("second {expected} timeout"))
+                .unwrap_or_else(|| panic!("second {expected} event should exist"));
+        }
+
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
-    async fn persistent_runtime_executor_recovers_persisted_session_for_context_only_apply() {
+    async fn persistent_runtime_executor_recovers_missing_actor_for_context_only_apply_under_exact_attachment()
+     {
         use meerkat_core::lifecycle::InputId;
         use meerkat_core::lifecycle::RunId;
         use meerkat_core::lifecycle::run_primitive::{
@@ -2630,20 +3072,42 @@ mod tests {
         .await
         .expect("materialize session");
 
-        service
-            .discard_live_session(&result.session_id)
+        let attachment_witness = adapter
+            .current_executor_attachment_witness(&result.session_id)
             .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
+            .expect("materialized session should retain an exact executor attachment");
+        let actor_lease = service
+            .acquire_live_session_actor_turn_boundary_lease(&result.session_id)
             .await
-            .expect("runtime session should unregister cleanly");
+            .expect("capture exact live actor before actor-only recovery");
+        assert!(
+            service
+                .discard_live_session_actor(&actor_lease)
+                .await
+                .expect("discard exact live actor before actor-only recovery"),
+            "exact actor discard should remove the captured actor"
+        );
+        drop(actor_lease);
+        assert_eq!(
+            adapter
+                .current_executor_attachment_witness(&result.session_id)
+                .await
+                .as_ref(),
+            Some(&attachment_witness),
+            "actor loss must not replace or remove the serving executor attachment"
+        );
 
         let mut executor = PersistentRuntimeExecutor::new(
             Arc::clone(&service),
             Arc::clone(&adapter),
             result.session_id.clone(),
         );
+        let turn_boundary = executor
+            .turn_finalization_boundary_handle()
+            .expect("persistent executor should expose its stable turn boundary")
+            .acquire()
+            .await
+            .expect("acquire the runtime-owned turn boundary before apply");
         let output = executor
             .apply(
                 RunId::new(),
@@ -2665,7 +3129,8 @@ mod tests {
                 }),
             )
             .await
-            .expect("context-only apply should recover persisted session");
+            .expect("context-only apply should recover the missing actor");
+        drop(turn_boundary);
 
         assert_eq!(
             output.receipt.boundary,
@@ -2684,14 +3149,7 @@ mod tests {
             staged_snapshot.system_context_state()
         );
 
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
@@ -2970,14 +3428,7 @@ mod tests {
             staged_snapshot.system_context_state()
         );
 
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[tokio::test]
@@ -3043,14 +3494,7 @@ mod tests {
             other => panic!("expected ApplyFailed, got {other:?}"),
         }
 
-        service
-            .discard_live_session(&result.session_id)
-            .await
-            .expect("discard live session");
-        adapter
-            .unregister_session(&result.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
     #[cfg(all(

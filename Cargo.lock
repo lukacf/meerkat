@@ -3040,6 +3040,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "ciborium",
  "jsonschema",
  "meerkat-capabilities",
  "meerkat-core",
@@ -3048,6 +3049,7 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "strum",
  "thiserror 2.0.18",
  "tokio",
@@ -3147,7 +3149,9 @@ dependencies = [
  "meerkat-auth-core",
  "meerkat-client",
  "meerkat-comms",
+ "meerkat-contracts",
  "meerkat-core",
+ "meerkat-live",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
  "meerkat-mob",
@@ -3166,6 +3170,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -3279,6 +3284,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -3311,6 +3317,7 @@ name = "meerkat-mcp-server"
 version = "0.7.31"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
  "dirs",
  "futures",
@@ -3324,6 +3331,7 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-models",
  "meerkat-runtime",
+ "meerkat-session",
  "meerkat-store",
  "meerkat-tools",
  "rmcp",
@@ -3365,6 +3373,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "hmac 0.12.1",
  "indexmap",
  "jsonschema",
  "meerkat",
@@ -3372,6 +3381,7 @@ dependencies = [
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-live",
  "meerkat-machine-derive",
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
@@ -3390,11 +3400,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tokio-util",
  "tokio_with_wasm",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
@@ -3421,6 +3433,7 @@ dependencies = [
  "meerkat-mob",
  "meerkat-runtime",
  "meerkat-schedule",
+ "meerkat-session",
  "meerkat-store",
  "schemars 1.2.1",
  "serde",
@@ -3582,6 +3595,7 @@ version = "0.7.31"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures",
  "indexmap",
  "meerkat-auth-core",
  "meerkat-comms",
@@ -3596,6 +3610,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4907,6 +4922,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-gemini",
+ "meerkat-live",
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-mob",
@@ -4917,6 +4933,7 @@ dependencies = [
  "meerkat-providers",
  "meerkat-rpc",
  "meerkat-runtime",
+ "meerkat-session",
  "meerkat-store",
  "meerkat-tools",
  "parking_lot",

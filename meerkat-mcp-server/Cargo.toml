@@ -56,8 +56,11 @@ workgraph = ["meerkat/workgraph"]
 ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mob", "meerkat-mob-mcp", "meerkat-runtime", "rmcp"]  # feature-gated / optional
 
 [dev-dependencies]
+chrono = { workspace = true }
 tempfile = { workspace = true }
 meerkat-mob = { workspace = true, features = ["test-support"] }
+meerkat-runtime = { workspace = true, features = ["test-support"] }
+meerkat-session = { workspace = true, features = ["session-store"] }
 
 [lints]
 workspace = true

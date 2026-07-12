@@ -275,6 +275,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     // Rust-atom mapping remains schema-owned.
                     named_types: vec![],
                     ci_step_limit: None,
+                    deep_domain_overrides: Default::default(),
                 }
             }
         }

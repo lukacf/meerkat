@@ -50,14 +50,42 @@ pub enum RuntimeBinding {
         /// from it. Zero-key descriptors are rejected by trust validation.
         pubkey: [u8; 32],
     },
+    /// Member runtime is a session on a bound member host, materialized via
+    /// the host-addressed bridge (multi-host mobs, plan §7.3).
+    ///
+    /// `host` is a PROJECTION of the machine's `member_placement` fact
+    /// carried for dispatch; MobMachine state is authoritative and every
+    /// consuming seam re-checks it (typed divergence error, never trust).
+    /// Endpoint/pubkey/generation/fence/session facts are NOT carried —
+    /// their single owners are the MobMachine host and identity-runtime
+    /// maps (DEC-R1).
+    HostMaterialized {
+        host: crate::machines::mob_machine::HostId,
+    },
 }
 
 impl RuntimeBinding {
     /// Returns the backend kind tag for this binding.
+    ///
+    /// A host-materialized member is still backed by a Meerkat session; its
+    /// placement changes where that session runs, not the backend family.
     pub fn kind(&self) -> MobBackendKind {
         match self {
-            Self::Session => MobBackendKind::Session,
+            Self::Session | Self::HostMaterialized { .. } => MobBackendKind::Session,
             Self::External { .. } => MobBackendKind::External,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_materialized_binding_keeps_session_backend_kind() {
+        let binding = RuntimeBinding::HostMaterialized {
+            host: crate::machines::mob_machine::HostId::from("host-1"),
+        };
+        assert_eq!(binding.kind(), MobBackendKind::Session);
     }
 }

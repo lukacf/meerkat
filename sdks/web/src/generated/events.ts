@@ -192,6 +192,11 @@ export type InteractionFailureReason = {
 } | {
   detail: string;
   kind: "finalization_failed";
+} | {
+  attempts: number;
+  kind: "extraction_failed";
+  last_output: string;
+  reason: string;
 };
 
 export type InteractionId = string;
@@ -349,6 +354,14 @@ export type StreamTruncationReason = {
 } | {
   dropped: number;
   kind: "output_audio_degraded";
+} | {
+  kind: "remote_cursor_overrun";
+  watermark: number;
+} | {
+  durable_seq: number;
+  encoded_bytes: number;
+  kind: "oversized_remote_event";
+  max_bytes: number;
 };
 
 export type SystemNoticePeer = {

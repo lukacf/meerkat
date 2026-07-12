@@ -1,6 +1,7 @@
 import { EventSubscription } from './events.js';
 import { serializePromptContentInput } from './session.js';
 import { isKnownEvent } from './types.js';
+import { MOB_SPAWN_MANY_FAILURE_CAUSES } from './generated/mob.js';
 import type {
   AuthBindingRef,
   ContentInput,
@@ -40,9 +41,21 @@ import type {
   MobMemberStatusResult as WireMobMemberStatusResult,
   MobRespawnResult as WireMobRespawnResult,
   MobStatusResult as WireMobStatusResult,
+  MobSpawnManyFailureCause,
   WireMobMemberStatus,
+  WireMemberLifecycleCapabilities,
+  WireMemberProgressSnapshot,
+  WireNonPortableResourceKind,
+  WireReachability,
   WireResolvedModelCapabilities,
 } from './generated/mob.js';
+
+function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailureCause {
+  return (
+    typeof value === 'string' &&
+    (MOB_SPAWN_MANY_FAILURE_CAUSES as readonly string[]).includes(value)
+  );
+}
 
 // WASM function signatures (bound at construction)
 interface MobWasmBindings {
@@ -83,9 +96,11 @@ function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
     agent_identity: spec.agent_identity,
     runtime_mode: spec.runtime_mode,
     initial_message: spec.initial_message,
+    placement: spec.placement,
     labels: spec.labels,
     context: spec.context,
     additional_instructions: spec.additional_instructions,
+    model_override: spec.model_override,
   };
 }
 
@@ -476,14 +491,18 @@ function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
   if (status === 'failed') {
     requireOnlyKeys(
       raw.result,
-      ['message'],
+      ['cause', 'message'],
       'Invalid mob spawn response: malformed failed result payload',
     );
+    const cause = raw.result.cause;
+    if (!isMobSpawnManyFailureCause(cause)) {
+      throw new Error('Invalid mob spawn response: failed result has unknown cause');
+    }
     const message = raw.result.message;
     if (typeof message !== 'string' || message.length === 0) {
       throw new Error('Invalid mob spawn response: failed result missing message');
     }
-    throw new Error(`Mob spawn failed: ${message}`);
+    throw new Error(`Mob spawn failed (${cause}): ${message}`);
   }
 
   requireOnlyKeys(
@@ -674,6 +693,170 @@ function parseMobEvents(raw: unknown): MobEvent[] {
   return parseEventItems(raw, 'Invalid mob/events response', parseMobEvent);
 }
 
+const WIRE_REACHABILITY_VALUES: readonly WireReachability[] = [
+  'reachable',
+  'stale',
+  'unreachable',
+  'unknown',
+];
+
+function parseWireReachability(raw: unknown, field: string): WireReachability | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  if (
+    typeof raw === 'string' &&
+    WIRE_REACHABILITY_VALUES.includes(raw as WireReachability)
+  ) {
+    return raw as WireReachability;
+  }
+  throw new Error(
+    `Invalid mob member_status response: ${field} must be a valid reachability`,
+  );
+}
+
+function parseMemberLifecycleCapabilities(
+  raw: unknown,
+): WireMemberLifecycleCapabilities | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: lifecycle_capabilities must be object',
+  );
+  return {
+    transcript_edits: requireBooleanField(
+      record,
+      'transcript_edits',
+      'Invalid mob member_status response: lifecycle_capabilities.transcript_edits must be boolean',
+    ),
+    revisions: requireBooleanField(
+      record,
+      'revisions',
+      'Invalid mob member_status response: lifecycle_capabilities.revisions must be boolean',
+    ),
+    resume_after_restart: requireBooleanField(
+      record,
+      'resume_after_restart',
+      'Invalid mob member_status response: lifecycle_capabilities.resume_after_restart must be boolean',
+    ),
+  };
+}
+
+const WIRE_MEMBER_RUN_STATES: readonly WireMemberProgressSnapshot['run_state'][] = [
+  'idle',
+  'run_open',
+  'unknown',
+];
+const WIRE_MEMBER_PROGRESS_EVENTS: readonly WireMemberProgressSnapshot['last_progress_event'][] = [
+  'execution_advanced',
+  'became_idle',
+  'unchanged',
+];
+const WIRE_MEMBER_HEALTH_CLASSES: readonly WireMemberProgressSnapshot['health'][] = [
+  'healthy',
+  'degraded',
+  'wedged',
+  'unknown',
+];
+
+function parseMemberProgressSnapshot(raw: unknown): WireMemberProgressSnapshot | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: progress must be object',
+  );
+  const runState = requireStringField(
+    record,
+    'run_state',
+    'Invalid mob member_status response: progress.run_state must be string',
+  );
+  if (
+    !WIRE_MEMBER_RUN_STATES.includes(
+      runState as WireMemberProgressSnapshot['run_state'],
+    )
+  ) {
+    throw new Error(
+      'Invalid mob member_status response: progress.run_state must be a valid run state',
+    );
+  }
+  const lastProgressEvent = requireStringField(
+    record,
+    'last_progress_event',
+    'Invalid mob member_status response: progress.last_progress_event must be string',
+  );
+  if (
+    !WIRE_MEMBER_PROGRESS_EVENTS.includes(
+      lastProgressEvent as WireMemberProgressSnapshot['last_progress_event'],
+    )
+  ) {
+    throw new Error(
+      'Invalid mob member_status response: progress.last_progress_event must be a valid progress event',
+    );
+  }
+  const health = requireStringField(
+    record,
+    'health',
+    'Invalid mob member_status response: progress.health must be string',
+  );
+  if (
+    !WIRE_MEMBER_HEALTH_CLASSES.includes(
+      health as WireMemberProgressSnapshot['health'],
+    )
+  ) {
+    throw new Error(
+      'Invalid mob member_status response: progress.health must be a valid health class',
+    );
+  }
+  return {
+    run_state: runState as WireMemberProgressSnapshot['run_state'],
+    in_flight_work: requireNonNegativeIntegerField(
+      record,
+      'in_flight_work',
+      'Invalid mob member_status response: progress.in_flight_work must be a non-negative integer',
+    ),
+    last_progress_at_ms: requireNonNegativeIntegerField(
+      record,
+      'last_progress_at_ms',
+      'Invalid mob member_status response: progress.last_progress_at_ms must be a non-negative integer',
+    ),
+    last_progress_event:
+      lastProgressEvent as WireMemberProgressSnapshot['last_progress_event'],
+    health: health as WireMemberProgressSnapshot['health'],
+  };
+}
+
+const WIRE_NON_PORTABLE_RESOURCE_KINDS: readonly WireNonPortableResourceKind[] = [
+  'rust_bundles',
+  'per_spawn_external_tools',
+  'mob_default_external_tools',
+  'default_llm_client_override',
+  'host_surface_mcp_allowlist',
+  'workgraph_tools',
+];
+
+function parseNonPortableDisabled(raw: unknown): WireNonPortableResourceKind[] | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (entry) =>
+        typeof entry !== 'string' ||
+        !WIRE_NON_PORTABLE_RESOURCE_KINDS.includes(entry as WireNonPortableResourceKind),
+    )
+  ) {
+    throw new Error(
+      'Invalid mob member_status response: non_portable_disabled must contain valid resource kinds',
+    );
+  }
+  return raw as WireNonPortableResourceKind[];
+}
+
 function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
   const snapshot = requireRecord(
     raw,
@@ -735,8 +918,59 @@ function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
   if (resolvedCapabilities !== undefined) {
     result.resolved_capabilities = resolvedCapabilities;
   }
+  const progress = parseMemberProgressSnapshot(snapshot.progress);
+  if (progress !== undefined) {
+    result.progress = progress;
+  }
   if (Object.prototype.hasOwnProperty.call(snapshot, 'external_member')) {
     result.external_member = snapshot.external_member;
+  }
+  const placement = optionalStringField(
+    snapshot,
+    'placement',
+    'Invalid mob member_status response: placement must be string',
+  );
+  if (placement !== undefined) {
+    result.placement = placement;
+  }
+  const controlReachability = parseWireReachability(
+    snapshot.control_reachability,
+    'control_reachability',
+  );
+  if (controlReachability !== undefined) {
+    result.control_reachability = controlReachability;
+  }
+  const commsReachability = parseWireReachability(
+    snapshot.comms_reachability,
+    'comms_reachability',
+  );
+  if (commsReachability !== undefined) {
+    result.comms_reachability = commsReachability;
+  }
+  if (snapshot.last_seen_ms != null) {
+    result.last_seen_ms = requireNonNegativeIntegerField(
+      snapshot,
+      'last_seen_ms',
+      'Invalid mob member_status response: last_seen_ms must be a non-negative integer',
+    );
+  }
+  const freshnessReason = optionalStringField(
+    snapshot,
+    'freshness_reason',
+    'Invalid mob member_status response: freshness_reason must be string',
+  );
+  if (freshnessReason !== undefined) {
+    result.freshness_reason = freshnessReason;
+  }
+  const lifecycleCapabilities = parseMemberLifecycleCapabilities(
+    snapshot.lifecycle_capabilities,
+  );
+  if (lifecycleCapabilities !== undefined) {
+    result.lifecycle_capabilities = lifecycleCapabilities;
+  }
+  const nonPortableDisabled = parseNonPortableDisabled(snapshot.non_portable_disabled);
+  if (nonPortableDisabled !== undefined) {
+    result.non_portable_disabled = nonPortableDisabled;
   }
   return result;
 }

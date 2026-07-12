@@ -212,13 +212,16 @@ session-scoped `AgentMobToolSurface` dispatcher.
 ```rust
 use std::sync::Arc;
 use meerkat_core::service::{MobToolsFactory, SessionBuildOptions};
-use meerkat_mob::MobSessionService;
+use meerkat_mob::{MobControlPrincipal, MobSessionService};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 
 fn with_mob_tools(
     session_service: Arc<dyn MobSessionService>,
 ) -> SessionBuildOptions {
-    let state = Arc::new(MobMcpState::new(session_service));
+    let state = Arc::new(MobMcpState::new(
+        session_service,
+        MobControlPrincipal::Owner,
+    ));
     let factory: Arc<dyn MobToolsFactory> =
         Arc::new(AgentMobToolSurfaceFactory::new(state));
     SessionBuildOptions {
@@ -237,14 +240,34 @@ authority and session-scoped wiring are injected at build time.
 | Surface | Mob access | Current behavior |
 |---|---|---|
 | CLI `run` / `run --resume` | `mob_*` tools in prompt-driven runs when mob tools are enabled | Primary CLI mob UX |
-| CLI `rkat mob ...` | helper/artifact commands | Secondary operational surface |
+| CLI `rkat mob ...` | helper, artifact, and explicit operator commands | Secondary operational surface, including member-host, grant, observation, and live verbs |
 | CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
 | RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; generic `mob/tools` / `mob/call` escape hatches do not exist |
-| REST | session HTTP endpoints plus mob helpers | `/mob/{id}/events`, helper spawn/fork, member status/cancel/respawn, wait kickoff |
+| REST | session HTTP endpoints plus mob helpers | Existing helper/member routes plus the read-only multi-host observations |
 | MCP | `meerkat_*` session tools plus `meerkat_mob_*` public tools, including `meerkat_mob_wait_ready` and profile CRUD | typed public mob control plane for host access |
 | Python SDK | `Mob` class via `create_mob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |
 | TypeScript SDK | `Mob` class via `createMob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |
 | Web SDK | `Mob` class via `createMob()` | same WASM-backed mob lifecycle with typed `EventSubscription<T>` |
+
+### Multi-host surface matrix
+
+This is the authoritative exposure matrix for the multi-host console family.
+The asymmetry is intentional: an absent mutation is a security boundary, not
+an SDK backlog.
+
+| Surface | Multi-host exposure |
+|---|---|
+| JSON-RPC | Full typed family: `mob/grant_scopes`, `mob/revoke_scopes`, `mob/grants`; `mob/member_history`, `mob/hosts`, `mob/route_installs`; `mob/bind_host`, `mob/revoke_host`; `mob/hard_cancel_member`; and `mob/member_live_open`, `mob/member_live_close`, `mob/member_live_status`, `mob/member_live_control`. `mob/spawn` and each `mob/spawn_many` spec also accept optional `placement`. |
+| REST | Read-only additions only: `GET /mob/{id}/members/{agent_identity}/history`, `GET /mob/{id}/hosts`, and `GET /mob/{id}/route-installs`. Existing helper, event, status, cancel, and respawn routes remain remote-transparent and use the same typed multi-host error projector. No host/grant/live mutation endpoints. |
+| Public MCP | Read-only additions only: `meerkat_mob_member_history`, `meerkat_mob_hosts`, and `meerkat_mob_route_installs`. No host/grant/live/hard-cancel tools, so an LLM-reachable MCP roster cannot acquire those operator mutations. |
+| CLI | `rkat mob host`, `bind-host`, `revoke-host`, `hosts`; `grant`, `revoke-grant`, `grants`; `member-history`, `route-installs`; and the `live open/close/status/control` family. Existing helper/member verbs route by stable member identity. |
+| Python / TypeScript | First-class wrappers for every JSON-RPC method above, including placed spawn. Return the shared generated wire types; do not invent SDK-only envelopes. |
+| Agent tools | `delegate` and `mob_spawn_member` accept optional `placement`. Host/grant/observation/live/hard-cancel console verbs are deliberately absent from the LLM-visible roster. |
+| Web / WASM | Single-host. Spawn carriers accept the source-compatible optional placement field, but a non-local placement is rejected by the typed capability boundary. No member-host, grant, observation-console, or member-live console exports. |
+
+All console surfaces consume the same four classified failures:
+`scope_denied`, `host_unavailable`, `stale_cursor`, and `stale_fence`.
+Unclassified failures keep each route or protocol's legacy rendering.
 
 Runtime-mode behavior is shared across these surfaces because dispatch comes from the same mob runtime:
 

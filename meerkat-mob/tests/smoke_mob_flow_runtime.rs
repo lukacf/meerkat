@@ -25,7 +25,6 @@ use meerkat_mob::{
     ProfileBinding, ProfileName, RuntimeBinding, SpawnMemberSpec, StepId, ToolConfig,
     run_mobpack_callable,
 };
-use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
 use serde_json::Value;
@@ -36,6 +35,12 @@ use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, Instant, sleep};
+
+mod support;
+use support::{
+    HostFixtureOptions, REAL_COMMS_TEST_LOCK, create_controlling_mob, send_peer_text,
+    spawn_host_daemon_fixture, spawn_production_external_tcp_target, unused_loopback_port,
+};
 
 fn first_env(vars: &[&str]) -> Option<String> {
     for name in vars {
@@ -2730,38 +2735,11 @@ async fn setup_flow_mob(
     (handle, mob_service, temp)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-struct ProductionExternalTcpTarget {
-    binding: RuntimeBinding,
-    adapter: Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
-    session_id: meerkat_core::SessionId,
-    runtime: Arc<meerkat_comms::CommsRuntime>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl ProductionExternalTcpTarget {
-    async fn active_input_count(&self) -> usize {
-        self.adapter
-            .list_active_inputs(&self.session_id)
-            .await
-            .expect("target runtime should list active inputs")
-            .len()
-    }
-
-    async fn shutdown(&self) {
-        // Teardown: tolerate already-stopped/unknown drains (typed result).
-        let _aborted: Result<(), _> = self.adapter.abort_comms_drain(&self.session_id).await;
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn unused_loopback_port() -> u16 {
-    std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("reserve loopback port")
-        .local_addr()
-        .expect("reserved listener local addr")
-        .port()
-}
+// `ProductionExternalTcpTarget`, `spawn_production_external_tcp_target`, and
+// `unused_loopback_port` moved to the shared fixture module
+// `tests/support/mod.rs` (multi-host mobs phase 2, Lane W4) so deterministic
+// lanes can compose the production-drain external target too. This file
+// consumes the shared fixture; the composition is byte-for-byte the same.
 
 #[cfg(not(target_arch = "wasm32"))]
 fn external_tcp_smoke_definition(
@@ -2811,91 +2789,6 @@ fn external_tcp_smoke_definition(
         }),
     };
     definition
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExternalTcpTarget {
-    let mut runtime =
-        meerkat_comms::CommsRuntime::inproc_only(peer_name).expect("create target comms runtime");
-    runtime
-        .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("configure target TCP listener");
-    runtime
-        .start_listeners()
-        .await
-        .expect("start target TCP listener");
-    let address = runtime.advertised_address();
-    let peer_id = runtime.public_key().to_peer_id().to_string();
-    let pubkey = *runtime.public_key().as_bytes();
-    let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
-    let runtime = Arc::new(runtime);
-    let session_id = meerkat_core::SessionId::new();
-
-    // The target runs the PRODUCTION comms_drain on `adapter`, which mints the
-    // supervisor trust-publish obligations during BindMember. The runtime's
-    // peer-comms classification handle AND its generated trust owner must come
-    // from that SAME adapter session — otherwise the inbound BindMember is
-    // dropped (ClassificationRejected → PeerOffline) for lack of a classifier,
-    // and the supervisor trust publish is rejected ("minted by a different
-    // generated owner"). A real session-backed external member gets this wiring
-    // from its SessionRuntimeBindings; this simulation installs it explicitly.
-    let adapter = Arc::new(meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral());
-    adapter
-        .register_session(session_id.clone())
-        .await
-        .expect("register session");
-    adapter
-        .test_install_session_peer_comms_handle_on_runtime(&session_id, runtime.as_ref())
-        .await
-        .expect("install adapter session peer-comms handle on target runtime");
-
-    // Peer request/response authority records inbound bridge requests on the
-    // runtime so the drain can reply (request_received → response).
-    let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
-    dsl.apply_signal(
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
-        "external_tcp_smoke_target::initialize",
-    )
-    .expect("initialize target peer interaction authority");
-    dsl.apply_input(
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
-                session_id.to_string(),
-            ),
-        },
-        "external_tcp_smoke_target::register",
-    )
-    .expect("register target peer interaction authority");
-    runtime.install_peer_request_response_authority(
-        meerkat_comms::PeerRequestResponseAuthority::new(
-            Arc::new(meerkat_runtime::handles::RuntimePeerInteractionHandle::new(
-                Arc::clone(&dsl),
-            )),
-            Arc::new(meerkat_runtime::handles::RuntimeInteractionStreamHandle::new(dsl)),
-        ),
-    );
-
-    let spawned = adapter
-        .maybe_spawn_comms_drain(
-            &session_id,
-            true,
-            Some(runtime.clone() as Arc<dyn meerkat_core::agent::CommsRuntime>),
-        )
-        .await
-        .expect("update_peer_ingress_context must succeed");
-    assert!(spawned, "target must run production comms_drain");
-
-    ProductionExternalTcpTarget {
-        binding: RuntimeBinding::External {
-            peer_id,
-            address,
-            bootstrap_token: Some(bootstrap_token.into()),
-            pubkey,
-        },
-        adapter,
-        session_id,
-        runtime,
-    }
 }
 
 async fn wait_for_run_terminal(handle: &MobHandle, run_id: &meerkat_mob::RunId) -> MobRun {
@@ -2985,6 +2878,174 @@ fn assert_completed_without_failures(run: &MobRun, label: &str) {
     );
 }
 
+/// Phase 4 §9/§10.4 — route-install obligations are RETAINED across a
+/// member-host partition and drained by the explicit retry verb once the
+/// host returns at the same identity/address over its durable truth.
+///
+/// Deterministic local-resource row (no live providers): real host-daemon
+/// composition over real loopback TCP; the partition is a full daemon
+/// quiesce with durable truth retained (`HostDaemonFixture::partition`).
+/// The deterministic T-W1..T-W4 rows in `cross_host_wiring.rs` remain the
+/// regression gate; this row pins the §9 partition observable end to end.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "lane:e2e-system"]
+async fn e2e_mob_host_partition_retains_route_install_obligations() {
+    const CONVERGE_WAIT: Duration = Duration::from_secs(60);
+    async fn wait_for<F, Fut>(what: &str, mut predicate: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        tokio::time::timeout(CONVERGE_WAIT, async {
+            loop {
+                if predicate().await {
+                    return;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture = spawn_host_daemon_fixture(
+        HostFixtureOptions::named("partition-route-installs-host-b").with_member_build(),
+    )
+    .await
+    .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("e2e-partition-route-installs").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let mob_id = controlling.mob_id.to_string();
+
+    controlling
+        .handle
+        .spawn_spec(SpawnMemberSpec::new("worker", "a1"))
+        .await
+        .expect("spawn local a1");
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 materializes on host B");
+
+    // Positive control: a live-host wire converges with no obligations.
+    controlling
+        .handle
+        .wire(AgentIdentity::from("a1"), AgentIdentity::from("b2"))
+        .await
+        .expect("live-host wire converges");
+    let installs = controlling
+        .handle
+        .route_installs()
+        .await
+        .expect("route installs projection");
+    assert!(
+        installs.complete && installs.outstanding.is_empty(),
+        "no outstanding obligations against the live host: {installs:?}"
+    );
+    let b2_row = fixture
+        .host_binding_record(&mob_id)
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row");
+
+    // PARTITION: quiesce the daemon, retaining durable truth + address.
+    let partitioned = fixture.partition().await;
+
+    // A cross-host wire during the partition commits the edge (Ok — fail
+    // closed, never fail quiet) and RETAINS the install obligation.
+    controlling
+        .handle
+        .spawn_spec(SpawnMemberSpec::new("worker", "a2"))
+        .await
+        .expect("spawn local a2 while partitioned");
+    controlling
+        .handle
+        .wire(AgentIdentity::from("a2"), AgentIdentity::from("b2"))
+        .await
+        .expect("wire during the partition commits the edge and records the obligation");
+    let installs = controlling
+        .handle
+        .route_installs()
+        .await
+        .expect("route installs projection");
+    assert!(
+        !installs.complete,
+        "the partitioned install must stay outstanding: {installs:?}"
+    );
+    assert!(
+        installs
+            .outstanding
+            .iter()
+            .any(|obligation| obligation.edge_a == "a2" && obligation.edge_b == "b2"),
+        "the obligation names the (a2, b2) edge: {installs:?}"
+    );
+    // Membership and the wiring graph are UNCHANGED by the partition.
+    let a2_entry = controlling
+        .handle
+        .get_member(&AgentIdentity::from("a2"))
+        .await
+        .expect("get a2")
+        .expect("a2 present");
+    assert!(
+        a2_entry.wired_to.contains(&AgentIdentity::from("b2")),
+        "the committed edge survives the partition"
+    );
+
+    // HEAL: the daemon returns at the same identity/address over its durable
+    // truth (boot revival recomposes b2; revived members hold no peer trust
+    // rows until the retry re-installs them).
+    let fixture = partitioned.restore().await;
+    controlling
+        .handle
+        .drive_route_installs()
+        .await
+        .expect("drive drains the retained obligation after the partition heals");
+    wait_for("route-install obligations to drain", || async {
+        let installs = controlling
+            .handle
+            .route_installs()
+            .await
+            .expect("route installs projection");
+        installs.complete && installs.outstanding.is_empty()
+    })
+    .await;
+
+    // The healed edge is usable: REAL delivery, receiver-acked.
+    let a2_session = controlling
+        .member_session_id(&AgentIdentity::from("a2"))
+        .await;
+    let a2_runtime = controlling.member_comms_runtime(&a2_session).await;
+    let b2_runtime = fixture.member_comms_runtime(&b2_row.session_id).await;
+    let b2_peer = b2_runtime.peer_id().expect("b2 peer id");
+    let a2_peer = a2_runtime.peer_id().expect("a2 peer id");
+    wait_for("b2's trust row for a2 to be installed", || async {
+        fixture
+            .member_trusts_peer(&b2_row.session_id, &a2_peer.to_string())
+            .await
+    })
+    .await;
+    let receipt = send_peer_text(&a2_runtime, b2_peer, "post-partition delivery")
+        .await
+        .expect("a2 -> b2 delivers after the partition heals");
+    assert!(
+        matches!(
+            receipt,
+            meerkat_core::SendReceipt::PeerMessageSent {
+                delivery: meerkat_core::comms::PeerDeliveryOutcome::Acked
+                    | meerkat_core::comms::PeerDeliveryOutcome::HandedOff,
+                ..
+            }
+        ),
+        "post-heal delivery must be receiver-acked, got {receipt:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
@@ -3026,7 +3087,9 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
     let target = spawn_production_external_tcp_target(&target_peer_name).await;
     let target_address = match &target.binding {
         RuntimeBinding::External { address, .. } => address.clone(),
-        RuntimeBinding::Session => panic!("target binding must be external"),
+        RuntimeBinding::Session | RuntimeBinding::HostMaterialized { .. } => {
+            panic!("target binding must be external")
+        }
     };
     assert!(
         target_address.starts_with("tcp://127.0.0.1:"),

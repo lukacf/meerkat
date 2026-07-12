@@ -35,6 +35,7 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<&T> {
 pub mod approval_lifecycle;
 pub mod auth_machine;
 pub mod meerkat_machine;
+pub mod mob_host_binding_authority;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
@@ -55,6 +56,7 @@ pub struct MachineSchemaMetadata {
     pub runtime_internal_inputs: Vec<InputVariantId>,
     pub command_plans: Vec<CommandPlanSchema>,
     pub ci_step_limit: Option<u32>,
+    pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
 }
 
 impl MachineSchemaMetadata {
@@ -63,11 +65,24 @@ impl MachineSchemaMetadata {
         schema.runtime_internal_inputs = self.runtime_internal_inputs;
         schema.command_plans = self.command_plans;
         schema.ci_step_limit = self.ci_step_limit;
+        schema.deep_domain_overrides = self.deep_domain_overrides;
         schema
     }
 
     pub fn with_ci_step_limit(mut self, ci_step_limit: u32) -> Self {
         self.ci_step_limit = Some(ci_step_limit);
+        self
+    }
+
+    /// Deep-profile TLC sample-cardinality override for one generated
+    /// CONSTANT domain (model-checker configuration, not vocabulary).
+    pub fn with_deep_domain_override(
+        mut self,
+        domain: impl Into<String>,
+        cardinality: usize,
+    ) -> Self {
+        self.deep_domain_overrides
+            .insert(domain.into(), cardinality);
         self
     }
 }
@@ -96,6 +111,9 @@ pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgrap
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
 pub const WORK_ATTENTION_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::work_attention_lifecycle";
+pub const MOB_HOST_BINDING_AUTHORITY_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const MOB_HOST_BINDING_AUTHORITY_PRODUCTION_RUST_MODULE: &str =
+    "machines::mob_host_binding_authority";
 
 fn with_production_rust_binding(
     mut schema: MachineSchema,
@@ -186,6 +204,7 @@ fn machine_schema_metadata(
         runtime_internal_inputs,
         command_plans: Vec::new(),
         ci_step_limit: None,
+        deep_domain_overrides: std::collections::BTreeMap::new(),
     }
 }
 
@@ -418,6 +437,37 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
                     ],
                 },
             ],
+        },
+        CommandPlanSchema {
+            name: "AuthorizedInteractionTerminalOutboxAdoption".to_owned(),
+            authority_type: "AuthorizedInteractionTerminalOutboxAdoption".to_owned(),
+            source_inputs: vec![input_variant_id(
+                "AuthorizeInteractionTerminalOutboxAdoption",
+            )],
+            source_signals: vec![],
+            transitions: completion_result_phases
+                .iter()
+                .map(|phase| {
+                    transition_id_owned(format!(
+                        "AuthorizeInteractionTerminalOutboxAdoption{phase}"
+                    ))
+                })
+                .collect(),
+            effects: vec![effect_variant_id(
+                "InteractionTerminalOutboxAdoptionAuthorized",
+            )],
+            effect_closures: vec![EffectClosureSchema {
+                effect: effect_variant_id("InteractionTerminalOutboxAdoptionAuthorized"),
+                authority_type: "AuthorizedInteractionTerminalOutboxAdoption".to_owned(),
+                closure_policy: "DurableOutboxBindingAdoption".to_owned(),
+                lifecycle: vec![
+                    "Authorized".to_owned(),
+                    "Attempted".to_owned(),
+                    "Realized".to_owned(),
+                    "Failed".to_owned(),
+                    "Abandoned".to_owned(),
+                ],
+            }],
         },
         CommandPlanSchema {
             name: "AuthorizedRuntimeCompletionResultClosure".to_owned(),
@@ -808,6 +858,138 @@ pub fn session_persistence_version_authority_schema_metadata() -> MachineSchemaM
     )
 }
 
+runtime_internal_inputs!(
+    MobHostBindingAuthorityRuntimeInternalInput,
+    MOB_HOST_BINDING_AUTHORITY_RUNTIME_INTERNAL_INPUTS,
+    mob_host_binding_authority::MobHostBindingAuthorityInputVariant,
+    [
+        // Host bind/rebind/revoke + generic host-addressed admission: the host
+        // comms acceptor observes envelope facts and feeds them typed; the
+        // authority adjudicates (plan §6.3, A11).
+        ResolveHostBind,
+        ResolveHostRebind,
+        RevokeHostBinding,
+        ResolveHostCommandAdmission,
+        // Materialize dedup/preflight adjudication + success recorder driven
+        // by the materialize executor (§14 R7/R8).
+        ResolveMaterializeAdmission,
+        ResolveMaterializePreflight,
+        RecordMaterializedMember,
+        // Release admission mirror + disposal recorder (§19.L3).
+        ResolveReleaseAdmission,
+        RecordMemberRelease,
+        // Turn-outcome journal recorder (§18 O2).
+        RecordTurnOutcome,
+        CancelTrackedInput,
+        CompleteTrackedInputCancel,
+    ]
+);
+
+/// Non-canonical scoped-authority schema (plan §21.5): the member host's
+/// mob-keyed binding/admission/dedup authority. Registered for production-
+/// schema parity via `meerkat-mob/tests/mob_host_binding_authority.rs`
+/// (`production_schema_matches_catalog_schema`), not for canonical gates.
+pub fn dsl_mob_host_binding_authority_machine() -> MachineSchema {
+    mob_host_binding_authority_schema_metadata()
+        .attach_to(mob_host_binding_authority::MobHostBindingAuthorityState::schema())
+}
+
+pub fn dsl_mob_host_binding_authority_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_mob_host_binding_authority_machine(),
+        MOB_HOST_BINDING_AUTHORITY_PRODUCTION_RUST_CRATE,
+        MOB_HOST_BINDING_AUTHORITY_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn mob_host_binding_authority_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string("MobId"),
+            NamedTypeBinding::string("AgentIdentity"),
+            NamedTypeBinding::string("SessionId"),
+            NamedTypeBinding::string("InputId"),
+            NamedTypeBinding::u64("Generation"),
+            NamedTypeBinding::u64("FenceToken"),
+            NamedTypeBinding::type_path(
+                "PeerId",
+                "crate::catalog::dsl::mob_host_binding_authority::PeerId",
+            ),
+            NamedTypeBinding::type_path(
+                "PeerSigningKey",
+                "crate::catalog::dsl::mob_host_binding_authority::PeerSigningKey",
+            ),
+            NamedTypeBinding::type_path_struct(
+                "MemberKey",
+                "crate::catalog::dsl::mob_host_binding_authority::MemberKey",
+                vec![
+                    TypePathStructField::named("mob_id", "MobId"),
+                    TypePathStructField::named("agent_identity", "AgentIdentity"),
+                ],
+            ),
+            // DEC-5: the turn journal key is mob-keyed.
+            NamedTypeBinding::type_path_struct(
+                "TurnKey",
+                "crate::catalog::dsl::mob_host_binding_authority::TurnKey",
+                vec![
+                    TypePathStructField::named("mob_id", "MobId"),
+                    TypePathStructField::named("agent_identity", "AgentIdentity"),
+                    TypePathStructField::named("generation", "Generation"),
+                    TypePathStructField::named("fence_token", "FenceToken"),
+                    TypePathStructField::named("input_id", "InputId"),
+                ],
+            ),
+            NamedTypeBinding::string_enum("HostBindingPhase", &["Bound"]),
+            NamedTypeBinding::string_enum(
+                "HostAdmissionRejectKind",
+                &[
+                    "NotBound",
+                    "StaleSupervisor",
+                    "SenderMismatch",
+                    "InvalidBootstrapToken",
+                    "AddressMismatch",
+                    "StaleFence",
+                    "AlreadyBound",
+                    "Unsupported",
+                    "TurnDirectiveUnsupported",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MaterializeRejectKind",
+                &[
+                    "NotBound",
+                    "StaleFence",
+                    "SpecDigestMismatch",
+                    "ModelUnresolvable",
+                    "AuthBindingUnresolvable",
+                    "EnvKeysMissing",
+                    "McpCommandMissing",
+                    "RealmBackendUnavailable",
+                    "MemoryStoreUnavailable",
+                    "EngineProtocolUnsupported",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberSessionDisposal",
+                &[
+                    "Archived",
+                    "RuntimeReleasedOnlyHostOwned",
+                    "RuntimeReleasedOnlyNoDurableSessions",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "FlowTurnOutcomeKind",
+                &["Completed", "Failed", "Canceled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "TrackedInputCancelKind",
+                &["NoEffect", "Cancelling", "Cancelled"],
+            ),
+        ],
+        input_variant_ids(MOB_HOST_BINDING_AUTHORITY_RUNTIME_INTERNAL_INPUTS),
+    )
+}
+
 pub fn dsl_meerkat_machine_production_schema() -> MachineSchema {
     with_production_rust_binding(
         dsl_meerkat_machine(),
@@ -1165,7 +1347,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveOpenAdmissionRejection",
-                &["AlreadyBound", "ChannelAlreadyBound"],
+                &["AlreadyBound", "ChannelAlreadyBound", "LifecycleClosed"],
             ),
             NamedTypeBinding::string_enum("LiveRefreshPublicStatus", &["Queued"]),
             NamedTypeBinding::string_enum("LiveClosePublicStatus", &["Closed"]),
@@ -2062,6 +2244,7 @@ runtime_internal_inputs!(
     [
         AbandonInput,
         AbandonLiveOpenAdmission,
+        AbortCancelAfterBoundaryDispatch,
         AbortOp,
         AcknowledgeTerminal,
         AddDirectPeerEndpoint,
@@ -2089,6 +2272,7 @@ runtime_internal_inputs!(
         BoundaryComplete,
         BoundaryContinue,
         BudgetExhausted,
+        CallbackPending,
         CancelNow,
         CancelOp,
         CancelRun,
@@ -2229,6 +2413,7 @@ runtime_internal_inputs!(
         AdvanceRuntimeInjectedCompletionCursor,
         AdvanceRuntimeObservedCompletionCursor,
         AuthorizeDeferredSessionMachineArchivedResume,
+        AuthorizeInteractionTerminalOutboxAdoption,
         AuthorizeStoredInputStateSeed,
         AuthorizeSupervisorMobPeerOverlay,
         BeginDeferredSessionArchive,
@@ -2681,7 +2866,12 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "SpawnExecPhase",
-                &["Opened", "MembershipCommitted", "Activated"],
+                &[
+                    "Opened",
+                    "MaterializePending",
+                    "MembershipCommitted",
+                    "Activated",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "LoopIterationReducerCommandKind",
@@ -2727,6 +2917,8 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MobLifecycleJournalKind",
                 &[
                     "Completed",
+                    "Stopped",
+                    "Resumed",
                     "Destroying",
                     "DestroyStorageFinalizing",
                     "MemberSpawned",
@@ -2736,7 +2928,9 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RemoteMemberRuntimeRetired",
                     "RemoteMemberSupervisorRevoked",
                     "MemberRetired",
+                    "RespawnTopologyAbandoned",
                     "Reset",
+                    "MemberRetirementStarted",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -2764,7 +2958,33 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MobRemoteMemberRuntimeTerminality",
                 &["NonTerminal", "Terminal"],
             ),
-            NamedTypeBinding::string_enum("MobSpawnMemberAdmissionKind", &["Denied", "Allowed"]),
+            NamedTypeBinding::string_enum(
+                "MobSpawnMemberAdmissionKind",
+                &[
+                    "Denied",
+                    "Allowed",
+                    "NonPortableRustBundles",
+                    "NonPortablePerSpawnExternalTools",
+                    "NonPortableMobDefaultExternalTools",
+                    "NonPortableDefaultLlmClientOverride",
+                    "NonPortableHostSurfaceMcpAllowlist",
+                    "NonPortableInheritedToolFilter",
+                    "NonPortableWorkgraphTools",
+                    "SecretBearingShellEnv",
+                    "SecretBearingMcpStdioEnv",
+                    "SecretBearingMcpHttpHeaders",
+                    "MissingHostCapabilityAutonomousMembers",
+                    "MissingHostCapabilityDurableSessions",
+                    "MissingHostCapabilityTrackedInputCancel",
+                    "MissingHostCapabilityProtocolV4",
+                    "MissingHostCapabilityMemoryStore",
+                    "MissingHostCapabilityMcp",
+                    "HostNotBound",
+                    "OwnerBridgeSessionAbsent",
+                    "LaunchModePlacementMismatch",
+                    "ResolvedSpecDigestAbsent",
+                ],
+            ),
             NamedTypeBinding::string_enum("MobCurrentMobAdmissionKind", &["Denied", "Allowed"]),
             NamedTypeBinding::string_enum("MobSpawnToolAdmissionKind", &["Denied", "Allowed"]),
             NamedTypeBinding::string_enum("MobCreateMobAdmissionKind", &["Denied", "Allowed"]),
@@ -2970,6 +3190,170 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "PeerSigningKey",
                 "crate::catalog::dsl::mob_machine::PeerSigningKey",
             ),
+            // Multi-host mobs (§6.1/§6.2/§6.5/§15/§18) named types.
+            NamedTypeBinding::type_path("HostId", "crate::catalog::dsl::mob_machine::HostId"),
+            NamedTypeBinding::u64("HostBindingGeneration"),
+            NamedTypeBinding::type_path_struct(
+                "HostBindingGenerationTombstone",
+                "crate::catalog::dsl::mob_machine::HostBindingGenerationTombstone",
+                vec![
+                    TypePathStructField::named("host_id", "HostId"),
+                    TypePathStructField::named("binding_generation", "HostBindingGeneration"),
+                ],
+            ),
+            NamedTypeBinding::string("PlacedSpawnId"),
+            NamedTypeBinding::string_enum(
+                "PlacedSpawnCarrierExpectedPhase",
+                &["Pending", "Committed"],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "PlacedCarrierCleanupObligation",
+                "crate::catalog::dsl::mob_machine::PlacedCarrierCleanupObligation",
+                vec![
+                    TypePathStructField::named("agent_identity", "AgentIdentity"),
+                    TypePathStructField::named("spawn_id", "PlacedSpawnId"),
+                    TypePathStructField::named("generation", "Generation"),
+                    TypePathStructField::named("fence_token", "FenceToken"),
+                    TypePathStructField::string("provision_operation_id"),
+                    TypePathStructField::named("operation_owner_session_id", "SessionId"),
+                    TypePathStructField::named("expected_phase", "PlacedSpawnCarrierExpectedPhase"),
+                ],
+            ),
+            NamedTypeBinding::string_enum("HostBindPhase", &["Requested", "Bound"]),
+            NamedTypeBinding::type_path(
+                "LiveWsEndpointUrl",
+                "crate::catalog::dsl::mob_machine::LiveWsEndpointUrl",
+            ),
+            NamedTypeBinding::type_path(
+                "PrincipalId",
+                "crate::catalog::dsl::mob_machine::PrincipalId",
+            ),
+            // String binding (not type_path): MeerkatMachine already declares
+            // `InputId` as String and the meerkat_mob_seam composition requires
+            // one binding per name — it is the same delivery-input-id fact
+            // (SessionId follows the same newtype-in-tail/string-in-metadata
+            // pattern).
+            NamedTypeBinding::string("InputId"),
+            NamedTypeBinding::string_enum(
+                "ControlScope",
+                &[
+                    "List",
+                    "ReadHistory",
+                    "SubscribeEvents",
+                    "SendCommand",
+                    "Cancel",
+                    "Retire",
+                    "WireTopology",
+                    "Live",
+                    "AdminHost",
+                    "AdminGrants",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberSessionDisposal",
+                &[
+                    "Archived",
+                    "RuntimeReleasedOnlyHostOwned",
+                    "RuntimeReleasedOnlyNoDurableSessions",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "FlowStepDispatchKind",
+                &[
+                    "Local",
+                    "RemoteTurnDirective",
+                    "RejectedOverlayAutonomous",
+                    "RejectedHostIncapable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberOperatorRejectKind",
+                &[
+                    "UnknownIdentity",
+                    "SenderKeyMismatch",
+                    "StaleGeneration",
+                    "StaleFence",
+                    "StaleSession",
+                    "StaleHost",
+                    "StaleHostBindingGeneration",
+                    "HostRevoked",
+                    "NoPlacement",
+                ],
+            ),
+            NamedTypeBinding::string_enum("RouteObligationKind", &["Install", "Remove"]),
+            NamedTypeBinding::u64("RemoteTurnDispatchSequence"),
+            NamedTypeBinding::type_path_struct(
+                "RouteInstallObligation",
+                "crate::catalog::dsl::mob_machine::RouteInstallObligation",
+                vec![
+                    TypePathStructField::named("edge", "WiringEdge"),
+                    TypePathStructField::named("host", "HostId"),
+                    TypePathStructField::named("kind", "RouteObligationKind"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "RemoteTurnObligation",
+                "crate::catalog::dsl::mob_machine::RemoteTurnObligation",
+                vec![
+                    TypePathStructField::named("agent_identity", "AgentIdentity"),
+                    TypePathStructField::named("host_id", "HostId"),
+                    TypePathStructField::named("host_binding_generation", "HostBindingGeneration"),
+                    TypePathStructField::named("member_session_id", "SessionId"),
+                    TypePathStructField::named("generation", "Generation"),
+                    TypePathStructField::named("fence_token", "FenceToken"),
+                    TypePathStructField::named("dispatch_sequence", "RemoteTurnDispatchSequence"),
+                    TypePathStructField::named("input_id", "InputId"),
+                    TypePathStructField::named("run_id", "RunId"),
+                    TypePathStructField::named("step_id", "StepId"),
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PlacedCompletionLifecycleIntentKind",
+                &["Stop", "Reset", "Complete", "RetireAll", "Destroy"],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "PlacedCompletionObligation",
+                "crate::catalog::dsl::mob_machine::PlacedCompletionObligation",
+                vec![
+                    TypePathStructField::named("agent_identity", "AgentIdentity"),
+                    TypePathStructField::named("host_id", "HostId"),
+                    TypePathStructField::named("host_binding_generation", "HostBindingGeneration"),
+                    TypePathStructField::named("member_session_id", "SessionId"),
+                    TypePathStructField::named("generation", "Generation"),
+                    TypePathStructField::named("fence_token", "FenceToken"),
+                    TypePathStructField::named("dispatch_sequence", "RemoteTurnDispatchSequence"),
+                    TypePathStructField::named("input_id", "InputId"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "PlacedKickoffObligation",
+                "crate::catalog::dsl::mob_machine::PlacedKickoffObligation",
+                vec![
+                    TypePathStructField::named("agent_identity", "AgentIdentity"),
+                    TypePathStructField::named("host_id", "HostId"),
+                    TypePathStructField::named("host_binding_generation", "HostBindingGeneration"),
+                    TypePathStructField::named("member_session_id", "SessionId"),
+                    TypePathStructField::named("generation", "Generation"),
+                    TypePathStructField::named("fence_token", "FenceToken"),
+                    TypePathStructField::named("input_id", "InputId"),
+                    TypePathStructField::string("objective_id"),
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PlacedKickoffOutcomeKind",
+                &[
+                    "Started",
+                    "CallbackPending",
+                    "Failed",
+                    "Cancelled",
+                    "RejectedNoEffect",
+                    "Disposed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PlacedKickoffClosureKind",
+                &["Acknowledged", "Disposed", "RejectedNoEffect"],
+            ),
             // Mob coordination board types (folded from the former standalone
             // MobCoordinationLifecycleAuthorityMachine).
             NamedTypeBinding::string("WorkIntentId"),
@@ -3000,7 +3384,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
         ],
         input_variant_ids(MOB_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
-    .with_ci_step_limit(1);
+    .with_ci_step_limit(1)
+    // ADJ-P4-5: the plan's 2 hosts x 3 members deep-verification bound —
+    // deep-profile model-checker configuration, not machine vocabulary.
+    .with_deep_domain_override("AgentIdentityValues", 3);
     metadata.command_plans = mob_spawn_command_plans();
     metadata
 }
@@ -3020,6 +3407,11 @@ runtime_internal_inputs!(
         BeginSpawnExec,
         CommitSpawnActivation,
         AbortSpawnExec,
+        // Exact placed-carrier deletion is a runtime-owned recovery/teardown
+        // protocol. Public commands cannot authorize or resolve the persisted
+        // operation/phase witness directly.
+        AuthorizePlacedCarrierCleanup,
+        ResolvePlacedCarrierCleanup,
         ClassifyFlowRunTerminality,
         ClassifyFlowStepTerminality,
         ClassifyFlowFrameTerminalStatus,
@@ -3089,6 +3481,7 @@ runtime_internal_inputs!(
         AuthorizeMemberTrustCleanup,
         AuthorizeMemberTrustCleanupObserved,
         AuthorizeMemberEndpointMigrationTrustCleanup,
+        AuthorizeRetiringMemberPeerOverlayCleanup,
         AuthorizeRetiringMemberTrustCleanupObserved,
         CleanupRetiringMemberWiring,
         RestoreRetiringMemberWiring,
@@ -3106,6 +3499,47 @@ runtime_internal_inputs!(
         RecordPendingRecipientTrust,
         ResolvePendingRecipientTrust,
         RollbackPendingRecipientTrust,
+        // Multi-host mobs (§6/§15/§18): host bind lifecycle, materialization
+        // failure recording, route/turn obligations, grants, member-operator
+        // upcall admission, and flow-step dispatch classification are all
+        // driven by the runtime shell in phase 1 (surfaces land later).
+        BeginHostBind,
+        CommitHostBind,
+        HostRebound,
+        PromoteCommittedPlacedSpawnCarrierBinding,
+        RefreshHostCapabilities,
+        RevokeHost,
+        RecordMemberMaterializationFailure,
+        RecordRouteInstall,
+        AuthorizeRouteRemovalBeforeUnwire,
+        ResolveRouteInstall,
+        RollbackRouteInstall,
+        RecordRemoteTurnObligation,
+        AbortRemoteTurnObligation,
+        CommitRemoteTurnOutcome,
+        ResolveRemoteTurnObligation,
+        AcknowledgeRemoteTurnOutcome,
+        DisposeRemoteTurnObligation,
+        RecordPlacedCompletionObligation,
+        RequestPlacedCompletionCancellation,
+        ResolvePlacedCompletionOutcome,
+        ClosePlacedCompletionOutcome,
+        AcknowledgePlacedCompletionOutcome,
+        DisposePlacedCompletionOutcome,
+        BeginPlacedCompletionLifecycleQuiesce,
+        EndPlacedCompletionLifecycleQuiesce,
+        StartPlacedKickoff,
+        ResolvePlacedKickoffStarted,
+        ResolvePlacedKickoffCallbackPending,
+        ResolvePlacedKickoffFailed,
+        ResolvePlacedKickoffCancelled,
+        RejectPlacedKickoffBeforeAdmission,
+        AcknowledgePlacedKickoffOutcome,
+        DisposePlacedKickoffObligation,
+        GrantOperatorScopes,
+        RevokeOperatorScopes,
+        ResolveMemberOperatorAdmission,
+        ClassifyFlowStepDispatch,
         RecordCoordinationWorkIntent,
         RecordCoordinationResourceClaim,
         UpdateCoordinationWorkIntentStatus,

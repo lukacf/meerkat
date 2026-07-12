@@ -47,8 +47,8 @@ function expectWireBoolean(value: unknown, context: string): boolean {
 }
 
 function expectWireInteger(value: unknown, context: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw wireParseError(context, "expected integer");
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw wireParseError(context, "expected safe integer");
   }
   return value;
 }
@@ -106,28 +106,10 @@ export interface WireRunResult {
   schema_warnings?: Array<{ provider: string; path: string; message: string }>;
 }
 
-export interface WireProviderMeta {
-  provider: string;
-  [key: string]: unknown;
-}
-
 export interface WireToolResult {
   tool_use_id: string;
   content: WireToolResultContent;
   is_error?: boolean;
-}
-
-export interface WireSessionMessage {
-  role: string;
-  created_at: string;
-  kind?: string;
-  body?: string;
-  content?: WireContentInput;
-  stop_reason?: WireStopReason;
-  interaction_id?: string;
-  run_id?: string;
-  blocks?: WireAssistantBlock[];
-  results?: WireToolResult[];
 }
 
 export interface WireSessionHistory {
@@ -177,7 +159,7 @@ export interface McpStdioConfig {
 
 export interface McpHttpConfig {
   headers?: Record<string, string>;
-  transport?: McpHttpTransport;
+  transport?: McpHttpTransport | null;
   url: string;
 }
 
@@ -199,15 +181,15 @@ export interface McpRemoveParams {
 
 export interface McpReloadParams {
   persisted?: boolean;
-  server_name?: string;
+  server_name?: string | null;
   session_id: string;
 }
 
 export interface McpLiveOpResponse {
-  applied_at_turn?: number;
+  applied_at_turn?: number | null;
   operation: "add" | "remove" | "reload";
   persisted: boolean;
-  server_name?: string;
+  server_name?: string | null;
   session_id: string;
   status: "staged" | "applied" | "rejected";
 }
@@ -230,7 +212,7 @@ export interface SkillEntry {
   key: SkillKey;
   name: string;
   scope: SkillScope;
-  shadowed_by?: SkillSourceProvenance;
+  shadowed_by?: SkillSourceProvenance | null;
   source: SkillSourceProvenance;
 }
 
@@ -339,27 +321,27 @@ export interface CallbackToolDefinition {
 }
 
 export interface ConfigEnvelope {
-  backend?: string;
+  backend?: string | null;
   config: unknown;
   generation: number;
-  instance_id?: string;
-  realm_id?: string;
-  resolved_paths?: Record<string, unknown>;
+  instance_id?: string | null;
+  realm_id?: string | null;
+  resolved_paths?: Record<string, unknown> | null;
 }
 
 export interface ConfigPatchParams {
-  expected_generation?: number;
+  expected_generation?: number | null;
   patch?: unknown;
 }
 
 export interface ConfigWriteResult {
-  backend?: string;
+  backend?: string | null;
   config: unknown;
   generation: number;
-  instance_id?: string;
-  live_propagation?: WireLiveConfigPropagationReport;
-  realm_id?: string;
-  resolved_paths?: Record<string, unknown>;
+  instance_id?: string | null;
+  live_propagation?: WireLiveConfigPropagationReport | null;
+  realm_id?: string | null;
+  resolved_paths?: Record<string, unknown> | null;
 }
 
 export interface InterruptResult {
@@ -397,14 +379,14 @@ export interface WorkItemsResult {
 export type ConfigSetParams = Record<string, unknown>;
 
 export interface SessionExternalEventEnvelopeGenericJson {
-  blocks?: WireContentBlock[];
+  blocks?: WireContentBlock[] | null;
   event_type: string;
   kind: "generic_json";
   payload: unknown;
 }
 
 export interface SessionExternalEventEnvelopePeerResponseTerminal {
-  display_name?: PeerName;
+  display_name?: PeerName | null;
   kind: "peer_response_terminal";
   peer_id: PeerId;
   request_id: string;
@@ -433,7 +415,7 @@ export interface WireDeviceCompleteResultExpired {
 export interface WireDeviceCompleteResultReady {
   auth_binding: WireAuthBindingRef;
   binding_id: string;
-  expires_at?: string;
+  expires_at?: string | null;
   has_refresh_token: boolean;
   profile_id: string;
   provider: string;
@@ -449,7 +431,7 @@ export interface ApprovalDecideParams {
   approval_id: string;
   decision: "approve" | "deny";
   provenance?: unknown;
-  reason?: string;
+  reason?: string | null;
 }
 
 export interface ApprovalGetParams {
@@ -468,8 +450,8 @@ export interface ApprovalRecord {
   allowed_decisions: ("approve" | "deny")[];
   approval_id: string;
   created_at: string;
-  decision?: Record<string, unknown>;
-  expires_at?: string;
+  decision?: Record<string, unknown> | null;
+  expires_at?: string | null;
   metadata: Record<string, unknown>;
   owner: Record<string, unknown>;
   proposed_action: Record<string, unknown>;
@@ -484,7 +466,7 @@ export interface ApprovalRecord {
 
 export interface ApprovalRequestParams {
   allowed_decisions: ("approve" | "deny")[];
-  expires_at?: string;
+  expires_at?: string | null;
   metadata?: Record<string, unknown>;
   owner: Record<string, unknown>;
   proposed_action: Record<string, unknown>;
@@ -501,7 +483,7 @@ export interface ArchiveSessionParams {
 
 export interface ArtifactDownloadParams {
   artifact_id: string;
-  expected_media_type?: string;
+  expected_media_type?: string | null;
 }
 
 export interface ArtifactDownloadResult {
@@ -515,7 +497,7 @@ export interface ArtifactIdParams {
 
 export interface ArtifactListParams {
   label_equals?: Record<string, string>;
-  session_id?: string;
+  session_id?: string | null;
 }
 
 export interface ArtifactListResult {
@@ -525,14 +507,14 @@ export interface ArtifactListResult {
 export interface ArtifactRecord {
   artifact_id: string;
   artifact_type: "text" | "log" | "command_output" | "diff" | "patch" | "generated_file" | "test_report" | "screenshot" | "image" | "json" | "binary" | { other: string };
-  content_handle: Record<string, unknown>;
+  content_handle: BlobRef | Record<string, unknown>;
   created_at: string;
   handle: Record<string, unknown>;
-  hash?: string;
+  hash?: string | null;
   media_type: string;
   metadata?: Record<string, unknown>;
   owner?: Record<string, unknown>;
-  producer?: string;
+  producer?: string | null;
   provenance?: Record<string, string>;
   size_bytes: number;
   title: string;
@@ -540,7 +522,7 @@ export interface ArtifactRecord {
 
 export interface BindingIdParams {
   binding_id: string;
-  profile_id?: string;
+  profile_id?: string | null;
   realm_id: string;
 }
 
@@ -557,40 +539,40 @@ export interface BlobPayload {
 export interface CreateProfileParams {
   auth_method: string;
   binding_id: string;
-  profile_id?: string;
+  profile_id?: string | null;
   realm_id: string;
   secret: string;
 }
 
 export interface CreateScheduleRequest {
-  description?: string;
+  description?: string | null;
   labels?: Record<string, string>;
   misfire_policy?: Record<string, unknown>;
   missing_target_policy?: "skip" | "mark_misfired";
-  name?: string;
+  name?: string | null;
   overlap_policy?: "allow_concurrent" | "skip_if_running";
-  planning_horizon_days?: number;
-  planning_horizon_occurrences?: number;
+  planning_horizon_days?: number | null;
+  planning_horizon_occurrences?: number | null;
   target: Record<string, unknown>;
   trigger: Record<string, unknown>;
 }
 
 export interface DeferredCreateResult {
   session_id: string;
-  session_ref?: string;
+  session_ref?: string | null;
 }
 
 export interface DeviceCompleteParams {
   binding_id: string;
   device_code: string;
-  profile_id?: string;
+  profile_id?: string | null;
   provider: string;
   realm_id: string;
 }
 
 export interface DeviceStartParams {
   binding_id: string;
-  profile_id?: string;
+  profile_id?: string | null;
   provider: string;
   realm_id: string;
 }
@@ -600,18 +582,18 @@ export interface EventsLatestCursorParams {
 }
 
 export interface EventsLatestCursorResult {
-  contract_version: Record<string, unknown>;
+  contract_version: ContractVersion;
   cursor: Record<string, unknown>;
 }
 
 export interface EventsListSinceParams {
-  cursor?: Record<string, unknown>;
-  limit?: number;
+  cursor?: Record<string, unknown> | null;
+  limit?: number | null;
   scope: Record<string, unknown>;
 }
 
 export interface EventsListSinceResult {
-  contract_version: Record<string, unknown>;
+  contract_version: ContractVersion;
   events?: Record<string, unknown>[];
   from_cursor: Record<string, unknown>;
   has_more: boolean;
@@ -624,7 +606,7 @@ export interface EventsSnapshotParams {
 }
 
 export interface EventsSnapshotResult {
-  contract_version: Record<string, unknown>;
+  contract_version: ContractVersion;
   cursor: Record<string, unknown>;
   scope: Record<string, unknown>;
   snapshot: Record<string, unknown>;
@@ -634,34 +616,34 @@ export interface ForkSessionAtParams {
   message_index: number;
   running_behavior?: "reject";
   session_id: string;
-  tool_access_policy?: Record<string, unknown>;
+  tool_access_policy?: WireToolAccessPolicy | null;
 }
 
 export interface ForkSessionReplaceParams {
   message_index: number;
-  replacement: Record<string, unknown>;
+  replacement: WireTranscriptReplacement;
   running_behavior?: "reject";
   session_id: string;
-  tool_access_policy?: Record<string, unknown>;
+  tool_access_policy?: WireToolAccessPolicy | null;
 }
 
 export interface HelpRequest {
   execution_mode?: "explain_only" | "plan_execution";
-  max_tokens?: number;
-  model?: string;
-  prompt?: string;
-  provider?: string;
+  max_tokens?: number | null;
+  model?: string | null;
+  prompt?: string | null;
+  provider?: string | null;
   question: string;
 }
 
 export interface HelpResponse {
-  extraction_error?: Record<string, unknown>;
-  schema_warnings?: Record<string, unknown>[];
+  extraction_error?: Record<string, unknown> | null;
+  schema_warnings?: Record<string, unknown>[] | null;
   session_id: string;
-  session_ref?: string;
-  skill_diagnostics?: Record<string, unknown>;
+  session_ref?: string | null;
+  skill_diagnostics?: Record<string, unknown> | null;
   structured_output?: unknown;
-  terminal_cause_kind?: "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
+  terminal_cause_kind?: "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure" | null;
   text: string;
   tool_calls: number;
   turns: number;
@@ -670,9 +652,9 @@ export interface HelpResponse {
 
 export interface InjectSystemContextParams {
   content: Record<string, unknown>;
-  idempotency_key?: string;
+  idempotency_key?: string | null;
   session_id: string;
-  source?: string;
+  source?: string | null;
 }
 
 export interface InjectSystemContextResult {
@@ -684,15 +666,15 @@ export interface InterruptParams {
 }
 
 export interface ListSessionTranscriptRevisionsParams {
-  limit?: number;
-  offset?: number;
+  limit?: number | null;
+  offset?: number | null;
   session_id: string;
 }
 
 export interface ListSessionsParams {
-  labels?: Record<string, string>;
-  limit?: number;
-  offset?: number;
+  labels?: Record<string, string> | null;
+  limit?: number | null;
+  offset?: number | null;
 }
 
 export interface ListSessionsResult {
@@ -702,7 +684,7 @@ export interface ListSessionsResult {
 export interface LoginCompleteParams {
   binding_id: string;
   code: string;
-  profile_id?: string;
+  profile_id?: string | null;
   provider: string;
   realm_id: string;
   redirect_uri: string;
@@ -711,7 +693,7 @@ export interface LoginCompleteParams {
 
 export interface LoginStartParams {
   binding_id: string;
-  profile_id?: string;
+  profile_id?: string | null;
   provider: string;
   realm_id: string;
   redirect_uri: string;
@@ -719,14 +701,14 @@ export interface LoginStartParams {
 
 export interface ProvisionApiKeyParams {
   access_token: string;
-  binding_id?: string;
-  profile_id?: string;
-  realm_id?: string;
+  binding_id?: string | null;
+  profile_id?: string | null;
+  realm_id?: string | null;
 }
 
 export interface ReadSessionHistoryParams {
-  limit?: number;
-  offset?: number;
+  limit?: number | null;
+  offset?: number | null;
   session_id: string;
 }
 
@@ -735,8 +717,8 @@ export interface ReadSessionParams {
 }
 
 export interface ReadSessionTranscriptRevisionParams {
-  limit?: number;
-  offset?: number;
+  limit?: number | null;
+  offset?: number | null;
   revision: string;
   session_id: string;
 }
@@ -750,7 +732,7 @@ export interface SessionInputStateSelector {
 }
 
 export interface SessionInputStateResult {
-  state?: Record<string, unknown>;
+  state?: Record<string, unknown> | null;
 }
 
 export interface RealmIdParams {
@@ -758,44 +740,62 @@ export interface RealmIdParams {
 }
 
 export interface RestoreSessionTranscriptRevisionParams {
-  actor?: string;
-  expected_parent_revision?: string;
-  reason: Record<string, unknown>;
+  actor?: string | null;
+  expected_parent_revision?: string | null;
+  reason: TranscriptRewriteReason;
   revision: string;
   running_behavior?: "reject";
   session_id: string;
 }
 
 export interface RewriteSessionTranscriptParams {
-  actor?: string;
-  expected_parent_revision?: string;
-  reason: Record<string, unknown>;
-  replacement: Record<string, unknown>[];
+  actor?: string | null;
+  expected_parent_revision?: string | null;
+  reason: TranscriptRewriteReason;
+  replacement: TranscriptRewriteMessage[];
   running_behavior?: "reject";
-  selection: Record<string, unknown>;
+  selection: TranscriptRewriteSelection;
   session_id: string;
 }
 
 export interface RuntimeHostCapabilities {
-  contract_version: Record<string, unknown>;
-  features: Record<string, unknown>;
+  contract_version: ContractVersion;
+  features: RuntimeHostFeatureFlags;
+}
+
+export interface RuntimeHostFeatureFlags {
+  approvals: boolean;
+  artifacts: boolean;
+  blobs: boolean;
+  comms: boolean;
+  event_replay: boolean;
+  external_members: boolean;
+  mcp_live: boolean;
+  mobs: boolean;
+  multi_host_mobs?: boolean;
+  runtime_backed_sessions: boolean;
+  schedules: boolean;
+  secure_remote_rpc: boolean;
+  session_events: boolean;
+  session_streams: boolean;
+  skills: boolean;
 }
 
 export interface RuntimeHostHealth {
   checks?: Record<string, "ok" | "degraded" | "unhealthy">;
-  contract_version: Record<string, unknown>;
+  contract_version: ContractVersion;
   status: "ok" | "degraded" | "unhealthy";
 }
 
 export interface RuntimeHostInfo {
   capabilities: RuntimeHostCapabilities;
-  contract_version: Record<string, unknown>;
+  contract_version: ContractVersion;
   endpoints: Record<string, unknown>;
   health: RuntimeHostHealth;
   host_id: string;
   host_id_scope: "process" | "realm_instance";
   placement_labels?: Record<string, string>;
-  policy_profile_summary?: string;
+  policy_profile_summary?: string | null;
   process_name: string;
   process_version: string;
   realm: Record<string, unknown>;
@@ -803,16 +803,16 @@ export interface RuntimeHostInfo {
 
 export interface Schedule {
   created_at_utc: string;
-  deleted_at_utc?: string;
-  description?: string;
+  deleted_at_utc?: string | null;
+  description?: string | null;
   labels?: Record<string, string>;
   misfire_policy: Record<string, unknown>;
   missing_target_policy: "skip" | "mark_misfired";
-  name?: string;
+  name?: string | null;
   next_occurrence_ordinal: number;
   overlap_policy: "allow_concurrent" | "skip_if_running";
   phase: "active" | "paused" | "deleted";
-  planning_cursor_utc?: string;
+  planning_cursor_utc?: string | null;
   planning_horizon_days: number;
   planning_horizon_occurrences: number;
   revision: number;
@@ -835,12 +835,12 @@ export interface ScheduleToolsResult {
 export interface SessionForkResult {
   message_count: number;
   session_id: string;
-  session_ref?: string;
+  session_ref?: string | null;
   source_session_id: string;
 }
 
 export interface SessionPeerResponseTerminalParams {
-  display_name?: PeerName;
+  display_name?: PeerName | null;
   peer_id: PeerId;
   request_id: string;
   result: unknown;
@@ -870,13 +870,13 @@ export interface WireProvisionApiKeyResult {
 export interface WireSessionTranscriptRevision {
   has_more: boolean;
   head_revision: string;
-  limit?: number;
+  limit?: number | null;
   message_count: number;
   messages: Record<string, unknown>[];
   offset: number;
   revision: string;
   session_id: string;
-  session_ref?: string;
+  session_ref?: string | null;
 }
 
 export interface WireSessionTranscriptRevisionList {
@@ -935,25 +935,25 @@ export interface MobLifecycleResult {
 }
 
 export interface MobSpawnParams {
-  additional_instructions?: string[];
+  additional_instructions?: string[] | null;
   agent_identity: string;
-  auth_binding?: WireAuthBindingRef;
-  auto_wire_parent?: boolean;
-  backend?: WireMobBackendKind;
-  binding?: WireRuntimeBinding;
-  budget_split_policy?: WireBudgetSplitPolicy;
+  auth_binding?: WireAuthBindingRef | null;
+  auto_wire_parent?: boolean | null;
+  backend?: WireMobBackendKind | null;
+  binding?: WireRuntimeBinding | null;
   context?: unknown;
-  inherited_tool_filter?: WireToolFilter;
-  initial_message?: WireContentInput;
-  labels?: Record<string, string>;
-  launch_mode?: WireMemberLaunchMode;
+  inherited_tool_filter?: WireToolFilter | null;
+  initial_message?: WireContentInput | null;
+  labels?: Record<string, string> | null;
+  launch_mode?: WireMemberLaunchMode | null;
   mob_id: string;
-  model_override?: string;
-  override_profile?: WireMobProfile;
+  model_override?: string | null;
+  override_profile?: WireMobProfile | null;
+  placement?: string | null;
   profile: string;
-  runtime_mode?: WireMobRuntimeMode;
-  shell_env?: Record<string, string>;
-  tool_access_policy?: WireToolAccessPolicy;
+  runtime_mode?: WireMobRuntimeMode | null;
+  shell_env?: Record<string, string> | null;
+  tool_access_policy?: WireToolAccessPolicy | null;
 }
 
 export interface MobSpawnResult {
@@ -963,16 +963,17 @@ export interface MobSpawnResult {
 }
 
 export interface MobSpawnSpecParams {
-  additional_instructions?: string[];
+  additional_instructions?: string[] | null;
   agent_identity: string;
-  auth_binding?: WireAuthBindingRef;
-  backend?: WireMobBackendKind;
+  auth_binding?: WireAuthBindingRef | null;
+  backend?: WireMobBackendKind | null;
   context?: unknown;
-  initial_message?: WireContentInput;
-  labels?: Record<string, string>;
-  model_override?: string;
+  initial_message?: WireContentInput | null;
+  labels?: Record<string, string> | null;
+  model_override?: string | null;
+  placement?: WireHostRef | null;
   profile: string;
-  runtime_mode?: WireMobRuntimeMode;
+  runtime_mode?: WireMobRuntimeMode | null;
 }
 
 export interface MobSpawnManyParams {
@@ -1006,7 +1007,7 @@ export interface MobSpawnReceiptWire {
 
 export interface MobMemberListEntryWire {
   agent_identity: string;
-  error?: string;
+  error?: string | null;
   is_final: boolean;
   labels?: Record<string, string>;
   member_ref: WireMemberRef;
@@ -1037,19 +1038,19 @@ export interface WireMobToolConfig {
 }
 
 export interface WireMobProfile {
-  auto_compact_threshold?: number;
-  backend?: WireMobBackendKind;
+  auto_compact_threshold?: number | null;
+  backend?: WireMobBackendKind | null;
   external_addressable?: boolean;
-  image_generation_provider?: Provider;
-  max_inline_peer_notifications?: number;
+  image_generation_provider?: Provider | null;
+  max_inline_peer_notifications?: number | null;
   model: string;
   output_schema?: unknown;
   peer_description?: string;
-  provider?: Provider;
-  provider_params?: unknown;
+  provider?: Provider | null;
+  provider_params?: unknown | null;
   resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
-  self_hosted_server_id?: string;
+  self_hosted_server_id?: string | null;
   skills?: string[];
   tools?: WireMobToolConfig;
 }
@@ -1058,7 +1059,7 @@ export interface WireMobRun {
   flow_id: string;
   mob_id: string;
   run_id: string;
-  status: "pending" | "running" | "completed" | "failed" | "canceled";
+  status: WireMobRunStatus;
 }
 
 export interface WireMobRunResultEnvelope {
@@ -1067,24 +1068,18 @@ export interface WireMobRunResultEnvelope {
   outputs?: Record<string, unknown>;
   result?: unknown;
   run_id: string;
-  status: "pending" | "running" | "completed" | "failed" | "canceled";
-}
-
-export interface WireMobRunStatus {
-}
-
-export interface WirePeerConnectivity {
+  status: WireMobRunStatus;
 }
 
 export interface WirePeerConnectivitySnapshot {
   reachable_peer_count: number;
   unknown_peer_count: number;
-  unreachable_peers?: Record<string, unknown>[];
+  unreachable_peers?: WireUnreachablePeer[];
 }
 
 export interface WireUnreachablePeer {
   peer: string;
-  reason?: string;
+  reason?: string | null;
 }
 
 export interface WireMobError {
@@ -1126,7 +1121,7 @@ export interface MobRetireResult {
 
 export interface MobRespawnParams {
   agent_identity: string;
-  initial_message?: WireContentInput;
+  initial_message?: WireContentInput | null;
   mob_id: string;
 }
 
@@ -1181,7 +1176,7 @@ export interface MobMemberSendParams {
   content: WireContentInput;
   handling_mode?: "queue" | "steer";
   mob_id: string;
-  render_metadata?: Record<string, unknown>;
+  render_metadata?: Record<string, unknown> | null;
 }
 
 export interface MobMemberSendResult {
@@ -1195,7 +1190,7 @@ export interface MobIngressInteractionParams {
   content: WireContentInput;
   handling_mode?: "queue" | "steer";
   mob_id: string;
-  render_metadata?: Record<string, unknown>;
+  render_metadata?: Record<string, unknown> | null;
   spec: MobMemberSpecWire;
 }
 
@@ -1211,9 +1206,9 @@ export interface MobIngressInteractionResult {
 
 export interface MobAppendSystemContextParams {
   agent_identity: string;
-  idempotency_key?: string;
+  idempotency_key?: string | null;
   mob_id: string;
-  source?: string;
+  source?: string | null;
   text: string;
 }
 
@@ -1229,10 +1224,10 @@ export interface MobFlowsResult {
 }
 
 export interface MobRunParams {
-  flow_id?: string;
+  flow_id?: string | null;
   mob_id: string;
   params?: unknown;
-  prompt?: string;
+  prompt?: string | null;
 }
 
 export interface MobFlowRunParams {
@@ -1251,7 +1246,7 @@ export interface MobFlowStatusParams {
 }
 
 export interface MobFlowStatusResult {
-  run?: WireMobRun;
+  run?: WireMobRun | null;
 }
 
 export interface MobRunResultParams {
@@ -1260,7 +1255,7 @@ export interface MobRunResultParams {
 }
 
 export interface MobRunResult {
-  run?: WireMobRunResultEnvelope;
+  run?: WireMobRunResultEnvelope | null;
 }
 
 export interface MobFlowCancelParams {
@@ -1273,33 +1268,33 @@ export interface MobFlowCancelResult {
 }
 
 export interface MobSpawnHelperParams {
-  agent_identity?: string;
-  auth_binding?: WireAuthBindingRef;
-  backend?: WireMobBackendKind;
+  agent_identity?: string | null;
+  auth_binding?: WireAuthBindingRef | null;
+  backend?: WireMobBackendKind | null;
   mob_id: string;
-  model_override?: string;
+  model_override?: string | null;
   prompt: string;
-  role_name?: string;
-  runtime_mode?: WireMobRuntimeMode;
+  role_name?: string | null;
+  runtime_mode?: WireMobRuntimeMode | null;
 }
 
 export interface MobForkHelperParams {
-  agent_identity?: string;
-  auth_binding?: WireAuthBindingRef;
-  backend?: WireMobBackendKind;
+  agent_identity?: string | null;
+  auth_binding?: WireAuthBindingRef | null;
+  backend?: WireMobBackendKind | null;
   fork_context?: unknown;
   mob_id: string;
-  model_override?: string;
+  model_override?: string | null;
   prompt: string;
-  role_name?: string;
-  runtime_mode?: WireMobRuntimeMode;
+  role_name?: string | null;
+  runtime_mode?: WireMobRuntimeMode | null;
   source_member_id: string;
 }
 
 export interface MobHelperResult {
   agent_identity: string;
   member_ref: WireMemberRef;
-  output?: string;
+  output?: string | null;
   tokens_used: number;
 }
 
@@ -1308,35 +1303,42 @@ export interface MobForceCancelResult {
 }
 
 export interface MobTurnStartParams {
-  additional_instructions?: string[];
+  additional_instructions?: string[] | null;
   agent_identity: string;
-  auth_binding?: Record<string, unknown>;
-  injected_context?: WireContentInput[];
-  keep_alive?: boolean;
-  max_tokens?: number;
+  auth_binding?: Record<string, unknown> | null;
+  injected_context?: WireContentInput[] | null;
+  keep_alive?: boolean | null;
+  max_tokens?: number | null;
   mob_id: string;
-  model?: string;
+  model?: string | null;
   output_schema?: unknown;
   prompt: WireContentInput;
-  provider?: string;
-  provider_params?: Record<string, unknown>;
-  skill_refs?: SkillKey[];
-  structured_output_retries?: number;
-  system_prompt?: string;
-  turn_tool_overlay?: PublicTurnToolOverlay;
+  provider?: string | null;
+  provider_params?: Record<string, unknown> | null;
+  skill_refs?: SkillKey[] | null;
+  structured_output_retries?: number | null;
+  system_prompt?: string | null;
+  turn_tool_overlay?: PublicTurnToolOverlay | null;
 }
 
 export interface MobMemberStatusResult {
-  current_session_id?: string;
-  error?: string;
+  comms_reachability?: WireReachability | null;
+  control_reachability?: WireReachability | null;
+  current_session_id?: string | null;
+  error?: string | null;
   external_member?: unknown;
+  freshness_reason?: string | null;
   is_final: boolean;
   kickoff?: unknown;
+  last_seen_ms?: number | null;
+  lifecycle_capabilities?: WireMemberLifecycleCapabilities | null;
   member_ref: WireMemberRef;
-  output_preview?: string;
-  peer_connectivity?: WirePeerConnectivity;
-  progress?: WireMemberProgressSnapshot;
-  resolved_capabilities?: WireResolvedModelCapabilities;
+  non_portable_disabled?: WireNonPortableResourceKind[] | null;
+  output_preview?: string | null;
+  peer_connectivity?: WirePeerConnectivity | null;
+  placement?: WireHostRef | null;
+  progress?: WireMemberProgressSnapshot | null;
+  resolved_capabilities?: WireResolvedModelCapabilities | null;
   status: WireMobMemberStatus;
   tokens_used: number;
 }
@@ -1367,17 +1369,17 @@ export interface MobRotateSupervisorResult {
 
 export interface MobSubmitWorkParams {
   content: WireContentInput;
-  injected_context?: WireContentInput[];
+  injected_context?: WireContentInput[] | null;
   member_ref: WireMemberRef;
-  objective_id?: string;
+  objective_id?: string | null;
   origin?: "external" | "internal";
-  work_ref?: string;
+  work_ref?: string | null;
 }
 
 export interface MobSubmitWorkResult {
   member_ref: WireMemberRef;
   mob_id: string;
-  objective_id?: string;
+  objective_id?: string | null;
   work_ref: string;
 }
 
@@ -1413,9 +1415,9 @@ export interface MobCancelAllWorkResult {
 }
 
 export interface MobWaitParams {
-  member_ids?: string[];
+  member_ids?: string[] | null;
   mob_id: string;
-  timeout_ms?: number;
+  timeout_ms?: number | null;
 }
 
 export interface MobWaitMembersResult {
@@ -1432,12 +1434,12 @@ export interface MobProfileNameParams {
 }
 
 export interface MobProfileLookupResult {
-  created_at?: string;
+  created_at?: string | null;
   name: string;
   not_found?: boolean;
-  profile?: WireMobProfile;
-  revision?: number;
-  updated_at?: string;
+  profile?: WireMobProfile | null;
+  revision?: number | null;
+  updated_at?: string | null;
 }
 
 export interface MobProfileListResult {
@@ -1461,7 +1463,7 @@ export interface MobProfileDeleteResult {
 }
 
 export interface MobStreamOpenParams {
-  agent_identity?: string;
+  agent_identity?: string | null;
   mob_id: string;
 }
 
@@ -1480,64 +1482,210 @@ export interface MobStreamCloseResult {
   stream_id: string;
 }
 
+export interface MobGrantScopesParams {
+  expires_at_ms?: number | null;
+  mob_id: string;
+  principal: string;
+  scopes: WireControlScope[];
+}
+
+export interface MobGrantScopesResult {
+  record: WireGrantRecord;
+}
+
+export interface MobRevokeScopesParams {
+  mob_id: string;
+  principal: string;
+  scopes?: WireControlScope[] | null;
+}
+
+export interface MobRevokeScopesResult {
+  removed: boolean;
+}
+
+export interface MobGrantsResult {
+  grants: WireGrantRecord[];
+}
+
+export interface MobMemberHistoryParams {
+  agent_identity: string;
+  from_index?: number | null;
+  limit?: number | null;
+  mob_id: string;
+}
+
+export interface MobMemberHistoryResult {
+  generation: number;
+  page: WireMemberHistoryPageBody;
+  placement?: WireHostRef | null;
+  provenance: WireProjectionProvenance;
+}
+
+export interface WireMemberHistoryPageBody {
+  complete: boolean;
+  from_index: number;
+  message_count: number;
+  messages: WireHistoryRow[];
+  next_index?: number | null;
+}
+
+export interface MobHostsResult {
+  hosts: MobHostStatus[];
+}
+
+export interface MobHostStatus {
+  authority_epoch?: number | null;
+  bind_phase: WireHostBindPhase;
+  capabilities?: WireHostCapabilityFlags | null;
+  control_reachability?: WireReachability | null;
+  endpoint?: string | null;
+  freshness_reason?: string | null;
+  host_id: WireHostRef;
+  last_seen_ms?: number | null;
+  materialized_member_count: number;
+}
+
+export interface WireHostCapabilityFlags {
+  approval_forwarding: boolean;
+  autonomous_members: boolean;
+  durable_sessions: boolean;
+  engine_version: string;
+  hard_cancel_member: boolean;
+  live_endpoint?: string | null;
+  mcp: boolean;
+  memory_store: boolean;
+  protocol_max: number;
+  protocol_min: number;
+  resolvable_providers?: string[];
+  tracked_input_cancel?: boolean;
+}
+
+export interface MobRouteInstallsResult {
+  complete: boolean;
+  outstanding: WireRouteInstallObligation[];
+}
+
+export interface WireRouteInstallObligation {
+  edge_a: string;
+  edge_b: string;
+  host: WireHostRef;
+}
+
+export interface MobBindHostParams {
+  descriptor: WireHostBindingDescriptor;
+  mob_id: string;
+}
+
+export interface MobBindHostResult {
+  authority_epoch: number;
+  capabilities: WireHostCapabilityFlags;
+  host_id: WireHostRef;
+}
+
+export interface MobRevokeHostParams {
+  host_id: WireHostRef;
+  mob_id: string;
+}
+
+export interface MobRevokeHostResult {
+  host_id: WireHostRef;
+  released_members: string[];
+}
+
+export interface MobHardCancelParams {
+  agent_identity: string;
+  mob_id: string;
+  reason: string;
+}
+
+export interface MobHardCancelResult {
+  cancelled: boolean;
+}
+
+export interface MobMemberLiveOpenParams {
+  agent_identity: string;
+  mob_id: string;
+  transport?: LiveOpenTransport | null;
+  turning_mode?: RealtimeTurningMode | null;
+}
+
+export interface MobMemberLiveChannelParams {
+  agent_identity: string;
+  channel_id: string;
+  mob_id: string;
+}
+
+export interface MobMemberLiveStatusParams {
+  agent_identity: string;
+  channel_id?: string | null;
+  mob_id: string;
+}
+
+export interface MobMemberLiveControlParams {
+  agent_identity: string;
+  channel_id: string;
+  mob_id: string;
+  verb: BridgeLiveControlVerb;
+}
+
 export interface PublicTurnToolOverlay {
-  allowed_tools?: ToolName[];
-  blocked_tools?: ToolName[];
+  allowed_tools?: ToolName[] | null;
+  blocked_tools?: ToolName[] | null;
 }
 
 export interface MobDefinitionInput {
   backend?: MobBackendConfigInput;
-  event_router?: MobEventRouterConfigInput;
+  event_router?: MobEventRouterConfigInput | null;
   flows?: Record<string, MobFlowSpecInput>;
   id: string;
-  image_generation_provider?: Provider;
-  limits?: MobLimitsSpecInput;
+  image_generation_provider?: Provider | null;
+  limits?: MobLimitsSpecInput | null;
   models?: Record<string, CustomModelConfig>;
-  orchestrator?: MobOrchestratorInput;
+  orchestrator?: MobOrchestratorInput | null;
   profiles: Record<string, MobProfileBindingInput>;
   skills?: Record<string, MobSkillSourceInput>;
-  spawn_policy?: MobSpawnPolicyInput;
-  supervisor?: MobSupervisorSpecInput;
-  topology?: MobTopologySpecInput;
+  spawn_policy?: MobSpawnPolicyInput | null;
+  supervisor?: MobSupervisorSpecInput | null;
+  topology?: MobTopologySpecInput | null;
   wiring?: MobWiringRulesInput;
 }
 
 export interface MobBackendConfigInput {
   default?: WireMobBackendKind;
-  external?: MobExternalBackendConfigInput;
+  external?: MobExternalBackendConfigInput | null;
 }
 
 export interface MobEventRouterConfigInput {
   buffer_size?: number;
-  exclude_patterns?: string[];
-  include_patterns?: string[];
+  exclude_patterns?: string[] | null;
+  include_patterns?: string[] | null;
 }
 
 export interface MobExternalBackendConfigInput {
   address_base: string;
-  supervisor_bridge?: unknown;
+  supervisor_bridge?: unknown | null;
 }
 
 export interface MobFlowSpecInput {
-  description?: string;
-  root?: MobFrameSpecInput;
+  description?: string | null;
+  root?: MobFrameSpecInput | null;
   steps?: Record<string, MobFlowStepInput>;
 }
 
 export interface MobFlowStepInput {
-  allowed_tools?: string[];
-  blocked_tools?: string[];
-  branch?: string;
+  allowed_tools?: string[] | null;
+  blocked_tools?: string[] | null;
+  branch?: string | null;
   collection_policy?: MobCollectionPolicyInput;
-  condition?: MobConditionExprInput;
+  condition?: MobConditionExprInput | null;
   depends_on?: string[];
   depends_on_mode?: MobDependencyModeInput;
   dispatch_mode?: MobDispatchModeInput;
-  expected_schema_ref?: string;
+  expected_schema_ref?: string | null;
   message: WireContentInput;
-  output_format?: MobStepOutputFormatInput;
+  output_format?: MobStepOutputFormatInput | null;
   role: string;
-  timeout_ms?: number;
+  timeout_ms?: number | null;
 }
 
 export interface MobFrameSpecInput {
@@ -1545,13 +1693,13 @@ export interface MobFrameSpecInput {
 }
 
 export interface MobLimitsSpecInput {
-  cancel_grace_timeout_ms?: number;
-  max_active_frames?: number;
-  max_active_nodes?: number;
-  max_flow_duration_ms?: number;
-  max_frame_depth?: number;
-  max_orphaned_turns?: number;
-  max_step_retries?: number;
+  cancel_grace_timeout_ms?: number | null;
+  max_active_frames?: number | null;
+  max_active_nodes?: number | null;
+  max_flow_duration_ms?: number | null;
+  max_frame_depth?: number | null;
+  max_orphaned_turns?: number | null;
+  max_step_retries?: number | null;
 }
 
 export interface MobOrchestratorInput {
@@ -1559,19 +1707,19 @@ export interface MobOrchestratorInput {
 }
 
 export interface MobProfileInput {
-  auto_compact_threshold?: number;
-  backend?: WireMobBackendKind;
+  auto_compact_threshold?: number | null;
+  backend?: WireMobBackendKind | null;
   external_addressable?: boolean;
-  image_generation_provider?: Provider;
-  max_inline_peer_notifications?: number;
+  image_generation_provider?: Provider | null;
+  max_inline_peer_notifications?: number | null;
   model: string;
-  output_schema?: unknown;
+  output_schema?: unknown | null;
   peer_description?: string;
-  provider?: Provider;
-  provider_params?: unknown;
+  provider?: Provider | null;
+  provider_params?: unknown | null;
   resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
-  self_hosted_server_id?: string;
+  self_hosted_server_id?: string | null;
   skills?: string[];
   tools?: MobToolConfigInput;
 }
@@ -1583,7 +1731,7 @@ export interface MobRoleWiringRuleInput {
 
 export interface MobSupervisorSpecInput {
   escalation_threshold: number;
-  escalation_turn_timeout_ms?: number;
+  escalation_turn_timeout_ms?: number | null;
   role: string;
 }
 
@@ -1616,26 +1764,27 @@ export interface MobWiringRulesInput {
 }
 
 export interface CustomModelConfig {
-  call_timeout_secs?: number;
-  context_window?: number;
-  display_name?: string;
-  max_output_tokens?: number;
+  call_timeout_secs?: number | null;
+  context_window?: number | null;
+  display_name?: string | null;
+  max_output_tokens?: number | null;
   provider: Provider;
-  vision?: boolean;
-  web_search?: boolean;
+  vision?: boolean | null;
+  web_search?: boolean | null;
 }
 
 export interface MobMemberSpecWire {
-  additional_instructions?: string[];
+  additional_instructions?: string[] | null;
   agent_identity: string;
-  auto_wire_parent?: boolean;
-  backend?: WireMobBackendKind;
-  binding?: WireRuntimeBinding;
+  auto_wire_parent?: boolean | null;
+  backend?: WireMobBackendKind | null;
+  binding?: WireRuntimeBinding | null;
   context?: unknown;
-  initial_message?: WireContentInput;
-  labels?: Record<string, string>;
+  initial_message?: WireContentInput | null;
+  labels?: Record<string, string> | null;
+  placement?: WireHostRef | null;
   profile: string;
-  runtime_mode?: WireMobRuntimeMode;
+  runtime_mode?: WireMobRuntimeMode | null;
 }
 
 export interface MobReconcileOptionsWire {
@@ -1656,10 +1805,30 @@ export interface MobReconcileFailureWire {
   stage: WireMobReconcileStage;
 }
 
+export interface WireHostBindingDescriptor {
+  address: string;
+  bootstrap_token: BridgeBootstrapToken;
+  identity: WireTrustedPeerIdentity;
+  kind: WireHostBindingDescriptorKind;
+  live_endpoint?: string | null;
+}
+
+export interface WireGrantRecord {
+  expires_at_ms?: number | null;
+  principal: string;
+  scopes: WireControlScope[];
+}
+
+export interface WireMemberLifecycleCapabilities {
+  resume_after_restart: boolean;
+  revisions: boolean;
+  transcript_edits: boolean;
+}
+
 export interface AttentionBindingRequest {
   binding_id: string;
-  namespace?: string;
-  realm_id?: string;
+  namespace?: string | null;
+  realm_id?: string | null;
 }
 
 export interface AttentionBindingResult {
@@ -1667,10 +1836,10 @@ export interface AttentionBindingResult {
 }
 
 export interface AttentionListRequest {
-  namespace?: string;
-  realm_id?: string;
-  status?: WorkAttentionStatus;
-  target?: WorkAttentionTarget;
+  namespace?: string | null;
+  realm_id?: string | null;
+  status?: WorkAttentionStatus | null;
+  target?: WorkAttentionTarget | null;
 }
 
 export interface AttentionListResult {
@@ -1684,8 +1853,8 @@ export interface AttentionProjectionPolicy {
 
 export interface GoalStatusRequest {
   binding_id: string;
-  namespace?: string;
-  realm_id?: string;
+  namespace?: string | null;
+  realm_id?: string | null;
 }
 
 export interface GoalStatusResult {
@@ -1695,9 +1864,9 @@ export interface GoalStatusResult {
 
 export interface ReadyWorkFilter {
   labels?: string[];
-  limit?: number;
-  namespace?: string;
-  realm_id?: string;
+  limit?: number | null;
+  namespace?: string | null;
+  realm_id?: string | null;
 }
 
 export interface WorkAttentionBinding {
@@ -1714,11 +1883,11 @@ export interface WorkAttentionBinding {
 }
 
 export interface WorkGraphEventFilter {
-  after_seq?: number;
+  after_seq?: number | null;
   all_namespaces?: boolean;
-  limit?: number;
-  namespace?: string;
-  realm_id?: string;
+  limit?: number | null;
+  namespace?: string | null;
+  realm_id?: string | null;
 }
 
 export interface WorkGraphEventsResponse {
@@ -1727,8 +1896,8 @@ export interface WorkGraphEventsResponse {
 
 export interface WorkGraphIdParams {
   id: string;
-  namespace?: string;
-  realm_id?: string;
+  namespace?: string | null;
+  realm_id?: string | null;
 }
 
 export interface WorkGraphItemsResponse {
@@ -1740,9 +1909,9 @@ export interface WorkGraphSnapshot {
   attention?: WorkAttentionBinding[];
   captured_at: string;
   edges: WorkEdge[];
-  event_high_water_mark?: number;
+  event_high_water_mark?: number | null;
   items: WorkItem[];
-  namespace?: string;
+  namespace?: string | null;
   ready_item_ids: string[];
   realm_id: string;
 }
@@ -1751,32 +1920,32 @@ export interface WorkGraphSnapshotFilter {
   all_namespaces?: boolean;
   include_terminal?: boolean;
   labels?: string[];
-  limit?: number;
-  namespace?: string;
-  realm_id?: string;
+  limit?: number | null;
+  namespace?: string | null;
+  realm_id?: string | null;
   statuses?: WorkStatus[];
 }
 
 export interface WorkItem {
-  claim?: WorkItemClaim;
+  claim?: WorkItemClaim | null;
   completion_policy: WorkCompletionPolicy;
   created_at: string;
-  description?: string;
-  due_at?: string;
+  description?: string | null;
+  due_at?: string | null;
   evidence_refs?: WorkEvidenceRef[];
   external_refs?: WorkItemExternalRef[];
   id: string;
   labels?: string[];
   machine_state: Record<string, unknown>;
   namespace: string;
-  not_before?: string;
-  owner?: WorkItemOwner;
+  not_before?: string | null;
+  owner?: WorkItemOwner | null;
   priority: "low" | "medium" | "high";
   realm_id: string;
   revision: number;
-  snoozed_until?: string;
+  snoozed_until?: string | null;
   status: "open" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed";
-  terminal_at?: string;
+  terminal_at?: string | null;
   title: string;
   updated_at: string;
 }
@@ -1785,9 +1954,9 @@ export interface WorkItemFilter {
   all_namespaces?: boolean;
   include_terminal?: boolean;
   labels?: string[];
-  limit?: number;
-  namespace?: string;
-  realm_id?: string;
+  limit?: number | null;
+  namespace?: string | null;
+  realm_id?: string | null;
   statuses?: WorkStatus[];
 }
 
@@ -1807,22 +1976,22 @@ export interface WorkEdge {
 }
 
 export interface WorkEvidenceRef {
-  confirmation_kind?: WorkEvidenceKind;
-  confirming_owner_key?: WorkOwnerKey;
+  confirmation_kind?: WorkEvidenceKind | null;
+  confirming_owner_key?: WorkOwnerKey | null;
   id: string;
   kind: string;
-  label?: string;
-  summary?: string;
+  label?: string | null;
+  summary?: string | null;
 }
 
 export interface WorkGraphEvent {
   at: string;
-  item_id?: string;
+  item_id?: string | null;
   kind: WorkGraphEventKind;
   namespace: string;
   payload?: unknown;
   realm_id: string;
-  seq?: number;
+  seq?: number | null;
 }
 
 export interface WorkOwnerKey {
@@ -1832,18 +2001,18 @@ export interface WorkOwnerKey {
 
 export interface WorkItemClaim {
   claimed_at: string;
-  lease_expires_at?: string;
+  lease_expires_at?: string | null;
   owner: WorkItemOwner;
 }
 
 export interface WorkItemExternalRef {
   id: string;
   kind: string;
-  url?: string;
+  url?: string | null;
 }
 
 export interface WorkItemOwner {
-  display_name?: string;
+  display_name?: string | null;
   key: WorkOwnerKey;
 }
 
@@ -1867,15 +2036,23 @@ export interface BridgeBindResponse {
 }
 
 export interface BridgeCapabilities {
+  approval_forwarding?: boolean;
+  autonomous_members?: boolean;
   current_protocol_version?: BridgeProtocolVersion;
   default_protocol_version?: BridgeProtocolVersion;
   deliver_member_input?: boolean;
   destroy_member?: boolean;
+  durable_sessions?: boolean;
+  engine_version?: string;
   hard_cancel_member?: boolean;
   interrupt_member?: boolean;
+  mcp?: boolean;
+  memory_store?: boolean;
   observe_member?: boolean;
+  resolvable_providers?: Provider[];
   retire_member?: boolean;
   supported_protocol_versions?: BridgeProtocolVersion[];
+  tracked_input_cancel?: boolean;
   unwire_member?: boolean;
   wire_member?: boolean;
 }
@@ -1883,16 +2060,20 @@ export interface BridgeCapabilities {
 export interface BridgeDeliveryPayload {
   content: ContentInput;
   epoch: number;
+  expected_member?: BridgeMemberIncarnation | null;
   handling_mode: HandlingMode;
   injected_context?: ContentInput[];
   input_id: string;
-  objective_id?: string;
+  objective_id?: string | null;
+  outcome_tracking?: "interaction" | null;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
+  transcript_interaction_id?: string | null;
+  turn?: BridgeTurnDirective | null;
 }
 
 export interface BridgeDeliveryResponse {
-  canonical_input_id?: string;
+  canonical_input_id?: string | null;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
 }
@@ -1903,17 +2084,20 @@ export interface BridgeDestroyResponse {
 
 export interface BridgeHardCancelPayload {
   epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  expected_run_id: RunId;
+  operation_id: OperationId;
   protocol_version: BridgeProtocolVersion;
   reason: string;
   supervisor: BridgePeerSpec;
 }
 
 export interface BridgeObservationResponse {
-  accepting_inputs?: boolean;
-  current_run_id?: string;
-  last_error?: string;
+  accepting_inputs?: boolean | null;
+  current_run_id?: string | null;
+  last_error?: string | null;
   observed_at: string;
-  peer_connectivity?: BridgePeerConnectivity;
+  peer_connectivity?: BridgePeerConnectivity | null;
   state: BridgeMemberRuntimeState;
 }
 
@@ -1926,7 +2110,7 @@ export interface BridgePeerSpec {
 
 export interface BridgePeerWiringPayload {
   epoch: number;
-  mob_peer_overlay?: Record<string, unknown>;
+  mob_peer_overlay?: BridgeMobPeerOverlayHandoff | null;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -1954,10 +2138,10 @@ export interface CommsChecksumTokenResult {
 }
 
 export interface CommsPeerLifecycleParams {
-  description?: string;
+  description?: string | null;
   peer: string;
-  peer_spec?: BridgePeerSpec;
-  role?: string;
+  peer_spec?: BridgePeerSpec | null;
+  role?: string | null;
 }
 
 export interface CommsPeersParams {
@@ -2008,34 +2192,242 @@ export interface SessionStreamCloseResult {
   stream_id: string;
 }
 
+export interface BridgeHostCapabilityRequirements {
+  autonomous_members: boolean;
+  durable_sessions: boolean;
+  protocol_v4: boolean;
+  tracked_input_cancel: boolean;
+}
+
+export interface BridgeMemberIncarnation {
+  agent_identity: string;
+  binding_generation: number;
+  fence_token: number;
+  generation: number;
+  host_id: string;
+  member_session_id: string;
+  mob_id: string;
+}
+
+export interface BridgeTurnCorrelation {
+  run_id: string;
+  step_id: string;
+}
+
+export interface BridgeTurnDirective {
+  correlation: BridgeTurnCorrelation;
+  tool_overlay?: PublicTurnToolOverlay | null;
+}
+
+export interface BridgeTurnOutcomeAck {
+  fence_token: number;
+  generation: number;
+  input_id: string;
+}
+
+export interface WireFlowFailureDetail {
+  original_utf8_bytes: number;
+  text: string;
+  truncated: boolean;
+}
+
+export interface BridgeTurnOutcomeRecord {
+  fence_token: number;
+  generation: number;
+  input_id: string;
+  outcome: WireFlowTurnOutcome;
+  terminal_seq: number;
+}
+
+export interface BridgeMobPeerOverlayHandoff {
+  peer_specs: BridgePeerSpec[];
+  recipient_peer_id: string;
+  topology_epoch: number;
+}
+
+export type RunId = string;
+
+export type OperationId = string;
+
+export interface BridgeEventCursorTail {
+  cursor: "tail";
+}
+
+export interface BridgeEventCursorAt {
+  cursor: "at";
+  generation: number;
+  seq: number;
+}
+
+export type BridgeEventCursor = BridgeEventCursorTail | BridgeEventCursorAt;
+
+export type BridgeOutboundTaintTarget = "peer_only" | { placed: BridgeMemberIncarnation };
+
+export interface BridgeTrackedInputCancelOutcomeNoEffect {
+  outcome: "no_effect";
+}
+
+export interface BridgeTrackedInputCancelOutcomeCancelled {
+  outcome: "cancelled";
+}
+
+export interface BridgeTrackedInputCancelOutcomeTerminal {
+  outcome: "terminal";
+  record: BridgeTurnOutcomeRecord;
+}
+
+export type BridgeTrackedInputCancelOutcome = BridgeTrackedInputCancelOutcomeNoEffect | BridgeTrackedInputCancelOutcomeCancelled | BridgeTrackedInputCancelOutcomeTerminal;
+
+export type LiveOpenTransport = "websocket" | "webrtc";
+
+export interface WireFlowTurnOutcomeExtractionFailedPayload {
+  detail: WireFlowFailureDetail;
+}
+
+export interface WireFlowTurnOutcomeExtractionFailed {
+  extraction_failed: WireFlowTurnOutcomeExtractionFailedPayload;
+}
+
+export interface WireFlowTurnOutcomeRunFailedPayload {
+  detail: WireFlowFailureDetail;
+}
+
+export interface WireFlowTurnOutcomeRunFailed {
+  run_failed: WireFlowTurnOutcomeRunFailedPayload;
+}
+
+export interface WireFlowTurnOutcomeInteractionFailedPayload {
+  detail: WireFlowFailureDetail;
+}
+
+export interface WireFlowTurnOutcomeInteractionFailed {
+  interaction_failed: WireFlowTurnOutcomeInteractionFailedPayload;
+}
+
+export type WireFlowTurnOutcome = "run_completed" | "extraction_succeeded" | "interaction_complete" | "interaction_callback_pending" | "channel_closed" | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed;
+
+export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other";
+
+export type ConnectionTargetErrorKind = "missing_realm" | "unknown_realm" | "missing_default_binding" | "invalid_realm_id" | "invalid_binding_id" | "realm_config_invalid" | "binding_invalid" | "provider_mismatch" | "realm_chain";
+
+export type WireControlScope = "list" | "read_history" | "subscribe_events" | "send_command" | "cancel" | "retire" | "wire_topology" | "live" | "admin_host" | "admin_grants";
+
+export interface MemberBuildRejectionUnknownProviderForModelPayload {
+  model: string;
+}
+
+export interface MemberBuildRejectionUnknownProviderForModel {
+  unknown_provider_for_model: MemberBuildRejectionUnknownProviderForModelPayload;
+}
+
+export interface MemberBuildRejectionBindingUnresolvablePayload {
+  kind: ConnectionTargetErrorKind;
+}
+
+export interface MemberBuildRejectionBindingUnresolvable {
+  binding_unresolvable: MemberBuildRejectionBindingUnresolvablePayload;
+}
+
+export interface MemberBuildRejectionProviderAuthPayload {
+  kind: AuthErrorKind;
+}
+
+export interface MemberBuildRejectionProviderAuth {
+  provider_auth: MemberBuildRejectionProviderAuthPayload;
+}
+
+export interface MemberBuildRejectionSelfHostedServerMissingPayload {
+  server_id: string;
+}
+
+export interface MemberBuildRejectionSelfHostedServerMissing {
+  self_hosted_server_missing: MemberBuildRejectionSelfHostedServerMissingPayload;
+}
+
+export type MemberBuildRejection = MemberBuildRejectionUnknownProviderForModel | MemberBuildRejectionBindingUnresolvable | MemberBuildRejectionProviderAuth | MemberBuildRejectionSelfHostedServerMissing;
+
+export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
+
+export type ToolConfigChangeOperation = "add" | "remove" | "reload";
+
+export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
+
+export interface ToolConfigChangeStatusBoundaryApplied {
+  base_changed: boolean;
+  kind: "boundary_applied";
+  revision: number;
+  visible_changed: boolean;
+}
+
+export interface ToolConfigChangeStatusDeferredCatalogDelta {
+  added_hidden_count: number;
+  kind: "deferred_catalog_delta";
+  pending_source_count: number;
+  removed_hidden_count: number;
+}
+
+export interface ToolConfigChangeStatusWarningFailedClosed {
+  error: string;
+  kind: "warning_failed_closed";
+}
+
+export interface ToolConfigChangeStatusExternalToolDelta {
+  detail?: string | null;
+  kind: "external_tool_delta";
+  phase: ExternalToolDeltaPhase;
+}
+
+export type ToolConfigChangeStatus = ToolConfigChangeStatusBoundaryApplied | ToolConfigChangeStatusDeferredCatalogDelta | ToolConfigChangeStatusWarningFailedClosed | ToolConfigChangeStatusExternalToolDelta;
+
+export interface SystemNoticePeer {
+  display_name?: string | null;
+  id: PeerId;
+}
+
+export interface DeferredCatalogDelta {
+  added_hidden_names?: ToolName[];
+  pending_sources?: string[];
+  removed_hidden_names?: ToolName[];
+}
+
+export interface ToolConfigChangedPayload {
+  applied_at_turn?: number | null;
+  deferred_catalog_delta?: DeferredCatalogDelta | null;
+  domain?: ToolConfigChangeDomain | null;
+  operation: ToolConfigChangeOperation;
+  persisted: boolean;
+  status_info: ToolConfigChangeStatus;
+  target: string;
+}
+
 export interface ScheduleIdParams {
   schedule_id: string;
 }
 
 export interface ListSchedulesParams {
-  labels?: Record<string, string>;
-  limit?: number;
-  offset?: number;
+  labels?: Record<string, string> | null;
+  limit?: number | null;
+  offset?: number | null;
 }
 
 export interface ScheduleOccurrencesParams {
-  include_terminal?: boolean;
+  include_terminal?: boolean | null;
   schedule_id: string;
 }
 
 export interface UpdateScheduleParams {
-  description?: string;
-  expected_revision?: number;
-  labels?: Record<string, string>;
-  misfire_policy?: Record<string, unknown>;
-  missing_target_policy?: "skip" | "mark_misfired";
-  name?: string;
-  overlap_policy?: "allow_concurrent" | "skip_if_running";
-  planning_horizon_days?: number;
-  planning_horizon_occurrences?: number;
+  description?: string | null;
+  expected_revision?: number | null;
+  labels?: Record<string, string> | null;
+  misfire_policy?: Record<string, unknown> | null;
+  missing_target_policy?: "skip" | "mark_misfired" | null;
+  name?: string | null;
+  overlap_policy?: "allow_concurrent" | "skip_if_running" | null;
+  planning_horizon_days?: number | null;
+  planning_horizon_occurrences?: number | null;
   schedule_id: string;
-  target?: Record<string, unknown>;
-  trigger?: Record<string, unknown>;
+  target?: Record<string, unknown> | null;
+  trigger?: Record<string, unknown> | null;
 }
 
 export interface WireContentBlockText {
@@ -2043,15 +2435,34 @@ export interface WireContentBlockText {
   type: "text";
 }
 
-export interface WireContentBlockImage {
+export interface WireContentBlockImageInline {
   media_type: string;
   type: "image";
+  data: string;
+  source: "inline";
 }
 
-export interface WireContentBlockVideo {
+export interface WireContentBlockImageBlob {
+  media_type: string;
+  type: "image";
+  blob_id: string;
+  source: "blob";
+}
+
+export interface WireContentBlockVideoInline {
   duration_ms: number;
   media_type: string;
   type: "video";
+  data: string;
+  source: "inline";
+}
+
+export interface WireContentBlockVideoUri {
+  duration_ms: number;
+  media_type: string;
+  type: "video";
+  source: "uri";
+  uri: string;
 }
 
 export interface WireContentBlockStructured {
@@ -2063,7 +2474,7 @@ export interface WireContentBlockUnknown {
   type: "unknown";
 }
 
-export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockStructured | WireContentBlockUnknown;
+export type WireContentBlock = WireContentBlockText | WireContentBlockImageInline | WireContentBlockImageBlob | WireContentBlockVideoInline | WireContentBlockVideoUri | WireContentBlockStructured | WireContentBlockUnknown;
 
 export type WireContentInput = string | WireContentBlock[];
 
@@ -2081,7 +2492,7 @@ export interface WireRuntimeBindingSession {
 
 export interface WireRuntimeBindingExternal {
   address: string;
-  bootstrap_token?: BridgeBootstrapToken;
+  bootstrap_token?: BridgeBootstrapToken | null;
   identity: WireTrustedPeerIdentity;
   kind: "external";
 }
@@ -2131,25 +2542,6 @@ export interface WireToolAccessPolicyDenyList {
 }
 
 export type WireToolAccessPolicy = WireToolAccessPolicyInherit | WireToolAccessPolicyAllowList | WireToolAccessPolicyDenyList;
-
-export interface WireBudgetSplitPolicyEqual {
-  type: "equal";
-}
-
-export interface WireBudgetSplitPolicyProportional {
-  type: "proportional";
-}
-
-export interface WireBudgetSplitPolicyRemaining {
-  type: "remaining";
-}
-
-export interface WireBudgetSplitPolicyFixed {
-  type: "fixed";
-  value: number;
-}
-
-export type WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplitPolicyProportional | WireBudgetSplitPolicyRemaining | WireBudgetSplitPolicyFixed;
 
 export type WireToolFilter = "All" | { Allow: string[] } | { Deny: string[] };
 
@@ -2226,7 +2618,7 @@ export type MobDependencyModeInput = "all" | "any";
 export type MobDispatchModeInput = "fan_out" | "one_to_one" | "fan_in";
 
 export interface MobFlowNodeInputStep {
-  branch?: string;
+  branch?: string | null;
   depends_on?: string[];
   depends_on_mode?: MobDependencyModeInput;
   kind: "step";
@@ -2276,6 +2668,78 @@ export type MobStepOutputFormatInput = "json" | "text";
 
 export type WireMobReconcileStage = "spawn" | "retire";
 
+export type WireHostRef = string;
+
+export type WireHostBindPhase = "requested" | "bound";
+
+export type WireProjectionProvenance = "host_claimed" | "controlling_host_verified";
+
+export type WireReachability = "reachable" | "stale" | "unreachable" | "unknown";
+
+export type WireNonPortableResourceKind = "rust_bundles" | "per_spawn_external_tools" | "mob_default_external_tools" | "default_llm_client_override" | "host_surface_mcp_allowlist" | "workgraph_tools";
+
+export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
+
+export interface WirePeerConnectivityNotApplicable {
+  status: "not_applicable";
+}
+
+export interface WirePeerConnectivityProbeTimedOut {
+  status: "probe_timed_out";
+}
+
+export interface WirePeerConnectivityKnown {
+  snapshot: WirePeerConnectivitySnapshot;
+  status: "known";
+}
+
+export type WirePeerConnectivity = WirePeerConnectivityNotApplicable | WirePeerConnectivityProbeTimedOut | WirePeerConnectivityKnown;
+
+export type WireHostBindingDescriptorKind = "host";
+
+export interface BridgeLiveControlVerbCommitInput {
+  verb: "commit_input";
+}
+
+export interface BridgeLiveControlVerbInterrupt {
+  verb: "interrupt";
+}
+
+export interface BridgeLiveControlVerbTruncate {
+  audio_played_ms: number;
+  content_index: number;
+  item_id: string;
+  verb: "truncate";
+}
+
+export interface BridgeLiveControlVerbRefresh {
+  verb: "refresh";
+}
+
+export type BridgeLiveControlVerb = BridgeLiveControlVerbCommitInput | BridgeLiveControlVerbInterrupt | BridgeLiveControlVerbTruncate | BridgeLiveControlVerbRefresh;
+
+export interface BridgeLiveControlOutcomeCommitInput {
+  status: "committed";
+  verb: "commit_input";
+}
+
+export interface BridgeLiveControlOutcomeInterrupt {
+  status: "interrupted";
+  verb: "interrupt";
+}
+
+export interface BridgeLiveControlOutcomeTruncate {
+  status: "truncated";
+  verb: "truncate";
+}
+
+export interface BridgeLiveControlOutcomeRefresh {
+  status: "queued";
+  verb: "refresh";
+}
+
+export type BridgeLiveControlOutcome = BridgeLiveControlOutcomeCommitInput | BridgeLiveControlOutcomeInterrupt | BridgeLiveControlOutcomeTruncate | BridgeLiveControlOutcomeRefresh;
+
 export type AttentionDelegatedAuthority = "add_evidence" | "close_own_review_item" | "request_closure" | "close_if_policy_allows";
 
 export interface GoalAttentionTargetSession {
@@ -2298,7 +2762,7 @@ export interface WorkAttentionStatusActive {
 
 export interface WorkAttentionStatusPaused {
   state: "paused";
-  until?: string;
+  until?: string | null;
 }
 
 export interface WorkAttentionStatusSuperseded {
@@ -2426,20 +2890,20 @@ export type WireToolResultContent = string | WireContentBlock[];
 export type WireModelTier = "recommended" | "supported";
 
 export interface CommsCommandInput {
-  allow_self_session?: boolean;
-  blocks?: ContentBlock[];
+  allow_self_session?: boolean | null;
+  blocks?: ContentBlock[] | null;
   body: string;
-  handling_mode?: HandlingMode;
+  handling_mode?: HandlingMode | null;
   kind: "input";
-  source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc";
-  stream?: "none" | "reserve_interaction";
+  source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc" | null;
+  stream?: "none" | "reserve_interaction" | null;
 }
 
 export interface CommsCommandPeerMessage {
-  blocks?: ContentBlock[];
+  blocks?: ContentBlock[] | null;
   body: string;
-  content_taint?: SendTaintOverride;
-  handling_mode?: HandlingMode;
+  content_taint?: SendTaintOverride | null;
+  handling_mode?: HandlingMode | null;
   kind: "peer_message";
   to: PeerId;
 }
@@ -2452,23 +2916,23 @@ export interface CommsCommandPeerLifecycle {
 }
 
 export interface CommsCommandPeerRequest {
-  blocks?: ContentBlock[];
-  content_taint?: SendTaintOverride;
-  handling_mode?: HandlingMode;
+  blocks?: ContentBlock[] | null;
+  content_taint?: SendTaintOverride | null;
+  handling_mode?: HandlingMode | null;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
   params: CommsPeerRequestParams;
-  stream?: "none" | "reserve_interaction";
+  stream?: "none" | "reserve_interaction" | null;
   to: PeerId;
 }
 
 export interface CommsCommandPeerResponse {
-  blocks?: ContentBlock[];
-  content_taint?: SendTaintOverride;
-  handling_mode?: HandlingMode;
+  blocks?: ContentBlock[] | null;
+  content_taint?: SendTaintOverride | null;
+  handling_mode?: HandlingMode | null;
   in_reply_to: string;
   kind: "peer_response";
-  result?: CommsPeerResponseResult;
+  result?: CommsPeerResponseResult | null;
   status: "accepted" | "completed" | "failed";
   to: PeerId;
 }
@@ -2507,12 +2971,16 @@ export interface BridgeCommandDeliverMemberInput {
   command: "deliver_member_input";
   content: ContentInput;
   epoch: number;
+  expected_member?: BridgeMemberIncarnation | null;
   handling_mode: HandlingMode;
   injected_context?: ContentInput[];
   input_id: string;
-  objective_id?: unknown;
+  objective_id?: string | null;
+  outcome_tracking?: "interaction" | null;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
+  transcript_interaction_id?: string | null;
+  turn?: BridgeTurnDirective | null;
 }
 
 export interface BridgeCommandObserveMember {
@@ -2525,6 +2993,7 @@ export interface BridgeCommandObserveMember {
 export interface BridgeCommandInterruptMember {
   command: "interrupt_member";
   epoch: number;
+  expected_member?: BridgeMemberIncarnation | null;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
 }
@@ -2532,8 +3001,20 @@ export interface BridgeCommandInterruptMember {
 export interface BridgeCommandHardCancelMember {
   command: "hard_cancel_member";
   epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  expected_run_id: RunId;
+  operation_id: OperationId;
   protocol_version: BridgeProtocolVersion;
   reason: string;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandCancelTrackedMemberInput {
+  command: "cancel_tracked_member_input";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  input_id: string;
+  protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
 }
 
@@ -2554,7 +3035,7 @@ export interface BridgeCommandDestroyMember {
 export interface BridgeCommandWireMember {
   command: "wire_member";
   epoch: number;
-  mob_peer_overlay?: unknown;
+  mob_peer_overlay?: BridgeMobPeerOverlayHandoff | null;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -2563,7 +3044,7 @@ export interface BridgeCommandWireMember {
 export interface BridgeCommandUnwireMember {
   command: "unwire_member";
   epoch: number;
-  mob_peer_overlay?: unknown;
+  mob_peer_overlay?: BridgeMobPeerOverlayHandoff | null;
   peer_spec: BridgePeerSpec;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
@@ -2574,18 +3055,181 @@ export interface BridgeCommandDeclareMemberOutboundTaint {
   epoch: number;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
-  taint?: SenderContentTaint;
+  taint?: SenderContentTaint | null;
+  target?: BridgeOutboundTaintTarget | null;
+}
+
+export interface BridgeCommandReadMemberHistory {
+  command: "read_member_history";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  from_index?: number | null;
+  limit?: number | null;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandPollMemberEvents {
+  command: "poll_member_events";
+  cursor: BridgeEventCursor;
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  max?: number | null;
+  max_outcomes?: number | null;
+  outcome_acks?: BridgeTurnOutcomeAck[];
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  wait_ms?: number | null;
+}
+
+export interface BridgeCommandOpenMemberLiveChannel {
+  command: "open_member_live_channel";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  transport?: LiveOpenTransport | null;
+  turning_mode?: RealtimeTurningMode | null;
+}
+
+export interface BridgeCommandCloseMemberLiveChannel {
+  channel_id: string;
+  command: "close_member_live_channel";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandMemberLiveChannelStatus {
+  channel_id?: string | null;
+  command: "member_live_channel_status";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandControlMemberLiveChannel {
+  channel_id: string;
+  command: "control_member_live_channel";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  verb: BridgeLiveControlVerb;
+}
+
+export interface BridgeCommandBindHost {
+  binding_generation: number;
+  bootstrap_proof: string;
+  command: "bind_host";
+  epoch: number;
+  expected_address: string;
+  expected_host_peer_id: string;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  required_capabilities: BridgeHostCapabilityRequirements;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandRebindHost {
+  binding_generation: number;
+  command: "rebind_host";
+  epoch: number;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  required_capabilities: BridgeHostCapabilityRequirements;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandRevokeHost {
+  binding_generation: number;
+  command: "revoke_host";
+  epoch: number;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandMaterializeMember {
+  binding_generation: number;
+  command: "materialize_member";
+  epoch: number;
+  fence_token: number;
+  generation: number;
+  launch: { mode: "fresh" } | Record<string, unknown>;
+  protocol_version: BridgeProtocolVersion;
+  spec: Record<string, unknown>;
+  spec_digest: string;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandReleaseMember {
+  agent_identity: string;
+  binding_generation: number;
+  command: "release_member";
+  epoch: number;
+  fence_token: number;
+  generation: number;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandInstallPeerTrust {
+  agent_identity: string;
+  binding_generation: number;
+  command: "install_peer_trust";
+  epoch: number;
+  mob_id: string;
+  peer: BridgePeerSpec;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandRemovePeerTrust {
+  agent_identity: string;
+  binding_generation: number;
+  command: "remove_peer_trust";
+  epoch: number;
+  mob_id: string;
+  peer: BridgePeerSpec;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandHostStatus {
+  binding_generation: number;
+  command: "host_status";
+  epoch: number;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandMemberOperatorRequest {
+  agent_identity: string;
+  command: "member_operator_request";
+  op: Record<string, unknown> | { op: "list_members" } | { op: "mob_list_flows" };
+  protocol_version: BridgeProtocolVersion;
+  request_id: string;
+  requester_fence_token: number;
+  requester_generation: number;
+  requester_host_binding_generation: number;
+  requester_host_id: string;
+  requester_member_session_id: string;
 }
 
 export interface BridgeCommandObserveSupervisorRotation {
   command: "observe_supervisor_rotation";
   observer: BridgePeerSpec;
   observer_epoch: number;
-  operation_id: unknown;
+  operation_id: string;
   protocol_version: BridgeProtocolVersion;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandObserveSupervisorRotation;
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -2624,7 +3268,29 @@ export interface BridgeDeliveryRejectionCauseInternal {
   kind: "internal";
 }
 
-export type BridgeDeliveryRejectionCause = BridgeDeliveryRejectionCauseNotReady | BridgeDeliveryRejectionCauseDurabilityViolation | BridgeDeliveryRejectionCausePeerHandlingModeInvalid | BridgeDeliveryRejectionCauseInternal;
+export interface BridgeDeliveryRejectionCauseTurnDirectiveUnsupported {
+  detail: string;
+  kind: "turn_directive_unsupported";
+}
+
+export interface BridgeDeliveryRejectionCauseOutcomeJournalFull {
+  kind: "outcome_journal_full";
+  limit: number;
+  retained: number;
+}
+
+export interface BridgeDeliveryRejectionCauseStaleMemberIncarnation {
+  current: BridgeMemberIncarnation;
+  kind: "stale_member_incarnation";
+}
+
+export interface BridgeDeliveryRejectionCauseStaleMemberResidency {
+  current?: BridgeMemberIncarnation | null;
+  expected: BridgeMemberIncarnation;
+  kind: "stale_member_residency";
+}
+
+export type BridgeDeliveryRejectionCause = BridgeDeliveryRejectionCauseNotReady | BridgeDeliveryRejectionCauseDurabilityViolation | BridgeDeliveryRejectionCausePeerHandlingModeInvalid | BridgeDeliveryRejectionCauseInternal | BridgeDeliveryRejectionCauseTurnDirectiveUnsupported | BridgeDeliveryRejectionCauseOutcomeJournalFull | BridgeDeliveryRejectionCauseStaleMemberIncarnation | BridgeDeliveryRejectionCauseStaleMemberResidency;
 
 export type BridgeMemberRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
@@ -2632,7 +3298,138 @@ export type BridgePeerConnectivity = "reachable" | "unreachable" | "unknown";
 
 export type BridgeProtocolVersion = number;
 
-export type BridgeRejectionCause = "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal";
+export interface BridgeRejectionCauseStaleCursorPayload {
+  generation: number;
+  watermark: number;
+}
+
+export interface BridgeRejectionCauseStaleCursor {
+  stale_cursor: BridgeRejectionCauseStaleCursorPayload;
+}
+
+export interface BridgeRejectionCauseOversizedEventPayload {
+  durable_seq: number;
+  encoded_bytes: number;
+  generation: number;
+  max_bytes: number;
+  next_seq: number;
+}
+
+export interface BridgeRejectionCauseOversizedEvent {
+  oversized_event: BridgeRejectionCauseOversizedEventPayload;
+}
+
+export interface BridgeRejectionCauseHistoryRowTooLargePayload {
+  encoded_bytes: number;
+  index: number;
+  max_bytes: number;
+}
+
+export interface BridgeRejectionCauseHistoryRowTooLarge {
+  history_row_too_large: BridgeRejectionCauseHistoryRowTooLargePayload;
+}
+
+export interface BridgeRejectionCauseScopeDeniedPayload {
+  presented: WireControlScope[];
+  required: WireControlScope;
+}
+
+export interface BridgeRejectionCauseScopeDenied {
+  scope_denied: BridgeRejectionCauseScopeDeniedPayload;
+}
+
+export interface BridgeRejectionCauseMaterializeBuildRejectedPayload {
+  cause: MemberBuildRejection;
+}
+
+export interface BridgeRejectionCauseMaterializeBuildRejected {
+  materialize_build_rejected: BridgeRejectionCauseMaterializeBuildRejectedPayload;
+}
+
+export interface BridgeRejectionCauseModelUnresolvablePayload {
+  model: string;
+}
+
+export interface BridgeRejectionCauseModelUnresolvable {
+  model_unresolvable: BridgeRejectionCauseModelUnresolvablePayload;
+}
+
+export interface BridgeRejectionCauseAuthBindingUnresolvablePayload {
+  binding: string;
+  realm: string;
+}
+
+export interface BridgeRejectionCauseAuthBindingUnresolvable {
+  auth_binding_unresolvable: BridgeRejectionCauseAuthBindingUnresolvablePayload;
+}
+
+export interface BridgeRejectionCauseMcpCommandMissingPayload {
+  server: string;
+}
+
+export interface BridgeRejectionCauseMcpCommandMissing {
+  mcp_command_missing: BridgeRejectionCauseMcpCommandMissingPayload;
+}
+
+export interface BridgeRejectionCauseEnvKeyMissingPayload {
+  key: string;
+}
+
+export interface BridgeRejectionCauseEnvKeyMissing {
+  env_key_missing: BridgeRejectionCauseEnvKeyMissingPayload;
+}
+
+export interface BridgeRejectionCauseHostEngineVersionChangedPayload {
+  bound: string;
+  reported: string;
+}
+
+export interface BridgeRejectionCauseHostEngineVersionChanged {
+  host_engine_version_changed: BridgeRejectionCauseHostEngineVersionChangedPayload;
+}
+
+export interface BridgeRejectionCauseModelNotRealtimePayload {
+  model: string;
+  provider: string;
+}
+
+export interface BridgeRejectionCauseModelNotRealtime {
+  model_not_realtime: BridgeRejectionCauseModelNotRealtimePayload;
+}
+
+export interface BridgeRejectionCauseLiveAdapterUnavailablePayload {
+  provider: string;
+}
+
+export interface BridgeRejectionCauseLiveAdapterUnavailable {
+  live_adapter_unavailable: BridgeRejectionCauseLiveAdapterUnavailablePayload;
+}
+
+export interface BridgeRejectionCauseLiveTransportUnsupportedPayload {
+  requested: string;
+}
+
+export interface BridgeRejectionCauseLiveTransportUnsupported {
+  live_transport_unsupported: BridgeRejectionCauseLiveTransportUnsupportedPayload;
+}
+
+export interface BridgeRejectionCauseCapabilityMissingPayload {
+  capability: string;
+}
+
+export interface BridgeRejectionCauseCapabilityMissing {
+  capability_missing: BridgeRejectionCauseCapabilityMissingPayload;
+}
+
+export interface BridgeRejectionCauseSessionOwnershipConflictPayload {
+  session_id: string;
+}
+
+export interface BridgeRejectionCauseSessionOwnershipConflict {
+  session_ownership_conflict: BridgeRejectionCauseSessionOwnershipConflictPayload;
+}
+
+export type BridgeRejectionCause = "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict;
 
 export interface BridgeReplyBindMember {
   address: string;
@@ -2647,20 +3444,27 @@ export interface BridgeReplyAck {
 }
 
 export interface BridgeReplyObservation {
-  accepting_inputs?: boolean;
-  current_run_id?: string;
-  last_error?: string;
+  accepting_inputs?: boolean | null;
+  current_run_id?: string | null;
+  last_error?: string | null;
   observed_at: string;
-  peer_connectivity?: BridgePeerConnectivity;
+  peer_connectivity?: BridgePeerConnectivity | null;
   result: "observation";
   state: BridgeMemberRuntimeState;
 }
 
 export interface BridgeReplyDelivery {
-  canonical_input_id?: string;
+  canonical_input_id?: string | null;
   input_id: string;
   outcome: BridgeDeliveryOutcome;
   result: "delivery";
+}
+
+export interface BridgeReplyTrackedInputCancelled {
+  expected_member: BridgeMemberIncarnation;
+  input_id: string;
+  outcome: BridgeTrackedInputCancelOutcome;
+  result: "tracked_input_cancelled";
 }
 
 export interface BridgeReplyRetire {
@@ -2674,8 +3478,16 @@ export interface BridgeReplyDestroy {
   result: "destroy";
 }
 
-export interface BridgeReplySupervisorRotation {
+export interface BridgeReplySupervisorRotationFound {
   result: "supervisor_rotation";
+  outcome: "found";
+  state: Record<string, unknown>;
+}
+
+export interface BridgeReplySupervisorRotationNotFound {
+  result: "supervisor_rotation";
+  operation_id: string;
+  outcome: "not_found";
 }
 
 export interface BridgeReplyRejected {
@@ -2684,22 +3496,135 @@ export interface BridgeReplyRejected {
   result: "rejected";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotation | BridgeReplyRejected;
+export interface BridgeReplyBindHost {
+  address: string;
+  binding_generation: number;
+  capabilities: BridgeCapabilities;
+  host_peer_id: string;
+  live_endpoint?: string | null;
+  result: "bind_host";
+}
+
+export interface BridgeReplyHostRebound {
+  binding_generation: number;
+  capabilities: BridgeCapabilities;
+  host_peer_id: string;
+  live_endpoint?: string | null;
+  result: "host_rebound";
+}
+
+export interface BridgeReplyHostRevoked {
+  binding_generation: number;
+  epoch: number;
+  host_peer_id: string;
+  mob_id: string;
+  released_members: string[];
+  result: "host_revoked";
+}
+
+export interface BridgeReplyMemberHistoryPage {
+  generation: number;
+  page: WireMemberHistoryPageBody;
+  result: "member_history_page";
+}
+
+export interface BridgeReplyMemberEventsPage {
+  events: Record<string, unknown>[];
+  fence_token: number;
+  from_seq: number;
+  generation: number;
+  next_seq: number;
+  outcomes_complete: boolean;
+  result: "member_events_page";
+  turn_outcomes?: BridgeTurnOutcomeRecord[];
+  watermark: number;
+}
+
+export interface BridgeReplyMemberMaterialized {
+  advertised_address: string;
+  engine_version: string;
+  launch_outcome: "fresh" | "resumed_live" | "resumed_from_snapshot";
+  member_peer_id: string;
+  member_pubkey: string;
+  resolved_auth_binding?: WireAuthBindingRef | null;
+  result: "member_materialized";
+  session_id: string;
+  spec_digest: string;
+}
+
+export interface BridgeReplyMemberReleased {
+  disposal: Record<string, unknown>;
+  result: "member_released";
+}
+
+export interface BridgeReplyHostStatus {
+  capabilities: BridgeCapabilities;
+  members: Record<string, unknown>[];
+  result: "host_status";
+}
+
+export interface BridgeReplyMemberLiveChannelOpened {
+  open: Record<string, unknown>;
+  result: "member_live_channel_opened";
+}
+
+export interface BridgeReplyMemberLiveChannelClosed {
+  result: "member_live_channel_closed";
+  status: "closed";
+}
+
+export interface BridgeReplyMemberLiveChannelStatusReport {
+  channel_id: string;
+  result: "member_live_channel_status_report";
+  status: WireLiveAdapterStatus;
+}
+
+export interface BridgeReplyMemberLiveChannelControlled {
+  outcome: BridgeLiveControlOutcome;
+  result: "member_live_channel_controlled";
+}
+
+export interface BridgeReplyMemberOperatorReply {
+  outcome: Record<string, unknown>;
+  request_id: string;
+  result: "member_operator_reply";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply;
 
 export interface ContentBlockText {
   text: string;
   type: "text";
 }
 
-export interface ContentBlockImage {
+export interface ContentBlockImageInline {
   media_type: string;
   type: "image";
+  data: string;
+  source: "inline";
 }
 
-export interface ContentBlockVideo {
+export interface ContentBlockImageBlob {
+  media_type: string;
+  type: "image";
+  blob_id: BlobId;
+  source: "blob";
+}
+
+export interface ContentBlockVideoInline {
   duration_ms: number;
   media_type: string;
   type: "video";
+  data: string;
+  source: "inline";
+}
+
+export interface ContentBlockVideoUri {
+  duration_ms: number;
+  media_type: string;
+  type: "video";
+  source: "uri";
+  uri: string;
 }
 
 export interface ContentBlockStructured {
@@ -2713,26 +3638,26 @@ export interface ContentBlockSkillContext {
   type: "skill_context";
 }
 
-export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured | ContentBlockSkillContext;
+export type ContentBlock = ContentBlockText | ContentBlockImageInline | ContentBlockImageBlob | ContentBlockVideoInline | ContentBlockVideoUri | ContentBlockStructured | ContentBlockSkillContext;
 
 export type ContentInput = string | ContentBlock[];
 
 export interface CommsSendParamsInput {
-  allow_self_session?: boolean;
-  blocks?: ContentBlock[];
+  allow_self_session?: boolean | null;
+  blocks?: ContentBlock[] | null;
   body: string;
-  handling_mode?: HandlingMode;
+  handling_mode?: HandlingMode | null;
   kind: "input";
   session_id: string;
-  source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc";
-  stream?: "none" | "reserve_interaction";
+  source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc" | null;
+  stream?: "none" | "reserve_interaction" | null;
 }
 
 export interface CommsSendParamsPeerMessage {
-  blocks?: ContentBlock[];
+  blocks?: ContentBlock[] | null;
   body: string;
-  content_taint?: SendTaintOverride;
-  handling_mode?: HandlingMode;
+  content_taint?: SendTaintOverride | null;
+  handling_mode?: HandlingMode | null;
   kind: "peer_message";
   session_id: string;
   to: PeerId;
@@ -2747,24 +3672,24 @@ export interface CommsSendParamsPeerLifecycle {
 }
 
 export interface CommsSendParamsPeerRequest {
-  blocks?: ContentBlock[];
-  content_taint?: SendTaintOverride;
-  handling_mode?: HandlingMode;
+  blocks?: ContentBlock[] | null;
+  content_taint?: SendTaintOverride | null;
+  handling_mode?: HandlingMode | null;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
   params: CommsPeerRequestParams;
   session_id: string;
-  stream?: "none" | "reserve_interaction";
+  stream?: "none" | "reserve_interaction" | null;
   to: PeerId;
 }
 
 export interface CommsSendParamsPeerResponse {
-  blocks?: ContentBlock[];
-  content_taint?: SendTaintOverride;
-  handling_mode?: HandlingMode;
+  blocks?: ContentBlock[] | null;
+  content_taint?: SendTaintOverride | null;
+  handling_mode?: HandlingMode | null;
   in_reply_to: string;
   kind: "peer_response";
-  result?: CommsPeerResponseResult;
+  result?: CommsPeerResponseResult | null;
   session_id: string;
   status: "accepted" | "completed" | "failed";
   to: PeerId;
@@ -2831,7 +3756,7 @@ export type SendTaintOverride = { declare: SenderContentTaint } | "undeclared";
 
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
-  salience?: "background" | "normal" | "important" | "urgent";
+  salience?: "background" | "normal" | "important" | "urgent" | null;
 }
 
 export interface WireTrustedPeerIdentityEd25519PublicKey {
@@ -2858,8 +3783,8 @@ export interface RealtimeAudioFormat {
 }
 
 export interface RealtimeCapabilities {
-  audio_input_format?: RealtimeAudioFormat;
-  audio_output_format?: RealtimeAudioFormat;
+  audio_input_format?: RealtimeAudioFormat | null;
+  audio_output_format?: RealtimeAudioFormat | null;
   input_kinds?: RealtimeInputKind[];
   interrupt_supported: boolean;
   output_kinds?: RealtimeOutputKind[];
@@ -2892,10 +3817,10 @@ export interface RealtimeImageChunk {
 }
 
 export interface LiveOpenParams {
-  seed_max_chars?: number;
+  seed_max_chars?: number | null;
   session_id: string;
-  transport?: "websocket" | "webrtc";
-  turning_mode?: RealtimeTurningMode;
+  transport?: LiveOpenTransport | null;
+  turning_mode?: RealtimeTurningMode | null;
 }
 
 export interface WireLiveChannelCapabilities {
@@ -2942,7 +3867,7 @@ export interface WireLiveTransportBootstrapWebsocket {
 
 export interface WireLiveTransportBootstrapWebrtc {
   answer_method: string;
-  http_url?: string;
+  http_url?: string | null;
   token: string;
   transport: "webrtc";
 }
@@ -3013,7 +3938,7 @@ export type WireLiveResponseModality = WireLiveResponseModalityAudio | WireLiveR
 
 export interface LiveCommitInputParams {
   channel_id: string;
-  response_modality?: WireLiveResponseModality;
+  response_modality?: WireLiveResponseModality | null;
 }
 
 export type LiveRefreshStatus = "queued";
@@ -3082,22 +4007,22 @@ export type LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireTex
 
 export interface RealtimeTranscriptEventItemObserved {
   item_id: string;
-  previous_item_id?: string;
-  response_id?: string;
+  previous_item_id?: string | null;
+  response_id?: string | null;
   role: RealtimeTranscriptRole;
   type: "item_observed";
 }
 
 export interface RealtimeTranscriptEventItemSkipped {
   item_id: string;
-  previous_item_id?: string;
+  previous_item_id?: string | null;
   type: "item_skipped";
 }
 
 export interface RealtimeTranscriptEventUserTranscriptFinal {
   content_index: number;
   item_id: string;
-  previous_item_id?: string;
+  previous_item_id?: string | null;
   text: string;
   type: "user_transcript_final";
 }
@@ -3107,7 +4032,7 @@ export interface RealtimeTranscriptEventAssistantTextDelta {
   delta: string;
   delta_id: string;
   item_id: string;
-  previous_item_id?: string;
+  previous_item_id?: string | null;
   response_id: string;
   type: "assistant_text_delta";
 }
@@ -3117,7 +4042,7 @@ export interface RealtimeTranscriptEventAssistantTranscriptDelta {
   delta: string;
   delta_id: string;
   item_id: string;
-  previous_item_id?: string;
+  previous_item_id?: string | null;
   response_id: string;
   type: "assistant_transcript_delta";
 }
@@ -3379,61 +4304,61 @@ export interface WireLiveAdapterObservationReady {
 }
 
 export interface WireLiveAdapterObservationUserTranscriptFinal {
-  content_index?: number;
+  content_index?: number | null;
   observation: "user_transcript_final";
-  previous_item_id?: string;
-  provider_item_id?: string;
+  previous_item_id?: string | null;
+  provider_item_id?: string | null;
   text: string;
 }
 
 export interface WireLiveAdapterObservationAssistantTextDelta {
-  content_index?: number;
+  content_index?: number | null;
   delta: string;
-  delta_id?: string;
+  delta_id?: string | null;
   observation: "assistant_text_delta";
-  previous_item_id?: string;
-  provider_item_id?: string;
-  response_id?: string;
+  previous_item_id?: string | null;
+  provider_item_id?: string | null;
+  response_id?: string | null;
 }
 
 export interface WireLiveAdapterObservationAssistantTranscriptDelta {
-  content_index?: number;
+  content_index?: number | null;
   delta: string;
-  delta_id?: string;
+  delta_id?: string | null;
   observation: "assistant_transcript_delta";
-  previous_item_id?: string;
-  provider_item_id?: string;
-  response_id?: string;
+  previous_item_id?: string | null;
+  provider_item_id?: string | null;
+  response_id?: string | null;
 }
 
 export interface WireLiveAdapterObservationAssistantAudioChunk {
   channels: number;
-  content_index?: number;
+  content_index?: number | null;
   data: string;
-  item_id?: string;
+  item_id?: string | null;
   observation: "assistant_audio_chunk";
-  response_id?: string;
+  response_id?: string | null;
   sample_rate_hz: number;
 }
 
 export interface WireLiveAdapterObservationAssistantTranscriptFinal {
-  content_index?: number;
+  content_index?: number | null;
   observation: "assistant_transcript_final";
-  previous_item_id?: string;
+  previous_item_id?: string | null;
   provider_item_id: string;
-  response_id?: string;
-  stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
+  response_id?: string | null;
+  stop_reason: WireStopReason;
   text: string;
   usage: Record<string, unknown>;
 }
 
 export interface WireLiveAdapterObservationAssistantTranscriptTruncated {
-  content_index?: number;
+  content_index?: number | null;
   observation: "assistant_transcript_truncated";
-  previous_item_id?: string;
-  provider_item_id?: string;
-  response_id?: string;
-  text?: string;
+  previous_item_id?: string | null;
+  provider_item_id?: string | null;
+  response_id?: string | null;
+  text?: string | null;
 }
 
 export interface WireLiveAdapterObservationRealtimeTranscript {
@@ -3447,7 +4372,7 @@ export interface WireLiveAdapterObservationUserContentCommitted {
   item_id: string;
   media_type: string;
   observation: "user_content_committed";
-  previous_item_id?: string;
+  previous_item_id?: string | null;
 }
 
 export interface WireLiveAdapterObservationToolCallRequested {
@@ -3459,13 +4384,13 @@ export interface WireLiveAdapterObservationToolCallRequested {
 
 export interface WireLiveAdapterObservationTurnInterrupted {
   observation: "turn_interrupted";
-  response_id?: string;
+  response_id?: string | null;
 }
 
 export interface WireLiveAdapterObservationTurnCompleted {
   observation: "turn_completed";
-  response_id?: string;
-  stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
+  response_id?: string | null;
+  stop_reason: WireStopReason;
   usage: Record<string, unknown>;
 }
 
@@ -3494,17 +4419,17 @@ export interface WireLiveAdapterObservationUnknown {
 export type WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationUserContentCommitted | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown;
 
 export interface RuntimeAcceptResult {
-  existing_id?: string;
-  input_id?: string;
+  existing_id?: string | null;
+  input_id?: string | null;
   outcome_type: "accepted" | "deduplicated" | "rejected";
-  policy?: "stage" | "queue" | "immediate";
-  reason?: string;
-  state?: Record<string, unknown>;
+  policy?: "stage" | "queue" | "immediate" | null;
+  reason?: string | null;
+  state?: Record<string, unknown> | null;
 }
 
 export interface WireInputStateHistoryEntry {
   from: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
-  reason?: string;
+  reason?: string | null;
   timestamp: string;
   to: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
 }
@@ -3513,17 +4438,17 @@ export interface WireInputState {
   attempt_count?: number;
   created_at: string;
   current_state: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
-  durability?: "durable" | "volatile" | "ephemeral";
+  durability?: "durable" | "volatile" | "ephemeral" | null;
   history?: WireInputStateHistoryEntry[];
-  idempotency_key?: string;
+  idempotency_key?: string | null;
   input_id: string;
-  last_boundary_sequence?: number;
-  last_run_id?: string;
-  persisted_input?: Record<string, unknown>;
-  policy?: "stage" | "queue" | "immediate";
-  reconstruction_source?: "live" | "event_store" | "snapshot" | "replay";
+  last_boundary_sequence?: number | null;
+  last_run_id?: string | null;
+  persisted_input?: Record<string, unknown> | null;
+  policy?: "stage" | "queue" | "immediate" | null;
+  reconstruction_source?: "live" | "event_store" | "snapshot" | "replay" | null;
   recovery_count?: number;
-  terminal_outcome?: "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
+  terminal_outcome?: "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled" | null;
   updated_at: string;
 }
 
@@ -3549,13 +4474,13 @@ export interface WireSessionInfo {
   created_at: number;
   is_active: boolean;
   labels?: Record<string, string>;
-  last_assistant_text?: string;
+  last_assistant_text?: string | null;
   message_count: number;
   model: string;
   provider: string;
-  resolved_capabilities?: WireResolvedModelCapabilities;
+  resolved_capabilities?: WireResolvedModelCapabilities | null;
   session_id: string;
-  session_ref?: string;
+  session_ref?: string | null;
   updated_at: number;
 }
 
@@ -3565,21 +4490,24 @@ export interface WireSessionSummary {
   labels?: Record<string, string>;
   message_count: number;
   session_id: string;
-  session_ref?: string;
+  session_ref?: string | null;
   total_tokens: number;
   updated_at: number;
 }
 
 export interface ContractVersion {
+  major: number;
+  minor: number;
+  patch: number;
 }
 
 export interface CatalogModelEntry {
-  context_window?: number;
+  context_window?: number | null;
   display_name: string;
   id: string;
-  max_output_tokens?: number;
-  profile?: Record<string, unknown>;
-  server_id?: string;
+  max_output_tokens?: number | null;
+  profile?: Record<string, unknown> | null;
+  server_id?: string | null;
   tier: "recommended" | "supported";
 }
 
@@ -3611,9 +4539,9 @@ export interface WireModelProfile {
 }
 
 export interface WireAssistantImageRef {
-  blob_ref: Record<string, unknown>;
+  blob_ref: BlobRef;
   height: number;
-  image_id: string;
+  image_id: AssistantImageId;
   media_type: string;
   width: number;
 }
@@ -3639,23 +4567,23 @@ export interface WireGenerateImageExecutionPlan {
 
 export interface WireImageGenerationToolResult {
   images?: Record<string, unknown>[];
-  native_metadata: Record<string, unknown>;
+  native_metadata: ProviderImageMetadata;
   operation_id: string;
   provider_text: Record<string, unknown>;
-  revised_prompt: Record<string, unknown>;
+  revised_prompt: RevisedPromptDisposition;
   terminal: Record<string, unknown>;
   warnings?: Record<string, unknown>[];
 }
 
 export interface WireAuthBindingRef {
   binding: string;
-  profile?: string;
+  profile?: string | null;
   realm: string;
 }
 
 export interface WireBackendProfile {
   backend_kind: string;
-  base_url?: string;
+  base_url?: string | null;
   id: string;
   options?: unknown;
   provider: string;
@@ -3672,7 +4600,7 @@ export interface WireProviderBinding {
   allow_auth_override?: boolean;
   auth_profile: string;
   backend_profile: string;
-  default_model?: string;
+  default_model?: string | null;
   id: string;
   require_metadata_account?: boolean;
   require_metadata_workspace?: boolean;
@@ -3682,7 +4610,7 @@ export interface WireRealmConnectionSet {
   auth_profiles: Record<string, WireAuthProfile>;
   backends: Record<string, WireBackendProfile>;
   bindings: Record<string, WireProviderBinding>;
-  default_binding?: string;
+  default_binding?: string | null;
   realm_id: string;
 }
 
@@ -3727,13 +4655,13 @@ export interface WireLoginStart {
 export interface WireLoginReady {
   auth_binding: WireAuthBindingRef;
   binding_id: string;
-  expires_at?: string;
+  expires_at?: string | null;
   has_refresh_token: boolean;
   profile_id: string;
   provider: string;
   realm_id: string;
   scopes: string[];
-  state?: string;
+  state?: string | null;
 }
 
 export interface WireDeviceStart {
@@ -3743,14 +4671,14 @@ export interface WireDeviceStart {
   provider: string;
   user_code: string;
   verification_uri: string;
-  verification_uri_complete?: string;
+  verification_uri_complete?: string | null;
 }
 
 export interface WireRealmSummary {
   auth_profile_count: number;
   backend_count: number;
   binding_count: number;
-  default_binding?: string;
+  default_binding?: string | null;
   realm_id: string;
 }
 
@@ -3766,24 +4694,24 @@ export interface WireAuthProfilesList {
 }
 
 export interface WireAuthStatus {
-  account_id?: string;
+  account_id?: string | null;
   auth_method: string;
-  expires_at?: string;
-  last_error?: Record<string, unknown>;
-  last_refresh_at?: string;
+  expires_at?: string | null;
+  last_error?: Record<string, unknown> | null;
+  last_refresh_at?: string | null;
   profile_id: string;
   provider: string;
   state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "released" | "absent" | "missing_credential";
 }
 
 export interface WireAuthStatusDetail {
-  account_id?: string;
+  account_id?: string | null;
   auth_binding: WireAuthBindingRef;
   auth_method: string;
   binding_id: string;
-  expires_at?: string;
+  expires_at?: string | null;
   has_refresh_token: boolean;
-  last_refresh_at?: string;
+  last_refresh_at?: string | null;
   profile_id: string;
   provider: string;
   realm_id: string;
@@ -3861,6 +4789,45 @@ export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupporte
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 
+export interface WireProviderMetaAnthropic {
+  provider: "anthropic";
+  signature: string;
+}
+
+export interface WireProviderMetaAnthropicRedacted {
+  data: string;
+  provider: "anthropic_redacted";
+}
+
+export interface WireProviderMetaAnthropicCompaction {
+  content: string;
+  provider: "anthropic_compaction";
+}
+
+export interface WireProviderMetaGemini {
+  provider: "gemini";
+  thoughtSignature: string;
+}
+
+export interface WireProviderMetaOpenAi {
+  encrypted_content?: string | null;
+  id: string;
+  phase?: string | null;
+  provider: "open_ai";
+  response_id?: string | null;
+}
+
+export interface WireProviderMetaOpenAiResponse {
+  provider: "open_ai_response";
+  response_id: string;
+}
+
+export interface WireProviderMetaUnknown {
+  provider: "unknown";
+}
+
+export type WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaUnknown;
+
 export interface WireTranscriptSourceSpoken {
   kind: "spoken";
 }
@@ -3874,32 +4841,32 @@ export type WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSo
 
 export interface WireAssistantBlockText {
   block_type: "text";
-  data: { meta?: Record<string, unknown>; text: string };
+  data: { meta?: WireProviderMeta | null; text: string };
 }
 
 export interface WireAssistantBlockTranscript {
   block_type: "transcript";
-  data: { meta?: Record<string, unknown>; source: WireTranscriptSource; text: string };
+  data: { meta?: WireProviderMeta | null; source: WireTranscriptSource; text: string };
 }
 
 export interface WireAssistantBlockReasoning {
   block_type: "reasoning";
-  data: { meta?: Record<string, unknown>; text?: string };
+  data: { meta?: WireProviderMeta | null; text?: string };
 }
 
 export interface WireAssistantBlockToolUse {
   block_type: "tool_use";
-  data: { args: unknown; id: string; meta?: Record<string, unknown>; name: string };
+  data: { args: unknown; id: string; meta?: WireProviderMeta | null; name: string };
 }
 
 export interface WireAssistantBlockServerToolContent {
   block_type: "server_tool_content";
-  data: { content: unknown; id?: string; kind: Record<string, unknown>; meta?: Record<string, unknown> };
+  data: { content: unknown; id?: string | null; kind: WireServerToolKind; meta?: WireProviderMeta | null };
 }
 
 export interface WireAssistantBlockImage {
   block_type: "image";
-  data: { blob_ref: Record<string, unknown>; height: number; image_id: string; media_type: string; meta: Record<string, unknown>; revised_prompt: Record<string, unknown>; width: number };
+  data: { blob_ref: BlobRef; height: number; image_id: AssistantImageId; media_type: string; meta: ProviderImageMetadata; revised_prompt: RevisedPromptDisposition; width: number };
 }
 
 export interface WireAssistantBlockUnknown {
@@ -3907,6 +4874,265 @@ export interface WireAssistantBlockUnknown {
 }
 
 export type WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockTranscript | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown;
+
+export interface TranscriptRewriteReason {
+  kind: string;
+  note?: string | null;
+}
+
+export interface CompactionRewriteRange {
+  end: number;
+  start: number;
+}
+
+export interface TranscriptEditRewriteRange {
+  end: number;
+  start: number;
+}
+
+export interface TranscriptRewriteSelectionMessageRange {
+  end: number;
+  start: number;
+  type: "message_range";
+}
+
+export interface TranscriptRewriteSelectionEditMessageRange {
+  range: TranscriptEditRewriteRange;
+  type: "edit_message_range";
+}
+
+export interface TranscriptRewriteSelectionCompactionMessageRange {
+  range: CompactionRewriteRange;
+  type: "compaction_message_range";
+}
+
+export type TranscriptRewriteSelection = TranscriptRewriteSelectionMessageRange | TranscriptRewriteSelectionEditMessageRange | TranscriptRewriteSelectionCompactionMessageRange;
+
+export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "cancelled" | "retired" | "terminated";
+
+export type CommsNoticeKind = string;
+
+export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
+
+export interface SystemNoticeBlockComms {
+  content?: ContentBlock[];
+  direction: SystemNoticeDirection;
+  intent?: string | null;
+  kind: CommsNoticeKind;
+  payload?: unknown;
+  peer?: SystemNoticePeer | null;
+  request_id?: string | null;
+  sender_taint?: SenderContentTaint | null;
+  status?: string | null;
+  summary?: string | null;
+  type: "comms";
+}
+
+export interface SystemNoticeBlockExternalEvent {
+  body?: string | null;
+  content?: ContentBlock[];
+  event_type: string;
+  payload?: unknown;
+  source: string;
+  summary?: string | null;
+  type: "external_event";
+}
+
+export interface SystemNoticeBlockToolConfig {
+  payload: ToolConfigChangedPayload;
+  type: "tool_config";
+}
+
+export interface SystemNoticeBlockMcp {
+  detail?: string | null;
+  operation?: ToolConfigChangeOperation | null;
+  pending_sources?: string[];
+  persisted?: boolean;
+  phase?: ExternalToolDeltaPhase | null;
+  server_id?: string | null;
+  type: "mcp";
+}
+
+export interface SystemNoticeBlockBackgroundJob {
+  detail?: string | null;
+  display_name?: string | null;
+  job_id: string;
+  status: BackgroundJobTerminalStatus;
+  type: "background_job";
+}
+
+export interface SystemNoticeBlockAuth {
+  binding?: string | null;
+  detail?: string | null;
+  state: string;
+  type: "auth";
+}
+
+export interface SystemNoticeBlockRuntimeNotice {
+  category: string;
+  detail?: string | null;
+  payload?: unknown;
+  type: "runtime_notice";
+}
+
+export interface SystemNoticeBlockUnknown {
+  payload?: unknown;
+  summary?: string | null;
+  type: "unknown";
+}
+
+export type SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockUnknown;
+
+export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required";
+
+export type TranscriptUserRole = "conversational" | "compaction_summary" | "injected_context";
+
+export type AssistantImageId = string;
+
+export interface BlobRef {
+  blob_id: BlobId;
+  media_type: string;
+}
+
+export interface GeminiImageMetadata {
+  continuity_ref?: string | null;
+  response_id?: string | null;
+  target_model: string;
+}
+
+export interface OpenAiImageMetadata {
+  image_generation_call_id?: string | null;
+  response_id?: string | null;
+  target_model: string;
+}
+
+export interface ProviderImageMetadataNotEmitted {
+  provider: "not_emitted";
+}
+
+export interface ProviderImageMetadataOpenai {
+  image_generation_call_id?: string | null;
+  response_id?: string | null;
+  target_model: string;
+  provider: "openai";
+}
+
+export interface ProviderImageMetadataGemini {
+  continuity_ref?: string | null;
+  response_id?: string | null;
+  target_model: string;
+  provider: "gemini";
+}
+
+export type ProviderImageMetadata = ProviderImageMetadataNotEmitted | ProviderImageMetadataOpenai | ProviderImageMetadataGemini;
+
+export interface PromptText {
+  content: string;
+}
+
+export type RevisedPromptSource = "provider" | "meerkat_projection";
+
+export interface RevisedPromptDispositionNotRequested {
+  disposition: "not_requested";
+}
+
+export interface RevisedPromptDispositionUnsupportedByBackend {
+  disposition: "unsupported_by_backend";
+}
+
+export interface RevisedPromptDispositionUnchanged {
+  disposition: "unchanged";
+}
+
+export interface RevisedPromptDispositionRevised {
+  disposition: "revised";
+  source: RevisedPromptSource;
+  text: PromptText;
+}
+
+export type RevisedPromptDisposition = RevisedPromptDispositionNotRequested | RevisedPromptDispositionUnsupportedByBackend | RevisedPromptDispositionUnchanged | RevisedPromptDispositionRevised;
+
+export interface WireServerToolKindWebSearch {
+  kind: "web_search";
+}
+
+export interface WireServerToolKindGoogleSearch {
+  kind: "google_search";
+}
+
+export interface WireServerToolKindProviderNative {
+  kind: "provider_native";
+  name: string;
+}
+
+export interface WireServerToolKindUnknown {
+  debug: string;
+  kind: "unknown";
+}
+
+export type WireServerToolKind = WireServerToolKindWebSearch | WireServerToolKindGoogleSearch | WireServerToolKindProviderNative | WireServerToolKindUnknown;
+
+export interface TranscriptRewriteMessageSystem {
+  content: string;
+  created_at?: string | null;
+  role: "system";
+}
+
+export interface TranscriptRewriteMessageSystemNotice {
+  blocks?: SystemNoticeBlock[];
+  body?: string | null;
+  created_at?: string | null;
+  kind: SystemNoticeKind;
+  role: "system_notice";
+}
+
+export interface TranscriptRewriteMessageUser {
+  content: WireContentInput;
+  created_at?: string | null;
+  role: "user";
+  transcript_role?: TranscriptUserRole;
+}
+
+export interface TranscriptRewriteMessageBlockAssistant {
+  blocks: WireAssistantBlock[];
+  created_at?: string | null;
+  role: "block_assistant";
+  stop_reason?: WireStopReason;
+}
+
+export interface TranscriptRewriteMessageToolResults {
+  created_at?: string | null;
+  results: WireToolResult[];
+  role: "tool_results";
+}
+
+export type TranscriptRewriteMessage = TranscriptRewriteMessageSystem | TranscriptRewriteMessageSystemNotice | TranscriptRewriteMessageUser | TranscriptRewriteMessageBlockAssistant | TranscriptRewriteMessageToolResults;
+
+export interface WireTranscriptReplacementMessage {
+  message: TranscriptRewriteMessage;
+  type: "message";
+}
+
+export interface WireTranscriptReplacementUserContentBlock {
+  block: WireContentBlock;
+  block_index: number;
+  type: "user_content_block";
+}
+
+export interface WireTranscriptReplacementAssistantBlock {
+  block: WireAssistantBlock;
+  block_index: number;
+  type: "assistant_block";
+}
+
+export interface WireTranscriptReplacementToolResultContentBlock {
+  block: WireContentBlock;
+  block_index: number;
+  result_index: number;
+  type: "tool_result_content_block";
+}
+
+export type WireTranscriptReplacement = WireTranscriptReplacementMessage | WireTranscriptReplacementUserContentBlock | WireTranscriptReplacementAssistantBlock | WireTranscriptReplacementToolResultContentBlock;
 
 export interface WireImageOperationPhaseRequested {
   phase: "requested";
@@ -3959,6 +5185,48 @@ export interface WireImageOperationPhaseTerminal {
 }
 
 export type WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationPhaseValidating | WireImageOperationPhaseAwaitingApproval | WireImageOperationPhasePlanResolved | WireImageOperationPhaseProjectionSnapshotted | WireImageOperationPhaseScopedOverrideActive | WireImageOperationPhaseProviderCallInFlight | WireImageOperationPhaseProviderResultCaptured | WireImageOperationPhaseBlobCommitPending | WireImageOperationPhaseResultCommitted | WireImageOperationPhaseRestoringScopedOverride | WireImageOperationPhaseTerminal;
+
+export interface WireSessionMessageSystem {
+  content: string;
+  created_at: string;
+  role: "system";
+}
+
+export interface WireSessionMessageSystemNotice {
+  blocks?: SystemNoticeBlock[];
+  body?: string | null;
+  created_at: string;
+  kind: SystemNoticeKind;
+  role: "system_notice";
+}
+
+export interface WireSessionMessageUser {
+  content: WireContentInput;
+  created_at: string;
+  interaction_id?: string | null;
+  role: "user";
+  run_id?: RunId | null;
+  transcript_role?: TranscriptUserRole;
+}
+
+export interface WireSessionMessageBlockAssistant {
+  blocks: WireAssistantBlock[];
+  created_at: string;
+  interaction_id?: string | null;
+  role: "block_assistant";
+  run_id?: RunId | null;
+  stop_reason: WireStopReason;
+}
+
+export interface WireSessionMessageToolResults {
+  created_at: string;
+  results: WireToolResult[];
+  role: "tool_results";
+}
+
+export type WireSessionMessage = WireSessionMessageSystem | WireSessionMessageSystemNotice | WireSessionMessageUser | WireSessionMessageBlockAssistant | WireSessionMessageToolResults;
+
+export type WireHistoryRow = WireSessionMessage;
 
 /** Fail-closed wire parser for WorkItem (K21): throws MeerkatError(INVALID_RESPONSE). */
 export function parseWorkItem(value: unknown): WorkItem {

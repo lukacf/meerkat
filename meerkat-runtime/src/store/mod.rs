@@ -7,6 +7,8 @@ pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
 
+use std::collections::{HashMap, HashSet};
+
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 
 use crate::identifiers::LogicalRuntimeId;
@@ -16,6 +18,106 @@ use crate::runtime_state::RuntimeState;
 const LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 1;
 const SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 2;
 const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 3;
+
+/// Maximum number of exact input-state rows admitted by one compare-and-swap
+/// boundary. Directed-terminal outbox batches share the same 256-row bound as
+/// their publication seam.
+pub const MAX_INPUT_STATE_BATCH_CAS: usize = 256;
+
+/// Result of an exact input-state batch compare-and-swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputStateBatchCasOutcome {
+    /// Every expected durable row matched and every replacement committed, or
+    /// every durable row was already byte-identical to its replacement from an
+    /// earlier invocation whose acknowledgement was lost.
+    Swapped,
+    /// At least one expected row was missing or no longer byte-identical; no
+    /// replacement was written.
+    Stale,
+}
+
+#[derive(Debug)]
+struct PreparedInputStateBatchCasRow {
+    input_id: InputId,
+    expected_json: Vec<u8>,
+    replacement: StoredInputState,
+    // SQLite writes the already-validated bytes; the in-memory implementation
+    // stores the typed replacement directly.
+    #[cfg_attr(not(feature = "sqlite-store"), allow(dead_code))]
+    replacement_json: Vec<u8>,
+}
+
+fn prepare_input_state_batch_cas(
+    expected: &[StoredInputState],
+    replacements: &[InputStatePersistenceRecord],
+) -> Result<Vec<PreparedInputStateBatchCasRow>, RuntimeStoreError> {
+    if expected.len() != replacements.len() {
+        return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+            reason: format!(
+                "expected row count {} does not match replacement row count {}",
+                expected.len(),
+                replacements.len()
+            ),
+        });
+    }
+    if expected.len() > MAX_INPUT_STATE_BATCH_CAS {
+        return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+            reason: format!(
+                "batch contains {} rows, exceeding the maximum of {MAX_INPUT_STATE_BATCH_CAS}",
+                expected.len()
+            ),
+        });
+    }
+
+    let mut expected_ids = HashSet::with_capacity(expected.len());
+    for row in expected {
+        if !expected_ids.insert(row.state.input_id.clone()) {
+            return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+                reason: format!("expected batch repeats input {}", row.state.input_id),
+            });
+        }
+    }
+
+    let mut replacement_by_id = HashMap::with_capacity(replacements.len());
+    for record in replacements {
+        let replacement = record.clone_stored();
+        let input_id = replacement.state.input_id.clone();
+        let replacement_json = serde_json::to_vec(&replacement)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if replacement_by_id
+            .insert(input_id.clone(), (replacement, replacement_json))
+            .is_some()
+        {
+            return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+                reason: format!("replacement batch repeats input {input_id}"),
+            });
+        }
+    }
+
+    let mut prepared = Vec::with_capacity(expected.len());
+    for expected_row in expected {
+        let input_id = expected_row.state.input_id.clone();
+        let Some((replacement, replacement_json)) = replacement_by_id.remove(&input_id) else {
+            return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+                reason: format!("replacement batch does not contain expected input {input_id}"),
+            });
+        };
+        let expected_json = serde_json::to_vec(expected_row)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        prepared.push(PreparedInputStateBatchCasRow {
+            input_id,
+            expected_json,
+            replacement,
+            replacement_json,
+        });
+    }
+    if let Some(extra) = replacement_by_id.keys().next() {
+        return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+            reason: format!("replacement batch contains unexpected input {extra}"),
+        });
+    }
+    Ok(prepared)
+}
 
 /// Errors from RuntimeStore operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -56,6 +158,14 @@ pub enum RuntimeStoreError {
     /// Runtime snapshot CAS rejected a stale transcript rewrite.
     #[error("Transcript revision conflict: expected {expected}, actual {actual}")]
     TranscriptRevisionConflict { expected: String, actual: String },
+    /// An atomic boundary commit carried a session snapshot that was already
+    /// superseded by the durable append-only head. Callers must observe this
+    /// as a failed commit rather than mistaking a no-op for publication.
+    #[error("Session snapshot for runtime '{runtime_id}' was superseded by the durable head")]
+    SessionSnapshotSuperseded { runtime_id: String },
+    /// The requested exact input-state batch CAS has an invalid row/key shape.
+    #[error("Invalid input-state batch compare-and-swap: {reason}")]
+    InvalidInputStateBatchCas { reason: String },
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -1462,9 +1572,6 @@ impl MachineLifecycleStoreRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineLifecycleCommit {
     snapshot: MachineLifecycleSnapshot,
-    /// Exact ops epoch that the final unregister transaction must tombstone.
-    /// This is transaction metadata, not part of the lifecycle store record.
-    retired_ops_epoch: Option<meerkat_core::RuntimeEpochId>,
 }
 
 impl MachineLifecycleCommit {
@@ -1495,20 +1602,7 @@ impl MachineLifecycleCommit {
                 supervisor_authority,
                 unregister_progress,
             ),
-            retired_ops_epoch: None,
         }
-    }
-
-    pub(crate) fn for_unregister_finalization(
-        mut self,
-        retired_ops_epoch: meerkat_core::RuntimeEpochId,
-    ) -> Self {
-        self.retired_ops_epoch = Some(retired_ops_epoch);
-        self
-    }
-
-    pub(crate) fn retired_ops_epoch(&self) -> Option<&meerkat_core::RuntimeEpochId> {
-        self.retired_ops_epoch.as_ref()
     }
 
     /// Runtime state selected by the owning MeerkatMachine transition.
@@ -1531,11 +1625,75 @@ impl MachineLifecycleCommit {
     }
 }
 
+/// Machine-authorized final-unregister persistence token.
+///
+/// The token bundles terminal lifecycle truth with the exact authorized input
+/// snapshot. It has no public constructor and can only be minted by consuming
+/// the private-field delete witness derived from the generated
+/// `DeleteSnapshot` unregister verdict.
+#[derive(Debug, Clone)]
+pub struct UnregisterFinalizationCommit {
+    machine_lifecycle: MachineLifecycleCommit,
+    input_states: Vec<InputStatePersistenceRecord>,
+    retired_ops_epoch: meerkat_core::RuntimeEpochId,
+}
+
+impl UnregisterFinalizationCommit {
+    pub(crate) fn new(
+        machine_lifecycle: MachineLifecycleCommit,
+        input_states: Vec<InputStatePersistenceRecord>,
+        retired_ops_epoch: meerkat_core::RuntimeEpochId,
+        _authority: crate::meerkat_machine::DeleteOpsFinalizationAuthority,
+    ) -> Self {
+        Self {
+            machine_lifecycle,
+            input_states,
+            retired_ops_epoch,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        MachineLifecycleSnapshot,
+        Vec<InputStatePersistenceRecord>,
+        meerkat_core::RuntimeEpochId,
+    ) {
+        (
+            self.machine_lifecycle.into_snapshot(),
+            self.input_states,
+            self.retired_ops_epoch,
+        )
+    }
+
+    /// Opaque encoded lifecycle record selected by final-unregister machine
+    /// authority. External stores can persist this without gaining a way to
+    /// construct or alter the authority token.
+    pub fn lifecycle_store_record(&self) -> MachineLifecycleStoreRecord {
+        self.machine_lifecycle.store_record()
+    }
+
+    /// Authorized input-state rows that must commit in the same transaction.
+    pub fn input_states(&self) -> &[InputStatePersistenceRecord] {
+        &self.input_states
+    }
+
+    /// Exact ops epoch retired by this finalization transaction.
+    pub fn retired_ops_epoch(&self) -> &meerkat_core::RuntimeEpochId {
+        &self.retired_ops_epoch
+    }
+}
+
 /// Atomic persistence interface for runtime state.
 ///
 /// Implementations:
 /// - `InMemoryRuntimeStore` — in-memory, no durability (ephemeral/testing)
 /// - `SqliteRuntimeStore` — SQLite-backed durable runtime state
+///
+/// A store may contain many logical runtime ids, but each id is controlled by
+/// one live `MeerkatMachine` authority. Store transactions provide durable
+/// atomicity; they are not a distributed lease for two machines concurrently
+/// controlling the same logical runtime.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
@@ -1669,6 +1827,35 @@ pub trait RuntimeStore: Send + Sync {
         ))
     }
 
+    /// Atomically persist a failed-but-applied runtime turn.
+    ///
+    /// This is the machine-terminal counterpart to [`Self::atomic_apply`]:
+    /// the mutated session snapshot, boundary receipt, generated machine
+    /// lifecycle record, and input/outbox state must become visible in one
+    /// transaction. Implementations must never compose this from separate
+    /// `atomic_apply` and `commit_machine_lifecycle` calls.
+    async fn atomic_apply_with_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = (
+            runtime_id,
+            session_delta,
+            receipt,
+            machine_lifecycle,
+            input_updates,
+            session_store_key,
+        );
+        Err(RuntimeStoreError::Unsupported(
+            "atomic_apply_with_machine_lifecycle".to_string(),
+        ))
+    }
+
     /// Load all input states for a runtime.
     async fn load_input_states(
         &self,
@@ -1748,6 +1935,51 @@ pub trait RuntimeStore: Send + Sync {
         state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError>;
 
+    /// Atomically persist a batch of machine-authorized input shell updates.
+    /// Used by per-input terminal outboxes so an N-input batch can never
+    /// expose a mixed provisional/finalized or finalized/published phase.
+    async fn persist_input_states_atomically(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        states: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        Err(RuntimeStoreError::Unsupported(
+            "persist_input_states_atomically".to_string(),
+        ))
+    }
+
+    /// Atomically replace an exact set of input-state rows only when every
+    /// currently persisted row is byte-identical to its expected
+    /// [`StoredInputState`] serialization.
+    ///
+    /// Expected and replacement batches must contain the same unique keys and
+    /// at most [`MAX_INPUT_STATE_BATCH_CAS`] rows. If every current row already
+    /// equals its replacement, implementations return
+    /// [`InputStateBatchCasOutcome::Swapped`] without rewriting it; this makes
+    /// a committed store-first transaction retryable after caller
+    /// cancellation or acknowledgement loss. Missing rows, mixed
+    /// expected/replacement images, and any other changed durable rows return
+    /// [`InputStateBatchCasOutcome::Stale`] without writing a replacement.
+    /// Implementations must hold one lock/transaction across the complete
+    /// comparison and write set.
+    async fn compare_and_swap_input_states_atomically(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        expected: &[StoredInputState],
+        replacements: &[InputStatePersistenceRecord],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+        let prepared = prepare_input_state_batch_cas(expected, replacements)?;
+        if prepared.is_empty() {
+            return Ok(InputStateBatchCasOutcome::Swapped);
+        }
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_input_states_atomically".to_string(),
+        ))
+    }
+
     /// Load a single input state.
     async fn load_input_state(
         &self,
@@ -1803,12 +2035,56 @@ pub trait RuntimeStore: Send + Sync {
     /// reading its transaction authority. It may use the typed unknown error
     /// only when it cannot prove either the exact final state or the exact
     /// pre-transaction state; callers then retry without a durable rollback.
+    /// The opaque token also proves the generated `DeleteSnapshot` verdict and
+    /// bundles the exact lifecycle and input rows selected by the machine.
+    ///
+    /// The returned future is also a cancellation boundary: after it is
+    /// dropped, no mutation from that invocation may become visible later.
+    /// An implementation may leave the prior pair untouched or finish the
+    /// entire atomic commit before cancellation is observable, but it must not
+    /// detach a background write that can cross a same-runtime-ID replacement.
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &LogicalRuntimeId,
-        commit: MachineLifecycleCommit,
-        input_states: &[InputStatePersistenceRecord],
-    ) -> Result<(), RuntimeStoreError>;
+        finalization: UnregisterFinalizationCommit,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = (runtime_id, finalization);
+        Err(RuntimeStoreError::Unsupported(
+            "commit_unregister_finalization".into(),
+        ))
+    }
+
+    /// Atomically initialize the ops lifecycle row if it is absent and return
+    /// the canonical durable snapshot.
+    ///
+    /// The absence check, optional insert, and canonical read MUST share one
+    /// store transaction (or one indivisible in-memory critical section).
+    /// Concurrent initializer calls for the same runtime must therefore all
+    /// observe the same epoch: exactly one candidate may become durable and
+    /// every losing caller receives that winner's snapshot. The machine's
+    /// stable registration transaction separately spans this store call
+    /// through map publication/removal; this method is not a distributed
+    /// machine lease. Implementations must also reject a candidate whose epoch
+    /// is already covered by the unregister deletion-wins fence.
+    ///
+    /// Cancellation may leave the candidate as the canonical empty row: no
+    /// bindings escape before this await completes, and the next registrar
+    /// adopts the returned durable epoch. A cancelled invocation must never
+    /// overwrite a row that was already present.
+    ///
+    /// There is intentionally no load-then-persist default. Custom stores
+    /// that support durable ops lifecycle state must implement this atomic
+    /// boundary or fail closed with [`RuntimeStoreError::Unsupported`].
+    async fn initialize_ops_lifecycle_if_absent(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        candidate: &crate::ops_lifecycle::PersistedOpsSnapshot,
+    ) -> Result<crate::ops_lifecycle::PersistedOpsSnapshot, RuntimeStoreError> {
+        let _ = (runtime_id, candidate);
+        Err(RuntimeStoreError::Unsupported(
+            "initialize_ops_lifecycle_if_absent".into(),
+        ))
+    }
 
     /// Persist a snapshot of the ops lifecycle registry state.
     async fn persist_ops_lifecycle(
@@ -1839,6 +2115,119 @@ pub trait RuntimeStore: Send + Sync {
         let _ = runtime_id;
         Err(RuntimeStoreError::Unsupported(
             "delete_ops_lifecycle".into(),
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Mob host binding rows (`runtime_mob_host_bindings`, multi-host mobs R8)
+    // -----------------------------------------------------------------------
+    //
+    // Raw record-JSON accessors only: the TYPED record and the
+    // transition-derived persistence authorities live mob-side
+    // (`meerkat-mob/src/runtime/host_actor.rs`); this store never interprets
+    // the blob. CAS compares the full serialized record, mirroring the
+    // `mob_runtime_supervisors` mechanics.
+
+    /// Load the persisted host-binding record blob for `mob_id`, if any.
+    async fn load_mob_host_binding(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        let _ = mob_id;
+        Err(RuntimeStoreError::Unsupported(
+            "load_mob_host_binding".into(),
+        ))
+    }
+
+    /// List every persisted host-binding row (boot recovery).
+    async fn list_mob_host_bindings(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "list_mob_host_bindings".into(),
+        ))
+    }
+
+    /// Insert the host-binding row for `mob_id` iff absent. Returns whether
+    /// the row was inserted.
+    async fn put_mob_host_binding_if_absent(
+        &self,
+        mob_id: &str,
+        record_json: &[u8],
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = (mob_id, record_json);
+        Err(RuntimeStoreError::Unsupported(
+            "put_mob_host_binding_if_absent".into(),
+        ))
+    }
+
+    /// Replace the host-binding row for `mob_id` iff the stored blob equals
+    /// `expected_json`. Returns whether the swap applied.
+    async fn compare_and_put_mob_host_binding(
+        &self,
+        mob_id: &str,
+        expected_json: &[u8],
+        next_json: &[u8],
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = (mob_id, expected_json, next_json);
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_put_mob_host_binding".into(),
+        ))
+    }
+
+    /// Delete the host-binding row for `mob_id` iff the stored blob equals
+    /// `expected_json`. Returns whether a row was deleted.
+    async fn delete_mob_host_binding(
+        &self,
+        mob_id: &str,
+        expected_json: &[u8],
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = (mob_id, expected_json);
+        Err(RuntimeStoreError::Unsupported(
+            "delete_mob_host_binding".into(),
+        ))
+    }
+
+    /// Load the durable receipt for an already-completed host revocation.
+    ///
+    /// The blob is deliberately separate from `runtime_mob_host_bindings`:
+    /// boot recovery must never mistake a revoke retry receipt for a live
+    /// binding or revive the materialized-member rows that the revoke
+    /// removed. The typed receipt and its transition witness live mob-side;
+    /// this store treats it as opaque bytes.
+    async fn load_mob_host_revocation(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        let _ = mob_id;
+        Err(RuntimeStoreError::Unsupported(
+            "load_mob_host_revocation".into(),
+        ))
+    }
+
+    /// List durable host-revocation receipts for boot recovery of exact
+    /// reply-loss retries. Receipts are not bindings and carry no member
+    /// revival rows.
+    async fn list_mob_host_revocations(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "list_mob_host_revocations".into(),
+        ))
+    }
+
+    /// Atomically delete the expected active binding and publish its revoke
+    /// receipt. Returns `false` when the expected binding did not match; in
+    /// that case neither write is visible.
+    ///
+    /// This is the durable terminal boundary for host revocation. A crash
+    /// before it leaves the binding retryable; a crash after it leaves no
+    /// binding/member rows to revive and an exact receipt to replay.
+    async fn revoke_mob_host_binding(
+        &self,
+        mob_id: &str,
+        expected_binding_json: &[u8],
+        receipt_json: &[u8],
+    ) -> Result<bool, RuntimeStoreError> {
+        let _ = (mob_id, expected_binding_json, receipt_json);
+        Err(RuntimeStoreError::Unsupported(
+            "revoke_mob_host_binding".into(),
         ))
     }
 }

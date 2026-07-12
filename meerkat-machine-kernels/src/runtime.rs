@@ -1299,11 +1299,324 @@ impl GeneratedMachineKernel {
         // Test-oracle support for native helpers whose production semantics
         // live in the generated/Rust machine owner.
         match helper {
+            "meerkat_machine_session_id_matches_string" => {
+                self.eval_meerkat_machine_session_id_matches_string(args, transition_name)
+            }
             "mob_machine_external_peer_identity_absent" => {
                 self.eval_mob_machine_external_peer_identity_absent(args, transition_name)
             }
+            "mob_machine_next_respawn_generation" => {
+                self.eval_mob_machine_next_respawn_generation(args, transition_name)
+            }
+            "mob_machine_u64_is_exact_successor" => {
+                self.eval_mob_machine_u64_is_exact_successor(args, transition_name)
+            }
+            "mob_machine_optional_u64_is_exact_successor" => {
+                self.eval_mob_machine_optional_u64_is_exact_successor(args, transition_name)
+            }
+            "mob_machine_members_to_spawn" => {
+                self.eval_mob_machine_members_to_spawn(args, transition_name)
+            }
+            "mob_machine_members_to_retire" => {
+                self.eval_mob_machine_members_to_retire(args, transition_name)
+            }
+            "mob_machine_placed_cleanup_absent_for_identity" => {
+                self.eval_mob_machine_placed_cleanup_absent_for_identity(args, transition_name)
+            }
+            "mob_machine_placed_cleanup_obligation" => {
+                self.eval_mob_machine_placed_cleanup_obligation(args, transition_name)
+            }
             _ => Err(self.eval_error(transition_name, format!("unknown helper `{helper}`"))),
         }
+    }
+
+    fn eval_meerkat_machine_session_id_matches_string(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [current, candidate]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "meerkat_machine_session_id_matches_string expects two args",
+            )
+        })?;
+        let KernelValue::String(candidate) = candidate else {
+            return Err(self.eval_error(
+                transition_name,
+                "meerkat_machine_session_id_matches_string expected a String candidate",
+            ));
+        };
+        let matches = match current {
+            KernelValue::None => false,
+            KernelValue::Map(values) if values.len() == 1 => {
+                let value = values
+                    .get(&KernelValue::String("value".to_string()))
+                    .ok_or_else(|| {
+                        self.eval_error(
+                            transition_name,
+                            "meerkat_machine_session_id_matches_string expected Option<SessionId>",
+                        )
+                    })?;
+                named_or_bare_string_leaf(value, "SessionId").ok_or_else(|| {
+                    self.eval_error(
+                        transition_name,
+                        "meerkat_machine_session_id_matches_string expected Option<SessionId>",
+                    )
+                })? == candidate.as_str()
+            }
+            other => {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!(
+                        "meerkat_machine_session_id_matches_string expected Option<SessionId>, found {other:?}"
+                    ),
+                ));
+            }
+        };
+        Ok(KernelValue::Bool(matches))
+    }
+
+    fn eval_mob_machine_next_respawn_generation(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [identity_runtime_generations, agent_identity]: [KernelValue; 2] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_next_respawn_generation expects two args",
+                )
+            })?;
+        let identity_runtime_generations = identity_runtime_generations
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        if named_or_bare_string_leaf(&agent_identity, "AgentIdentity").is_none() {
+            return Err(self.eval_error(
+                transition_name,
+                "mob_machine_next_respawn_generation expected AgentIdentity",
+            ));
+        }
+        let next_generation = match identity_runtime_generations.get(&agent_identity) {
+            Some(generation) => named_or_bare_u64_leaf(generation, "Generation")
+                .ok_or_else(|| {
+                    self.eval_error(
+                        transition_name,
+                        "mob_machine_next_respawn_generation expected Generation map values",
+                    )
+                })?
+                .checked_add(1),
+            None => Some(0),
+        };
+        let Some(next_generation) = next_generation else {
+            return Ok(KernelValue::None);
+        };
+        let generation_type = NamedTypeId::parse("Generation").map_err(|error| {
+            self.eval_error(
+                transition_name,
+                format!("invalid Generation named type: {error}"),
+            )
+        })?;
+        Ok(option_some(KernelValue::Named {
+            type_name: generation_type,
+            value: Box::new(KernelValue::U64(next_generation)),
+        }))
+    }
+
+    fn eval_mob_machine_u64_is_exact_successor(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [current, next]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_u64_is_exact_successor expects two args",
+            )
+        })?;
+        let current = current
+            .as_u64()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let next = next
+            .as_u64()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        Ok(KernelValue::Bool(current.checked_add(1) == Some(next)))
+    }
+
+    fn eval_mob_machine_optional_u64_is_exact_successor(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [current, next]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_optional_u64_is_exact_successor expects two args",
+            )
+        })?;
+        let current = current
+            .as_u64()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let next = match next {
+            KernelValue::None => None,
+            KernelValue::Map(values) if values.len() == 1 => values
+                .get(&KernelValue::String("value".to_string()))
+                .ok_or_else(|| {
+                    self.eval_error(
+                        transition_name,
+                        "mob_machine_optional_u64_is_exact_successor expected Option<u64>",
+                    )
+                })?
+                .as_u64()
+                .map(Some)
+                .map_err(|error| self.eval_error(transition_name, error))?,
+            other => {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!(
+                        "mob_machine_optional_u64_is_exact_successor expected Option<u64>, found {other:?}"
+                    ),
+                ));
+            }
+        };
+        Ok(KernelValue::Bool(current.checked_add(1) == next))
+    }
+
+    fn eval_mob_machine_members_to_spawn(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [identity_to_runtime, desired]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_members_to_spawn expects two args",
+            )
+        })?;
+        let identity_to_runtime = identity_to_runtime
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let desired = desired
+            .into_set()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        Ok(KernelValue::Set(
+            desired
+                .into_iter()
+                .filter(|identity| !identity_to_runtime.contains_key(identity))
+                .collect(),
+        ))
+    }
+
+    fn eval_mob_machine_members_to_retire(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [identity_to_runtime, desired, retire_stale]: [KernelValue; 3] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_members_to_retire expects three args",
+                )
+            })?;
+        let identity_to_runtime = identity_to_runtime
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let desired = desired
+            .into_set()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let retire_stale = retire_stale
+            .as_bool()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        if !retire_stale {
+            return Ok(KernelValue::Set(BTreeSet::new()));
+        }
+        Ok(KernelValue::Set(
+            identity_to_runtime
+                .into_keys()
+                .filter(|identity| !desired.contains(identity))
+                .collect(),
+        ))
+    }
+
+    fn eval_mob_machine_placed_cleanup_absent_for_identity(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [obligations, agent_identity]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_placed_cleanup_absent_for_identity expects two args",
+            )
+        })?;
+        let obligations = obligations
+            .into_set()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let agent_identity = named_or_bare_string_leaf(&agent_identity, "AgentIdentity")
+            .ok_or_else(|| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_placed_cleanup_absent_for_identity expected AgentIdentity",
+                )
+            })?;
+        for obligation in &obligations {
+            let obligation_identity = placed_cleanup_obligation_agent_identity(obligation)
+                .ok_or_else(|| {
+                    self.eval_error(
+                        transition_name,
+                        "mob_machine_placed_cleanup_absent_for_identity expected obligations with AgentIdentity",
+                    )
+                })?;
+            if obligation_identity == agent_identity {
+                return Ok(KernelValue::Bool(false));
+            }
+        }
+        Ok(KernelValue::Bool(true))
+    }
+
+    fn eval_mob_machine_placed_cleanup_obligation(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [
+            agent_identity,
+            spawn_id,
+            generation,
+            fence_token,
+            provision_operation_id,
+            operation_owner_session_id,
+            expected_phase,
+        ]: [KernelValue; 7] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_placed_cleanup_obligation expects seven args",
+            )
+        })?;
+        let obligation_type =
+            NamedTypeId::parse("PlacedCarrierCleanupObligation").map_err(|error| {
+                self.eval_error(
+                    transition_name,
+                    format!("invalid PlacedCarrierCleanupObligation named type: {error}"),
+                )
+            })?;
+        Ok(KernelValue::Named {
+            type_name: obligation_type,
+            value: Box::new(KernelValue::Map(BTreeMap::from([
+                (string_key("agent_identity"), agent_identity),
+                (string_key("spawn_id"), spawn_id),
+                (string_key("generation"), generation),
+                (string_key("fence_token"), fence_token),
+                (string_key("provision_operation_id"), provision_operation_id),
+                (
+                    string_key("operation_owner_session_id"),
+                    operation_owner_session_id,
+                ),
+                (string_key("expected_phase"), expected_phase),
+            ]))),
+        })
     }
 
     fn eval_mob_machine_external_peer_identity_absent(
@@ -1486,6 +1799,32 @@ fn named_string_leaf<'a>(value: &'a KernelValue, expected_type: &str) -> Option<
     }
 }
 
+fn named_u64_leaf(value: &KernelValue, expected_type: &str) -> Option<u64> {
+    match value {
+        KernelValue::Named { type_name, value } if type_name.as_str() == expected_type => {
+            match value.as_ref() {
+                KernelValue::U64(value) => Some(*value),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn named_or_bare_string_leaf<'a>(value: &'a KernelValue, expected_type: &str) -> Option<&'a str> {
+    match value {
+        KernelValue::String(value) => Some(value.as_str()),
+        _ => named_string_leaf(value, expected_type),
+    }
+}
+
+fn named_or_bare_u64_leaf(value: &KernelValue, expected_type: &str) -> Option<u64> {
+    match value {
+        KernelValue::U64(value) => Some(*value),
+        _ => named_u64_leaf(value, expected_type),
+    }
+}
+
 fn string_leaf(value: &KernelValue) -> Option<&str> {
     match value {
         KernelValue::String(value) => Some(value.as_str()),
@@ -1543,6 +1882,11 @@ fn external_peer_edge_endpoint_name(edge: &KernelValue) -> Option<&str> {
     let endpoint = type_path_field(edge, "endpoint")?;
     let name = type_path_field(endpoint, "name")?;
     string_leaf(name)
+}
+
+fn placed_cleanup_obligation_agent_identity(obligation: &KernelValue) -> Option<&str> {
+    let agent_identity = type_path_field(obligation, "agent_identity")?;
+    named_or_bare_string_leaf(agent_identity, "AgentIdentity")
 }
 
 /// Synthetic transition id used in error contexts that are not raised from a
@@ -3633,6 +3977,7 @@ mod tests {
                         (field_id("provider_params_digest"), KernelValue::None),
                         (field_id("output_schema_digest"), KernelValue::None),
                         (field_id("external_addressable"), KernelValue::Bool(false)),
+                        (field_id("resolved_spec_digest"), KernelValue::None),
                     ]),
                 },
             )
@@ -3658,7 +4003,7 @@ mod tests {
                             named_string("AgentRuntimeId", "runtime.worker.1"),
                         ),
                         (field_id("fence_token"), named_u64("FenceToken", 41)),
-                        (field_id("generation"), named_u64("Generation", 2)),
+                        (field_id("generation"), named_u64("Generation", 0)),
                         (
                             field_id("profile_material_digest"),
                             KernelValue::String(profile_material_digest.to_owned()),
@@ -3676,6 +4021,52 @@ mod tests {
                             option_some(named_string("SessionId", "bridge.worker.1")),
                         ),
                         (field_id("replacing"), KernelValue::None),
+                        (field_id("placement"), KernelValue::None),
+                        (field_id("workgraph_required"), KernelValue::Bool(false)),
+                        (field_id("rust_bundles_present"), KernelValue::Bool(false)),
+                        (
+                            field_id("per_spawn_external_tools_present"),
+                            KernelValue::Bool(false),
+                        ),
+                        (
+                            field_id("mob_default_external_tools_present"),
+                            KernelValue::Bool(false),
+                        ),
+                        (
+                            field_id("default_llm_client_override_present"),
+                            KernelValue::Bool(false),
+                        ),
+                        (
+                            field_id("host_surface_mcp_allowlist_present"),
+                            KernelValue::Bool(false),
+                        ),
+                        (
+                            field_id("inherited_tool_filter_present"),
+                            KernelValue::Bool(false),
+                        ),
+                        (field_id("shell_env_present"), KernelValue::Bool(false)),
+                        (field_id("mcp_stdio_env_present"), KernelValue::Bool(false)),
+                        (
+                            field_id("mcp_http_headers_present"),
+                            KernelValue::Bool(false),
+                        ),
+                        (field_id("memory_required"), KernelValue::Bool(false)),
+                        (field_id("mcp_required"), KernelValue::Bool(false)),
+                        (field_id("resume_session_id"), KernelValue::None),
+                        (field_id("placed_spawn_id"), KernelValue::None),
+                        (field_id("placed_provision_operation_id"), KernelValue::None),
+                        (
+                            field_id("placed_operation_owner_session_id"),
+                            KernelValue::None,
+                        ),
+                        (
+                            field_id("effective_profile_override_present"),
+                            KernelValue::Bool(false),
+                        ),
+                        (
+                            field_id("effective_model_override_present"),
+                            KernelValue::Bool(false),
+                        ),
                     ]),
                 },
             )
@@ -3701,7 +4092,7 @@ mod tests {
                             named_string("AgentRuntimeId", "runtime.worker.1"),
                         ),
                         (field_id("fence_token"), named_u64("FenceToken", 41)),
-                        (field_id("generation"), named_u64("Generation", 2)),
+                        (field_id("generation"), named_u64("Generation", 0)),
                         (
                             field_id("profile_material_digest"),
                             KernelValue::String(profile_material_digest.to_owned()),
@@ -3721,6 +4112,11 @@ mod tests {
                             option_some(named_string("SessionId", "bridge.worker.1")),
                         ),
                         (field_id("replacing"), KernelValue::None),
+                        (field_id("member_peer_endpoint"), KernelValue::None),
+                        (field_id("spec_digest_echo"), KernelValue::None),
+                        (field_id("ack_engine_version"), KernelValue::None),
+                        (field_id("placed_spawn_id"), KernelValue::None),
+                        (field_id("provision_operation_id"), KernelValue::None),
                     ]),
                 },
             )
@@ -3781,6 +4177,319 @@ mod tests {
                 .get(&field_id("active_run_count")),
             Some(&KernelValue::U64(0))
         );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn meerkat_live_open_transition_matches_only_the_registered_typed_session() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+        let registered = kernel
+            .transition(
+                &initialized.next_state,
+                &KernelInput {
+                    variant: input_id("RegisterSession"),
+                    fields: BTreeMap::from([(
+                        field_id("session_id"),
+                        named_string("SessionId", "session-a"),
+                    )]),
+                },
+            )
+            .expect("register typed session");
+        let live_open = |session_id: &str, channel_id: &str| KernelInput {
+            variant: input_id("ResolveLiveOpenAdmission"),
+            fields: BTreeMap::from([
+                (
+                    field_id("session_id"),
+                    KernelValue::String(session_id.to_string()),
+                ),
+                (
+                    field_id("channel_id"),
+                    KernelValue::String(channel_id.to_string()),
+                ),
+                (
+                    field_id("llm_identity"),
+                    named_string("SessionLlmIdentity", "openai:gpt-test"),
+                ),
+            ]),
+        };
+
+        let matching = kernel
+            .transition(&registered.next_state, &live_open("session-a", "channel-a"))
+            .expect("matching live/open session");
+        assert_eq!(
+            matching.transition,
+            transition_id("ResolveLiveOpenAdmissionAcceptedIdle")
+        );
+        assert!(matching.effects.iter().any(|effect| {
+            effect.variant == effect_id("LiveOpenAdmissionResolved")
+                && effect.fields.get(&field_id("admitted")) == Some(&KernelValue::Bool(true))
+        }));
+        let Some(KernelValue::Map(active_channels)) = matching
+            .next_state
+            .fields
+            .get(&field_id("live_active_channel_by_session"))
+        else {
+            panic!("live/open acceptance must preserve the generated session/channel binding");
+        };
+        assert_eq!(
+            active_channels.get(&KernelValue::String("session-a".to_string())),
+            Some(&KernelValue::String("channel-a".to_string()))
+        );
+
+        let refusal = kernel
+            .transition(&registered.next_state, &live_open("session-b", "channel-b"))
+            .expect_err("mismatched live/open session must not select an admission transition");
+        assert!(matches!(
+            refusal,
+            TransitionRefusal::NoMatchingTransition { .. }
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn meerkat_session_id_native_helper_executes() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let transition = transition_id("ResolveLiveOpenAdmissionAcceptedIdle");
+        let current = option_some(named_string("SessionId", "session-a"));
+
+        for (candidate, expected) in [("session-a", true), ("session-b", false)] {
+            assert_eq!(
+                kernel
+                    .eval_native_helper(
+                        "meerkat_machine_session_id_matches_string",
+                        vec![current.clone(), KernelValue::String(candidate.to_string())],
+                        &transition,
+                    )
+                    .expect("typed session/string comparison"),
+                KernelValue::Bool(expected)
+            );
+        }
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "meerkat_machine_session_id_matches_string",
+                    vec![
+                        option_some(KernelValue::String("session-a".to_string())),
+                        KernelValue::String("session-a".to_string()),
+                    ],
+                    &transition,
+                )
+                .expect("natural string-shaped SessionId comparison"),
+            KernelValue::Bool(true)
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "meerkat_machine_session_id_matches_string",
+                    vec![
+                        KernelValue::None,
+                        KernelValue::String("session-a".to_string())
+                    ],
+                    &transition,
+                )
+                .expect("absent current session"),
+            KernelValue::Bool(false)
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn mob_wave_g2_native_helpers_execute() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let transition = transition_id("BeginSpawnExecFresh");
+        let agent_a = named_string("AgentIdentity", "agent.a");
+        let agent_b = named_string("AgentIdentity", "agent.b");
+        let runtime_a = named_string("AgentRuntimeId", "runtime.a");
+
+        let fresh = kernel
+            .eval_native_helper(
+                "mob_machine_next_respawn_generation",
+                vec![KernelValue::Map(BTreeMap::new()), agent_a.clone()],
+                &transition,
+            )
+            .expect("fresh generation");
+        assert_eq!(fresh, option_some(named_u64("Generation", 0)));
+
+        let successor = kernel
+            .eval_native_helper(
+                "mob_machine_next_respawn_generation",
+                vec![
+                    KernelValue::Map(BTreeMap::from([(
+                        agent_a.clone(),
+                        named_u64("Generation", 7),
+                    )])),
+                    agent_a.clone(),
+                ],
+                &transition,
+            )
+            .expect("successor generation");
+        assert_eq!(successor, option_some(named_u64("Generation", 8)));
+
+        let exhausted = kernel
+            .eval_native_helper(
+                "mob_machine_next_respawn_generation",
+                vec![
+                    KernelValue::Map(BTreeMap::from([(
+                        agent_a.clone(),
+                        named_u64("Generation", u64::MAX),
+                    )])),
+                    agent_a.clone(),
+                ],
+                &transition,
+            )
+            .expect("exhausted generation");
+        assert_eq!(exhausted, KernelValue::None);
+
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_u64_is_exact_successor",
+                    vec![KernelValue::U64(7), KernelValue::U64(8)],
+                    &transition,
+                )
+                .expect("plain exact successor"),
+            KernelValue::Bool(true)
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_u64_is_exact_successor",
+                    vec![KernelValue::U64(u64::MAX), KernelValue::U64(0)],
+                    &transition,
+                )
+                .expect("plain successor exhaustion"),
+            KernelValue::Bool(false)
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_optional_u64_is_exact_successor",
+                    vec![KernelValue::U64(7), option_some(KernelValue::U64(8))],
+                    &transition,
+                )
+                .expect("optional exact successor"),
+            KernelValue::Bool(true)
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_optional_u64_is_exact_successor",
+                    vec![KernelValue::U64(u64::MAX), option_some(KernelValue::U64(0))],
+                    &transition,
+                )
+                .expect("optional successor exhaustion"),
+            KernelValue::Bool(false)
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_optional_u64_is_exact_successor",
+                    vec![KernelValue::U64(7), KernelValue::None],
+                    &transition,
+                )
+                .expect("optional missing successor"),
+            KernelValue::Bool(false)
+        );
+
+        let identity_to_runtime = KernelValue::Map(BTreeMap::from([(agent_a.clone(), runtime_a)]));
+        let desired = KernelValue::Set(BTreeSet::from([agent_a.clone(), agent_b.clone()]));
+        let members_to_spawn = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_spawn",
+                vec![identity_to_runtime.clone(), desired.clone()],
+                &transition,
+            )
+            .expect("members to spawn");
+        assert_eq!(
+            members_to_spawn,
+            KernelValue::Set(BTreeSet::from([agent_b.clone()]))
+        );
+        let members_to_retire = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_retire",
+                vec![
+                    identity_to_runtime.clone(),
+                    KernelValue::Set(BTreeSet::from([agent_b.clone()])),
+                    KernelValue::Bool(true),
+                ],
+                &transition,
+            )
+            .expect("members to retire");
+        assert_eq!(
+            members_to_retire,
+            KernelValue::Set(BTreeSet::from([agent_a.clone()]))
+        );
+        let retirement_disabled = kernel
+            .eval_native_helper(
+                "mob_machine_members_to_retire",
+                vec![identity_to_runtime, desired, KernelValue::Bool(false)],
+                &transition,
+            )
+            .expect("retirement disabled");
+        assert_eq!(retirement_disabled, KernelValue::Set(BTreeSet::new()));
+
+        let obligation = kernel
+            .eval_native_helper(
+                "mob_machine_placed_cleanup_obligation",
+                vec![
+                    agent_a.clone(),
+                    named_string("PlacedSpawnId", "spawn.a"),
+                    named_u64("Generation", 8),
+                    named_u64("FenceToken", 41),
+                    KernelValue::String("provision.a".to_owned()),
+                    named_string("SessionId", "session.a"),
+                    KernelValue::NamedVariant {
+                        enum_name: enum_type_id("PlacedSpawnCarrierExpectedPhase"),
+                        variant: enum_variant_id("Committed"),
+                    },
+                ],
+                &transition,
+            )
+            .expect("placed cleanup obligation");
+        let obligations = KernelValue::Set(BTreeSet::from([obligation.clone()]));
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_placed_cleanup_absent_for_identity",
+                    vec![obligations.clone(), agent_a],
+                    &transition,
+                )
+                .expect("matching cleanup identity"),
+            KernelValue::Bool(false)
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_placed_cleanup_absent_for_identity",
+                    vec![obligations, KernelValue::String("agent.b".to_owned())],
+                    &transition,
+                )
+                .expect("bare nonmatching cleanup identity"),
+            KernelValue::Bool(true)
+        );
+
+        let malformed_obligation = KernelValue::Map(BTreeMap::new());
+        assert!(matches!(
+            kernel.eval_native_helper(
+                "mob_machine_placed_cleanup_absent_for_identity",
+                vec![
+                    KernelValue::Set(BTreeSet::from([malformed_obligation])),
+                    agent_b,
+                ],
+                &transition,
+            ),
+            Err(TransitionRefusal::EvaluationError { .. })
+        ));
     }
 
     #[allow(clippy::expect_used)]

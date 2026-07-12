@@ -5,6 +5,7 @@ use crate::definition::{
     DependencyMode, FlowNodeSpec, FlowSpec, FrameSpec, LimitsSpec, SupervisorSpec, TopologySpec,
 };
 use crate::error::MobError;
+use crate::event::RemoteTurnObligationEvent;
 use crate::ids::{
     AgentIdentity, BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MobId,
     ProfileName, RunId, StepId,
@@ -22,6 +23,183 @@ pub mod flow_run;
 pub mod loop_iteration;
 
 pub const FLOW_RUN_PROVENANCE_AGENT_ID: &str = "__flow_system_member__";
+
+/// Replay-complete durable result for one remote target attempt. The receipt
+/// is committed in the run store before controller custody can advance to
+/// `Committed`, so a host ACK can never erase the only copy of the outcome.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MobRunRemoteTurnReceipt {
+    pub obligation: RemoteTurnObligationEvent,
+    pub outcome: MobRunRemoteTurnReceiptOutcome,
+}
+
+pub const REMOTE_TURN_RECEIPT_MAX_ENCODED_BYTES: usize = 512 * 1024;
+
+impl MobRunRemoteTurnReceipt {
+    /// Validate the receipt's self-contained shape without treating it as
+    /// custody authority. Recovery/commit still require the exact intent;
+    /// this narrower check lets allocator recovery observe an orphan receipt
+    /// sequence after a crash so that sequence can never be reused.
+    pub fn validate_shape_for(&self, run_id: &RunId) -> Result<(), String> {
+        let obligation = &self.obligation;
+        if &obligation.run_id != run_id {
+            return Err(format!(
+                "receipt obligation run '{}' does not match owning run '{run_id}'",
+                obligation.run_id
+            ));
+        }
+        if obligation.dispatch_sequence == 0
+            || uuid::Uuid::parse_str(&obligation.input_id).is_err()
+            || obligation.host_id.is_empty()
+            || obligation.host_binding_generation == 0
+            || obligation.member_session_id.is_empty()
+            || obligation.agent_identity.as_str().is_empty()
+            || obligation.step_id.to_string().is_empty()
+        {
+            return Err("receipt obligation contains an empty/invalid correlation field".into());
+        }
+        match &self.outcome {
+            MobRunRemoteTurnReceiptOutcome::Completed { value } => {
+                serde_json::to_vec(value)
+                    .map_err(|error| format!("receipt output encoding failed: {error}"))?;
+            }
+            MobRunRemoteTurnReceiptOutcome::Failed { reason, .. }
+            | MobRunRemoteTurnReceiptOutcome::TrackedInputCancel { reason, .. } => {
+                if reason.is_empty() || reason.len() > 64 * 1024 {
+                    return Err("receipt failure reason is empty or exceeds 64 KiB".into());
+                }
+            }
+        }
+        let encoded_bytes = serde_json::to_vec(self)
+            .map_err(|error| format!("receipt encoding failed: {error}"))?
+            .len();
+        if encoded_bytes > REMOTE_TURN_RECEIPT_MAX_ENCODED_BYTES {
+            return Err(format!(
+                "receipt is {encoded_bytes} bytes; maximum is {REMOTE_TURN_RECEIPT_MAX_ENCODED_BYTES}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for(
+        &self,
+        run_id: &RunId,
+        mob_id: &MobId,
+        intent: &MobRunRemoteTurnIntent,
+    ) -> Result<(), String> {
+        self.validate_shape_for(run_id)?;
+        intent.validate_for(run_id, mob_id)?;
+        if self.obligation != intent.obligation {
+            return Err("receipt obligation does not exactly match durable intent".into());
+        }
+        Ok(())
+    }
+}
+
+/// Internal durable replay material for a remote directed-turn delivery.
+/// This is stored beside the run rather than exposed through public MobEvent
+/// payloads, because it contains model-visible user content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobRunRemoteTurnIntent {
+    pub obligation: RemoteTurnObligationEvent,
+    pub expected_member: meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+    pub content: meerkat_core::types::ContentInput,
+    pub handling_mode: meerkat_core::types::HandlingMode,
+    pub directive: meerkat_contracts::wire::supervisor_bridge::BridgeTurnDirective,
+}
+
+/// Conservative replay-payload ceiling below the 1 MiB comms envelope. The
+/// remaining 256 KiB is reserved for authenticated routing/framing overhead.
+pub const REMOTE_TURN_INTENT_MAX_ENCODED_BYTES: usize = 768 * 1024;
+
+impl MobRunRemoteTurnIntent {
+    pub fn validate_for(&self, run_id: &RunId, mob_id: &MobId) -> Result<(), String> {
+        let obligation = &self.obligation;
+        let expected = &self.expected_member;
+        if &obligation.run_id != run_id {
+            return Err(format!(
+                "intent obligation run '{}' does not match owning run '{run_id}'",
+                obligation.run_id
+            ));
+        }
+        if obligation.dispatch_sequence == 0
+            || obligation.input_id.trim().is_empty()
+            || obligation.input_id.len() > 128
+            || uuid::Uuid::parse_str(&obligation.input_id).is_err()
+            || obligation.run_id.to_string().is_empty()
+            || obligation.step_id.to_string().is_empty()
+            || obligation.host_id.is_empty()
+            || obligation.host_binding_generation == 0
+            || obligation.member_session_id.is_empty()
+        {
+            return Err("intent obligation contains an empty/invalid correlation field".into());
+        }
+        if expected.mob_id.as_str() != mob_id.as_str()
+            || expected.agent_identity.as_str() != obligation.agent_identity.as_str()
+            || expected.host_id != obligation.host_id
+            || expected.binding_generation != obligation.host_binding_generation
+            || expected.member_session_id != obligation.member_session_id
+            || expected.generation != obligation.generation.get()
+            || expected.fence_token != obligation.fence_token.get()
+        {
+            return Err(
+                "intent expected_member does not exactly match its obligation/owner".into(),
+            );
+        }
+        if self.directive.correlation.run_id != obligation.run_id.to_string()
+            || self.directive.correlation.step_id.as_str() != obligation.step_id.as_str()
+        {
+            return Err(
+                "intent directive correlation does not exactly match its obligation".into(),
+            );
+        }
+        if self.handling_mode != meerkat_core::types::HandlingMode::Queue {
+            return Err("remote flow intent handling mode must be queue".into());
+        }
+        let encoded_bytes = serde_json::to_vec(self)
+            .map_err(|error| format!("intent encoding failed: {error}"))?
+            .len();
+        if encoded_bytes > REMOTE_TURN_INTENT_MAX_ENCODED_BYTES {
+            return Err(format!(
+                "intent is {encoded_bytes} bytes; maximum is {REMOTE_TURN_INTENT_MAX_ENCODED_BYTES}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum MobRunRemoteTurnReceiptOutcome {
+    Completed {
+        value: serde_json::Value,
+    },
+    Failed {
+        reason: String,
+        /// Present only for an authenticated delivery rejection before
+        /// runtime effect. Host-side tracked cancellation has its own typed
+        /// receipt variant below because `Cancelled` is terminal but does not
+        /// certify that no effect was ever admitted.
+        no_effect_proof:
+            Option<meerkat_contracts::wire::supervisor_bridge::BridgeDeliveryRejectionCause>,
+    },
+    /// Authenticated, replay-stable terminal from the host's exact tracked
+    /// input cancellation command. Unlike a delivery rejection, `Cancelled`
+    /// may follow an admitted effect; both terminal classes durably fence the
+    /// key and authorize controller-side obligation disposal without a turn
+    /// outcome ACK.
+    TrackedInputCancel {
+        reason: String,
+        terminal: MobRunRemoteTurnTrackedCancelTerminal,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobRunRemoteTurnTrackedCancelTerminal {
+    NoEffect,
+    Cancelled,
+}
 
 #[must_use]
 pub fn mob_run_schema_version() -> u32 {
@@ -367,11 +545,50 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::CommitSpawnMembership { .. }
             | mob_dsl::MobMachineInput::CommitSpawnActivation { .. }
             | mob_dsl::MobMachineInput::AbortSpawnExec { .. }
+            | mob_dsl::MobMachineInput::AuthorizePlacedCarrierCleanup { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedCarrierCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
             | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }
             | mob_dsl::MobMachineInput::ResolveFlowDelegationEdgeAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
+            | mob_dsl::MobMachineInput::BeginHostBind { .. }
+            | mob_dsl::MobMachineInput::CommitHostBind { .. }
+            | mob_dsl::MobMachineInput::HostRebound { .. }
+            | mob_dsl::MobMachineInput::PromoteCommittedPlacedSpawnCarrierBinding { .. }
+            | mob_dsl::MobMachineInput::RefreshHostCapabilities { .. }
+            | mob_dsl::MobMachineInput::RevokeHost { .. }
+            | mob_dsl::MobMachineInput::RecordMemberMaterializationFailure { .. }
+            | mob_dsl::MobMachineInput::RecordRouteInstall { .. }
+            | mob_dsl::MobMachineInput::AuthorizeRouteRemovalBeforeUnwire { .. }
+            | mob_dsl::MobMachineInput::ResolveRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RollbackRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RecordRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::AbortRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::CommitRemoteTurnOutcome { .. }
+            | mob_dsl::MobMachineInput::ResolveRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::AcknowledgeRemoteTurnOutcome { .. }
+            | mob_dsl::MobMachineInput::DisposeRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::RecordPlacedCompletionObligation { .. }
+            | mob_dsl::MobMachineInput::RequestPlacedCompletionCancellation { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::ClosePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::AcknowledgePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::DisposePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { .. }
+            | mob_dsl::MobMachineInput::EndPlacedCompletionLifecycleQuiesce { .. }
+            | mob_dsl::MobMachineInput::StartPlacedKickoff { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffStarted { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffCallbackPending { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffFailed { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffCancelled { .. }
+            | mob_dsl::MobMachineInput::RejectPlacedKickoffBeforeAdmission { .. }
+            | mob_dsl::MobMachineInput::AcknowledgePlacedKickoffOutcome { .. }
+            | mob_dsl::MobMachineInput::DisposePlacedKickoffObligation { .. }
+            | mob_dsl::MobMachineInput::GrantOperatorScopes { .. }
+            | mob_dsl::MobMachineInput::RevokeOperatorScopes { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberOperatorAdmission { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowStepDispatch { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnToolAdmission { .. }
@@ -397,6 +614,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberPeerRebind { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberPeerOverlay { .. }
+            | mob_dsl::MobMachineInput::AuthorizeRetiringMemberPeerOverlayCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
@@ -1572,11 +1790,50 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::CommitSpawnMembership { .. }
             | mob_dsl::MobMachineInput::CommitSpawnActivation { .. }
             | mob_dsl::MobMachineInput::AbortSpawnExec { .. }
+            | mob_dsl::MobMachineInput::AuthorizePlacedCarrierCleanup { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedCarrierCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeSpawnProfile { .. }
             | mob_dsl::MobMachineInput::ClassifySpawnManyFailure { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberWait { .. }
             | mob_dsl::MobMachineInput::ResolveFlowDelegationEdgeAdmission { .. }
             | mob_dsl::MobMachineInput::ClassifyRemoteMemberRuntimeObservation { .. }
+            | mob_dsl::MobMachineInput::BeginHostBind { .. }
+            | mob_dsl::MobMachineInput::CommitHostBind { .. }
+            | mob_dsl::MobMachineInput::HostRebound { .. }
+            | mob_dsl::MobMachineInput::PromoteCommittedPlacedSpawnCarrierBinding { .. }
+            | mob_dsl::MobMachineInput::RefreshHostCapabilities { .. }
+            | mob_dsl::MobMachineInput::RevokeHost { .. }
+            | mob_dsl::MobMachineInput::RecordMemberMaterializationFailure { .. }
+            | mob_dsl::MobMachineInput::RecordRouteInstall { .. }
+            | mob_dsl::MobMachineInput::AuthorizeRouteRemovalBeforeUnwire { .. }
+            | mob_dsl::MobMachineInput::ResolveRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RollbackRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RecordRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::AbortRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::CommitRemoteTurnOutcome { .. }
+            | mob_dsl::MobMachineInput::ResolveRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::AcknowledgeRemoteTurnOutcome { .. }
+            | mob_dsl::MobMachineInput::DisposeRemoteTurnObligation { .. }
+            | mob_dsl::MobMachineInput::RecordPlacedCompletionObligation { .. }
+            | mob_dsl::MobMachineInput::RequestPlacedCompletionCancellation { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::ClosePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::AcknowledgePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::DisposePlacedCompletionOutcome { .. }
+            | mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { .. }
+            | mob_dsl::MobMachineInput::EndPlacedCompletionLifecycleQuiesce { .. }
+            | mob_dsl::MobMachineInput::StartPlacedKickoff { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffStarted { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffCallbackPending { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffFailed { .. }
+            | mob_dsl::MobMachineInput::ResolvePlacedKickoffCancelled { .. }
+            | mob_dsl::MobMachineInput::RejectPlacedKickoffBeforeAdmission { .. }
+            | mob_dsl::MobMachineInput::AcknowledgePlacedKickoffOutcome { .. }
+            | mob_dsl::MobMachineInput::DisposePlacedKickoffObligation { .. }
+            | mob_dsl::MobMachineInput::GrantOperatorScopes { .. }
+            | mob_dsl::MobMachineInput::RevokeOperatorScopes { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberOperatorAdmission { .. }
+            | mob_dsl::MobMachineInput::ClassifyFlowStepDispatch { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnToolAdmission { .. }
@@ -1604,6 +1861,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RegisterMemberPeer { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberPeerRebind { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberPeerOverlay { .. }
+            | mob_dsl::MobMachineInput::AuthorizeRetiringMemberPeerOverlayCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustWiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustUnwiring { .. }
             | mob_dsl::MobMachineInput::AuthorizeMemberTrustCleanup { .. }
@@ -4817,6 +5075,33 @@ impl MobRun {
         }
         self.flow_authority_inputs.extend(records);
         Ok(())
+    }
+
+    /// Recover the exact persisted reducer authority for a step whose
+    /// `FailStep` state CAS committed before its public projections did.
+    pub(crate) fn persisted_fail_step_provenance_authority(
+        &self,
+        step_id: &StepId,
+    ) -> Result<Option<MobRunProvenanceAuthority>, MobError> {
+        let expected_input = MobMachineFlowRunCommand::FailStep(flow_run::inputs::FailStep {
+            step_id: step_id.clone(),
+        })
+        .authority_input(&self.run_id);
+        let expected_record = FlowAuthorityInputRecord::from_machine_input(expected_input)?;
+        let mut matching = self
+            .flow_authority_inputs
+            .iter()
+            .filter(|record| *record == &expected_record);
+        let Some(record) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some() {
+            return Err(MobError::Internal(format!(
+                "run '{}' contains duplicate persisted FailStep authority for step '{}'",
+                self.run_id, step_id
+            )));
+        }
+        MobRunProvenanceAuthority::from_flow_authority_input(record.to_machine_input()).map(Some)
     }
 
     pub(crate) fn replay_flow_authority_inputs_into(

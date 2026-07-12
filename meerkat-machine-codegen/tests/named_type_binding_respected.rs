@@ -85,6 +85,7 @@ fn schema_with_single_named_type(field_name: &str, named: &str) -> MachineSchema
             rust: RustTypeAtom::String, // overridden by the callers
         }],
         ci_step_limit: None,
+        deep_domain_overrides: Default::default(),
     }
 }
 

@@ -54,6 +54,11 @@
           "mobs": {
             "type": "boolean"
           },
+          "multi_host_mobs": {
+            "default": false,
+            "description": "Multi-host mob orchestration (host bind + remote materialization).\nDefaulted so pre-field payloads keep decoding (SD-8).",
+            "type": "boolean"
+          },
           "runtime_backed_sessions": {
             "type": "boolean"
           },
@@ -167,6 +172,11 @@
         "type": "boolean"
       },
       "mobs": {
+        "type": "boolean"
+      },
+      "multi_host_mobs": {
+        "default": false,
+        "description": "Multi-host mob orchestration (host bind + remote materialization).\nDefaulted so pre-field payloads keep decoding (SD-8).",
         "type": "boolean"
       },
       "runtime_backed_sessions": {
@@ -395,6 +405,11 @@
             "type": "boolean"
           },
           "mobs": {
+            "type": "boolean"
+          },
+          "multi_host_mobs": {
+            "default": false,
+            "description": "Multi-host mob orchestration (host bind + remote materialization).\nDefaulted so pre-field payloads keep decoding (SD-8).",
             "type": "boolean"
           },
           "runtime_backed_sessions": {

@@ -182,11 +182,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli = Cli::parse();
-    let tcp_bind_policy = if cli.allow_remote {
-        meerkat_rpc::secure_rpc::TcpBindPolicy::allow_remote()
-    } else {
-        meerkat_rpc::secure_rpc::TcpBindPolicy::local_only()
-    };
+    let tcp_bind_policy = resolved_tcp_bind_policy(cli.allow_remote);
     if let Some(ref tcp_addr) = cli.tcp {
         meerkat_rpc::secure_rpc::validate_tcp_bind_policy("rpc", tcp_addr, tcp_bind_policy)
             .map_err(|err| {
@@ -461,6 +457,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let live_ws = if let Some(ref live_ws_addr) = cli.live_ws {
+        validate_live_ws_bind(live_ws_addr, tcp_bind_policy).map_err(|err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
+        })?;
         let listener = tokio::net::TcpListener::bind(live_ws_addr).await?;
         let actual_addr = listener.local_addr()?;
         eprintln!(
@@ -549,4 +548,51 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     serve_result?;
 
     Ok(())
+}
+
+/// The ONE bind policy shared by every TCP listener this binary opens
+/// (`--tcp` and `--live-ws`): local-only unless `--allow-remote`.
+fn resolved_tcp_bind_policy(allow_remote: bool) -> meerkat_rpc::secure_rpc::TcpBindPolicy {
+    if allow_remote {
+        meerkat_rpc::secure_rpc::TcpBindPolicy::allow_remote()
+    } else {
+        meerkat_rpc::secure_rpc::TcpBindPolicy::local_only()
+    }
+}
+
+/// DL7: the live-ws listener obeys the same conservative bind policy as
+/// `--tcp`. A non-loopback `--live-ws` without `--allow-remote` is a typed
+/// startup error (previously it bound silently).
+fn validate_live_ws_bind(
+    live_ws_addr: &str,
+    policy: meerkat_rpc::secure_rpc::TcpBindPolicy,
+) -> Result<(), meerkat_rpc::secure_rpc::TcpBindPolicyError> {
+    meerkat_rpc::secure_rpc::validate_tcp_bind_policy("live-ws", live_ws_addr, policy)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// §W4.1 DL7 row: `rkat-rpc --live-ws 0.0.0.0:0` without
+    /// `--allow-remote` is a typed startup error — driven through the SAME
+    /// policy-derivation + validation pair `async_main` wires.
+    #[test]
+    fn live_ws_wildcard_bind_without_allow_remote_is_a_typed_startup_reject() {
+        let err = validate_live_ws_bind("0.0.0.0:0", resolved_tcp_bind_policy(false))
+            .expect_err("wildcard live-ws bind must be refused without --allow-remote");
+        assert!(
+            err.to_string().contains("live-ws"),
+            "the typed error names the offending surface: {err}"
+        );
+    }
+
+    #[test]
+    fn live_ws_bind_policy_admits_loopback_and_explicit_remote() {
+        validate_live_ws_bind("127.0.0.1:0", resolved_tcp_bind_policy(false))
+            .expect("loopback live-ws bind is always admissible");
+        validate_live_ws_bind("0.0.0.0:0", resolved_tcp_bind_policy(true))
+            .expect("--allow-remote admits the wildcard live-ws bind");
+    }
 }

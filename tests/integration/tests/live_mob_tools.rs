@@ -156,6 +156,7 @@ async fn make_smoke_rpc_stack(
     let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
         runtime.session_service(),
         Some(runtime.runtime_adapter()),
+        meerkat_mob::MobControlPrincipal::Owner,
     ));
 
     // Wire mob tools factory into the builder inside the session service.

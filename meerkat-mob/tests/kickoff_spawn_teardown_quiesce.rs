@@ -23,9 +23,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use meerkat_mob::machines::mob_machine::{
-    AgentIdentity, AgentRuntimeId, FenceToken, Generation, KickoffPhase, MobId,
-    MobMachineAuthority, MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal,
-    SessionId, SpawnPolicyRuntimeMode,
+    AgentIdentity, AgentRuntimeId, FenceToken, Generation, KickoffPhase, MemberSessionDisposal,
+    MobId, MobMachineAuthority, MobMachineEffect, MobMachineInput, MobMachineMutator,
+    MobMachineSignal, SessionId, SpawnPolicyRuntimeMode,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -61,13 +61,14 @@ fn authorize_spawn_profile(
             provider_params_digest: None,
             output_schema_digest: None,
             external_addressable: false,
+            resolved_spec_digest: None,
         },
     )
     .expect("spawn profile material must be authorized before Spawn");
 }
 
 fn spawn_member(authority: &mut MobMachineAuthority, identity_name: &str, bridge_sid: &str) {
-    authorize_spawn_profile(authority, identity_name, 1);
+    authorize_spawn_profile(authority, identity_name, 0);
     // Drive the full machine-driven spawn ladder the way the actor does:
     // `BeginSpawnExec` opens the per-identity phase, `CommitSpawnMembership`
     // establishes the live member, and `CommitSpawnActivation` settles the
@@ -76,14 +77,33 @@ fn spawn_member(authority: &mut MobMachineAuthority, identity_name: &str, bridge
         authority,
         MobMachineInput::BeginSpawnExec {
             agent_identity: identity(identity_name),
-            agent_runtime_id: runtime_id(identity_name, 1),
+            agent_runtime_id: runtime_id(identity_name, 0),
             fence_token: FenceToken(1),
-            generation: Generation(1),
-            profile_material_digest: profile_material_digest(identity_name, 1),
+            generation: Generation(0),
+            profile_material_digest: profile_material_digest(identity_name, 0),
             external_addressable: false,
             runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
             bridge_session_id: Some(session_id(bridge_sid)),
             replacing: None,
+            placement: None,
+            workgraph_required: false,
+            rust_bundles_present: false,
+            per_spawn_external_tools_present: false,
+            mob_default_external_tools_present: false,
+            default_llm_client_override_present: false,
+            host_surface_mcp_allowlist_present: false,
+            inherited_tool_filter_present: false,
+            shell_env_present: false,
+            mcp_stdio_env_present: false,
+            mcp_http_headers_present: false,
+            memory_required: false,
+            mcp_required: false,
+            resume_session_id: None,
+            placed_spawn_id: None,
+            placed_provision_operation_id: None,
+            placed_operation_owner_session_id: None,
+            effective_profile_override_present: false,
+            effective_model_override_present: false,
         },
     )
     .expect("begin spawn exec must be accepted");
@@ -91,14 +111,19 @@ fn spawn_member(authority: &mut MobMachineAuthority, identity_name: &str, bridge
         authority,
         MobMachineInput::CommitSpawnMembership {
             agent_identity: identity(identity_name),
-            agent_runtime_id: runtime_id(identity_name, 1),
+            agent_runtime_id: runtime_id(identity_name, 0),
             fence_token: FenceToken(1),
-            generation: Generation(1),
-            profile_material_digest: profile_material_digest(identity_name, 1),
+            generation: Generation(0),
+            profile_material_digest: profile_material_digest(identity_name, 0),
             external_addressable: false,
             runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
             bridge_session_id: Some(session_id(bridge_sid)),
             replacing: None,
+            member_peer_endpoint: None,
+            spec_digest_echo: None,
+            ack_engine_version: None,
+            placed_spawn_id: None,
+            provision_operation_id: None,
         },
     )
     .expect("fresh spawn must be accepted");
@@ -134,9 +159,9 @@ fn mark_kickoff_starting(authority: &mut MobMachineAuthority, identity_name: &st
 fn retire_input(identity_name: &str, bridge_sid: &str) -> MobMachineInput {
     MobMachineInput::Retire {
         mob_id: MobId("test-mob".to_string()),
-        agent_runtime_id: runtime_id(identity_name, 1),
+        agent_runtime_id: runtime_id(identity_name, 0),
         agent_identity: identity(identity_name),
-        generation: Generation(1),
+        generation: Generation(0),
         releasing: Some(session_id(bridge_sid)),
         session_id: Some(session_id(bridge_sid)),
     }
@@ -145,10 +170,13 @@ fn retire_input(identity_name: &str, bridge_sid: &str) -> MobMachineInput {
 fn archived_signal(identity_name: &str, bridge_sid: &str) -> MobMachineSignal {
     MobMachineSignal::ObserveMemberRetirementArchived {
         agent_identity: identity(identity_name),
-        agent_runtime_id: runtime_id(identity_name, 1),
+        agent_runtime_id: runtime_id(identity_name, 0),
         fence_token: FenceToken(1),
-        generation: Generation(1),
+        generation: Generation(0),
         session_id: Some(session_id(bridge_sid)),
+        // These fixtures model the local mob-owned archive path.
+        disposal: MemberSessionDisposal::Archived,
+        preserve_machine_topology: false,
     }
 }
 
@@ -299,7 +327,7 @@ fn stopped_retirement_accepts_runtime_success_before_archive_completion() {
 
     let retired = authority
         .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
         })
         .expect("stopped runtime retirement success must close in the stopped phase");
@@ -311,14 +339,14 @@ fn stopped_retirement_accepts_runtime_success_before_archive_completion() {
         authority
             .state()
             .member_state_markers
-            .contains_key(&runtime_id("alpha", 1)),
+            .contains_key(&runtime_id("alpha", 0)),
         "runtime success must retain Retiring until durable archive completion"
     );
     assert!(
         !authority
             .state()
             .live_runtime_ids
-            .contains(&runtime_id("alpha", 1))
+            .contains(&runtime_id("alpha", 0))
     );
     authority
         .apply_signal(archived_signal("alpha", "bridge-a"))
@@ -334,7 +362,7 @@ fn runtime_destroyed_cannot_bypass_pending_session_ingress_detach() {
     assert!(
         authority
             .apply_signal(MobMachineSignal::ObserveRuntimeDestroyed {
-                agent_runtime_id: runtime_id("alpha", 1),
+                agent_runtime_id: runtime_id("alpha", 0),
                 fence_token: FenceToken(1),
             })
             .is_err(),
@@ -343,7 +371,7 @@ fn runtime_destroyed_cannot_bypass_pending_session_ingress_detach() {
     close_session_ingress_detach(&mut authority, &retire);
     authority
         .apply_signal(MobMachineSignal::ObserveRuntimeDestroyed {
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
         })
         .expect("runtime destruction may commit after the detach proof closes");
@@ -611,9 +639,9 @@ fn admit_destroy_member_retire_emits_kickoff_quiesce_request() {
         .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
             mob_id: MobId("test-mob".to_string()),
             agent_identity: identity("alpha"),
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
-            generation: Generation(1),
+            generation: Generation(0),
             session_id: Some(session_id("bridge-a")),
         })
         .expect("destroy member retire admission accepted");
@@ -642,16 +670,16 @@ fn destroy_member_archive_retry_reemits_exact_journal_authority() {
         .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
             mob_id: MobId("test-mob".to_string()),
             agent_identity: identity("alpha"),
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
-            generation: Generation(1),
+            generation: Generation(0),
             session_id: Some(session_id("bridge-a")),
         })
         .expect("destroy member retire admission accepted");
     close_session_ingress_detach(&mut authority, &retire);
     authority
         .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
         })
         .expect("runtime retirement success accepted");
@@ -659,10 +687,11 @@ fn destroy_member_archive_retry_reemits_exact_journal_authority() {
     let first = authority
         .apply_signal(MobMachineSignal::ObserveDestroyMemberRetirementArchived {
             agent_identity: identity("alpha"),
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
-            generation: Generation(1),
+            generation: Generation(0),
             session_id: Some(session_id("bridge-a")),
+            disposal: MemberSessionDisposal::Archived,
         })
         .expect("first destroy archive completion accepted");
     assert!(first.effects().iter().any(|effect| matches!(
@@ -678,9 +707,9 @@ fn destroy_member_archive_retry_reemits_exact_journal_authority() {
         .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
             mob_id: MobId("test-mob".to_string()),
             agent_identity: identity("alpha"),
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
-            generation: Generation(1),
+            generation: Generation(0),
             session_id: None,
         })
         .expect("destroy retry admission must accept the exact already-archived machine shape");
@@ -688,10 +717,11 @@ fn destroy_member_archive_retry_reemits_exact_journal_authority() {
     let retry = authority
         .apply_signal(MobMachineSignal::ObserveDestroyMemberRetirementArchived {
             agent_identity: identity("alpha"),
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             fence_token: FenceToken(1),
-            generation: Generation(1),
+            generation: Generation(0),
             session_id: None,
+            disposal: MemberSessionDisposal::Archived,
         })
         .expect("post-commit destroy archive retry must be machine-authorized");
     assert!(retry.effects().iter().any(|effect| matches!(
@@ -700,11 +730,11 @@ fn destroy_member_archive_retry_reemits_exact_journal_authority() {
             kind: meerkat_mob::machines::mob_machine::MobLifecycleJournalKind::MemberRetired,
             agent_identity: Some(agent_identity),
             agent_runtime_id: Some(agent_runtime_id),
-            generation: Some(Generation(1)),
+            generation: Some(Generation(0)),
             session_id: None,
             ..
         } if agent_identity == &identity("alpha")
-            && agent_runtime_id == &runtime_id("alpha", 1)
+            && agent_runtime_id == &runtime_id("alpha", 0)
     )));
 }
 

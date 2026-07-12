@@ -362,6 +362,16 @@ impl PromptInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInput {
     pub header: InputHeader,
+    /// Exact per-input interaction identity for a host-residency-fenced
+    /// supervisor-bridge delivery. Ordinary peer traffic and peer-only legacy
+    /// bridge deliveries leave this absent.
+    ///
+    /// This persisted field is capability-adjacent data, not authority. The
+    /// runtime validates its independently carried input, correlation,
+    /// idempotency, durability, and peer-shape facts before admission and
+    /// mints terminal-publication metadata from the validated value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directed_interaction_id: Option<meerkat_core::interaction::InteractionId>,
     /// The peer convention (message, request, response).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub convention: Option<PeerConvention>,
@@ -466,6 +476,7 @@ pub fn peer_response_terminal_input(
     let display_identity = display_name.map_or_else(|| peer_id.clone(), |name| name.as_string());
 
     Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         header: InputHeader {
@@ -506,8 +517,120 @@ pub struct FlowStepInput {
     /// at read time via [`ContentInput::text_content`]; it is never stored
     /// separately.
     pub content: ContentInput,
+    /// Exact per-input interaction identity for a directed cross-host flow
+    /// delivery. Ordinary/local flow steps leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directed_interaction_id: Option<meerkat_core::interaction::InteractionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
+}
+
+fn validate_directed_interaction_header(
+    header: &InputHeader,
+    interaction_id: meerkat_core::interaction::InteractionId,
+    input_kind: &str,
+) -> Result<(), String> {
+    if header.id.0 != interaction_id.0 {
+        return Err(format!(
+            "directed {input_kind} interaction id does not match input id"
+        ));
+    }
+    if header.correlation_id.as_ref().map(|id| id.0) != Some(interaction_id.0) {
+        return Err(format!(
+            "directed {input_kind} correlation id does not match interaction id"
+        ));
+    }
+    let canonical_id = interaction_id.to_string();
+    if header
+        .idempotency_key
+        .as_ref()
+        .map(ToString::to_string)
+        .as_deref()
+        != Some(canonical_id.as_str())
+    {
+        return Err(format!(
+            "directed {input_kind} idempotency key does not match interaction id"
+        ));
+    }
+    if header.durability != InputDurability::Durable {
+        return Err(format!("directed {input_kind} input must be durable"));
+    }
+    Ok(())
+}
+
+/// Validate the capability-bearing correlation on a directed flow-step.
+///
+/// The optional field is persisted as data, not trusted as authority. A
+/// directed correlation is admitted only when every independently-carried
+/// identity fact agrees with the runtime input ID and the input has the
+/// durable flow-origin shape minted by [`crate::mob_adapter::create_tracked_flow_step_input`].
+pub(crate) fn validate_directed_flow_step_correlation(input: &Input) -> Result<(), String> {
+    let Input::FlowStep(flow_step) = input else {
+        return Ok(());
+    };
+    let Some(interaction_id) = flow_step.directed_interaction_id else {
+        return Ok(());
+    };
+    let header = &flow_step.header;
+    validate_directed_interaction_header(header, interaction_id, "flow-step")?;
+    match &header.source {
+        InputOrigin::Flow {
+            flow_id,
+            step_index: 0,
+        } if !flow_id.trim().is_empty() => Ok(()),
+        _ => Err(
+            "directed flow-step input must carry a non-empty flow origin with remote step index 0"
+                .to_string(),
+        ),
+    }
+}
+
+/// Validate and return the runtime-tracked interaction identity carried by an
+/// input. Both tracked flow steps and placed supervisor-bridge peer deliveries
+/// use the same terminal-publication machinery; every other input returns
+/// `None`.
+pub(crate) fn validated_directed_interaction_id(
+    input: &Input,
+) -> Result<Option<meerkat_core::interaction::InteractionId>, String> {
+    match input {
+        Input::FlowStep(flow_step) => {
+            validate_directed_flow_step_correlation(input)?;
+            Ok(flow_step.directed_interaction_id)
+        }
+        Input::Peer(peer) => {
+            let Some(interaction_id) = peer.directed_interaction_id else {
+                return Ok(None);
+            };
+            validate_directed_interaction_header(&peer.header, interaction_id, "peer input")?;
+            match &peer.header.source {
+                InputOrigin::Peer {
+                    peer_id,
+                    runtime_id: Some(runtime_id),
+                    ..
+                } if !peer_id.trim().is_empty() && !runtime_id.0.trim().is_empty() => {}
+                _ => {
+                    return Err(
+                        "directed peer input must carry a non-empty peer origin and runtime id"
+                            .to_string(),
+                    );
+                }
+            }
+            if !matches!(peer.convention, Some(PeerConvention::Message)) {
+                return Err("directed peer input must use the message convention".to_string());
+            }
+            if peer.payload.is_some() {
+                return Err("directed peer input must not carry a structured peer payload".into());
+            }
+            if peer.sender_taint.is_some() {
+                return Err("directed peer input must not carry sender-declared taint".into());
+            }
+            if peer.header.supersession_key.is_some() {
+                return Err("directed peer input must not carry a supersession key".into());
+            }
+            Ok(Some(interaction_id))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// External event input.
@@ -992,15 +1115,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
             .map(|content| (ConversationAppendRole::SystemNotice, content))?,
         Input::FlowStep(f) => (
             ConversationAppendRole::SystemNotice,
-            CoreRenderable::SystemNotice {
-                kind: SystemNoticeKind::Generic,
-                body: Some(format!("Flow step {}", f.step_id)),
-                blocks: vec![SystemNoticeBlock::RuntimeNotice {
-                    category: "flow_step".to_string(),
-                    detail: Some(f.content.text_content()),
-                    payload: None,
-                }],
-            },
+            flow_step_run_renderable(f),
         ),
         Input::ExternalEvent(e) => (
             ConversationAppendRole::SystemNotice,
@@ -1011,6 +1126,56 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     };
 
     Some(ConversationAppend { role, content })
+}
+
+fn flow_step_run_renderable(flow_step: &FlowStepInput) -> CoreRenderable {
+    CoreRenderable::SystemNotice {
+        kind: SystemNoticeKind::Generic,
+        body: Some(format!("Flow step {}", flow_step.step_id)),
+        blocks: vec![SystemNoticeBlock::RuntimeNotice {
+            category: "flow_step".to_string(),
+            detail: Some(flow_step.content.text_content()),
+            payload: None,
+        }],
+    }
+}
+
+/// Canonical content published in `AgentEvent::RunStarted` for one runtime
+/// input when it starts a turn by itself.
+///
+/// Runtime-authored typed appends are lowered by the session service into the
+/// same provider/model projection before the agent emits `RunStarted`. Keep
+/// host-side terminal attribution on this helper so peer notice rendering,
+/// multimodal blocks, injected context, and any additional typed appends
+/// cannot drift from the real turn-start projection.
+pub fn runtime_input_run_started_content(input: &Input) -> Option<ContentInput> {
+    let projection = runtime_input_projection(input);
+    let appends = projection
+        .injected_context_appends
+        .into_iter()
+        .chain(projection.append)
+        .chain(projection.additional_appends)
+        .collect::<Vec<_>>();
+    (!appends.is_empty()).then(|| {
+        meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+            &appends,
+        )
+    })
+}
+
+/// Validate a runtime-tracked interaction input and return its exact
+/// singleton `RunStarted` model projection.
+///
+/// The validation is part of the public cross-crate seam: the host journal may
+/// recover either a directed flow step or an explicitly tracked peer input,
+/// but it must never infer custody from an ordinary persisted input that only
+/// happens to share the same idempotency key.
+pub fn directed_input_run_started_content(input: &Input) -> Result<ContentInput, String> {
+    if validated_directed_interaction_id(input)?.is_none() {
+        return Err("persisted runtime input does not carry directed interaction custody".into());
+    }
+    runtime_input_run_started_content(input)
+        .ok_or_else(|| "directed runtime input has no turn-start projection".to_string())
 }
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
@@ -1301,6 +1466,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: vec![ContentInput::Text("supervisor ambient".to_string())],
             sender_taint: None,
@@ -1386,6 +1552,7 @@ mod tests {
     #[test]
     fn peer_input_message_serde() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1414,6 +1581,7 @@ mod tests {
         };
         header.correlation_id = correlation_id;
         Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1527,6 +1695,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1595,6 +1764,7 @@ mod tests {
                 runtime_id: None,
             };
             let input = Input::Peer(PeerInput {
+                directed_interaction_id: None,
                 objective_id: None,
                 injected_context: Vec::new(),
                 sender_taint: declared,
@@ -1655,6 +1825,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1800,6 +1971,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1873,6 +2045,7 @@ mod tests {
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1917,6 +2090,7 @@ mod tests {
     #[test]
     fn peer_input_request_serde() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1941,6 +2115,7 @@ mod tests {
     #[test]
     fn peer_input_response_terminal_serde() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1961,6 +2136,7 @@ mod tests {
     #[test]
     fn peer_input_response_progress_serde() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1994,12 +2170,130 @@ mod tests {
                     },
                 },
             ]),
+            directed_interaction_id: None,
             turn_metadata: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "flow_step");
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::FlowStep(_)));
+    }
+
+    #[test]
+    fn flow_step_uses_the_canonical_runtime_run_started_projection() {
+        let flow_step = FlowStepInput {
+            header: make_header(),
+            step_id: "step-1".into(),
+            content: ContentInput::Text("go\n\"quoted\" \\ path".into()),
+            directed_interaction_id: None,
+            turn_metadata: None,
+        };
+        let input = Input::FlowStep(flow_step);
+        let projected = runtime_input_projection(&input)
+            .append
+            .expect("flow step projects a run append")
+            .content
+            .render_text();
+
+        assert_eq!(projected, "Flow step step-1\ngo\n\"quoted\" \\ path");
+        assert_eq!(
+            runtime_input_run_started_content(&input)
+                .expect("flow step starts a model-visible run"),
+            ContentInput::Text(projected),
+        );
+    }
+
+    #[test]
+    fn multimodal_flow_step_uses_the_canonical_runtime_run_started_projection() {
+        let flow_step = FlowStepInput {
+            header: make_header(),
+            step_id: "vision-step".into(),
+            content: ContentInput::Blocks(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "inspect this\nimage".into(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: meerkat_core::types::ImageData::Inline {
+                        data: "abc123".into(),
+                    },
+                },
+            ]),
+            directed_interaction_id: None,
+            turn_metadata: None,
+        };
+        let input = Input::FlowStep(flow_step);
+        let projected = runtime_input_projection(&input)
+            .append
+            .expect("multimodal flow step projects a run append")
+            .content
+            .render_text();
+
+        assert_eq!(
+            runtime_input_run_started_content(&input)
+                .expect("multimodal flow step starts a model-visible run"),
+            ContentInput::Text(projected),
+        );
+    }
+
+    #[test]
+    fn directed_peer_run_started_content_preserves_context_and_multimodal_projection() {
+        let stable = uuid::Uuid::from_u128(0x00000000000040008000000000000123);
+        let interaction_id = meerkat_core::interaction::InteractionId(stable);
+        let input = Input::Peer(PeerInput {
+            directed_interaction_id: Some(interaction_id),
+            objective_id: Some(meerkat_core::interaction::ObjectiveId::new()),
+            injected_context: vec![ContentInput::Text("ambient context".to_string())],
+            sender_taint: None,
+            header: InputHeader {
+                id: InputId::from_uuid(stable),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: uuid::Uuid::from_u128(7).to_string(),
+                    display_identity: Some("supervisor".to_string()),
+                    runtime_id: Some(LogicalRuntimeId::new("rt:session:placed")),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: Some(IdempotencyKey::new(stable.to_string())),
+                supersession_key: None,
+                correlation_id: Some(CorrelationId::from_uuid(stable)),
+            },
+            convention: Some(PeerConvention::Message),
+            content: ContentInput::Blocks(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "inspect this image".to_string(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: meerkat_core::types::ImageData::Inline {
+                        data: "abc123".to_string(),
+                    },
+                },
+            ]),
+            payload: None,
+            handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+        });
+
+        let projection = runtime_input_projection(&input);
+        let appends = projection
+            .injected_context_appends
+            .into_iter()
+            .chain(projection.append)
+            .chain(projection.additional_appends)
+            .collect::<Vec<_>>();
+        let expected = meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+            &appends,
+        );
+        let actual = directed_input_run_started_content(&input)
+            .expect("valid directed peer owns a turn-start projection");
+
+        assert_eq!(actual, expected);
+        assert!(actual.text_content().contains("ambient context"));
+        assert!(actual.text_content().contains("inspect this image"));
+        assert!(
+            matches!(actual, ContentInput::Blocks(ref blocks) if blocks.iter().any(|block| matches!(block, meerkat_core::types::ContentBlock::Image { .. })))
+        );
     }
 
     #[test]
@@ -2187,6 +2481,7 @@ mod tests {
         assert_eq!(prompt.kind(), InputKind::Prompt);
 
         let peer_msg = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -2199,6 +2494,7 @@ mod tests {
         assert_eq!(peer_msg.kind(), InputKind::PeerMessage);
 
         let peer_req = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -2292,6 +2588,7 @@ mod tests {
     #[test]
     fn peer_input_with_queue_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -2364,6 +2661,28 @@ mod tests {
     }
 
     #[test]
+    fn absent_peer_directed_interaction_defaults_none_and_none_is_omitted() {
+        let input = peer_response_terminal_input(
+            meerkat_core::comms::PeerId::from_uuid(uuid::Uuid::new_v4()),
+            None,
+            meerkat_core::PeerCorrelationId::from_uuid(uuid::Uuid::new_v4()),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({"ok": true}),
+        );
+        let encoded = serde_json::to_value(&input).expect("serialize ordinary peer input");
+        assert!(
+            encoded.get("directed_interaction_id").is_none(),
+            "ordinary peer persistence must retain the pre-field wire shape"
+        );
+
+        let decoded: Input = serde_json::from_value(encoded).expect("deserialize absent field");
+        let Input::Peer(peer) = decoded else {
+            panic!("peer input round-trips as peer input");
+        };
+        assert_eq!(peer.directed_interaction_id, None);
+    }
+
+    #[test]
     fn peer_response_terminal_validation_is_structural_only() {
         let peer_id = meerkat_core::comms::PeerId::from_uuid(
             uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000161").unwrap(),
@@ -2387,6 +2706,7 @@ mod tests {
     #[test]
     fn peer_input_with_steer_handling_mode_roundtrips() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -2408,6 +2728,7 @@ mod tests {
     #[test]
     fn peer_input_handling_mode_not_serialized_when_none() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,

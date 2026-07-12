@@ -289,6 +289,8 @@ pub struct RestMobHelperRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<super::WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<WireMobRuntimeMode>,
@@ -306,6 +308,8 @@ pub struct RestMobForkHelperRequest {
     pub agent_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<super::WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,6 +450,7 @@ mod tests {
         let parsed: RestMobHelperRequest = serde_json::from_value(serde_json::json!({
             "prompt": "help",
             "agent_identity": "helper",
+            "model_override": "claude-opus-4-6",
             "auth_binding": {
                 "realm": "dev",
                 "binding": "default_anthropic",
@@ -453,6 +458,7 @@ mod tests {
             }
         }))
         .expect("spawn helper body parses");
+        assert_eq!(parsed.model_override.as_deref(), Some("claude-opus-4-6"));
         let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
         assert_eq!(auth_binding.realm.as_str(), "dev");
         assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
@@ -468,12 +474,14 @@ mod tests {
             "source_member_id": "source",
             "prompt": "help",
             "agent_identity": "helper",
+            "model_override": "gpt-5.4",
             "auth_binding": {
                 "realm": "dev",
                 "binding": "default_anthropic"
             }
         }))
         .expect("fork helper body parses");
+        assert_eq!(parsed.model_override.as_deref(), Some("gpt-5.4"));
         let auth_binding = parsed.auth_binding.expect("auth_binding should parse");
         assert_eq!(auth_binding.realm.as_str(), "dev");
         assert_eq!(auth_binding.binding.as_str(), "default_anthropic");

@@ -410,6 +410,40 @@ pub enum MobMachineRuntimeInternalReason {
     /// preserve a pending later incarnation when no committed member exists.
     RetirePendingSpawnDispositionAuthority,
     ObjectiveOwnerBindingAuthority,
+    /// Exact placed-spawn carrier deletion authorization and resolution. The
+    /// runtime drives this internal two-step protocol while recovering or
+    /// retiring a remote member; no public command may bypass its persisted
+    /// operation/phase witness.
+    PlacedCarrierCleanupAuthority,
+    /// Multi-host (§6.1): member-host bind lifecycle (begin/commit/rebound/
+    /// refresh/revoke) driven by the runtime's bind handshake realization —
+    /// no surface command exists until the phase-7 surfaces land.
+    HostBindingAuthority,
+    /// Multi-host (§6.2, D4): cross-host pending Install window
+    /// (record/resolve/rollback) plus ephemeral synchronous pre-unwire Remove
+    /// authorization, driven by wiring realization.
+    RouteInstallObligationAuthority,
+    /// Multi-host (§18 O2): remote turn-directive outcome custody
+    /// (record/commit/resolve/ack/dispose), driven by flow persistence, the
+    /// outcome pump, and host-release teardown.
+    RemoteTurnObligationAuthority,
+    /// Multi-host placed-completion outcome custody and lifecycle quiescence
+    /// (record/cancel/resolve/close/ack/dispose/begin/end), driven by work
+    /// dispatch, reconciliation, and lifecycle teardown. These are internal
+    /// protocol transitions, not independent surface commands.
+    PlacedCompletionObligationAuthority,
+    /// Multi-host placed-kickoff outcome custody (start/resolve/reject/ack/
+    /// dispose), driven by the placement path and the recovery reconciler.
+    /// These are internal protocol transitions, not independent surface
+    /// commands.
+    PlacedKickoffObligationAuthority,
+    /// Multi-host (§6.5/§8): principal control-scope grant lifecycle,
+    /// driven by the runtime until the `mob/grant_scopes`/`mob/revoke_scopes`
+    /// surfaces land in phase 5.
+    OperatorGrantAuthority,
+    /// Multi-host (§15 R6): member-operator upcall admission, driven by the
+    /// comms upcall consumer from the verified envelope facts.
+    MemberOperatorAdmissionAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,6 +479,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AbortSpawnExec,
         reason: MobMachineRuntimeInternalReason::SpawnExecLadderAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizePlacedCarrierCleanup,
+        reason: MobMachineRuntimeInternalReason::PlacedCarrierCleanupAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolvePlacedCarrierCleanup,
+        reason: MobMachineRuntimeInternalReason::PlacedCarrierCleanupAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::SubscribeStructuralEvents,
@@ -746,6 +788,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeRetiringMemberPeerOverlayCleanup,
+        reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::AuthorizeRetiringMemberTrustCleanupObserved,
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
     },
@@ -814,6 +860,166 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RollbackPendingRecipientTrust,
         reason: MobMachineRuntimeInternalReason::TrustHandoffAuthority,
+    },
+    // Multi-host mobs (§6/§15/§18): all phase-1 inputs are runtime-internal;
+    // the operator surfaces (mob/bind_host, mob/grant_scopes, ...) land in
+    // later phases and will reclassify the command-backed subset then.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginHostBind,
+        reason: MobMachineRuntimeInternalReason::HostBindingAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CommitHostBind,
+        reason: MobMachineRuntimeInternalReason::HostBindingAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::HostRebound,
+        reason: MobMachineRuntimeInternalReason::HostBindingAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // The actor publishes a successfully compare-promoted durable placed
+        // carrier generation into MobMachine before any G2 work can route.
+        // This is an internal host-binding authority step, not an independent
+        // public surface command.
+        input: MobMachineCatalogInput::PromoteCommittedPlacedSpawnCarrierBinding,
+        reason: MobMachineRuntimeInternalReason::HostBindingAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RefreshHostCapabilities,
+        reason: MobMachineRuntimeInternalReason::HostBindingAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RevokeHost,
+        reason: MobMachineRuntimeInternalReason::HostBindingAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // The materialization failure recorder is a rung of the spawn-exec
+        // ladder (keeps MaterializePending for retry), driven by the
+        // materialization realization.
+        input: MobMachineCatalogInput::RecordMemberMaterializationFailure,
+        reason: MobMachineRuntimeInternalReason::SpawnExecLadderAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordRouteInstall,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeRouteRemovalBeforeUnwire,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveRouteInstall,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RollbackRouteInstall,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordRemoteTurnObligation,
+        reason: MobMachineRuntimeInternalReason::RemoteTurnObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AbortRemoteTurnObligation,
+        reason: MobMachineRuntimeInternalReason::RemoteTurnObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::CommitRemoteTurnOutcome,
+        reason: MobMachineRuntimeInternalReason::RemoteTurnObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveRemoteTurnObligation,
+        reason: MobMachineRuntimeInternalReason::RemoteTurnObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AcknowledgeRemoteTurnOutcome,
+        reason: MobMachineRuntimeInternalReason::RemoteTurnObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::DisposeRemoteTurnObligation,
+        reason: MobMachineRuntimeInternalReason::RemoteTurnObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordPlacedCompletionObligation,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RequestPlacedCompletionCancellation,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolvePlacedCompletionOutcome,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ClosePlacedCompletionOutcome,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AcknowledgePlacedCompletionOutcome,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::DisposePlacedCompletionOutcome,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::BeginPlacedCompletionLifecycleQuiesce,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::EndPlacedCompletionLifecycleQuiesce,
+        reason: MobMachineRuntimeInternalReason::PlacedCompletionObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::StartPlacedKickoff,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolvePlacedKickoffStarted,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolvePlacedKickoffCallbackPending,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolvePlacedKickoffFailed,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolvePlacedKickoffCancelled,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RejectPlacedKickoffBeforeAdmission,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AcknowledgePlacedKickoffOutcome,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::DisposePlacedKickoffObligation,
+        reason: MobMachineRuntimeInternalReason::PlacedKickoffObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::GrantOperatorScopes,
+        reason: MobMachineRuntimeInternalReason::OperatorGrantAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RevokeOperatorScopes,
+        reason: MobMachineRuntimeInternalReason::OperatorGrantAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveMemberOperatorAdmission,
+        reason: MobMachineRuntimeInternalReason::MemberOperatorAdmissionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Flow-step dispatch classification is driven by the flow engine
+        // during step execution, like the other flow-projection inputs.
+        input: MobMachineCatalogInput::ClassifyFlowStepDispatch,
+        reason: MobMachineRuntimeInternalReason::FlowProjectionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RecordCoordinationWorkIntent,

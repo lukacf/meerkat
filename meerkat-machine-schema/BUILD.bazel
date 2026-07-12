@@ -396,6 +396,56 @@ rust_test(
 )
 
 rust_test(
+    name = "draining_registration_fence_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "draining_registration_fence",
+    crate_root = "tests/draining_registration_fence.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/draining_registration_fence.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.31",
+        "CARGO_BIN_NAME": "draining_registration_fence",
+        "CARGO_MANIFEST_DIR": "./meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "identity_roundtrip_test",
     aliases = aliases(
         package_name = "meerkat-machine-schema",
@@ -546,6 +596,56 @@ rust_test(
 )
 
 rust_test(
+    name = "placed_lifecycle_origin_fence_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "placed_lifecycle_origin_fence",
+    crate_root = "tests/placed_lifecycle_origin_fence.rs",
+    crate_features = [],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/placed_lifecycle_origin_fence.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.31",
+        "CARGO_BIN_NAME": "placed_lifecycle_origin_fence",
+        "CARGO_MANIFEST_DIR": "./meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "schema_contracts_test",
     aliases = aliases(
         package_name = "meerkat-machine-schema",
@@ -657,10 +757,12 @@ test_suite(
         ":catalog_typed_round_trip_test",
         ":defer_input_totality_test",
         ":docs_machine_authority_alignment_test",
+        ":draining_registration_fence_test",
         ":identity_roundtrip_test",
         ":meerkat_machine_schema_unit_test",
         ":named_type_binding_covers_catalog_test",
         ":peer_endpoint_structural_equivalence_test",
+        ":placed_lifecycle_origin_fence_test",
         ":schema_contracts_test",
         ":stopped_phase_revival_lattice_test",
     ],

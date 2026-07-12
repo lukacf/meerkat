@@ -42,7 +42,8 @@ use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
+    CoreExecutorTurnFinalizationBoundaryHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
@@ -110,6 +111,7 @@ impl TargetScheduleSessionHost {
     fn executor(&self, session_id: SessionId) -> TargetCoreExecutor {
         TargetCoreExecutor::new(
             Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
             Arc::clone(&self.mob_state),
             session_id,
         )
@@ -273,9 +275,24 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         // session instead of orphaning a fresh random one.
         let session = Session::with_id(occurrence.materialized_session_id());
         let session_id = session.id().clone();
-        let bindings = self
+        let mut prepared = self
             .runtime_adapter
-            .prepare_bindings(session_id.clone())
+            .prepare_session_materialization(session_id.clone())
+            .await
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        self.runtime_adapter
+            .install_prepared_session_executor_handles(
+                prepared.bindings(),
+                Arc::new(TargetCoreInterruptHandle {
+                    service: Arc::clone(&self.service),
+                    session_id: session_id.clone(),
+                }),
+                Arc::new(TargetCorePostStopCleanupHandle {
+                    service: Arc::clone(&self.service),
+                    mob_state: Arc::clone(&self.mob_state),
+                    session_id: session_id.clone(),
+                }),
+            )
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
@@ -308,11 +325,13 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 .and_then(meerkat_core::RecoveryBackendKind::parse),
             keep_alive: create.keep_alive,
             app_context: create.app_context.clone(),
-            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(
+                prepared.bindings_clone(),
+            ),
             ..SessionBuildOptions::default()
         };
 
-        let result = self
+        let result = match self
             .service
             .create_session(CreateSessionRequest {
                 injected_context: Vec::new(),
@@ -333,15 +352,58 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 labels: Some(create.labels.clone()),
             })
             .await
-            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let rollback = prepared.rollback_now().await;
+                return Err(meerkat::ScheduleDomainError::Internal(match rollback {
+                    Ok(_) => error.to_string(),
+                    Err(rollback_error) => {
+                        format!("{error}; exact materialization rollback failed: {rollback_error}")
+                    }
+                }));
+            }
+        };
 
-        self.runtime_adapter
-            .ensure_session_with_executor(
-                result.session_id.clone(),
-                Box::new(self.executor(result.session_id.clone())),
-            )
+        let executor_host = self.clone();
+        let executor_session_id = result.session_id.clone();
+        let pending = match prepared
+            .ensure_executor_attachment(move |_witness| {
+                Box::new(executor_host.executor(executor_session_id))
+                    as Box<dyn meerkat_core::CoreExecutor>
+            })
             .await
-            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        {
+            Ok(meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending)) => pending,
+            Ok(meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(witness)) => {
+                let rollback = prepared.rollback_now().await;
+                let primary = format!(
+                    "unique scheduled materialization unexpectedly found attachment {witness:?}"
+                );
+                return Err(meerkat::ScheduleDomainError::Internal(match rollback {
+                    Ok(_) => primary,
+                    Err(rollback_error) => {
+                        format!(
+                            "{primary}; exact materialization rollback failed: {rollback_error}"
+                        )
+                    }
+                }));
+            }
+            Err(error) => {
+                let rollback = prepared.rollback_now().await;
+                return Err(meerkat::ScheduleDomainError::Internal(match rollback {
+                    Ok(_) => error.to_string(),
+                    Err(rollback_error) => {
+                        format!("{error}; exact materialization rollback failed: {rollback_error}")
+                    }
+                }));
+            }
+        };
+        pending.commit().await.map_err(|error| {
+            meerkat::ScheduleDomainError::Internal(format!(
+                "scheduled exact attachment commit failed: {error}"
+            ))
+        })?;
 
         Ok(result.session_id)
     }
@@ -424,7 +486,8 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         self.ensure_runtime_session_registered(session_id).await?;
         self.update_peer_ingress_context(session_id).await;
 
-        let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput { objective_id: None,
+        let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
+            objective_id: None,
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
@@ -493,7 +556,8 @@ async fn build_target_runtime_surface(
         Arc::clone(&jsonl_store) as Arc<dyn SessionStore>,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-        schedule_store);
+        schedule_store,
+    );
     let runtime_adapter = persistence.runtime_adapter();
     let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
@@ -503,6 +567,7 @@ async fn build_target_runtime_surface(
     let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
         service.clone(),
         Some(runtime_adapter.clone()),
+        meerkat_mob::MobControlPrincipal::Owner,
     ));
     *mob_tools_slot
         .write()
@@ -693,7 +758,8 @@ async fn main() -> anyhow::Result<()> {
         rpc_jsonl as Arc<dyn SessionStore>,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(MemoryBlobStore::new()),
-        rpc_schedule_store);
+        rpc_schedule_store,
+    );
     let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
         meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
     );
@@ -771,6 +837,8 @@ fn spawn_heartbeat(
                     intent: "heartbeat".into(),
                     params: serde_json::json!(null),
                     blocks: None,
+                    reply_endpoint: None,
+                    content_taint: None,
                     handling_mode: None,
                     content_taint: None,
                 },
@@ -972,10 +1040,25 @@ async fn setup_session(
     let system_prompt = system_prompt.replace("{session_id}", &prepared_session_id.to_string());
 
     // Prepare canonical runtime bindings (registers + allocates epoch in one shot).
-    let bindings = runtime_adapter
-        .prepare_bindings(prepared_session_id.clone())
+    let mut prepared = runtime_adapter
+        .prepare_session_materialization(prepared_session_id.clone())
         .await
         .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
+    runtime_adapter
+        .install_prepared_session_executor_handles(
+            prepared.bindings(),
+            Arc::new(TargetCoreInterruptHandle {
+                service: Arc::clone(service),
+                session_id: prepared_session_id.clone(),
+            }),
+            Arc::new(TargetCorePostStopCleanupHandle {
+                service: Arc::clone(service),
+                mob_state: Arc::clone(mob_state),
+                session_id: prepared_session_id.clone(),
+            }),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("prepared runtime cleanup install: {e}"))?;
 
     let build_opts = SessionBuildOptions {
         provider: Some(meerkat_core::Provider::from_name(provider)),
@@ -983,7 +1066,7 @@ async fn setup_session(
         override_shell: meerkat_core::ToolCategoryOverride::Enable,
         override_mob: meerkat_core::ToolCategoryOverride::Enable,
         resume_session: Some(prepared_session),
-        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone()),
         external_tools,
         ..Default::default()
     };
@@ -1004,31 +1087,62 @@ async fn setup_session(
     let result = match service.create_session(req).await {
         Ok(result) => result,
         Err(error) => {
-            if let Err(cleanup_error) = runtime_adapter
-                .unregister_session(&prepared_session_id)
-                .await
-            {
-                return Err(anyhow::anyhow!(
-                    "create session: {error}; additionally failed to unregister prepared runtime session: {cleanup_error}"
-                ));
-            }
-            return Err(anyhow::anyhow!("create session: {error}"));
+            let rollback = prepared.rollback_now().await;
+            return Err(match rollback {
+                Ok(_) => anyhow::anyhow!("create session: {error}"),
+                Err(rollback_error) => anyhow::anyhow!(
+                    "create session: {error}; exact materialization rollback failed: {rollback_error}"
+                ),
+            });
         }
     };
 
     let session_id = result.session_id;
     eprintln!("[target] session ready: {session_id}");
 
-    // Create executor and register with runtime adapter for Steer support
-    let executor = Box::new(TargetCoreExecutor::new(
-        service.clone(),
-        mob_state.clone(),
-        session_id.clone(),
-    ));
-    runtime_adapter
-        .ensure_session_with_executor(session_id.clone(), executor)
+    // Consume the exact actor-materialization claim into one attachment for
+    // Steer support; generic attach is intentionally unable to steal it.
+    let executor_service = Arc::clone(service);
+    let executor_runtime_adapter = Arc::clone(runtime_adapter);
+    let executor_mob_state = Arc::clone(mob_state);
+    let executor_session_id = session_id.clone();
+    let pending = match prepared
+        .ensure_executor_attachment(move |_witness| {
+            Box::new(TargetCoreExecutor::new(
+                executor_service,
+                executor_runtime_adapter,
+                executor_mob_state,
+                executor_session_id,
+            )) as Box<dyn meerkat_core::CoreExecutor>
+        })
         .await
-        .map_err(|error| anyhow::anyhow!("runtime executor registration failed: {error}"))?;
+    {
+        Ok(meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending)) => pending,
+        Ok(meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(witness)) => {
+            let rollback = prepared.rollback_now().await;
+            return Err(match rollback {
+                Ok(_) => {
+                    anyhow::anyhow!("unique target setup unexpectedly found attachment {witness:?}")
+                }
+                Err(rollback_error) => anyhow::anyhow!(
+                    "unique target setup unexpectedly found attachment {witness:?}; exact materialization rollback failed: {rollback_error}"
+                ),
+            });
+        }
+        Err(error) => {
+            let rollback = prepared.rollback_now().await;
+            return Err(match rollback {
+                Ok(_) => anyhow::anyhow!("runtime executor registration failed: {error}"),
+                Err(rollback_error) => anyhow::anyhow!(
+                    "runtime executor registration failed: {error}; exact materialization rollback failed: {rollback_error}"
+                ),
+            });
+        }
+    };
+    pending
+        .commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("runtime executor attachment commit failed: {error}"))?;
 
     // Enable peer ingress for this session so the hive can reach us via comms.
     // This is the one session the mob manages for this target — TUX resets go
@@ -1053,18 +1167,70 @@ async fn setup_session(
 /// it calls `apply()` which translates the RunPrimitive into a `start_turn()`.
 struct TargetCoreExecutor {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: Arc<MeerkatMachine>,
     mob_state: Arc<MobMcpState>,
     session_id: SessionId,
+}
+
+struct TargetCorePostStopCleanupHandle {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    mob_state: Arc<MobMcpState>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorPostStopCleanupHandle for TargetCorePostStopCleanupHandle {
+    async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
+        meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+            Arc::clone(&self.service),
+            self.session_id.clone(),
+        )
+        .cleanup_after_runtime_stop_terminalized()
+        .await?;
+        self.mob_state
+            .destroy_bridge_session_mobs(&self.session_id.to_string())
+            .await
+            .map_err(|error| {
+                CoreExecutorError::control_failed_runtime(format!(
+                    "failed to clean up target mobs for session {}: {error}",
+                    self.session_id
+                ))
+            })?;
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+    ) -> Result<(), CoreExecutorError> {
+        meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+            Arc::clone(&self.service),
+            self.session_id.clone(),
+        )
+        .cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary()
+        .await?;
+        self.mob_state
+            .destroy_bridge_session_mobs(&self.session_id.to_string())
+            .await
+            .map_err(|error| {
+                CoreExecutorError::control_failed_runtime(format!(
+                    "failed to clean up target mobs for session {}: {error}",
+                    self.session_id
+                ))
+            })?;
+        Ok(())
+    }
 }
 
 impl TargetCoreExecutor {
     fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        runtime_adapter: Arc<MeerkatMachine>,
         mob_state: Arc<MobMcpState>,
         session_id: SessionId,
     ) -> Self {
         Self {
             service,
+            runtime_adapter,
             mob_state,
             session_id,
         }
@@ -1073,20 +1239,39 @@ impl TargetCoreExecutor {
 
 struct TargetCoreBoundaryHandle {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
 }
 
 #[async_trait::async_trait]
 impl CoreExecutorBoundaryHandle for TargetCoreBoundaryHandle {
-    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &meerkat_core::RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
         self.service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_after_boundary_with_machine_authority(
+                &self.session_id,
+                expected_run_id,
+                self.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|error| match error {
                 SessionError::NotRunning { .. } => Ok(()),
                 error => Err(error),
             })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+
+    async fn prepare_system_context_at_boundary(
+        &self,
+        expected_run_id: &meerkat_core::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
+        self.service
+            .prepare_live_system_context_boundary(&self.session_id, expected_run_id, appends)
+            .await
     }
 }
 
@@ -1181,6 +1366,7 @@ impl CoreExecutor for TargetCoreExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(TargetCoreBoundaryHandle {
             service: Arc::clone(&self.service),
+            runtime_adapter: Arc::clone(&self.runtime_adapter),
             session_id: self.session_id.clone(),
         }))
     }
@@ -1190,6 +1376,36 @@ impl CoreExecutor for TargetCoreExecutor {
             service: Arc::clone(&self.service),
             session_id: self.session_id.clone(),
         }))
+    }
+
+    fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+        Some(meerkat::surface::persistent_runtime_publication_handle(
+            Arc::clone(&self.service),
+            self.session_id.clone(),
+        ))
+    }
+
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        true
+    }
+
+    fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+        Some(Arc::new(TargetCorePostStopCleanupHandle {
+            service: Arc::clone(&self.service),
+            mob_state: Arc::clone(&self.mob_state),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn CoreExecutorTurnFinalizationBoundaryHandle>> {
+        Some(
+            meerkat::surface::persistent_runtime_turn_finalization_boundary_handle(
+                Arc::clone(&self.service),
+                self.session_id.clone(),
+            ),
+        )
     }
 
     async fn apply(
@@ -1228,9 +1444,38 @@ impl CoreExecutor for TargetCoreExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
+                &self.session_id,
+                session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[meerkat_core::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        self.service
+            .publish_interaction_terminals_exact_batch(&self.session_id, events)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
-            .cancel_after_boundary(&self.session_id)
+            .cancel_current_after_boundary_with_machine_authority(
+                &self.session_id,
+                self.runtime_adapter.session_control_authority(),
+            )
             .await
             .or_else(|error| match error {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -1240,20 +1485,19 @@ impl CoreExecutor for TargetCoreExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
-        let discard_result =
-            discard_live_session_with_mob_cleanup(&self.service, &self.mob_state, &self.session_id)
-                .await;
-        runtime_adapter_unregister_noop();
-        match discard_result {
-            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
+        TargetCorePostStopCleanupHandle {
+            service: Arc::clone(&self.service),
+            mob_state: Arc::clone(&self.mob_state),
+            session_id: self.session_id.clone(),
         }
+        .cleanup_after_runtime_stop_terminalized()
+        .await
     }
 }
-
-/// Placeholder for StopRuntimeExecutor — the target owns the adapter lifetime
-/// so explicit unregistration isn't needed during shutdown.
-fn runtime_adapter_unregister_noop() {}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1401,7 +1645,8 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
             rpc_jsonl as Arc<dyn SessionStore>,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
-            rpc_schedule_store);
+            rpc_schedule_store,
+        );
         let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
             meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
         );
@@ -1420,6 +1665,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         let rpc_mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
             rpc_runtime.session_service(),
             Some(rpc_runtime.runtime_adapter()),
+            meerkat_mob::MobControlPrincipal::Owner,
         ));
         rpc_runtime.set_mob_tools(Arc::new(AgentMobToolSurfaceFactory::new(Arc::clone(
             &rpc_mob_state,
@@ -2294,7 +2540,8 @@ mod tests {
             Arc::new(bundle_store) as Arc<dyn SessionStore>,
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(MemoryBlobStore::new()),
-            schedule_store);
+            schedule_store,
+        );
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
 
@@ -2304,6 +2551,7 @@ mod tests {
         let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
             service.clone(),
             Some(runtime_adapter.clone()),
+            meerkat_mob::MobControlPrincipal::Owner,
         ));
         *mob_tools_slot
             .write()

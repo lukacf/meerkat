@@ -112,6 +112,12 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         })
         .collect();
 
+    let debug_invariant_validation = quote! {
+        fn validate_debug_invariants(&self) {
+            #(#invariant_checks)*
+        }
+    };
+
     let helpers: Vec<_> = def.helpers.iter().map(gen_helper).collect();
 
     let signal_method = if has_signals {
@@ -325,6 +331,34 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
             #prepared_signal_method
 
+            /// Apply a group of inputs as one prepared-authority transaction.
+            ///
+            /// Every input guard observes the state produced by the preceding
+            /// input, while generated whole-state invariants are validated once
+            /// at the atomic batch boundary. A rejected input restores the
+            /// prepared authority to its pre-batch state.
+            pub fn apply_batch<I>(
+                &mut self,
+                inputs: I,
+            ) -> Result<Vec<#transition_name>, #error_name>
+            where
+                I: IntoIterator<Item = #input_name>,
+            {
+                let checkpoint = self.authority.state.clone();
+                let mut transitions = Vec::new();
+                for input in inputs {
+                    match self.authority.apply_without_invariant_validation(input) {
+                        Ok(transition) => transitions.push(transition),
+                        Err(error) => {
+                            self.authority.state = checkpoint;
+                            return Err(error);
+                        }
+                    }
+                }
+                self.authority.validate_debug_invariants();
+                Ok(transitions)
+            }
+
             fn validate_commit_base(
                 &self,
                 live: &#authority_name,
@@ -382,6 +416,35 @@ pub fn generate(def: &MachineDef) -> TokenStream {
             fn validate_recovered_state(&self) -> Result<(), #error_name> {
                 #(#recovered_state_validations)*
                 Ok(())
+            }
+
+            #debug_invariant_validation
+
+            fn apply_without_invariant_validation(
+                &mut self,
+                input: #input_name,
+            ) -> Result<#transition_name, #error_name> {
+                let from_phase = self.state.phase();
+                let input_variant = input.variant();
+                #[allow(unused_mut)]
+                let mut effects = Vec::new();
+
+                match input {
+                    #input_arms
+                    #[allow(unreachable_patterns)]
+                    _ => return Err(#error_name::NoMatchingTransition {
+                        phase: from_phase,
+                        trigger: #trigger_name::Input(input_variant),
+                    }),
+                }
+
+                let to_phase = self.state.phase();
+                Ok(#transition_name {
+                    from_phase,
+                    to_phase,
+                    effects,
+                    _origin: sealed::TransitionOrigin,
+                })
             }
 
             pub fn fork(&self) -> Self {
@@ -451,28 +514,9 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
         impl #mutator_trait for #authority_name {
             fn apply(&mut self, input: #input_name) -> Result<#transition_name, #error_name> {
-                let from_phase = self.state.phase();
-                let input_variant = input.variant();
-                #[allow(unused_mut)]
-                let mut effects = Vec::new();
-
-                match input {
-                    #input_arms
-                    #[allow(unreachable_patterns)]
-                    _ => return Err(#error_name::NoMatchingTransition {
-                        phase: from_phase,
-                        trigger: #trigger_name::Input(input_variant),
-                    }),
-                }
-
-                let to_phase = self.state.phase();
-                #(#invariant_checks)*
-                Ok(#transition_name {
-                    from_phase,
-                    to_phase,
-                    effects,
-                    _origin: sealed::TransitionOrigin,
-                })
+                let transition = self.apply_without_invariant_validation(input)?;
+                self.validate_debug_invariants();
+                Ok(transition)
             }
         }
     }

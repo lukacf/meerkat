@@ -17,12 +17,14 @@ machine! {
             lifecycle_phase: SessionPersistenceVersionAuthorityPhase,
             session_envelope_version: u64,
             stored_input_state_version: u64,
+            stored_input_state_migration_v3: u64,
             session_metadata_schema_version: u64,
         }
 
         init(Ready) {
             session_envelope_version = 2,
-            stored_input_state_version = 3,
+            stored_input_state_version = 4,
+            stored_input_state_migration_v3 = 3,
             session_metadata_schema_version = 2,
         }
 
@@ -66,6 +68,20 @@ machine! {
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && persisted_version == self.stored_input_state_version
+            }
+            update {}
+            to Ready
+            emit VersionRestoreAuthorized {
+                field: SessionPersistenceVersionField::StoredInputState,
+                version: self.stored_input_state_version
+            }
+        }
+
+        transition MigrateStoredInputStateV3ToV4 {
+            on input RestoreStoredInputStateVersion { persisted_version }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && persisted_version == self.stored_input_state_migration_v3
             }
             update {}
             to Ready

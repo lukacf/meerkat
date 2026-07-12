@@ -13,6 +13,62 @@ use xtask::effect_authority::collect_effect_authority_findings;
 
 const LIVE_WORKSPACE_RUNFILES: &str = "required";
 
+const CORE_EXECUTOR_TRAIT_FIXTURE: &str = r"
+trait CoreExecutor {
+    fn boundary_handle(&self) {}
+    fn interrupt_handle(&self) {}
+    fn publication_handle(&self) {}
+    fn machine_managed_post_stop_unregister(&self) -> bool { false }
+    fn post_stop_cleanup_handle(&self) -> Option<()> { None }
+    fn turn_finalization_boundary_handle(&self) {}
+    fn apply(&mut self) {}
+    fn checkpoint_committed_session_snapshot(&mut self) {}
+    fn reconcile_committed_compaction_projections(&mut self) {}
+    fn abort_uncommitted_compaction_projections(&mut self) {}
+    fn publish_interaction_terminals(&mut self) {}
+    fn cancel_after_boundary(&mut self) {}
+    fn stop_runtime_executor(&mut self) {}
+    fn cleanup_after_runtime_stop_terminalized(&mut self) {}
+}
+";
+
+const MACHINE_MANAGED_EXECUTOR_FIXTURE: &str = r"
+struct MachineManagedPostStopExecutor {
+    inner: Executor,
+}
+
+impl CoreExecutor for MachineManagedPostStopExecutor {
+    fn boundary_handle(&self) { self.inner.boundary_handle() }
+    fn interrupt_handle(&self) { self.inner.interrupt_handle() }
+    fn publication_handle(&self) { self.inner.publication_handle() }
+    fn machine_managed_post_stop_unregister(&self) -> bool { false }
+    fn post_stop_cleanup_handle(&self) -> Option<()> { None }
+    fn turn_finalization_boundary_handle(&self) { self.inner.turn_finalization_boundary_handle() }
+    fn apply(&mut self) { self.inner.apply() }
+    fn checkpoint_committed_session_snapshot(&mut self) { self.inner.checkpoint_committed_session_snapshot() }
+    fn reconcile_committed_compaction_projections(&mut self) { self.inner.reconcile_committed_compaction_projections() }
+    fn abort_uncommitted_compaction_projections(&mut self) { self.inner.abort_uncommitted_compaction_projections() }
+    fn publish_interaction_terminals(&mut self) { self.inner.publish_interaction_terminals() }
+    fn cancel_after_boundary(&mut self) { self.inner.cancel_after_boundary() }
+    fn stop_runtime_executor(&mut self) {
+        self.inner.stop_runtime_executor();
+        machine.lock_post_stop_cleanup_attachment();
+    }
+    fn cleanup_after_runtime_stop_terminalized(&mut self) {
+        machine.unregister_terminalized_runtime_loop_if_current_with_guard();
+    }
+}
+
+impl MeerkatMachine {
+    fn ensure_session_with_executor_factory_inner(&self, executor: Executor) {
+        let managed = executor.machine_managed_post_stop_unregister();
+        let cleanup = executor.post_stop_cleanup_handle();
+        let _ = (managed, cleanup);
+        let _decorated = MachineManagedPostStopExecutor { inner: executor };
+    }
+}
+";
+
 fn write_file(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     if let Some(parent) = path.parent() {
@@ -25,6 +81,21 @@ fn findings_for(rel: &str, contents: &str) -> Vec<String> {
     let dir = tempdir().expect("tempdir");
     write_file(dir.path(), rel, contents);
     collect_effect_authority_findings(dir.path()).expect("collect findings")
+}
+
+fn core_executor_delegation_findings(trait_source: &str, decorator_source: &str) -> Vec<String> {
+    let dir = tempdir().expect("tempdir");
+    write_file(
+        dir.path(),
+        "meerkat-core/src/lifecycle/core_executor.rs",
+        trait_source,
+    );
+    write_file(
+        dir.path(),
+        "meerkat-runtime/src/meerkat_machine/session_management.rs",
+        decorator_source,
+    );
+    collect_effect_authority_findings(dir.path()).expect("collect delegation findings")
 }
 
 fn expect_failure(name: &str, rel: &str, contents: &str) {
@@ -51,6 +122,157 @@ fn live_workspace_effect_authority_audit_is_clean() {
     assert!(
         findings.is_empty(),
         "effect-authority audit must be clean for the committed workspace, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_complete_partition_is_clean() {
+    let findings = core_executor_delegation_findings(
+        CORE_EXECUTOR_TRAIT_FIXTURE,
+        MACHINE_MANAGED_EXECUTOR_FIXTURE,
+    );
+    assert!(
+        findings.is_empty(),
+        "complete CoreExecutor decorator partition must pass, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_rejects_new_defaulted_trait_method() {
+    let trait_source = CORE_EXECUTOR_TRAIT_FIXTURE.replace(
+        "    fn cleanup_after_runtime_stop_terminalized(&mut self) {}\n",
+        "    fn cleanup_after_runtime_stop_terminalized(&mut self) {}\n    fn newly_defaulted_projection(&mut self) {}\n",
+    );
+    let findings =
+        core_executor_delegation_findings(&trait_source, MACHINE_MANAGED_EXECUTOR_FIXTURE);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("newly_defaulted_projection")),
+        "new defaulted trait method must fail the exhaustive partition, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_rejects_omitted_forward() {
+    let decorator_source = MACHINE_MANAGED_EXECUTOR_FIXTURE.replace(
+        "    fn reconcile_committed_compaction_projections(&mut self) { self.inner.reconcile_committed_compaction_projections() }\n",
+        "",
+    );
+    let findings =
+        core_executor_delegation_findings(CORE_EXECUTOR_TRAIT_FIXTURE, &decorator_source);
+    assert!(
+        findings.iter().any(|finding| {
+            finding.contains("missing")
+                && finding.contains("reconcile_committed_compaction_projections")
+        }),
+        "omitted forwarding method must fail method-set equality, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_rejects_non_inner_forward() {
+    let decorator_source = MACHINE_MANAGED_EXECUTOR_FIXTURE.replace(
+        "self.inner.abort_uncommitted_compaction_projections()",
+        "self.abort_uncommitted_compaction_projections()",
+    );
+    let findings =
+        core_executor_delegation_findings(CORE_EXECUTOR_TRAIT_FIXTURE, &decorator_source);
+    assert!(
+        findings.iter().any(|finding| {
+            finding.contains("abort_uncommitted_compaction_projections")
+                && finding.contains("self.inner")
+        }),
+        "non-inner forwarding must fail the call-shape check, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_rejects_nested_side_effect_forward() {
+    let decorator_source = MACHINE_MANAGED_EXECUTOR_FIXTURE.replace(
+        "fn apply(&mut self) { self.inner.apply() }",
+        "fn apply(&mut self) { { side_effect; self.inner.apply() } }",
+    );
+    let findings =
+        core_executor_delegation_findings(CORE_EXECUTOR_TRAIT_FIXTURE, &decorator_source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("pure CoreExecutor decorator method `apply`")),
+        "nested side effects must not satisfy pure forwarding, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_rejects_missing_override_seams() {
+    let decorator_source = MACHINE_MANAGED_EXECUTOR_FIXTURE
+        .replace(
+            "machine.lock_post_stop_cleanup_attachment()",
+            "machine.unrelated_stop_hook()",
+        )
+        .replace(
+            "machine.unregister_terminalized_runtime_loop_if_current_with_guard()",
+            "machine.unrelated_cleanup_hook()",
+        );
+    let findings =
+        core_executor_delegation_findings(CORE_EXECUTOR_TRAIT_FIXTURE, &decorator_source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("exact post-stop attachment fence"))
+            && findings
+                .iter()
+                .any(|finding| finding.contains("exact machine unregister seam")),
+        "decorator overrides must retain both exact machine seams, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_rejects_changed_consumed_capabilities() {
+    let decorator_source = MACHINE_MANAGED_EXECUTOR_FIXTURE
+        .replace(
+            "fn machine_managed_post_stop_unregister(&self) -> bool { false }",
+            "fn machine_managed_post_stop_unregister(&self) -> bool { true }",
+        )
+        .replace(
+            "fn post_stop_cleanup_handle(&self) -> Option<()> { None }",
+            "fn post_stop_cleanup_handle(&self) -> Option<()> { Some(()) }",
+        );
+    let findings =
+        core_executor_delegation_findings(CORE_EXECUTOR_TRAIT_FIXTURE, &decorator_source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("must be explicitly false"))
+            && findings
+                .iter()
+                .any(|finding| finding.contains("must be explicitly None")),
+        "consumed capability values must remain pinned after decoration, got {findings:#?}"
+    );
+}
+
+#[test]
+fn core_executor_decorator_rejects_post_wrap_capability_capture() {
+    let before = r"        let managed = executor.machine_managed_post_stop_unregister();
+        let cleanup = executor.post_stop_cleanup_handle();
+        let _ = (managed, cleanup);
+        let _decorated = MachineManagedPostStopExecutor { inner: executor };
+";
+    let after = r"        let _decorated = MachineManagedPostStopExecutor { inner: executor };
+        let managed = executor.machine_managed_post_stop_unregister();
+        let cleanup = executor.post_stop_cleanup_handle();
+        let _ = (managed, cleanup);
+";
+    let decorator_source = MACHINE_MANAGED_EXECUTOR_FIXTURE.replace(before, after);
+    let findings =
+        core_executor_delegation_findings(CORE_EXECUTOR_TRAIT_FIXTURE, &decorator_source);
+    assert!(
+        findings.iter().any(|finding| {
+            finding.contains("machine_managed_post_stop_unregister") && finding.contains("captured")
+        }) && findings.iter().any(|finding| {
+            finding.contains("post_stop_cleanup_handle") && finding.contains("captured")
+        }),
+        "post-wrap capability capture must fail ordering checks, got {findings:#?}"
     );
 }
 

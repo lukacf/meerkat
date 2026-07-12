@@ -69,26 +69,56 @@
   "ErrorCode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Stable error codes for wire protocol.",
-    "enum": [
-      "SESSION_NOT_FOUND",
-      "SCHEDULE_NOT_FOUND",
-      "SESSION_BUSY",
-      "SESSION_NOT_RUNNING",
-      "REQUEST_CANCELLED",
-      "PROVIDER_ERROR",
-      "BUDGET_EXHAUSTED",
-      "HOOK_DENIED",
-      "AGENT_ERROR",
-      "CAPABILITY_UNAVAILABLE",
-      "SKILL_NOT_FOUND",
-      "SKILL_RESOLUTION_FAILED",
-      "INVALID_PARAMS",
-      "INTERNAL_ERROR",
-      "DUPLICATE_INPUT",
-      "SUPERVISOR_ROTATION_INCOMPLETE"
+    "oneOf": [
+      {
+        "enum": [
+          "SESSION_NOT_FOUND",
+          "SCHEDULE_NOT_FOUND",
+          "SESSION_BUSY",
+          "SESSION_NOT_RUNNING",
+          "REQUEST_CANCELLED",
+          "PROVIDER_ERROR",
+          "BUDGET_EXHAUSTED",
+          "HOOK_DENIED",
+          "AGENT_ERROR",
+          "CAPABILITY_UNAVAILABLE",
+          "SKILL_NOT_FOUND",
+          "SKILL_RESOLUTION_FAILED",
+          "INVALID_PARAMS",
+          "INTERNAL_ERROR",
+          "DUPLICATE_INPUT",
+          "SUPERVISOR_ROTATION_INCOMPLETE"
+        ],
+        "type": "string"
+      },
+      {
+        "const": "SCOPE_DENIED",
+        "description": "Plane-(b) control-scope denial; wire detail carries\n`{ required, presented }`.",
+        "type": "string"
+      },
+      {
+        "const": "HOST_UNAVAILABLE",
+        "description": "Member host unreachable/timeout; observation degrades typed, never\nquiet.",
+        "type": "string"
+      },
+      {
+        "const": "STALE_CURSOR",
+        "description": "Event cursor overran an ephemeral host's buffer; reply carries the\ncurrent watermark.",
+        "type": "string"
+      },
+      {
+        "const": "STALE_FENCE",
+        "description": "Command carried a superseded `(generation, fence)` tuple.",
+        "type": "string"
+      }
     ],
-    "title": "ErrorCode",
-    "type": "string"
+    "title": "ErrorCode"
+  },
+  "JsonRpcErrorCodes": {
+    "HOST_UNAVAILABLE": -32026,
+    "SCOPE_DENIED": -32025,
+    "STALE_CURSOR": -32027,
+    "STALE_FENCE": -32028
   },
   "WireError": {
     "$defs": {
@@ -155,25 +185,49 @@
       },
       "ErrorCode": {
         "description": "Stable error codes for wire protocol.",
-        "enum": [
-          "SESSION_NOT_FOUND",
-          "SCHEDULE_NOT_FOUND",
-          "SESSION_BUSY",
-          "SESSION_NOT_RUNNING",
-          "REQUEST_CANCELLED",
-          "PROVIDER_ERROR",
-          "BUDGET_EXHAUSTED",
-          "HOOK_DENIED",
-          "AGENT_ERROR",
-          "CAPABILITY_UNAVAILABLE",
-          "SKILL_NOT_FOUND",
-          "SKILL_RESOLUTION_FAILED",
-          "INVALID_PARAMS",
-          "INTERNAL_ERROR",
-          "DUPLICATE_INPUT",
-          "SUPERVISOR_ROTATION_INCOMPLETE"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "SESSION_NOT_FOUND",
+              "SCHEDULE_NOT_FOUND",
+              "SESSION_BUSY",
+              "SESSION_NOT_RUNNING",
+              "REQUEST_CANCELLED",
+              "PROVIDER_ERROR",
+              "BUDGET_EXHAUSTED",
+              "HOOK_DENIED",
+              "AGENT_ERROR",
+              "CAPABILITY_UNAVAILABLE",
+              "SKILL_NOT_FOUND",
+              "SKILL_RESOLUTION_FAILED",
+              "INVALID_PARAMS",
+              "INTERNAL_ERROR",
+              "DUPLICATE_INPUT",
+              "SUPERVISOR_ROTATION_INCOMPLETE"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "SCOPE_DENIED",
+            "description": "Plane-(b) control-scope denial; wire detail carries\n`{ required, presented }`.",
+            "type": "string"
+          },
+          {
+            "const": "HOST_UNAVAILABLE",
+            "description": "Member host unreachable/timeout; observation degrades typed, never\nquiet.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_CURSOR",
+            "description": "Event cursor overran an ephemeral host's buffer; reply carries the\ncurrent watermark.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_FENCE",
+            "description": "Command carried a superseded `(generation, fence)` tuple.",
+            "type": "string"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",

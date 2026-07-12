@@ -187,6 +187,18 @@ pub async fn pending_live_first_turn_is_still_deferred(
     service.live_deferred_first_turn_pending(session_id).await
 }
 
+/// Runtime-loop variant of [`pending_live_first_turn_is_still_deferred`].
+/// The generated loop retains the non-reentrant outer boundary while it awaits
+/// staged-promotion work, so this path must enter at the B-held service seam.
+pub async fn pending_live_first_turn_is_still_deferred_under_runtime_turn_boundary(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> Result<bool, SessionError> {
+    service
+        .live_deferred_first_turn_pending_under_runtime_turn_boundary(session_id)
+        .await
+}
+
 /// Replay any promoted system-context state captured during staged
 /// promotion back onto the session service after a successful turn.
 ///
@@ -238,6 +250,23 @@ pub async fn should_restore_pending_after_apply_runtime_turn(
     }
     if result.is_err() {
         pending_live_first_turn_is_still_deferred(service, session_id).await
+    } else {
+        Ok(false)
+    }
+}
+
+/// Runtime-loop variant of [`should_restore_pending_after_apply_runtime_turn`].
+pub async fn should_restore_pending_after_apply_runtime_turn_under_runtime_turn_boundary(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+    result: &Result<CoreApplyOutput, SessionError>,
+) -> Result<bool, SessionError> {
+    if is_pre_run_apply_runtime_turn_failure(result) {
+        return Ok(true);
+    }
+    if result.is_err() {
+        pending_live_first_turn_is_still_deferred_under_runtime_turn_boundary(service, session_id)
+            .await
     } else {
         Ok(false)
     }
@@ -361,30 +390,40 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
 ) -> ServiceApplyRuntimeTurnSpawnReceiver {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let create_result = match (
+        let (create_result, create_was_attempted) = match (
             promotion_cleanup.take_staged_capacity_admission(),
             generated_machine_archived_resume_admission.is_authorized_by_generated_authority(),
         ) {
-            (Some(admission), true) => {
+            (Some(_admission), true) => (
+                Err(SessionError::NotFound {
+                    id: session_id.clone(),
+                }),
+                false,
+            ),
+            (Some(admission), false) => (
                 service
-                    .create_session_with_reserved_machine_archived_resume_admission(
-                        create_req,
-                        admission,
-                        runtime_adapter.session_control_authority(),
+                    .create_session_with_reserved_admission_under_runtime_turn_boundary(
+                        create_req, admission,
                     )
-                    .await
-            }
-            (Some(admission), false) => {
-                service
-                    .create_session_with_reserved_admission(create_req, admission)
-                    .await
-            }
-            (None, true) => Err(SessionError::Agent(
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
+                    .await,
+                true,
+            ),
+            (None, true) => (
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
+                    )),
                 )),
-            )),
-            (None, false) => service.create_session(create_req).await,
+                false,
+            ),
+            (None, false) => (
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "runtime-loop staged promotion for session {session_id} is missing its reserved admission"
+                    )),
+                )),
+                false,
+            ),
         };
         match create_result {
             Ok(_) => {
@@ -392,14 +431,34 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             }
             Err(err) => {
                 if is_archived_create_rejection(&err) {
-                    let teardown = StagedApplyRuntimeTurnError::archived_teardown(err.to_string());
+                    let discard_error = if create_was_attempted {
+                        service
+                            .discard_live_session_under_runtime_turn_boundary(&session_id)
+                            .await
+                            .err()
+                            .filter(|error| !matches!(error, SessionError::NotFound { .. }))
+                    } else {
+                        None
+                    };
+                    let teardown =
+                        StagedApplyRuntimeTurnError::archived_teardown(match discard_error {
+                            Some(discard_error) => format!(
+                                "{err}; archived live-session discard also failed: {discard_error}"
+                            ),
+                            None => err.to_string(),
+                        });
                     promotion_cleanup.mark_materialized();
                     let _ = promotion_cleanup.finish_now().await;
                     promotion_cleanup.disarm();
                     let _ = result_tx.send(Err(teardown));
                     return;
                 }
-                match pending_live_first_turn_is_still_deferred(&service, &session_id).await {
+                match pending_live_first_turn_is_still_deferred_under_runtime_turn_boundary(
+                    &service,
+                    &session_id,
+                )
+                .await
+                {
                     Ok(true) => {
                         promotion_cleanup.mark_materialized();
                         finish_pending_promotion_after_service_turn(
@@ -418,7 +477,7 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                     }
                     Ok(false) => {
                         let materialized_after_error = match service
-                            .has_live_session(&session_id)
+                            .has_live_session_under_runtime_turn_boundary(&session_id)
                             .await
                         {
                             Ok(materialized_after_error) => materialized_after_error,
@@ -428,10 +487,23 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                                     error = %error,
                                     "failed to determine live-session materialization after create_session error"
                                 );
+                                let discard_error = service
+                                    .discard_live_session_under_runtime_turn_boundary(&session_id)
+                                    .await
+                                    .err()
+                                    .filter(|error| {
+                                        !matches!(error, SessionError::NotFound { .. })
+                                    });
+                                let mut message = format!(
+                                    "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
+                                );
+                                if let Some(discard_error) = discard_error {
+                                    message.push_str(&format!(
+                                        "; live-session discard also failed: {discard_error}"
+                                    ));
+                                }
                                 let primary_error = SessionError::Agent(
-                                    meerkat_core::error::AgentError::InternalError(format!(
-                                        "failed to read live-session materialization authority after create_session error for {session_id}: {error}"
-                                    )),
+                                    meerkat_core::error::AgentError::InternalError(message),
                                 );
                                 promotion_cleanup
                                     .fail_closed_after_unknown_materialization()
@@ -481,10 +553,21 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                             create_error = %err,
                             "failed to determine deferred-first-turn materialization after create_session error"
                         );
+                        let discard_error = service
+                            .discard_live_session_under_runtime_turn_boundary(&session_id)
+                            .await
+                            .err()
+                            .filter(|error| !matches!(error, SessionError::NotFound { .. }));
+                        let mut message = format!(
+                            "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
+                        );
+                        if let Some(discard_error) = discard_error {
+                            message.push_str(&format!(
+                                "; live-session discard also failed: {discard_error}"
+                            ));
+                        }
                         let primary_error = SessionError::Agent(
-                            meerkat_core::error::AgentError::InternalError(format!(
-                                "failed to read deferred-first-turn authority after create_session error for {session_id}: {error}"
-                            )),
+                            meerkat_core::error::AgentError::InternalError(message),
                         );
                         promotion_cleanup
                             .fail_closed_after_unknown_materialization()
@@ -533,24 +616,38 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             ))
         });
         let should_restore =
-            match should_restore_pending_after_apply_runtime_turn(&service, &session_id, &result)
-                .await
+            match should_restore_pending_after_apply_runtime_turn_under_runtime_turn_boundary(
+                &service,
+                &session_id,
+                &result,
+            )
+            .await
             {
                 Ok(should_restore) => should_restore,
                 Err(error) => {
+                    let discard_error = service
+                        .discard_live_session_under_runtime_turn_boundary(&session_id)
+                        .await
+                        .err()
+                        .filter(|error| !matches!(error, SessionError::NotFound { .. }));
                     promotion_cleanup
                         .fail_closed_after_unknown_materialization()
                         .await;
                     promotion_cleanup.disarm();
                     let _ = result_tx.send(Err(StagedApplyRuntimeTurnError::unavailable_teardown(
-                        error.to_string(),
+                        match discard_error {
+                            Some(discard_error) => format!(
+                                "{error}; live-session discard also failed: {discard_error}"
+                            ),
+                            None => error.to_string(),
+                        },
                     )));
                     return;
                 }
             };
         if should_restore {
             let restore_result = promotion_cleanup
-                .restore_after_materialized_failure(
+                .restore_after_materialized_failure_under_runtime_turn_boundary(
                     &service,
                     MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                 )
@@ -606,7 +703,9 @@ pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result = match service
-            .create_session_with_reserved_admission(create_req, admission)
+            .create_session_with_reserved_admission_under_runtime_turn_boundary(
+                create_req, admission,
+            )
             .await
         {
             Ok(_) => {
@@ -635,7 +734,7 @@ pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
                         )),
                     ))
                 });
-                let should_restore = match should_restore_pending_after_apply_runtime_turn(
+                let should_restore = match should_restore_pending_after_apply_runtime_turn_under_runtime_turn_boundary(
                     &service,
                     &session_id,
                     &result,
@@ -654,9 +753,19 @@ pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
                             let _ = result_tx.send(Ok(output));
                         }
                         Err(error) => {
+                            let discard_error = service
+                                .discard_live_session_under_runtime_turn_boundary(&session_id)
+                                .await
+                                .err()
+                                .filter(|error| !matches!(error, SessionError::NotFound { .. }));
                             let _ = result_tx.send(Err(
                                 StagedApplyRuntimeTurnError::unavailable_teardown(
-                                    error.to_string(),
+                                    match discard_error {
+                                        Some(discard_error) => format!(
+                                            "{error}; live-session discard also failed: {discard_error}"
+                                        ),
+                                        None => error.to_string(),
+                                    },
                                 ),
                             ));
                         }
@@ -696,30 +805,31 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
 ) -> ServiceStartTurnSpawnReceiver {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let create_result = match (
+        let (create_result, create_was_attempted) = match (
             promotion_cleanup.take_staged_capacity_admission(),
             generated_machine_archived_resume_admission.is_authorized_by_generated_authority(),
         ) {
-            (Some(admission), true) => {
-                service
-                    .create_session_with_reserved_machine_archived_resume_admission(
-                        create_req,
-                        admission,
-                        runtime_adapter.session_control_authority(),
-                    )
-                    .await
-            }
-            (Some(admission), false) => {
+            (Some(_admission), true) => (
+                Err(SessionError::NotFound {
+                    id: session_id.clone(),
+                }),
+                false,
+            ),
+            (Some(admission), false) => (
                 service
                     .create_session_with_reserved_admission(create_req, admission)
-                    .await
-            }
-            (None, true) => Err(SessionError::Agent(
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
+                    .await,
+                true,
+            ),
+            (None, true) => (
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
+                    )),
                 )),
-            )),
-            (None, false) => service.create_session(create_req).await,
+                false,
+            ),
+            (None, false) => (service.create_session(create_req).await, true),
         };
         match create_result {
             Ok(_) => {
@@ -727,15 +837,17 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
             }
             Err(err) => {
                 if is_archived_create_rejection(&err) {
-                    let _ = service.discard_live_session(&session_id).await;
-                    let err = unregister_session_compensation(
-                        runtime_adapter.as_ref(),
-                        &session_id,
-                        &err,
-                    )
-                    .await
-                    .err()
-                    .unwrap_or(err);
+                    if create_was_attempted {
+                        let _ = service.discard_live_session(&session_id).await;
+                    }
+                    let err = if create_was_attempted {
+                        unregister_session_compensation(runtime_adapter.as_ref(), &session_id, &err)
+                            .await
+                            .err()
+                            .unwrap_or(err)
+                    } else {
+                        err
+                    };
                     promotion_cleanup.mark_materialized();
                     let _ = promotion_cleanup.finish_now().await;
                     promotion_cleanup.disarm();
@@ -1100,6 +1212,28 @@ impl PendingPromotionCleanup {
         service: &PersistentSessionService<FactoryAgentBuilder>,
         protocol: MachineSessionArchiveProtocol<'_>,
     ) -> Result<(), SessionError> {
+        self.restore_after_materialized_failure_with_boundary_mode(service, protocol, false)
+            .await
+    }
+
+    /// Runtime-loop variant of [`Self::restore_after_materialized_failure`].
+    /// The caller already owns the stable B boundary through terminal
+    /// publication, so archive/discard must enter at their B-held seams.
+    pub async fn restore_after_materialized_failure_under_runtime_turn_boundary(
+        &mut self,
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        protocol: MachineSessionArchiveProtocol<'_>,
+    ) -> Result<(), SessionError> {
+        self.restore_after_materialized_failure_with_boundary_mode(service, protocol, true)
+            .await
+    }
+
+    async fn restore_after_materialized_failure_with_boundary_mode(
+        &mut self,
+        service: &PersistentSessionService<FactoryAgentBuilder>,
+        protocol: MachineSessionArchiveProtocol<'_>,
+        turn_boundary_already_held: bool,
+    ) -> Result<(), SessionError> {
         if let Err(error) = self
             .recover_materialized_staged_capacity_admission(service)
             .await
@@ -1108,10 +1242,37 @@ impl PendingPromotionCleanup {
             return Err(error);
         }
 
-        if let Err(error) = service
-            .archive_with_machine_protocol(&self.session_id, protocol)
-            .await
-        {
+        let archive_result = if turn_boundary_already_held {
+            service
+                .archive_with_machine_protocol_under_runtime_turn_boundary(
+                    &self.session_id,
+                    protocol,
+                )
+                .await
+        } else {
+            service
+                .archive_with_machine_protocol(&self.session_id, protocol)
+                .await
+        };
+        if let Err(error) = archive_result {
+            let discard_result = if turn_boundary_already_held {
+                service
+                    .discard_live_session_under_runtime_turn_boundary(&self.session_id)
+                    .await
+            } else {
+                service.discard_live_session(&self.session_id).await
+            };
+            if let Err(discard_error) = discard_result
+                && !matches!(discard_error, SessionError::NotFound { .. })
+            {
+                self.fail_closed_after_unknown_materialization().await;
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to archive materialized staged session {}: {error}; live-session discard also failed: {discard_error}",
+                        self.session_id
+                    )),
+                ));
+            }
             self.restore_now().await;
             return Err(error);
         }

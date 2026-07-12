@@ -38,8 +38,12 @@ import urllib.request
 from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
-from .generated.version_compat import is_compatible_with as _generated_is_compatible_with
+from .generated.version_compat import (
+    is_compatible_with as _generated_is_compatible_with,
+)
 from .generated.types import (
+    BridgeLiveControlOutcome,
+    BridgeLiveControlVerb,
     CallbackToolDefinition,
     SkillListResponse,
     AttentionListRequest,
@@ -60,13 +64,36 @@ from .generated.types import (
     GoalStatusResult,
     LiveCloseResult,
     LiveCloseStatus,
+    LiveOpenResult,
     LiveRefreshResult,
     LiveRefreshStatus,
+    LiveStatusResult,
     McpServerConfig,
+    MobBindHostParams,
+    MobBindHostResult,
     MobDefinitionInput,
     MobFlowRunResult,
+    MobGrantScopesParams,
+    MobGrantScopesResult,
+    MobGrantsResult,
+    MobHardCancelParams,
+    MobHardCancelResult,
+    MobHostStatus,
+    MobHostsResult,
+    MobIdParams,
     MobMemberParams,
+    MobMemberHistoryParams,
+    MobMemberHistoryResult,
+    MobMemberLiveChannelParams,
+    MobMemberLiveControlParams,
+    MobMemberLiveOpenParams,
+    MobMemberLiveStatusParams,
     MobMemberStatusResult,
+    MobRevokeHostParams,
+    MobRevokeHostResult,
+    MobRevokeScopesParams,
+    MobRevokeScopesResult,
+    MobRouteInstallsResult,
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
@@ -83,9 +110,14 @@ from .generated.types import (
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
     PublicTurnToolOverlay,
+    RealtimeTurningMode,
     WireAuthBindingRef,
-    WireBudgetSplitPolicy,
     WireContentInput,
+    WireHistoryRow,
+    WireHostBindPhase,
+    WireHostBindingDescriptor,
+    WireHostCapabilityFlags,
+    WireLiveChannelCapabilities,
     WireMemberLaunchMode,
     WireMobBackendKind,
     WireMobProfile,
@@ -94,6 +126,10 @@ from .generated.types import (
     WireToolAccessPolicy,
     WireToolFilter,
     WireMemberProgressSnapshot,
+    WireMemberHistoryPageBody,
+    WireProjectionProvenance,
+    WireReachability,
+    WireRouteInstallObligation,
     ToolsRegisterParams,
     ToolsRegisterResult,
 )
@@ -173,6 +209,7 @@ from .mob import (
     MobPeerConnectivity,
     MobPeerConnectivitySnapshot,
     MobReadyMemberSnapshot,
+    MobRespawnResult,
     MobSpawnResult,
     MobSpawnSpec,
     MobUnreachablePeer,
@@ -198,7 +235,10 @@ from .types import (
     ContentBlock,
     ContentInput,
     ModelsCatalogResponse,
+    MobControlScope,
     MobEventsResult,
+    MobGrantRecord,
+    MobMemberLiveTransport,
     MobProfile,
     HelpExecutionMode,
     PeerCorrelationId,
@@ -217,6 +257,8 @@ from .types import (
     SchemaWarning,
     SessionDetails,
     SessionAssistantBlock,
+    SessionContentBlock,
+    SessionContentInput,
     SessionForkResult,
     SessionHistory,
     SessionTranscriptRevision,
@@ -237,6 +279,7 @@ from .types import (
     TranscriptRewriteInputMessage,
     TranscriptRewriteReason,
     TranscriptRewriteSelection,
+    TranscriptUserRole,
     ReadyWorkFilter,
     WorkGraphEvent,
     WorkGraphEventFilter,
@@ -253,7 +296,9 @@ _logger = logging.getLogger(__name__)
 
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
-_MEERKAT_BINARY_CACHE_ROOT = Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
+_MEERKAT_BINARY_CACHE_ROOT = (
+    Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
+)
 _MOB_SPAWN_MANY_FAILURE_CAUSES = {
     "profile_not_found",
     "member_not_found",
@@ -280,6 +325,7 @@ _MOB_SPAWN_MANY_FAILURE_CAUSES = {
     "bridge_delivery_rejected",
     "supervisor_escalation",
     "unsupported_for_mode",
+    "missing_member_capability",
     "reset_barrier",
     "storage_error",
     "session_error",
@@ -290,6 +336,21 @@ _MOB_SPAWN_MANY_FAILURE_CAUSES = {
     "work_not_found",
     "internal",
 }
+
+_MOB_CONTROL_SCOPES = frozenset(
+    {
+        "list",
+        "read_history",
+        "subscribe_events",
+        "send_command",
+        "cancel",
+        "retire",
+        "wire_topology",
+        "live",
+        "admin_host",
+        "admin_grants",
+    }
+)
 
 RenderClass = Literal[
     "user_prompt",
@@ -319,10 +380,7 @@ def _wire_value(value: Any) -> Any:
                 converted[field.name] = _wire_value(item)
         return converted
     if isinstance(value, dict):
-        return {
-            key: _wire_value(item)
-            for key, item in value.items()
-        }
+        return {key: _wire_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_wire_value(item) for item in value]
     return value
@@ -355,7 +413,9 @@ def _normalize_mob_wire_members_batch_edge(
     return {"a": a, "b": b}
 
 
-def _parse_mob_wire_members_batch_edge(raw: Any, context: str) -> MobWireMembersBatchEdge:
+def _parse_mob_wire_members_batch_edge(
+    raw: Any, context: str
+) -> MobWireMembersBatchEdge:
     if not isinstance(raw, dict):
         raise MeerkatError("INVALID_RESPONSE", f"{context}: edge must be an object")
     a = raw.get("a")
@@ -368,7 +428,9 @@ def _parse_mob_wire_members_batch_edge(raw: Any, context: str) -> MobWireMembers
     return MobWireMembersBatchEdge(a=a, b=b)
 
 
-def _parse_mob_wire_members_batch_report(raw: dict[str, Any]) -> MobWireMembersBatchResult:
+def _parse_mob_wire_members_batch_report(
+    raw: dict[str, Any],
+) -> MobWireMembersBatchResult:
     context = "Invalid mob/wire_members_batch response"
     requested = raw.get("requested")
     if not isinstance(requested, int) or isinstance(requested, bool) or requested < 0:
@@ -387,10 +449,7 @@ def _parse_mob_wire_members_batch_report(raw: dict[str, Any]) -> MobWireMembersB
         )
     return MobWireMembersBatchResult(
         requested=requested,
-        wired=[
-            _parse_mob_wire_members_batch_edge(edge, context)
-            for edge in wired_raw
-        ],
+        wired=[_parse_mob_wire_members_batch_edge(edge, context) for edge in wired_raw],
         already_wired=[
             _parse_mob_wire_members_batch_edge(edge, context)
             for edge in already_wired_raw
@@ -469,14 +528,21 @@ class MeerkatClient:
             async def handle_search(arguments: dict) -> str:
                 return f"Results for {arguments.get('q', '')}"
         """
+
         def decorator(fn: Any) -> Any:
             self._tool_registry.register(
-                name, fn, description=description, input_schema=input_schema,
+                name,
+                fn,
+                description=description,
+                input_schema=input_schema,
             )
             # If already connected, register the new tool with the server immediately.
             if self._process and self._process.stdin:
-                asyncio.ensure_future(self._register_tool_with_server(name, description, input_schema))
+                asyncio.ensure_future(
+                    self._register_tool_with_server(name, description, input_schema)
+                )
             return fn
+
         return decorator
 
     async def _register_tool_with_server(
@@ -523,7 +589,9 @@ class MeerkatClient:
             self._tool_registration_errors[name] = exc
             _logger.error(
                 "post-connect tool registration failed for %r: [%s] %s",
-                name, exc.code, exc.message,
+                name,
+                exc.code,
+                exc.message,
             )
             raise
         # Success: clear any stale fault recorded by a prior failed attempt so a
@@ -556,16 +624,27 @@ class MeerkatClient:
     ) -> MeerkatClient:
         """Start the rkat-rpc subprocess and perform handshake."""
         if realm_id and isolated:
-            raise MeerkatError("INVALID_ARGS", "realm_id and isolated cannot both be set")
+            raise MeerkatError(
+                "INVALID_ARGS", "realm_id and isolated cannot both be set"
+            )
 
         resolved_path, use_legacy = await self._resolve_rkat_binary(self._rkat_path)
         self._rkat_path = resolved_path
         self._legacy_rpc_subcommand = use_legacy
 
-        has_advanced_opts = any([
-            isolated, realm_id, instance_id, realm_backend,
-            state_root, context_root, user_config_root, live_ws, live_webrtc,
-        ])
+        has_advanced_opts = any(
+            [
+                isolated,
+                realm_id,
+                instance_id,
+                realm_backend,
+                state_root,
+                context_root,
+                user_config_root,
+                live_ws,
+                live_webrtc,
+            ]
+        )
         if self._legacy_rpc_subcommand and has_advanced_opts:
             raise MeerkatError(
                 "LEGACY_BINARY_UNSUPPORTED",
@@ -574,15 +653,21 @@ class MeerkatClient:
             )
 
         args = self._build_args(
-            use_legacy, isolated=isolated, realm_id=realm_id,
-            instance_id=instance_id, realm_backend=realm_backend,
-            state_root=state_root, context_root=context_root,
-            user_config_root=user_config_root, live_ws=live_ws,
+            use_legacy,
+            isolated=isolated,
+            realm_id=realm_id,
+            instance_id=instance_id,
+            realm_backend=realm_backend,
+            state_root=state_root,
+            context_root=context_root,
+            user_config_root=user_config_root,
+            live_ws=live_ws,
             live_webrtc=live_webrtc,
         )
 
         self._process = await asyncio.create_subprocess_exec(
-            self._rkat_path, *args,
+            self._rkat_path,
+            *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -595,7 +680,9 @@ class MeerkatClient:
         self._dispatcher.start()
 
         # `initialize` returns the generated `ServerCapabilities` contract.
-        result: ServerCapabilities | dict[str, Any] = await self._request("initialize", {})
+        result: ServerCapabilities | dict[str, Any] = await self._request(
+            "initialize", {}
+        )
         if isinstance(result, ServerCapabilities):  # pragma: no cover - typing aid
             result = result.__dict__
         server_version = result.get("contract_version", "")
@@ -611,7 +698,9 @@ class MeerkatClient:
         caps_result: CapabilitiesResponse | dict[str, Any] = await self._request(
             "capabilities/get", {}
         )
-        if isinstance(caps_result, CapabilitiesResponse):  # pragma: no cover - typing aid
+        if isinstance(
+            caps_result, CapabilitiesResponse
+        ):  # pragma: no cover - typing aid
             caps_result = caps_result.__dict__
         context = "Invalid capabilities/get response"
         capabilities = self._require_present_list_field(
@@ -706,9 +795,7 @@ class MeerkatClient:
             params["profile_id"] = profile_id
         return await self._request("auth/profile/get", params)
 
-    async def create_auth_profile(
-        self, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def create_auth_profile(self, params: dict[str, Any]) -> dict[str, Any]:
         """Create binding-scoped credentials via `auth/profile/create`."""
         _rpc_signature: RpcCreateProfileParams
         return await self._request("auth/profile/create", params)
@@ -769,9 +856,7 @@ class MeerkatClient:
         `auth/login/device_start`. Returns the user_code to display +
         verification_uri + interval."""
         _rpc_signature: RpcDeviceStartParams
-        return await self._request(
-            "auth/login/device_start", {"provider": provider}
-        )
+        return await self._request("auth/login/device_start", {"provider": provider})
 
     async def auth_login_device_complete(
         self,
@@ -785,10 +870,7 @@ class MeerkatClient:
         """Poll once for device-code completion via
         `auth/login/device_complete`. Returns `{state: "pending" |
         "slow_down" | "access_denied" | "expired" | "ready", ...}`."""
-        _rpc_signature: (
-            RpcDeviceCompleteParams
-            | RpcWireDeviceCompleteResult
-        )
+        _rpc_signature: RpcDeviceCompleteParams | RpcWireDeviceCompleteResult
         params: dict[str, Any] = {
             "provider": provider,
             "device_code": device_code,
@@ -812,10 +894,7 @@ class MeerkatClient:
         the Console-scope OAuth flow first; hands the resulting
         access_token here; the server POSTs to Anthropic's
         create_api_key endpoint and persists the returned key."""
-        _rpc_signature: (
-            RpcProvisionApiKeyParams
-            | RpcWireProvisionApiKeyResult
-        )
+        _rpc_signature: RpcProvisionApiKeyParams | RpcWireProvisionApiKeyResult
         params: dict[str, Any] = {
             "access_token": access_token,
             "realm_id": realm_id,
@@ -892,25 +971,30 @@ class MeerkatClient:
             )
             print(session.text)
         """
-        _rpc_signature: (
-            RpcDeferredCreateResult
-            | RpcWireRunResult
-        )
+        _rpc_signature: RpcDeferredCreateResult | RpcWireRunResult
         params = self._build_create_params(
-            prompt, injected_context=injected_context,
-            model=model, provider=provider, auth_binding=auth_binding,
+            prompt,
+            injected_context=injected_context,
+            model=model,
+            provider=provider,
+            auth_binding=auth_binding,
             system_prompt=system_prompt,
-            max_tokens=max_tokens, output_schema=output_schema,
+            max_tokens=max_tokens,
+            output_schema=output_schema,
             structured_output_retries=structured_output_retries,
-            hooks_override=hooks_override, enable_builtins=enable_builtins,
+            hooks_override=hooks_override,
+            enable_builtins=enable_builtins,
             enable_shell=enable_shell,
-            enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_memory=enable_memory,
+            enable_schedule=enable_schedule,
             enable_workgraph=enable_workgraph,
             enable_mob=enable_mob,
             enable_web_search=enable_web_search,
             keep_alive=keep_alive,
-            comms_name=comms_name, peer_meta=peer_meta,
-            budget_limits=budget_limits, provider_params=provider_params,
+            comms_name=comms_name,
+            peer_meta=peer_meta,
+            budget_limits=budget_limits,
+            provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs,
             labels=labels,
@@ -968,27 +1052,32 @@ class MeerkatClient:
                 session_id = stream.session_id
                 result = stream.result
         """
-        _rpc_signature: (
-            RpcDeferredCreateResult
-            | RpcWireRunResult
-        )
+        _rpc_signature: RpcDeferredCreateResult | RpcWireRunResult
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
-            prompt, injected_context=injected_context,
-            model=model, provider=provider, auth_binding=auth_binding,
+            prompt,
+            injected_context=injected_context,
+            model=model,
+            provider=provider,
+            auth_binding=auth_binding,
             system_prompt=system_prompt,
-            max_tokens=max_tokens, output_schema=output_schema,
+            max_tokens=max_tokens,
+            output_schema=output_schema,
             structured_output_retries=structured_output_retries,
-            hooks_override=hooks_override, enable_builtins=enable_builtins,
+            hooks_override=hooks_override,
+            enable_builtins=enable_builtins,
             enable_shell=enable_shell,
-            enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_memory=enable_memory,
+            enable_schedule=enable_schedule,
             enable_workgraph=enable_workgraph,
             enable_mob=enable_mob,
             enable_web_search=enable_web_search,
             keep_alive=keep_alive,
-            comms_name=comms_name, peer_meta=peer_meta,
-            budget_limits=budget_limits, provider_params=provider_params,
+            comms_name=comms_name,
+            peer_meta=peer_meta,
+            budget_limits=budget_limits,
+            provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs,
             labels=labels,
@@ -1001,7 +1090,12 @@ class MeerkatClient:
         request_id = self._request_id
         event_queue = self._dispatcher.subscribe_pending_stream(request_id)
         response_future = self._dispatcher.expect_response(request_id)
-        request = {"jsonrpc": "2.0", "id": request_id, "method": "session/create", "params": params}
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/create",
+            "params": params,
+        }
         data = (json.dumps(request) + "\n").encode()
         return EventStream(
             session_id="",
@@ -1060,25 +1154,30 @@ class MeerkatClient:
             )
             result = await deferred.start_turn("Begin")
         """
-        _rpc_signature: (
-            RpcDeferredCreateResult
-            | RpcWireRunResult
-        )
+        _rpc_signature: RpcDeferredCreateResult | RpcWireRunResult
         params = self._build_create_params(
-            prompt, injected_context=injected_context,
-            model=model, provider=provider, auth_binding=auth_binding,
+            prompt,
+            injected_context=injected_context,
+            model=model,
+            provider=provider,
+            auth_binding=auth_binding,
             system_prompt=system_prompt,
-            max_tokens=max_tokens, output_schema=output_schema,
+            max_tokens=max_tokens,
+            output_schema=output_schema,
             structured_output_retries=structured_output_retries,
-            hooks_override=hooks_override, enable_builtins=enable_builtins,
+            hooks_override=hooks_override,
+            enable_builtins=enable_builtins,
             enable_shell=enable_shell,
-            enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_memory=enable_memory,
+            enable_schedule=enable_schedule,
             enable_workgraph=enable_workgraph,
             enable_mob=enable_mob,
             enable_web_search=enable_web_search,
             keep_alive=keep_alive,
-            comms_name=comms_name, peer_meta=peer_meta,
-            budget_limits=budget_limits, provider_params=provider_params,
+            comms_name=comms_name,
+            peer_meta=peer_meta,
+            budget_limits=budget_limits,
+            provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs,
             labels=labels,
@@ -1107,10 +1206,7 @@ class MeerkatClient:
         max_tokens: int | None = None,
     ) -> RunResult:
         """Ask Meerkat usage help through the dedicated ``help/ask`` RPC."""
-        _rpc_signature: (
-            RpcHelpRequest
-            | RpcHelpResponse
-        )
+        _rpc_signature: RpcHelpRequest | RpcHelpResponse
         params: dict[str, Any] = {
             "question": question,
             "execution_mode": execution_mode,
@@ -1136,10 +1232,7 @@ class MeerkatClient:
         offset: int | None = None,
     ) -> list[SessionSummary]:
         """List active sessions."""
-        _rpc_signature: (
-            RpcListSessionsParams
-            | RpcListSessionsResult
-        )
+        _rpc_signature: RpcListSessionsParams | RpcListSessionsResult
         params: dict[str, Any] = {}
         if labels is not None:
             params["labels"] = labels
@@ -1153,7 +1246,9 @@ class MeerkatClient:
         )
         return [
             self._parse_session_summary(
-                self._require_dict(s, f"sessions[{idx}]", "Invalid session/list response")
+                self._require_dict(
+                    s, f"sessions[{idx}]", "Invalid session/list response"
+                )
             )
             for idx, s in enumerate(sessions)
         ]
@@ -1207,7 +1302,6 @@ class MeerkatClient:
             params["display_name"] = display_name
         return await self._request("session/peer_response_terminal", params)
 
-
     async def inject_context(
         self,
         session_id: str,
@@ -1217,10 +1311,7 @@ class MeerkatClient:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Inject system context into a session."""
-        _rpc_signature: (
-            RpcInjectSystemContextParams
-            | RpcInjectSystemContextResult
-        )
+        _rpc_signature: RpcInjectSystemContextParams | RpcInjectSystemContextResult
         params = {
             "session_id": session_id,
             "content": {"type": "text", "text": text},
@@ -1244,10 +1335,7 @@ class MeerkatClient:
         reconciliation query for interrupted work after a host restart
         (terminal outcome, resolving run id, boundary sequence).
         """
-        _rpc_signature: (
-            RpcSessionInputStateParams
-            | RpcSessionInputStateResult
-        )
+        _rpc_signature: RpcSessionInputStateParams | RpcSessionInputStateResult
         if (input_id is None) == (idempotency_key is None):
             raise ValueError(
                 "exactly one of input_id or idempotency_key must be provided"
@@ -1286,8 +1374,7 @@ class MeerkatClient:
     ) -> SessionTranscriptRevision:
         """Read paginated transcript history for a retained revision."""
         _rpc_signature: (
-            RpcReadSessionTranscriptRevisionParams
-            | RpcWireSessionTranscriptRevision
+            RpcReadSessionTranscriptRevisionParams | RpcWireSessionTranscriptRevision
         )
         params: dict[str, Any] = {
             "session_id": session_id,
@@ -1325,18 +1412,18 @@ class MeerkatClient:
         message_index: int,
         *,
         running_behavior: TranscriptEditRunningBehavior | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork an idle session at a transcript message index."""
-        _rpc_signature: (
-            RpcForkSessionAtParams
-            | RpcSessionForkResult
-        )
+        _rpc_signature: RpcForkSessionAtParams | RpcSessionForkResult
         params: dict[str, Any] = {
             "session_id": session_id,
             "message_index": message_index,
         }
         if running_behavior is not None:
             params["running_behavior"] = running_behavior
+        if tool_access_policy is not None:
+            params["tool_access_policy"] = _wire_value(tool_access_policy)
         raw = await self._request("session/fork_at", params)
         return self._parse_session_fork_result(raw)
 
@@ -1347,12 +1434,10 @@ class MeerkatClient:
         replacement: TranscriptReplacement,
         *,
         running_behavior: TranscriptEditRunningBehavior | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork an idle session and apply a typed transcript replacement."""
-        _rpc_signature: (
-            RpcForkSessionReplaceParams
-            | RpcSessionForkResult
-        )
+        _rpc_signature: RpcForkSessionReplaceParams | RpcSessionForkResult
         params: dict[str, Any] = {
             "session_id": session_id,
             "message_index": message_index,
@@ -1360,6 +1445,8 @@ class MeerkatClient:
         }
         if running_behavior is not None:
             params["running_behavior"] = running_behavior
+        if tool_access_policy is not None:
+            params["tool_access_policy"] = _wire_value(tool_access_policy)
         raw = await self._request("session/fork_replace", params)
         return self._parse_session_fork_result(raw)
 
@@ -1376,8 +1463,7 @@ class MeerkatClient:
     ) -> SessionTranscriptRewriteResult:
         """Commit a typed same-session transcript rewrite."""
         _rpc_signature: (
-            RpcRewriteSessionTranscriptParams
-            | RpcSessionTranscriptRewriteResult
+            RpcRewriteSessionTranscriptParams | RpcSessionTranscriptRewriteResult
         )
         params: dict[str, Any] = {
             "session_id": session_id,
@@ -1427,10 +1513,7 @@ class MeerkatClient:
         return self._parse_session_transcript_rewrite_result(raw)
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
-        _rpc_signature: (
-            RpcBlobGetParams
-            | RpcBlobPayload
-        )
+        _rpc_signature: RpcBlobGetParams | RpcBlobPayload
         raw = await self._request("blob/get", {"blob_id": blob_id})
         context = "Invalid blob/get response"
         return BlobPayload(
@@ -1452,77 +1535,47 @@ class MeerkatClient:
         return await self._request("runtime/health", {})
 
     async def request_approval(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcApprovalRecord
-            | RpcApprovalRequestParams
-        )
+        _rpc_signature: RpcApprovalRecord | RpcApprovalRequestParams
         return await self._request("approval/request", params)
 
     async def list_approvals(
         self, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcApprovalListParams
-            | RpcApprovalListResult
-        )
+        _rpc_signature: RpcApprovalListParams | RpcApprovalListResult
         return await self._request("approval/list", params or {})
 
     async def get_approval(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcApprovalGetParams
-            | RpcApprovalRecord
-        )
+        _rpc_signature: RpcApprovalGetParams | RpcApprovalRecord
         return await self._request("approval/get", params)
 
     async def decide_approval(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcApprovalDecideParams
-            | RpcApprovalRecord
-        )
+        _rpc_signature: RpcApprovalDecideParams | RpcApprovalRecord
         return await self._request("approval/decide", params)
 
     async def list_artifacts(
         self, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcArtifactListParams
-            | RpcArtifactListResult
-        )
+        _rpc_signature: RpcArtifactListParams | RpcArtifactListResult
         return await self._request("artifact/list", params or {})
 
     async def get_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcArtifactIdParams
-            | RpcArtifactRecord
-        )
+        _rpc_signature: RpcArtifactIdParams | RpcArtifactRecord
         return await self._request("artifact/get", params)
 
     async def download_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcArtifactDownloadParams
-            | RpcArtifactDownloadResult
-        )
+        _rpc_signature: RpcArtifactDownloadParams | RpcArtifactDownloadResult
         return await self._request("artifact/download", params)
 
     async def latest_event_cursor(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcEventsLatestCursorParams
-            | RpcEventsLatestCursorResult
-        )
+        _rpc_signature: RpcEventsLatestCursorParams | RpcEventsLatestCursorResult
         return await self._request("events/latest_cursor", params)
 
     async def list_events_since(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcEventsListSinceParams
-            | RpcEventsListSinceResult
-        )
+        _rpc_signature: RpcEventsListSinceParams | RpcEventsListSinceResult
         return await self._request("events/list_since", params)
 
     async def event_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: (
-            RpcEventsSnapshotParams
-            | RpcEventsSnapshotResult
-        )
+        _rpc_signature: RpcEventsSnapshotParams | RpcEventsSnapshotResult
         return await self._request("events/snapshot", params)
 
     # -- Capabilities ------------------------------------------------------
@@ -1536,10 +1589,7 @@ class MeerkatClient:
         """Check if a capability is available."""
         if capability_id == "mob":
             return bool({"mob/create", "mob/list"} & self._methods)
-        return any(
-            c.id == capability_id and c.available
-            for c in self.capabilities
-        )
+        return any(c.id == capability_id and c.available for c in self.capabilities)
 
     def require_capability(self, capability_id: str) -> None:
         """Raise :class:`CapabilityUnavailableError` if a capability is missing."""
@@ -1581,10 +1631,7 @@ class MeerkatClient:
         return self._parse_models_catalog(raw)
 
     async def create_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
-        _rpc_signature: (
-            RpcCreateScheduleRequest
-            | RpcSchedule
-        )
+        _rpc_signature: RpcCreateScheduleRequest | RpcSchedule
         raw = await self._request("schedule/create", request)
         return self._parse_schedule_record(raw, "Invalid schedule/create response")
 
@@ -1763,7 +1810,9 @@ class MeerkatClient:
             ]
         )
 
-    async def get_workgraph_goal_status(self, params: GoalStatusRequest) -> GoalStatusResult:
+    async def get_workgraph_goal_status(
+        self, params: GoalStatusRequest
+    ) -> GoalStatusResult:
         raw = await self._request("workgraph/goal/status", _wire_params(params))
         return GoalStatusResult.from_wire(raw)
 
@@ -1771,7 +1820,9 @@ class MeerkatClient:
         self,
         params: AttentionListRequest | None = None,
     ) -> AttentionListResult:
-        raw = await self._request("workgraph/attention/list", _wire_params(params or {}))
+        raw = await self._request(
+            "workgraph/attention/list", _wire_params(params or {})
+        )
         return AttentionListResult.from_wire(raw)
 
     async def mcp_add(
@@ -1833,11 +1884,17 @@ class MeerkatClient:
         status = raw.get("status")
         persisted = raw.get("persisted")
         if not isinstance(session_id, str) or not session_id:
-            raise MeerkatError("INVALID_RESPONSE", "Invalid mcp response: missing session_id")
+            raise MeerkatError(
+                "INVALID_RESPONSE", "Invalid mcp response: missing session_id"
+            )
         if operation not in {"add", "remove", "reload"}:
-            raise MeerkatError("INVALID_RESPONSE", "Invalid mcp response: invalid operation")
+            raise MeerkatError(
+                "INVALID_RESPONSE", "Invalid mcp response: invalid operation"
+            )
         if not isinstance(status, str) or not status:
-            raise MeerkatError("INVALID_RESPONSE", "Invalid mcp response: missing status")
+            raise MeerkatError(
+                "INVALID_RESPONSE", "Invalid mcp response: missing status"
+            )
         if not isinstance(persisted, bool):
             raise MeerkatError(
                 "INVALID_RESPONSE",
@@ -1852,7 +1909,9 @@ class MeerkatClient:
         if not isinstance(skills, list):
             raise MeerkatError("INVALID_RESPONSE", f"{context}: skills must be a list")
         envelope = SkillListResponse(
-            skills=[MeerkatClient._parse_skill_entry(entry, context) for entry in skills]
+            skills=[
+                MeerkatClient._parse_skill_entry(entry, context) for entry in skills
+            ]
         )
         return envelope.skills
 
@@ -1902,8 +1961,12 @@ class MeerkatClient:
                 "INVALID_RESPONSE", f"{context}: skill key must be an object"
             )
         return WireSkillKey(
-            source_uuid=MeerkatClient._require_string_field(value, "source_uuid", context),
-            skill_name=MeerkatClient._require_string_field(value, "skill_name", context),
+            source_uuid=MeerkatClient._require_string_field(
+                value, "source_uuid", context
+            ),
+            skill_name=MeerkatClient._require_string_field(
+                value, "skill_name", context
+            ),
         )
 
     @staticmethod
@@ -1965,7 +2028,9 @@ class MeerkatClient:
     async def list_mobs(self) -> list[dict[str, Any]]:
         self.require_capability("mob")
         result = await self._request("mob/list", {})
-        mobs = self._require_present_list_field(result, "mobs", "Invalid mob/list response")
+        mobs = self._require_present_list_field(
+            result, "mobs", "Invalid mob/list response"
+        )
         parsed: list[dict[str, Any]] = []
         for idx, mob in enumerate(mobs):
             entry = self._require_dict(mob, f"mobs[{idx}]", "Invalid mob/list response")
@@ -1981,7 +2046,9 @@ class MeerkatClient:
         elif isinstance(raw_status, dict) and raw_status:
             status = next(iter(raw_status))
         else:
-            raise MeerkatError("INVALID_RESPONSE", "Invalid mob/status response: missing status")
+            raise MeerkatError(
+                "INVALID_RESPONSE", "Invalid mob/status response: missing status"
+            )
         return {"mob_id": str(result.get("mob_id", mob_id)), "status": status}
 
     async def list_mob_members(self, mob_id: str) -> list[MobMember]:
@@ -2035,11 +2102,7 @@ class MeerkatClient:
                         else {}
                     ),
                     **(
-                        {
-                            "wired_to": [
-                                str(peer) for peer in entry["wired_to"]
-                            ]
-                        }
+                        {"wired_to": [str(peer) for peer in entry["wired_to"]]}
                         if isinstance(entry.get("wired_to"), list)
                         else {}
                     ),
@@ -2142,12 +2205,12 @@ class MeerkatClient:
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
+        placement: str | None = None,
         binding: WireRuntimeBinding | dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         auto_wire_parent: bool | None = None,
         launch_mode: WireMemberLaunchMode | dict[str, Any] | None = None,
         tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
-        budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
         inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
         override_profile: WireMobProfile | dict[str, Any] | None = None,
         model_override: str | None = None,
@@ -2165,12 +2228,12 @@ class MeerkatClient:
             "additional_instructions": _wire_value(additional_instructions),
         }
         for key, value in {
+            "placement": placement,
             "binding": binding,
             "shell_env": shell_env,
             "auto_wire_parent": auto_wire_parent,
             "launch_mode": launch_mode,
             "tool_access_policy": tool_access_policy,
-            "budget_split_policy": budget_split_policy,
             "inherited_tool_filter": inherited_tool_filter,
             "override_profile": override_profile,
             "model_override": model_override,
@@ -2202,7 +2265,6 @@ class MeerkatClient:
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
         }
-
 
     async def spawn_mob_members(
         self,
@@ -2288,7 +2350,10 @@ class MeerkatClient:
                     "Invalid mob/spawn_many response: failed result has unknown fields",
                 )
             cause = payload.get("cause")
-            if not isinstance(cause, str) or cause not in _MOB_SPAWN_MANY_FAILURE_CAUSES:
+            if (
+                not isinstance(cause, str)
+                or cause not in _MOB_SPAWN_MANY_FAILURE_CAUSES
+            ):
                 raise MeerkatError(
                     "INVALID_RESPONSE",
                     "Invalid mob/spawn_many response: failed result has invalid cause",
@@ -2328,9 +2393,7 @@ class MeerkatClient:
             )
         }
 
-    async def mob_ingress_interaction(
-        self, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def mob_ingress_interaction(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self._request("mob/ingress_interaction", params)
 
     async def retire_mob_member(self, mob_id: str, agent_identity: str) -> None:
@@ -2392,6 +2455,264 @@ class MeerkatClient:
         await self._request(
             "mob/force_cancel",
             {"mob_id": mob_id, "agent_identity": agent_identity},
+        )
+
+    async def grant_mob_scopes(
+        self,
+        mob_id: str,
+        principal: str,
+        scopes: list[MobControlScope],
+        *,
+        expires_at_ms: int | None = None,
+    ) -> MobGrantRecord:
+        """Replace a principal's control-scope grant and return its record."""
+        params = MobGrantScopesParams(
+            mob_id=mob_id,
+            principal=principal,
+            scopes=scopes,
+            expires_at_ms=expires_at_ms,
+        )
+        _rpc_signature: MobGrantScopesParams | MobGrantScopesResult
+        result = await self._request("mob/grant_scopes", _wire_params(params))
+        context = "Invalid mob/grant_scopes response"
+        record = self._require_dict(result.get("record"), "record", context)
+        return self._parse_mob_grant_record(record, context)
+
+    async def revoke_mob_scopes(
+        self,
+        mob_id: str,
+        principal: str,
+        scopes: list[MobControlScope] | None = None,
+    ) -> bool:
+        """Revoke selected scopes, or the whole grant when scopes is omitted."""
+        params = MobRevokeScopesParams(
+            mob_id=mob_id,
+            principal=principal,
+            scopes=scopes,
+        )
+        _rpc_signature: MobRevokeScopesParams | MobRevokeScopesResult
+        result = await self._request("mob/revoke_scopes", _wire_params(params))
+        return self._require_bool_field(
+            result,
+            "removed",
+            "Invalid mob/revoke_scopes response",
+        )
+
+    async def list_mob_grants(self, mob_id: str) -> list[MobGrantRecord]:
+        """List typed control-scope grants, including optional expiry metadata."""
+        params = MobIdParams(mob_id=mob_id)
+        _rpc_signature: MobIdParams | MobGrantsResult
+        result = await self._request("mob/grants", _wire_params(params))
+        context = "Invalid mob/grants response"
+        grants = self._require_present_list_field(result, "grants", context)
+        return [
+            self._parse_mob_grant_record(
+                self._require_dict(record, f"grants[{index}]", context),
+                f"{context}: grants[{index}]",
+            )
+            for index, record in enumerate(grants)
+        ]
+
+    async def mob_member_history(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        *,
+        from_index: int | None = None,
+        limit: int | None = None,
+    ) -> MobMemberHistoryResult:
+        """Read one typed transcript page for a local or remote member."""
+        params = MobMemberHistoryParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            from_index=from_index,
+            limit=limit,
+        )
+        result = await self._request("mob/member_history", _wire_params(params))
+        return self._parse_mob_member_history_result(result)
+
+    async def mob_hosts(self, mob_id: str) -> list[MobHostStatus]:
+        """List tracked member hosts with committed authority facts."""
+        params = MobIdParams(mob_id=mob_id)
+        _rpc_signature: MobIdParams | MobHostsResult
+        result = await self._request("mob/hosts", _wire_params(params))
+        context = "Invalid mob/hosts response"
+        hosts = self._require_present_list_field(result, "hosts", context)
+        return [
+            self._parse_mob_host_status(row, f"{context}: hosts[{index}]")
+            for index, row in enumerate(hosts)
+        ]
+
+    async def mob_route_installs(self, mob_id: str) -> MobRouteInstallsResult:
+        """Read outstanding cross-host route-install obligations."""
+        params = MobIdParams(mob_id=mob_id)
+        result = await self._request("mob/route_installs", _wire_params(params))
+        context = "Invalid mob/route_installs response"
+        outstanding = self._require_present_list_field(
+            result,
+            "outstanding",
+            context,
+        )
+        obligations = [
+            self._parse_route_install_obligation(
+                row,
+                f"{context}: outstanding[{index}]",
+            )
+            for index, row in enumerate(outstanding)
+        ]
+        return MobRouteInstallsResult(
+            complete=self._require_bool_field(result, "complete", context),
+            outstanding=obligations,
+        )
+
+    async def bind_mob_host(
+        self,
+        mob_id: str,
+        descriptor: WireHostBindingDescriptor | dict[str, Any],
+    ) -> MobBindHostResult:
+        """Bind a member-host daemon from its typed binding descriptor."""
+        params = MobBindHostParams(
+            mob_id=mob_id,
+            descriptor=cast(WireHostBindingDescriptor, descriptor),
+        )
+        result = await self._request("mob/bind_host", _wire_params(params))
+        context = "Invalid mob/bind_host response"
+        return MobBindHostResult(
+            authority_epoch=self._require_non_negative_integer_field(
+                result,
+                "authority_epoch",
+                context,
+            ),
+            capabilities=self._parse_mob_host_capabilities(
+                result.get("capabilities"),
+                f"{context}: capabilities",
+            ),
+            host_id=self._require_string_field(result, "host_id", context),
+        )
+
+    async def revoke_mob_host(
+        self,
+        mob_id: str,
+        host_id: str,
+    ) -> MobRevokeHostResult:
+        """Revoke a host and return the identities released from it."""
+        params = MobRevokeHostParams(mob_id=mob_id, host_id=host_id)
+        result = await self._request("mob/revoke_host", _wire_params(params))
+        context = "Invalid mob/revoke_host response"
+        return MobRevokeHostResult(
+            host_id=self._require_string_field(result, "host_id", context),
+            released_members=self._parse_nonempty_string_list(
+                result.get("released_members"),
+                f"{context}: released_members",
+            ),
+        )
+
+    async def hard_cancel_mob_member(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        reason: str,
+    ) -> bool:
+        """Hard-cancel a member using immediate user-interrupt authority."""
+        params = MobHardCancelParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            reason=reason,
+        )
+        _rpc_signature: MobHardCancelParams | MobHardCancelResult
+        result = await self._request("mob/hard_cancel_member", _wire_params(params))
+        return self._require_bool_field(
+            result,
+            "cancelled",
+            "Invalid mob/hard_cancel_member response",
+        )
+
+    async def open_mob_member_live(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        *,
+        turning_mode: RealtimeTurningMode | None = None,
+        transport: MobMemberLiveTransport | None = None,
+    ) -> LiveOpenResult:
+        """Open a member live channel while preserving its opaque bootstrap."""
+        params = MobMemberLiveOpenParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            turning_mode=turning_mode,
+            transport=transport,
+        )
+        result = await self._request("mob/member_live_open", _wire_params(params))
+        return self._parse_live_open_result(
+            result,
+            "Invalid mob/member_live_open response",
+        )
+
+    async def close_mob_member_live(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        channel_id: str,
+    ) -> LiveCloseResult:
+        """Close exactly the named member live channel."""
+        params = MobMemberLiveChannelParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            channel_id=channel_id,
+        )
+        result = await self._request("mob/member_live_close", _wire_params(params))
+        context = "Invalid mob/member_live_close response"
+        status = self._require_string_field(result, "status", context)
+        if status != "closed":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported status {status!r}",
+            )
+        return LiveCloseResult(status=cast("LiveCloseStatus", status))
+
+    async def mob_member_live_status(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        channel_id: str | None = None,
+    ) -> LiveStatusResult:
+        """Read a named channel or discover the member's active channel."""
+        params = MobMemberLiveStatusParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            channel_id=channel_id,
+        )
+        result = await self._request("mob/member_live_status", _wire_params(params))
+        return self._parse_live_status_result(
+            result,
+            "Invalid mob/member_live_status response",
+        )
+
+    async def control_mob_member_live(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        channel_id: str,
+        verb: BridgeLiveControlVerb,
+    ) -> BridgeLiveControlOutcome:
+        """Drive one typed turn-level control verb on a member channel."""
+        requested_verb = verb.get("verb") if isinstance(verb, dict) else None
+        if requested_verb not in {"commit_input", "interrupt", "truncate", "refresh"}:
+            raise MeerkatError(
+                "INVALID_ARGS",
+                "mob/member_live_control verb must use the closed live-control vocabulary",
+            )
+        params = MobMemberLiveControlParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            channel_id=channel_id,
+            verb=verb,
+        )
+        result = await self._request("mob/member_live_control", _wire_params(params))
+        return self._parse_bridge_live_control_outcome(
+            result,
+            "Invalid mob/member_live_control response",
+            requested_verb,
         )
 
     async def mob_turn_start(
@@ -2693,16 +3014,19 @@ class MeerkatClient:
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
-        result = await self._request("mob/spawn_helper", {
-            "mob_id": mob_id,
-            "prompt": prompt,
-            "agent_identity": agent_identity,
-            "role_name": role_name,
-            "model_override": model_override,
-            "auth_binding": _wire_value(auth_binding),
-            "runtime_mode": runtime_mode,
-            "backend": backend,
-        })
+        result = await self._request(
+            "mob/spawn_helper",
+            {
+                "mob_id": mob_id,
+                "prompt": prompt,
+                "agent_identity": agent_identity,
+                "role_name": role_name,
+                "model_override": model_override,
+                "auth_binding": _wire_value(auth_binding),
+                "runtime_mode": runtime_mode,
+                "backend": backend,
+            },
+        )
         member_ref = result.get("member_ref")
         if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
@@ -2716,7 +3040,9 @@ class MeerkatClient:
                 "Invalid mob/spawn_helper response: missing agent_identity",
             )
         return {
-            "output": str(result["output"]) if result.get("output") is not None else None,
+            "output": str(result["output"])
+            if result.get("output") is not None
+            else None,
             "tokens_used": self._require_non_negative_integer_field(
                 result,
                 "tokens_used",
@@ -2740,18 +3066,21 @@ class MeerkatClient:
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
-        result = await self._request("mob/fork_helper", {
-            "mob_id": mob_id,
-            "source_member_id": source_member_id,
-            "prompt": prompt,
-            "agent_identity": agent_identity,
-            "role_name": role_name,
-            "model_override": model_override,
-            "auth_binding": _wire_value(auth_binding),
-            "fork_context": fork_context,
-            "runtime_mode": runtime_mode,
-            "backend": backend,
-        })
+        result = await self._request(
+            "mob/fork_helper",
+            {
+                "mob_id": mob_id,
+                "source_member_id": source_member_id,
+                "prompt": prompt,
+                "agent_identity": agent_identity,
+                "role_name": role_name,
+                "model_override": model_override,
+                "auth_binding": _wire_value(auth_binding),
+                "fork_context": fork_context,
+                "runtime_mode": runtime_mode,
+                "backend": backend,
+            },
+        )
         member_ref = result.get("member_ref")
         if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
@@ -2765,7 +3094,9 @@ class MeerkatClient:
                 "Invalid mob/fork_helper response: missing agent_identity",
             )
         return {
-            "output": str(result["output"]) if result.get("output") is not None else None,
+            "output": str(result["output"])
+            if result.get("output") is not None
+            else None,
             "tokens_used": self._require_non_negative_integer_field(
                 result,
                 "tokens_used",
@@ -2775,8 +3106,12 @@ class MeerkatClient:
             "member_ref": member_ref,
         }
 
-    async def create_mob_profile(self, name: str, profile: MobProfile) -> StoredMobProfile:
-        return await self._request("mob/profile/create", {"name": name, "profile": profile})
+    async def create_mob_profile(
+        self, name: str, profile: MobProfile
+    ) -> StoredMobProfile:
+        return await self._request(
+            "mob/profile/create", {"name": name, "profile": profile}
+        )
 
     async def get_mob_profile(self, name: str) -> StoredMobProfile | None:
         raw = await self._request("mob/profile/get", {"name": name})
@@ -2827,7 +3162,9 @@ class MeerkatClient:
             {"name": name, "expected_revision": expected_revision},
         )
 
-    async def wire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
+    async def wire_mob_members(
+        self, mob_id: str, member: str, peer: str | dict[str, Any]
+    ) -> None:
         payload = (
             {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
             if isinstance(peer, str)
@@ -2842,14 +3179,14 @@ class MeerkatClient:
     ) -> MobWireMembersBatchResult:
         payload = {
             "mob_id": mob_id,
-            "edges": [
-                _normalize_mob_wire_members_batch_edge(edge) for edge in edges
-            ],
+            "edges": [_normalize_mob_wire_members_batch_edge(edge) for edge in edges],
         }
         result = await self._request("mob/wire_members_batch", payload)
         return _parse_mob_wire_members_batch_report(result)
 
-    async def unwire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
+    async def unwire_mob_members(
+        self, mob_id: str, member: str, peer: str | dict[str, Any]
+    ) -> None:
         payload = (
             {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
             if isinstance(peer, str)
@@ -2941,9 +3278,7 @@ class MeerkatClient:
         params = MobConcludeObjectiveParams(
             member_ref=member_ref, objective_id=objective_id, outcome=outcome
         )
-        result = await self._request(
-            "mob/conclude_objective", params.__dict__
-        )
+        result = await self._request("mob/conclude_objective", params.__dict__)
         context = "Invalid mob/conclude_objective response"
         return MobConcludeObjectiveResult(
             member_ref=self._require_string_field(result, "member_ref", context),
@@ -2991,13 +3326,16 @@ class MeerkatClient:
         source: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        result = await self._request("mob/append_system_context", {
-            "mob_id": mob_id,
-            "agent_identity": agent_identity,
-            "text": text,
-            "source": source,
-            "idempotency_key": idempotency_key,
-        })
+        result = await self._request(
+            "mob/append_system_context",
+            {
+                "mob_id": mob_id,
+                "agent_identity": agent_identity,
+                "text": text,
+                "source": source,
+                "idempotency_key": idempotency_key,
+            },
+        )
         resolved_identity = result.get("agent_identity")
         if not isinstance(resolved_identity, str) or not resolved_identity:
             raise MeerkatError(
@@ -3026,9 +3364,16 @@ class MeerkatClient:
                 )
         return flows
 
-    async def run_mob_flow(self, mob_id: str, flow_id: str, params: dict[str, Any] | None = None) -> str:
-        result = await self._request("mob/flow_run", {"mob_id": mob_id, "flow_id": flow_id, "params": params or {}})
-        return self._require_string_field(result, "run_id", "Invalid mob/flow_run response")
+    async def run_mob_flow(
+        self, mob_id: str, flow_id: str, params: dict[str, Any] | None = None
+    ) -> str:
+        result = await self._request(
+            "mob/flow_run",
+            {"mob_id": mob_id, "flow_id": flow_id, "params": params or {}},
+        )
+        return self._require_string_field(
+            result, "run_id", "Invalid mob/flow_run response"
+        )
 
     async def run_mob(
         self,
@@ -3049,16 +3394,26 @@ class MeerkatClient:
             _wire_params(payload),
         )
         if isinstance(result, dict):
-            return self._require_string_field(result, "run_id", "Invalid mob/run response")
+            return self._require_string_field(
+                result, "run_id", "Invalid mob/run response"
+            )
         return result.run_id
 
-    async def get_mob_flow_status(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
-        result = await self._request("mob/flow_status", {"mob_id": mob_id, "run_id": run_id})
+    async def get_mob_flow_status(
+        self, mob_id: str, run_id: str
+    ) -> dict[str, Any] | None:
+        result = await self._request(
+            "mob/flow_status", {"mob_id": mob_id, "run_id": run_id}
+        )
         return result.get("run")
 
-    async def get_mob_run_result(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
+    async def get_mob_run_result(
+        self, mob_id: str, run_id: str
+    ) -> dict[str, Any] | None:
         params = MobRunResultParams(mob_id=mob_id, run_id=run_id)
-        result: MobRunResult | dict[str, Any] = await self._request("mob/run_result", _wire_params(params))
+        result: MobRunResult | dict[str, Any] = await self._request(
+            "mob/run_result", _wire_params(params)
+        )
         if isinstance(result, dict):
             return result.get("run")
         return result.run
@@ -3074,7 +3429,9 @@ class MeerkatClient:
             self._parse_attributed_mob_event,
         )
 
-    async def subscribe_mob_member_events(self, mob_id: str, agent_identity: str) -> EventSubscription:
+    async def subscribe_mob_member_events(
+        self, mob_id: str, agent_identity: str
+    ) -> EventSubscription:
         return await self._open_event_subscription(
             "mob/stream_open",
             {"mob_id": mob_id, "agent_identity": agent_identity},
@@ -3097,13 +3454,17 @@ class MeerkatClient:
             result = await self._request(open_method, params)
         stream_id = str(result.get("stream_id", ""))
         if not stream_id:
-            raise MeerkatError("INVALID_RESPONSE", f"{open_method} did not return stream_id")
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{open_method} did not return stream_id"
+            )
         queue = self._dispatcher.subscribe_stream(stream_id)
+
         async def _close_remote(active_stream_id: str) -> None:
             # Await stream-close authority before tearing down local dispatch:
             # a rejected close must leave the subscription delivering events.
             await self._request(close_method, {"stream_id": active_stream_id})
             self._dispatcher.unsubscribe_stream(active_stream_id)
+
         return EventSubscription(
             stream_id=stream_id,
             event_queue=queue,
@@ -3178,9 +3539,7 @@ class MeerkatClient:
         # into it. Nothing is coalesced to "" — malformed frames fail closed.
         source = MeerkatClient._require_dict(raw.get("source"), "source", context)
         identity = MeerkatClient._require_string_field(source, "identity", context)
-        generation = MeerkatClient._require_number_field(
-            source, "generation", context
-        )
+        generation = MeerkatClient._require_number_field(source, "generation", context)
         if not isinstance(generation, int) or generation < 0:
             raise MeerkatError(
                 "INVALID_RESPONSE",
@@ -3190,9 +3549,7 @@ class MeerkatClient:
             source=identity,
             role=MeerkatClient._require_string_field(raw, "role", context),
             envelope=MeerkatClient._parse_agent_event_envelope(
-                MeerkatClient._require_dict(
-                    raw.get("envelope"), "envelope", context
-                )
+                MeerkatClient._require_dict(raw.get("envelope"), "envelope", context)
             ),
             source_fence_token=MeerkatClient._optional_number_field(
                 raw, "source_fence_token", context
@@ -3299,7 +3656,12 @@ class MeerkatClient:
             params["structured_output_retries"] = structured_output_retries
         if provider_params is not None:
             params["provider_params"] = provider_params
-        request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start", "params": params}
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "turn/start",
+            "params": params,
+        }
         data = (json.dumps(request) + "\n").encode()
         return EventStream(
             session_id=session_id,
@@ -3329,12 +3691,16 @@ class MeerkatClient:
     # (`meerkat-core/src/comms.rs`). Invalid discriminator values are rejected
     # at the server's typed-serde boundary — these aliases document the
     # closed-world shape for callers.
-    _CommsKind = Literal["input", "peer_message", "peer_lifecycle", "peer_request", "peer_response"]
+    _CommsKind = Literal[
+        "input", "peer_message", "peer_lifecycle", "peer_request", "peer_response"
+    ]
     _HandlingMode = Literal["queue", "steer"]
     _InputSource = Literal["tcp", "uds", "stdin", "webhook", "rpc"]
     _InputStreamMode = Literal["none", "reserve_interaction"]
     _ResponseStatus = Literal["accepted", "completed", "failed"]
-    _PeerLifecycleKind = Literal["mob.peer_added", "mob.peer_retired", "mob.peer_unwired"]
+    _PeerLifecycleKind = Literal[
+        "mob.peer_added", "mob.peer_retired", "mob.peer_unwired"
+    ]
 
     async def send(
         self,
@@ -3543,9 +3909,7 @@ class MeerkatClient:
             status=cast("LiveCloseStatus", status),
         )
 
-    async def live_send_input_text(
-        self, channel_id: str, text: str
-    ) -> dict[str, Any]:
+    async def live_send_input_text(self, channel_id: str, text: str) -> dict[str, Any]:
         """Send a text input chunk to a live channel.
 
         Wraps `live/send_input` with `LiveSendInputParams { channel_id,
@@ -3790,9 +4154,7 @@ class MeerkatClient:
         if not isinstance(raw, dict):
             raise ValueError("live observation must be a JSON object")
         if "observation" not in raw:
-            raise ValueError(
-                "live observation missing `observation` discriminator"
-            )
+            raise ValueError("live observation missing `observation` discriminator")
         return raw
 
     async def mob_ensure_member(
@@ -3845,7 +4207,12 @@ class MeerkatClient:
             raise fault
         self._request_id += 1
         request_id = self._request_id
-        request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
         response_future = self._dispatcher.expect_response(request_id)
         self._process.stdin.write((json.dumps(request) + "\n").encode())
         await self._process.stdin.drain()
@@ -3858,7 +4225,9 @@ class MeerkatClient:
         if override:
             override = override.strip()
             if not override:
-                raise MeerkatError("BINARY_NOT_FOUND", "MEERKAT_BIN_PATH is set to an empty path.")
+                raise MeerkatError(
+                    "BINARY_NOT_FOUND", "MEERKAT_BIN_PATH is set to an empty path."
+                )
             candidate = self._resolve_candidate_path(override)
             if candidate is None:
                 raise MeerkatError(
@@ -3913,20 +4282,30 @@ class MeerkatClient:
         system = platform.system().lower()
         machine = platform.machine().lower()
         if system == "darwin":
-            target = {"arm64": "aarch64-apple-darwin", "aarch64": "aarch64-apple-darwin"}.get(machine)
+            target = {
+                "arm64": "aarch64-apple-darwin",
+                "aarch64": "aarch64-apple-darwin",
+            }.get(machine)
             if target is None:
-                raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported macOS architecture '{machine}'")
+                raise MeerkatError(
+                    "UNSUPPORTED_PLATFORM",
+                    f"Unsupported macOS architecture '{machine}'",
+                )
             return target, "tar.gz", _MEERKAT_BINARY
         if system == "linux":
             if machine in {"x86_64", "amd64"}:
                 return "x86_64-unknown-linux-gnu", "tar.gz", _MEERKAT_BINARY
             if machine in {"aarch64", "arm64"}:
                 return "aarch64-unknown-linux-gnu", "tar.gz", _MEERKAT_BINARY
-            raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported Linux architecture '{machine}'.")
+            raise MeerkatError(
+                "UNSUPPORTED_PLATFORM", f"Unsupported Linux architecture '{machine}'."
+            )
         if system == "windows":
             if machine in {"x86_64", "amd64"}:
                 return "x86_64-pc-windows-msvc", "zip", f"{_MEERKAT_BINARY}.exe"
-            raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported Windows architecture '{machine}'.")
+            raise MeerkatError(
+                "UNSUPPORTED_PLATFORM", f"Unsupported Windows architecture '{machine}'."
+            )
         raise MeerkatError("UNSUPPORTED_PLATFORM", f"Unsupported platform '{system}'.")
 
     @staticmethod
@@ -3935,7 +4314,9 @@ class MeerkatClient:
         owner, repo = _MEERKAT_REPO
         version = CONTRACT_VERSION
         artifact = f"{_MEERKAT_BINARY}-v{version}-{target}.{archive_ext}"
-        url = f"https://github.com/{owner}/{repo}/releases/download/v{version}/{artifact}"
+        url = (
+            f"https://github.com/{owner}/{repo}/releases/download/v{version}/{artifact}"
+        )
         cache_dir = _MEERKAT_BINARY_CACHE_ROOT / f"v{version}" / target
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached = cache_dir / binary_name
@@ -3946,7 +4327,10 @@ class MeerkatClient:
             with urllib.request.urlopen(url, timeout=30) as response:
                 payload = response.read()
         except (URLError, OSError) as exc:
-            raise MeerkatError("BINARY_DOWNLOAD_FAILED", f"Failed to download {_MEERKAT_BINARY} from {url}: {exc}") from exc
+            raise MeerkatError(
+                "BINARY_DOWNLOAD_FAILED",
+                f"Failed to download {_MEERKAT_BINARY} from {url}: {exc}",
+            ) from exc
 
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / f"{_MEERKAT_BINARY}.{archive_ext}"
@@ -3956,22 +4340,44 @@ class MeerkatClient:
             temp_binary = cache_dir / f".{binary_name}.download"
             if archive_ext == "tar.gz":
                 with tarfile.open(archive_path, "r:gz") as archive:
-                    members = [m for m in archive.getmembers() if Path(m.name).name == binary_name]
+                    members = [
+                        m
+                        for m in archive.getmembers()
+                        if Path(m.name).name == binary_name
+                    ]
                     if not members:
-                        raise MeerkatError("BINARY_DOWNLOAD_FAILED", f"Downloaded archive does not contain '{binary_name}'.")
+                        raise MeerkatError(
+                            "BINARY_DOWNLOAD_FAILED",
+                            f"Downloaded archive does not contain '{binary_name}'.",
+                        )
                     source = archive.extractfile(members[0])
                     if source is None:
-                        raise MeerkatError("BINARY_DOWNLOAD_FAILED", f"Could not extract '{binary_name}' from {artifact}.")
+                        raise MeerkatError(
+                            "BINARY_DOWNLOAD_FAILED",
+                            f"Could not extract '{binary_name}' from {artifact}.",
+                        )
                     with source, temp_binary.open("wb") as out:
                         out.write(source.read())
             else:
                 with zipfile.ZipFile(archive_path, "r") as archive:
                     candidate_names = [entry.filename for entry in archive.infolist()]
-                    if not any(Path(name).name == binary_name for name in candidate_names):
-                        raise MeerkatError("BINARY_DOWNLOAD_FAILED", f"Downloaded archive does not contain '{binary_name}'.")
-                    with archive.open(
-                        next(name for name in candidate_names if Path(name).name == binary_name),
-                    ) as source, temp_binary.open("wb") as out:
+                    if not any(
+                        Path(name).name == binary_name for name in candidate_names
+                    ):
+                        raise MeerkatError(
+                            "BINARY_DOWNLOAD_FAILED",
+                            f"Downloaded archive does not contain '{binary_name}'.",
+                        )
+                    with (
+                        archive.open(
+                            next(
+                                name
+                                for name in candidate_names
+                                if Path(name).name == binary_name
+                            ),
+                        ) as source,
+                        temp_binary.open("wb") as out,
+                    ):
                         out.write(source.read())
 
             if os.name != "nt":
@@ -4174,13 +4580,9 @@ class MeerkatClient:
                         "entry must be object",
                     )
                 peer_entry: MobUnreachablePeer = {
-                    "peer": MeerkatClient._require_string_field(
-                        entry, "peer", context
-                    ),
+                    "peer": MeerkatClient._require_string_field(entry, "peer", context),
                 }
-                reason = MeerkatClient._optional_string_field(
-                    entry, "reason", context
-                )
+                reason = MeerkatClient._optional_string_field(entry, "reason", context)
                 if reason is not None:
                     peer_entry["reason"] = reason
                 unreachable_peers.append(peer_entry)
@@ -4250,9 +4652,7 @@ class MeerkatClient:
         return value
 
     @staticmethod
-    def _parse_schedule_misfire_policy(
-        raw: Any, context: str
-    ) -> dict[str, Any]:
+    def _parse_schedule_misfire_policy(raw: Any, context: str) -> dict[str, Any]:
         policy = MeerkatClient._require_dict(raw, "misfire_policy", context)
         kind = MeerkatClient._require_schedule_literal(
             policy, "type", ("skip", "catch_up_within"), context
@@ -4266,9 +4666,7 @@ class MeerkatClient:
     @staticmethod
     def _parse_schedule_labels(raw: Any, context: str) -> dict[str, str]:
         if not isinstance(raw, dict):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: labels must be object"
-            )
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: labels must be object")
         labels: dict[str, str] = {}
         for key, value in raw.items():
             if not isinstance(key, str) or not isinstance(value, str):
@@ -4301,9 +4699,7 @@ class MeerkatClient:
         return parsed
 
     @staticmethod
-    def _parse_schedule_record(
-        raw: Any, context: str
-    ) -> ScheduleRecord:
+    def _parse_schedule_record(raw: Any, context: str) -> ScheduleRecord:
         raw = MeerkatClient._require_dict(raw, "response", context)
         phase = MeerkatClient._require_schedule_literal(
             raw, "phase", ("active", "paused", "deleted"), context
@@ -4372,9 +4768,7 @@ class MeerkatClient:
                         raw, "superseded_ack_ids", context
                     )
                 ),
-                "name": MeerkatClient._optional_string_field(
-                    raw, "name", context
-                ),
+                "name": MeerkatClient._optional_string_field(raw, "name", context),
                 "description": MeerkatClient._optional_string_field(
                     raw, "description", context
                 ),
@@ -4388,9 +4782,7 @@ class MeerkatClient:
         )
 
     @staticmethod
-    def _parse_schedule_occurrence(
-        raw: Any, context: str
-    ) -> ScheduleOccurrenceRecord:
+    def _parse_schedule_occurrence(raw: Any, context: str) -> ScheduleOccurrenceRecord:
         raw = MeerkatClient._require_dict(raw, "response", context)
         phase = MeerkatClient._require_schedule_literal(
             raw,
@@ -4422,10 +4814,8 @@ class MeerkatClient:
         )
         superseded_by_revision = raw.get("superseded_by_revision")
         if superseded_by_revision is not None:
-            superseded_by_revision = (
-                MeerkatClient._require_non_negative_integer_field(
-                    raw, "superseded_by_revision", context
-                )
+            superseded_by_revision = MeerkatClient._require_non_negative_integer_field(
+                raw, "superseded_by_revision", context
             )
         return cast(
             ScheduleOccurrenceRecord,
@@ -4506,6 +4896,1288 @@ class MeerkatClient:
         )
 
     @staticmethod
+    def _parse_mob_grant_record(
+        raw: dict[str, Any],
+        context: str,
+    ) -> MobGrantRecord:
+        principal = MeerkatClient._require_string_field(raw, "principal", context)
+        scopes_raw = MeerkatClient._require_present_list_field(raw, "scopes", context)
+        scopes: list[MobControlScope] = []
+        for index, scope in enumerate(scopes_raw):
+            if not isinstance(scope, str) or scope not in _MOB_CONTROL_SCOPES:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: scopes[{index}] is outside the control-scope vocabulary",
+                )
+            scopes.append(cast(MobControlScope, scope))
+        expires_at_ms: int | None = None
+        if raw.get("expires_at_ms") is not None:
+            expires_at_ms = MeerkatClient._require_non_negative_integer_field(
+                raw,
+                "expires_at_ms",
+                context,
+            )
+        return {
+            "principal": principal,
+            "scopes": scopes,
+            **({"expires_at_ms": expires_at_ms} if expires_at_ms is not None else {}),
+        }
+
+    @staticmethod
+    def _require_present_field(
+        raw: dict[str, Any],
+        field: str,
+        context: str,
+    ) -> Any:
+        if field not in raw:
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
+        return raw[field]
+
+    @staticmethod
+    def _validate_optional_response_string(
+        raw: dict[str, Any],
+        field: str,
+        context: str,
+    ) -> None:
+        if field in raw and not isinstance(raw[field], str):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: {field} must be a string",
+            )
+
+    @staticmethod
+    def _validate_nullable_response_string(
+        raw: dict[str, Any],
+        field: str,
+        context: str,
+    ) -> None:
+        if field in raw and raw[field] is not None and not isinstance(raw[field], str):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: {field} must be a string or null",
+            )
+
+    @staticmethod
+    def _validate_optional_response_bool(
+        raw: dict[str, Any],
+        field: str,
+        context: str,
+    ) -> None:
+        if field in raw and not isinstance(raw[field], bool):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: {field} must be boolean",
+            )
+
+    @staticmethod
+    def _validate_wire_content_block(
+        raw: Any,
+        context: str,
+        *,
+        system_notice_content: bool = False,
+    ) -> dict[str, Any]:
+        block = MeerkatClient._require_dict(raw, "content block", context)
+        block_type = MeerkatClient._require_string_field(block, "type", context)
+        allowed = (
+            {"text", "image", "video", "structured", "skill_context"}
+            if system_notice_content
+            else {"text", "image", "video", "structured", "unknown"}
+        )
+        if block_type not in allowed:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported content block type {block_type!r}",
+            )
+
+        if block_type == "text":
+            MeerkatClient._require_present_string_field(block, "text", context)
+        elif block_type == "image":
+            MeerkatClient._require_present_string_field(block, "media_type", context)
+            source = MeerkatClient._require_string_field(block, "source", context)
+            if source == "inline":
+                MeerkatClient._require_present_string_field(block, "data", context)
+            elif source == "blob":
+                MeerkatClient._require_string_field(block, "blob_id", context)
+            else:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported image source {source!r}",
+                )
+        elif block_type == "video":
+            MeerkatClient._require_present_string_field(block, "media_type", context)
+            MeerkatClient._require_non_negative_integer_field(
+                block,
+                "duration_ms",
+                context,
+            )
+            source = MeerkatClient._require_string_field(block, "source", context)
+            if source == "inline":
+                MeerkatClient._require_present_string_field(block, "data", context)
+            elif source == "uri":
+                MeerkatClient._require_string_field(block, "uri", context)
+            else:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported video source {source!r}",
+                )
+        elif block_type == "structured":
+            MeerkatClient._require_present_field(block, "data", context)
+        elif block_type == "skill_context":
+            skill_key = MeerkatClient._require_dict(
+                block.get("skill_key"),
+                "skill_key",
+                context,
+            )
+            MeerkatClient._require_string_field(
+                skill_key,
+                "source_uuid",
+                f"{context}: skill_key",
+            )
+            MeerkatClient._require_string_field(
+                skill_key,
+                "skill_name",
+                f"{context}: skill_key",
+            )
+            MeerkatClient._require_present_string_field(block, "text", context)
+        return block
+
+    @staticmethod
+    def _validate_tool_config_status(raw: Any, context: str) -> None:
+        status = MeerkatClient._require_dict(raw, "status_info", context)
+        kind = MeerkatClient._require_string_field(status, "kind", context)
+        if kind == "boundary_applied":
+            MeerkatClient._require_bool_field(status, "base_changed", context)
+            MeerkatClient._require_non_negative_integer_field(
+                status,
+                "revision",
+                context,
+            )
+            MeerkatClient._require_bool_field(status, "visible_changed", context)
+        elif kind == "deferred_catalog_delta":
+            for field in (
+                "added_hidden_count",
+                "pending_source_count",
+                "removed_hidden_count",
+            ):
+                MeerkatClient._require_non_negative_integer_field(
+                    status,
+                    field,
+                    context,
+                )
+        elif kind == "warning_failed_closed":
+            MeerkatClient._require_present_string_field(status, "error", context)
+        elif kind == "external_tool_delta":
+            phase = MeerkatClient._require_string_field(status, "phase", context)
+            if phase not in {"pending", "applied", "draining", "forced", "failed"}:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported external-tool phase {phase!r}",
+                )
+            MeerkatClient._validate_nullable_response_string(status, "detail", context)
+        else:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported tool-config status {kind!r}",
+            )
+
+    @staticmethod
+    def _validate_tool_config_payload(raw: Any, context: str) -> None:
+        payload = MeerkatClient._require_dict(raw, "payload", context)
+        operation = MeerkatClient._require_string_field(
+            payload,
+            "operation",
+            context,
+        )
+        if operation not in {"add", "remove", "reload"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported tool-config operation {operation!r}",
+            )
+        MeerkatClient._require_bool_field(payload, "persisted", context)
+        MeerkatClient._require_present_string_field(payload, "target", context)
+        MeerkatClient._validate_tool_config_status(
+            payload.get("status_info"),
+            f"{context}: status_info",
+        )
+        if "applied_at_turn" in payload and payload["applied_at_turn"] is not None:
+            MeerkatClient._require_non_negative_integer_field(
+                payload,
+                "applied_at_turn",
+                context,
+            )
+        if "domain" in payload and payload["domain"] is not None:
+            domain = MeerkatClient._require_string_field(payload, "domain", context)
+            if domain not in {"tool_scope", "deferred_catalog"}:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported tool-config domain {domain!r}",
+                )
+        if (
+            "deferred_catalog_delta" in payload
+            and payload["deferred_catalog_delta"] is not None
+        ):
+            delta = MeerkatClient._require_dict(
+                payload["deferred_catalog_delta"],
+                "deferred_catalog_delta",
+                context,
+            )
+            for field in (
+                "added_hidden_names",
+                "pending_sources",
+                "removed_hidden_names",
+            ):
+                if field in delta:
+                    MeerkatClient._parse_nonempty_string_list(
+                        delta[field],
+                        f"{context}: deferred_catalog_delta.{field}",
+                    )
+
+    @staticmethod
+    def _validate_system_notice_block(raw: Any, context: str) -> None:
+        block = MeerkatClient._require_dict(raw, "system notice block", context)
+        block_type = MeerkatClient._require_string_field(block, "type", context)
+        if block_type not in {
+            "comms",
+            "external_event",
+            "tool_config",
+            "mcp",
+            "background_job",
+            "auth",
+            "runtime_notice",
+            "unknown",
+        }:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported system-notice block {block_type!r}",
+            )
+
+        def validate_content() -> None:
+            if "content" not in block:
+                return
+            content = MeerkatClient._require_present_list_field(
+                block,
+                "content",
+                context,
+            )
+            for index, content_block in enumerate(content):
+                MeerkatClient._validate_wire_content_block(
+                    content_block,
+                    f"{context}: content[{index}]",
+                    system_notice_content=True,
+                )
+
+        if block_type == "comms":
+            direction = MeerkatClient._require_string_field(
+                block,
+                "direction",
+                context,
+            )
+            if direction not in {"incoming", "outgoing", "internal"}:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported comms direction {direction!r}",
+                )
+            MeerkatClient._require_present_string_field(block, "kind", context)
+            for field in ("intent", "request_id", "status", "summary"):
+                MeerkatClient._validate_nullable_response_string(block, field, context)
+            if "peer" in block and block["peer"] is not None:
+                peer = MeerkatClient._require_dict(block["peer"], "peer", context)
+                MeerkatClient._require_string_field(peer, "id", f"{context}: peer")
+                MeerkatClient._validate_nullable_response_string(
+                    peer,
+                    "display_name",
+                    f"{context}: peer",
+                )
+            if "sender_taint" in block and block["sender_taint"] is not None:
+                sender_taint = MeerkatClient._require_string_field(
+                    block,
+                    "sender_taint",
+                    context,
+                )
+                if sender_taint not in {"clean", "tainted"}:
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        f"{context}: unsupported sender_taint {sender_taint!r}",
+                    )
+            validate_content()
+        elif block_type == "external_event":
+            MeerkatClient._require_present_string_field(block, "event_type", context)
+            MeerkatClient._require_present_string_field(block, "source", context)
+            MeerkatClient._validate_nullable_response_string(block, "body", context)
+            MeerkatClient._validate_nullable_response_string(block, "summary", context)
+            validate_content()
+        elif block_type == "tool_config":
+            MeerkatClient._validate_tool_config_payload(
+                block.get("payload"),
+                f"{context}: payload",
+            )
+        elif block_type == "mcp":
+            for field in ("detail", "server_id"):
+                MeerkatClient._validate_nullable_response_string(block, field, context)
+            if "operation" in block and block["operation"] is not None:
+                operation = MeerkatClient._require_string_field(
+                    block,
+                    "operation",
+                    context,
+                )
+                if operation not in {"add", "remove", "reload"}:
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        f"{context}: unsupported MCP operation {operation!r}",
+                    )
+            if "pending_sources" in block:
+                MeerkatClient._parse_nonempty_string_list(
+                    block["pending_sources"],
+                    f"{context}: pending_sources",
+                )
+            MeerkatClient._validate_optional_response_bool(block, "persisted", context)
+            if "phase" in block and block["phase"] is not None:
+                phase = MeerkatClient._require_string_field(block, "phase", context)
+                if phase not in {
+                    "pending",
+                    "applied",
+                    "draining",
+                    "forced",
+                    "failed",
+                }:
+                    raise MeerkatError(
+                        "INVALID_RESPONSE",
+                        f"{context}: unsupported MCP phase {phase!r}",
+                    )
+        elif block_type == "background_job":
+            MeerkatClient._require_string_field(block, "job_id", context)
+            status = MeerkatClient._require_string_field(block, "status", context)
+            if status not in {
+                "completed",
+                "failed",
+                "aborted",
+                "cancelled",
+                "retired",
+                "terminated",
+            }:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported background-job status {status!r}",
+                )
+            MeerkatClient._validate_nullable_response_string(block, "detail", context)
+            MeerkatClient._validate_nullable_response_string(
+                block,
+                "display_name",
+                context,
+            )
+        elif block_type == "auth":
+            MeerkatClient._require_present_string_field(block, "state", context)
+            MeerkatClient._validate_nullable_response_string(block, "binding", context)
+            MeerkatClient._validate_nullable_response_string(block, "detail", context)
+        elif block_type == "runtime_notice":
+            MeerkatClient._require_present_string_field(block, "category", context)
+            MeerkatClient._validate_nullable_response_string(block, "detail", context)
+        else:
+            MeerkatClient._validate_nullable_response_string(block, "summary", context)
+
+    @staticmethod
+    def _validate_wire_provider_meta(raw: Any, context: str) -> None:
+        meta = MeerkatClient._require_dict(raw, "meta", context)
+        provider = MeerkatClient._require_string_field(meta, "provider", context)
+        required_payload = {
+            "anthropic": "signature",
+            "anthropic_redacted": "data",
+            "anthropic_compaction": "content",
+            "gemini": "thoughtSignature",
+            "open_ai_response": "response_id",
+        }.get(provider)
+        if required_payload is not None:
+            MeerkatClient._require_present_string_field(
+                meta,
+                required_payload,
+                context,
+            )
+        elif provider == "open_ai":
+            MeerkatClient._require_present_string_field(meta, "id", context)
+            for field in ("encrypted_content", "phase", "response_id"):
+                MeerkatClient._validate_nullable_response_string(
+                    meta,
+                    field,
+                    context,
+                )
+        elif provider != "unknown":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported provider metadata {provider!r}",
+            )
+
+    @staticmethod
+    def _validate_wire_server_tool_kind(raw: Any, context: str) -> None:
+        kind = MeerkatClient._require_dict(raw, "kind", context)
+        kind_name = MeerkatClient._require_string_field(kind, "kind", context)
+        if kind_name in {"web_search", "google_search"}:
+            return
+        if kind_name == "provider_native":
+            MeerkatClient._require_present_string_field(kind, "name", context)
+            return
+        if kind_name == "unknown":
+            MeerkatClient._require_present_string_field(kind, "debug", context)
+            return
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: unsupported server-tool kind {kind_name!r}",
+        )
+
+    @staticmethod
+    def _validate_blob_ref(raw: Any, context: str) -> None:
+        blob_ref = MeerkatClient._require_dict(raw, "blob_ref", context)
+        MeerkatClient._require_present_string_field(blob_ref, "blob_id", context)
+        MeerkatClient._require_present_string_field(blob_ref, "media_type", context)
+
+    @staticmethod
+    def _validate_provider_image_metadata(raw: Any, context: str) -> None:
+        meta = MeerkatClient._require_dict(raw, "meta", context)
+        provider = MeerkatClient._require_string_field(meta, "provider", context)
+        if provider == "not_emitted":
+            return
+        if provider == "openai":
+            MeerkatClient._require_present_string_field(meta, "target_model", context)
+            for field in ("response_id", "image_generation_call_id"):
+                MeerkatClient._validate_nullable_response_string(
+                    meta,
+                    field,
+                    context,
+                )
+            return
+        if provider == "gemini":
+            MeerkatClient._require_present_string_field(meta, "target_model", context)
+            for field in ("response_id", "continuity_ref"):
+                MeerkatClient._validate_nullable_response_string(
+                    meta,
+                    field,
+                    context,
+                )
+            return
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            f"{context}: unsupported image metadata provider {provider!r}",
+        )
+
+    @staticmethod
+    def _validate_revised_prompt_disposition(raw: Any, context: str) -> None:
+        revised_prompt = MeerkatClient._require_dict(
+            raw,
+            "revised_prompt",
+            context,
+        )
+        disposition = MeerkatClient._require_string_field(
+            revised_prompt,
+            "disposition",
+            context,
+        )
+        if disposition in {"not_requested", "unsupported_by_backend", "unchanged"}:
+            return
+        if disposition != "revised":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported revised-prompt disposition {disposition!r}",
+            )
+        source = MeerkatClient._require_string_field(
+            revised_prompt,
+            "source",
+            context,
+        )
+        if source not in {"provider", "meerkat_projection"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported revised-prompt source {source!r}",
+            )
+        text = MeerkatClient._require_dict(
+            revised_prompt.get("text"),
+            "text",
+            context,
+        )
+        MeerkatClient._require_present_string_field(
+            text,
+            "content",
+            f"{context}: text",
+        )
+
+    @staticmethod
+    def _validate_wire_assistant_block(raw: Any, context: str) -> None:
+        block = MeerkatClient._require_dict(raw, "assistant block", context)
+        block_type = MeerkatClient._require_string_field(block, "block_type", context)
+        if block_type not in {
+            "text",
+            "transcript",
+            "reasoning",
+            "tool_use",
+            "server_tool_content",
+            "image",
+            "unknown",
+        }:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported assistant block {block_type!r}",
+            )
+        if block_type == "unknown":
+            return
+
+        data = MeerkatClient._require_dict(block.get("data"), "data", context)
+        data_context = f"{context}: data"
+        if block_type != "image" and "meta" in data and data["meta"] is not None:
+            MeerkatClient._validate_wire_provider_meta(
+                data["meta"],
+                f"{data_context}: meta",
+            )
+        if block_type == "text":
+            MeerkatClient._require_present_string_field(data, "text", data_context)
+        elif block_type == "transcript":
+            MeerkatClient._require_present_string_field(data, "text", data_context)
+            source = MeerkatClient._require_dict(
+                data.get("source"),
+                "source",
+                data_context,
+            )
+            source_kind = MeerkatClient._require_string_field(
+                source,
+                "kind",
+                f"{data_context}: source",
+            )
+            if source_kind == "unknown":
+                MeerkatClient._require_present_string_field(
+                    source,
+                    "debug",
+                    f"{data_context}: source",
+                )
+            elif source_kind != "spoken":
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported transcript source {source_kind!r}",
+                )
+        elif block_type == "reasoning":
+            MeerkatClient._validate_optional_response_string(
+                data,
+                "text",
+                data_context,
+            )
+        elif block_type == "tool_use":
+            MeerkatClient._require_present_field(data, "args", data_context)
+            MeerkatClient._require_string_field(data, "id", data_context)
+            MeerkatClient._require_string_field(data, "name", data_context)
+        elif block_type == "server_tool_content":
+            MeerkatClient._require_present_field(data, "content", data_context)
+            MeerkatClient._validate_wire_server_tool_kind(
+                data.get("kind"),
+                f"{data_context}: kind",
+            )
+            MeerkatClient._validate_nullable_response_string(data, "id", data_context)
+        else:
+            MeerkatClient._validate_blob_ref(
+                data.get("blob_ref"),
+                f"{data_context}: blob_ref",
+            )
+            MeerkatClient._require_non_negative_integer_field(
+                data, "height", data_context
+            )
+            MeerkatClient._require_string_field(data, "image_id", data_context)
+            MeerkatClient._require_present_string_field(
+                data, "media_type", data_context
+            )
+            MeerkatClient._validate_provider_image_metadata(
+                data.get("meta"),
+                f"{data_context}: meta",
+            )
+            MeerkatClient._validate_revised_prompt_disposition(
+                data.get("revised_prompt"),
+                f"{data_context}: revised_prompt",
+            )
+            MeerkatClient._require_non_negative_integer_field(
+                data, "width", data_context
+            )
+
+    @staticmethod
+    def _validate_wire_tool_result(raw: Any, context: str) -> None:
+        result = MeerkatClient._require_dict(raw, "tool result", context)
+        MeerkatClient._require_string_field(result, "tool_use_id", context)
+        content = MeerkatClient._require_present_field(result, "content", context)
+        if content is None:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: content must not be null",
+            )
+        if isinstance(content, list):
+            for index, block in enumerate(content):
+                MeerkatClient._validate_wire_content_block(
+                    block,
+                    f"{context}: content[{index}]",
+                )
+        elif not isinstance(content, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: content must be a string or block list",
+            )
+        MeerkatClient._validate_optional_response_bool(result, "is_error", context)
+
+    @staticmethod
+    def _validate_wire_history_row(raw: Any, context: str) -> WireHistoryRow:
+        row = MeerkatClient._require_dict(raw, "history row", context)
+        role = MeerkatClient._require_string_field(row, "role", context)
+        MeerkatClient._require_string_field(row, "created_at", context)
+        for field in ("interaction_id", "run_id"):
+            value = row.get(field)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: {field} must be a non-empty string",
+                )
+
+        if role == "system":
+            MeerkatClient._require_present_string_field(row, "content", context)
+        elif role == "system_notice":
+            kind = MeerkatClient._require_string_field(row, "kind", context)
+            if kind not in {
+                "generic",
+                "comms",
+                "external_event",
+                "mcp_pending",
+                "mcp",
+                "background_job",
+                "tool_scope",
+                "tool_scope_warning",
+                "auth_reauth_required",
+            }:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported system-notice kind {kind!r}",
+                )
+            MeerkatClient._validate_nullable_response_string(row, "body", context)
+            MeerkatClient._validate_optional_response_string(row, "content", context)
+            if "blocks" in row:
+                blocks = MeerkatClient._require_present_list_field(
+                    row,
+                    "blocks",
+                    context,
+                )
+                for index, block in enumerate(blocks):
+                    MeerkatClient._validate_system_notice_block(
+                        block,
+                        f"{context}: blocks[{index}]",
+                    )
+        elif role == "user":
+            content = MeerkatClient._require_present_field(row, "content", context)
+            if content is None:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: content must not be null",
+                )
+            if isinstance(content, list):
+                for index, block in enumerate(content):
+                    MeerkatClient._validate_wire_content_block(
+                        block,
+                        f"{context}: content[{index}]",
+                    )
+            elif not isinstance(content, str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: content must be a string or block list",
+                )
+            transcript_role = row.get("transcript_role")
+            if transcript_role is not None and transcript_role not in {
+                "conversational",
+                "compaction_summary",
+                "injected_context",
+            }:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported transcript_role {transcript_role!r}",
+                )
+        elif role == "block_assistant":
+            blocks = MeerkatClient._require_present_list_field(
+                row,
+                "blocks",
+                context,
+            )
+            for index, block in enumerate(blocks):
+                MeerkatClient._validate_wire_assistant_block(
+                    block,
+                    f"{context}: blocks[{index}]",
+                )
+            stop_reason = MeerkatClient._require_string_field(
+                row,
+                "stop_reason",
+                context,
+            )
+            if stop_reason not in {
+                "end_turn",
+                "tool_use",
+                "max_tokens",
+                "stop_sequence",
+                "content_filter",
+                "cancelled",
+            }:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported stop_reason {stop_reason!r}",
+                )
+        elif role == "tool_results":
+            results = MeerkatClient._require_present_list_field(
+                row,
+                "results",
+                context,
+            )
+            for index, result in enumerate(results):
+                MeerkatClient._validate_wire_tool_result(
+                    result,
+                    f"{context}: results[{index}]",
+                )
+        else:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported role {role!r}",
+            )
+        return cast(WireHistoryRow, row)
+
+    @staticmethod
+    def _parse_mob_member_history_result(
+        raw: Any,
+    ) -> MobMemberHistoryResult:
+        context = "Invalid mob/member_history response"
+        result = MeerkatClient._require_dict(raw, "result", context)
+        page_raw = MeerkatClient._require_dict(result.get("page"), "page", context)
+        messages_raw = MeerkatClient._require_present_list_field(
+            page_raw,
+            "messages",
+            f"{context}: page",
+        )
+        messages = [
+            MeerkatClient._validate_wire_history_row(
+                row,
+                f"{context}: page.messages[{index}]",
+            )
+            for index, row in enumerate(messages_raw)
+        ]
+        from_index = MeerkatClient._require_non_negative_integer_field(
+            page_raw,
+            "from_index",
+            f"{context}: page",
+        )
+        message_count = MeerkatClient._require_non_negative_integer_field(
+            page_raw,
+            "message_count",
+            f"{context}: page",
+        )
+        complete = MeerkatClient._require_bool_field(
+            page_raw,
+            "complete",
+            f"{context}: page",
+        )
+        next_index: int | None = None
+        if page_raw.get("next_index") is not None:
+            next_index = MeerkatClient._require_non_negative_integer_field(
+                page_raw,
+                "next_index",
+                f"{context}: page",
+            )
+        page_end = from_index + len(messages)
+        if page_end > message_count:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: page ends beyond message_count",
+            )
+        if complete != (page_end == message_count):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: complete must match whether the page reaches message_count",
+            )
+        if complete and next_index is not None:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: complete page must not carry next_index",
+            )
+        if not complete:
+            if not messages:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: incomplete page must make progress",
+                )
+            if next_index != page_end:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: incomplete page next_index must equal served end",
+                )
+        provenance = MeerkatClient._require_string_field(
+            result,
+            "provenance",
+            context,
+        )
+        if provenance not in {"host_claimed", "controlling_host_verified"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported provenance {provenance!r}",
+            )
+        placement = MeerkatClient._optional_string_field(
+            result,
+            "placement",
+            context,
+        )
+        if placement == "":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: placement must be non-empty",
+            )
+        page = WireMemberHistoryPageBody(
+            complete=complete,
+            from_index=from_index,
+            message_count=message_count,
+            messages=messages,
+            next_index=next_index,
+        )
+        return MobMemberHistoryResult(
+            generation=MeerkatClient._require_non_negative_integer_field(
+                result,
+                "generation",
+                context,
+            ),
+            page=page,
+            provenance=cast(WireProjectionProvenance, provenance),
+            placement=placement,
+        )
+
+    @staticmethod
+    def _parse_mob_host_capabilities(
+        raw: Any,
+        context: str,
+    ) -> WireHostCapabilityFlags:
+        capabilities = MeerkatClient._require_dict(raw, "capabilities", context)
+        protocol_min = MeerkatClient._require_non_negative_integer_field(
+            capabilities,
+            "protocol_min",
+            context,
+        )
+        protocol_max = MeerkatClient._require_non_negative_integer_field(
+            capabilities,
+            "protocol_max",
+            context,
+        )
+        if protocol_min > protocol_max:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: protocol_min exceeds protocol_max",
+            )
+        live_endpoint = MeerkatClient._optional_string_field(
+            capabilities,
+            "live_endpoint",
+            context,
+        )
+        if live_endpoint == "":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: live_endpoint must be non-empty",
+            )
+        resolvable_providers: list[str] | None = None
+        if "resolvable_providers" in capabilities:
+            resolvable_providers = MeerkatClient._parse_nonempty_string_list(
+                capabilities["resolvable_providers"],
+                f"{context}: resolvable_providers",
+            )
+        tracked_input_cancel = False
+        if "tracked_input_cancel" in capabilities:
+            tracked_input_cancel = MeerkatClient._require_bool_field(
+                capabilities,
+                "tracked_input_cancel",
+                context,
+            )
+        return WireHostCapabilityFlags(
+            approval_forwarding=MeerkatClient._require_bool_field(
+                capabilities,
+                "approval_forwarding",
+                context,
+            ),
+            autonomous_members=MeerkatClient._require_bool_field(
+                capabilities,
+                "autonomous_members",
+                context,
+            ),
+            durable_sessions=MeerkatClient._require_bool_field(
+                capabilities,
+                "durable_sessions",
+                context,
+            ),
+            engine_version=MeerkatClient._require_string_field(
+                capabilities,
+                "engine_version",
+                context,
+            ),
+            hard_cancel_member=MeerkatClient._require_bool_field(
+                capabilities,
+                "hard_cancel_member",
+                context,
+            ),
+            mcp=MeerkatClient._require_bool_field(capabilities, "mcp", context),
+            memory_store=MeerkatClient._require_bool_field(
+                capabilities,
+                "memory_store",
+                context,
+            ),
+            protocol_max=protocol_max,
+            protocol_min=protocol_min,
+            live_endpoint=live_endpoint,
+            resolvable_providers=resolvable_providers,
+            tracked_input_cancel=tracked_input_cancel,
+        )
+
+    @staticmethod
+    def _parse_mob_host_status(raw: Any, context: str) -> MobHostStatus:
+        host = MeerkatClient._require_dict(raw, "host", context)
+        bind_phase = MeerkatClient._require_string_field(
+            host,
+            "bind_phase",
+            context,
+        )
+        if bind_phase not in {"requested", "bound"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported bind_phase {bind_phase!r}",
+            )
+        authority_epoch: int | None = None
+        if host.get("authority_epoch") is not None:
+            authority_epoch = MeerkatClient._require_non_negative_integer_field(
+                host,
+                "authority_epoch",
+                context,
+            )
+        endpoint = MeerkatClient._optional_string_field(host, "endpoint", context)
+        if endpoint == "":
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: endpoint must be non-empty",
+            )
+        capabilities = (
+            MeerkatClient._parse_mob_host_capabilities(
+                host.get("capabilities"),
+                f"{context}: capabilities",
+            )
+            if host.get("capabilities") is not None
+            else None
+        )
+        if bind_phase == "bound" and (
+            authority_epoch is None or endpoint is None or capabilities is None
+        ):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: bound host missing committed authority facts",
+            )
+        if bind_phase == "requested" and (
+            authority_epoch is not None
+            or endpoint is not None
+            or capabilities is not None
+        ):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: requested host must not claim committed authority facts",
+            )
+        control_reachability = MeerkatClient._optional_string_field(
+            host,
+            "control_reachability",
+            context,
+        )
+        if control_reachability is not None and control_reachability not in {
+            "reachable",
+            "stale",
+            "unreachable",
+            "unknown",
+        }:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported control_reachability",
+            )
+        last_seen_ms: int | None = None
+        if host.get("last_seen_ms") is not None:
+            last_seen_ms = MeerkatClient._require_non_negative_integer_field(
+                host,
+                "last_seen_ms",
+                context,
+            )
+        return MobHostStatus(
+            bind_phase=cast(WireHostBindPhase, bind_phase),
+            host_id=MeerkatClient._require_string_field(host, "host_id", context),
+            materialized_member_count=MeerkatClient._require_non_negative_integer_field(
+                host,
+                "materialized_member_count",
+                context,
+            ),
+            authority_epoch=authority_epoch,
+            capabilities=capabilities,
+            control_reachability=cast(WireReachability, control_reachability),
+            endpoint=endpoint,
+            freshness_reason=MeerkatClient._optional_string_field(
+                host,
+                "freshness_reason",
+                context,
+            ),
+            last_seen_ms=last_seen_ms,
+        )
+
+    @staticmethod
+    def _parse_route_install_obligation(
+        raw: Any,
+        context: str,
+    ) -> WireRouteInstallObligation:
+        obligation = MeerkatClient._require_dict(raw, "obligation", context)
+        return WireRouteInstallObligation(
+            edge_a=MeerkatClient._require_string_field(
+                obligation,
+                "edge_a",
+                context,
+            ),
+            edge_b=MeerkatClient._require_string_field(
+                obligation,
+                "edge_b",
+                context,
+            ),
+            host=MeerkatClient._require_string_field(obligation, "host", context),
+        )
+
+    @staticmethod
+    def _parse_live_channel_capabilities(
+        raw: Any,
+        context: str,
+    ) -> WireLiveChannelCapabilities:
+        capabilities = MeerkatClient._require_dict(raw, "capabilities", context)
+        return WireLiveChannelCapabilities(
+            audio_in=MeerkatClient._require_bool_field(
+                capabilities,
+                "audio_in",
+                context,
+            ),
+            audio_out=MeerkatClient._require_bool_field(
+                capabilities,
+                "audio_out",
+                context,
+            ),
+            barge_in_supported=MeerkatClient._require_bool_field(
+                capabilities,
+                "barge_in_supported",
+                context,
+            ),
+            image_in=MeerkatClient._require_bool_field(
+                capabilities,
+                "image_in",
+                context,
+            ),
+            provider_native_resume=MeerkatClient._require_bool_field(
+                capabilities,
+                "provider_native_resume",
+                context,
+            ),
+            text_in=MeerkatClient._require_bool_field(
+                capabilities,
+                "text_in",
+                context,
+            ),
+            text_out=MeerkatClient._require_bool_field(
+                capabilities,
+                "text_out",
+                context,
+            ),
+            transcript_supported=MeerkatClient._require_bool_field(
+                capabilities,
+                "transcript_supported",
+                context,
+            ),
+            video_in=MeerkatClient._require_bool_field(
+                capabilities,
+                "video_in",
+                context,
+            ),
+        )
+
+    @staticmethod
+    def _parse_live_transport_bootstrap(raw: Any, context: str) -> dict[str, Any]:
+        transport = MeerkatClient._require_dict(raw, "transport", context)
+        kind = MeerkatClient._require_string_field(
+            transport,
+            "transport",
+            context,
+        )
+        if kind == "websocket":
+            MeerkatClient._require_string_field(transport, "url", context)
+            MeerkatClient._require_string_field(transport, "token", context)
+        elif kind == "webrtc":
+            MeerkatClient._require_string_field(transport, "answer_method", context)
+            MeerkatClient._require_string_field(transport, "token", context)
+            http_url = MeerkatClient._optional_string_field(
+                transport,
+                "http_url",
+                context,
+            )
+            if http_url == "":
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: http_url must be non-empty",
+                )
+        elif kind == "unknown":
+            MeerkatClient._require_string_field(transport, "debug", context)
+        else:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported transport {kind!r}",
+            )
+        return transport
+
+    @staticmethod
+    def _parse_live_continuity(raw: Any, context: str) -> dict[str, Any]:
+        continuity = MeerkatClient._require_dict(raw, "continuity", context)
+        mode = MeerkatClient._require_string_field(continuity, "mode", context)
+        if mode == "provider_native_resume":
+            MeerkatClient._require_string_field(
+                continuity,
+                "provider_session_id",
+                context,
+            )
+        elif mode == "unknown":
+            MeerkatClient._require_string_field(continuity, "debug", context)
+        elif mode not in {"fresh", "transcript_only", "degraded"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported continuity mode {mode!r}",
+            )
+        return continuity
+
+    @staticmethod
+    def _parse_live_open_result(raw: Any, context: str) -> LiveOpenResult:
+        result = MeerkatClient._require_dict(raw, "result", context)
+        return LiveOpenResult(
+            capabilities=MeerkatClient._parse_live_channel_capabilities(
+                result.get("capabilities"),
+                f"{context}: capabilities",
+            ),
+            channel_id=MeerkatClient._require_string_field(
+                result,
+                "channel_id",
+                context,
+            ),
+            continuity=cast(
+                Any,
+                MeerkatClient._parse_live_continuity(
+                    result.get("continuity"),
+                    f"{context}: continuity",
+                ),
+            ),
+            transport=cast(
+                Any,
+                MeerkatClient._parse_live_transport_bootstrap(
+                    result.get("transport"),
+                    f"{context}: transport",
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _parse_live_adapter_status(raw: Any, context: str) -> dict[str, Any]:
+        status = MeerkatClient._require_dict(raw, "status", context)
+        state = MeerkatClient._require_string_field(status, "status", context)
+        if state == "degraded":
+            reason = MeerkatClient._require_dict(
+                status.get("reason"),
+                "reason",
+                context,
+            )
+            reason_kind = MeerkatClient._require_string_field(
+                reason,
+                "kind",
+                f"{context}: reason",
+            )
+            if reason_kind not in {
+                "rate_limited",
+                "provider_throttled",
+                "network_unstable",
+                "other",
+                "unknown",
+            }:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: unsupported degradation reason {reason_kind!r}",
+                )
+            if reason_kind == "other":
+                MeerkatClient._require_present_string_field(
+                    reason,
+                    "detail",
+                    f"{context}: reason",
+                )
+            elif reason_kind == "unknown":
+                MeerkatClient._require_present_string_field(
+                    reason,
+                    "debug",
+                    f"{context}: reason",
+                )
+        elif state == "unknown":
+            MeerkatClient._require_string_field(status, "debug", context)
+        elif state not in {"idle", "opening", "ready", "closing", "closed"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported live status {state!r}",
+            )
+        return status
+
+    @staticmethod
+    def _parse_live_status_result(raw: Any, context: str) -> LiveStatusResult:
+        result = MeerkatClient._require_dict(raw, "result", context)
+        return LiveStatusResult(
+            channel_id=MeerkatClient._require_string_field(
+                result,
+                "channel_id",
+                context,
+            ),
+            status=cast(
+                Any,
+                MeerkatClient._parse_live_adapter_status(
+                    result.get("status"),
+                    f"{context}: status",
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _parse_bridge_live_control_outcome(
+        raw: Any,
+        context: str,
+        expected_verb: str,
+    ) -> BridgeLiveControlOutcome:
+        outcome = MeerkatClient._require_dict(raw, "result", context)
+        verb = MeerkatClient._require_string_field(outcome, "verb", context)
+        status = MeerkatClient._require_string_field(outcome, "status", context)
+        expected_status = {
+            "commit_input": "committed",
+            "interrupt": "interrupted",
+            "truncate": "truncated",
+            "refresh": "queued",
+        }.get(verb)
+        if (
+            expected_status is None
+            or status != expected_status
+            or verb != expected_verb
+        ):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: mismatched verb/status outcome",
+            )
+        return cast(BridgeLiveControlOutcome, outcome)
+
+    @staticmethod
+    def _parse_nonempty_string_list(raw: Any, context: str) -> list[str]:
+        if not isinstance(raw, list):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context} must be a list",
+            )
+        parsed: list[str] = []
+        for index, value in enumerate(raw):
+            if not isinstance(value, str) or not value:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}[{index}] must be a non-empty string",
+                )
+            parsed.append(value)
+        return parsed
+
+    @staticmethod
     def _require_dict(raw: Any, field: str, context: str) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
@@ -4519,7 +6191,9 @@ class MeerkatClient:
         return value
 
     @staticmethod
-    def _require_present_string_field(raw: dict[str, Any], field: str, context: str) -> str:
+    def _require_present_string_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> str:
         value = raw.get(field)
         if not isinstance(value, str):
             raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
@@ -4562,9 +6236,7 @@ class MeerkatClient:
         ``requireNonNegativeIntegerField`` and the TypeScript SDK
         ``requireNonNegativeIntegerField``.
         """
-        value = MeerkatClient._require_number_field(
-            raw, field, context, display_field
-        )
+        value = MeerkatClient._require_number_field(raw, field, context, display_field)
         if value < 0 or (isinstance(value, float) and not value.is_integer()):
             raise MeerkatError(
                 "INVALID_RESPONSE",
@@ -4576,7 +6248,9 @@ class MeerkatClient:
     def _require_bool_field(raw: dict[str, Any], field: str, context: str) -> bool:
         value = raw.get(field)
         if not isinstance(value, bool):
-            raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be boolean")
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: {field} must be boolean"
+            )
         return value
 
     @staticmethod
@@ -4594,9 +6268,7 @@ class MeerkatClient:
             MeerkatClient._require_string_field(result, "envelope_id", context)
             delivery = MeerkatClient._require_string_field(result, "delivery", context)
             if delivery not in {"acked", "handed_off", "queued"}:
-                raise MeerkatError(
-                    "INVALID_RESPONSE", f"{context}: invalid delivery"
-                )
+                raise MeerkatError("INVALID_RESPONSE", f"{context}: invalid delivery")
         elif kind == "peer_lifecycle_sent":
             allowed = {"kind", "envelope_id"}
             MeerkatClient._require_string_field(result, "envelope_id", context)
@@ -4617,9 +6289,7 @@ class MeerkatClient:
             MeerkatClient._require_string_field(result, "envelope_id", context)
             MeerkatClient._require_string_field(result, "in_reply_to", context)
         else:
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: invalid kind"
-            )
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: invalid kind")
         unknown = set(result) - allowed
         if unknown:
             raise MeerkatError(
@@ -4635,7 +6305,9 @@ class MeerkatClient:
         progress = MeerkatClient._require_dict(raw, "progress", context)
         run_state = MeerkatClient._require_string_field(progress, "run_state", context)
         if run_state not in {"idle", "run_open", "unknown"}:
-            raise MeerkatError("INVALID_RESPONSE", f"{context}: invalid progress.run_state")
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid progress.run_state"
+            )
         last_event = MeerkatClient._require_string_field(
             progress, "last_progress_event", context
         )
@@ -4645,7 +6317,9 @@ class MeerkatClient:
             )
         health = MeerkatClient._require_string_field(progress, "health", context)
         if health not in {"healthy", "degraded", "wedged", "unknown"}:
-            raise MeerkatError("INVALID_RESPONSE", f"{context}: invalid progress.health")
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid progress.health"
+            )
         MeerkatClient._require_non_negative_integer_field(
             progress, "in_flight_work", context, "progress.in_flight_work"
         )
@@ -4681,9 +6355,7 @@ class MeerkatClient:
         if value is None:
             return None
         if not isinstance(value, str):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: {field} must be string"
-            )
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be string")
         return value
 
     @staticmethod
@@ -4702,9 +6374,7 @@ class MeerkatClient:
         if value is None:
             return None
         if not isinstance(value, dict):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: {field} must be object"
-            )
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be object")
         return value
 
     @staticmethod
@@ -4721,15 +6391,30 @@ class MeerkatClient:
         if value is None:
             return None
         if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: {field} must be number"
-            )
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be number")
         return int(value)
 
     @staticmethod
-    def _require_list_field(
+    def _optional_non_negative_integer_field(
         raw: dict[str, Any], field: str, context: str
-    ) -> list[Any]:
+    ) -> int | None:
+        """Return an optional unsigned wire integer without coercion.
+
+        Missing and explicit ``null`` both represent ``None`` for optional
+        serde fields. Present values must satisfy the same non-negative integer
+        contract as required Rust ``usize``/``u64`` fields; booleans,
+        fractional numbers, and negative integers are response violations.
+        """
+        if raw.get(field) is None:
+            return None
+        return MeerkatClient._require_non_negative_integer_field(
+            raw,
+            field,
+            context,
+        )
+
+    @staticmethod
+    def _require_list_field(raw: dict[str, Any], field: str, context: str) -> list[Any]:
         """Return a required wire array, failing closed on malformed shapes.
 
         An absent field is treated as the empty list (the runtime may omit
@@ -4959,7 +6644,9 @@ class MeerkatClient:
             terminal_cause_kind=data.get("terminal_cause_kind")
             if isinstance(data.get("terminal_cause_kind"), str)
             else None,
-            session_ref=MeerkatClient._optional_string_field(data, "session_ref", context),
+            session_ref=MeerkatClient._optional_string_field(
+                data, "session_ref", context
+            ),
             structured_output=data.get("structured_output"),
             extraction_error=extraction_error,
             schema_warnings=schema_warnings,
@@ -4969,24 +6656,27 @@ class MeerkatClient:
         )
 
     @staticmethod
-    def _parse_session_history(data: dict[str, Any]) -> SessionHistory:
+    def _parse_session_history(data: Any) -> SessionHistory:
         context = "Invalid session history"
+        data = MeerkatClient._require_dict(data, "result", context)
         return SessionHistory(
-            session_id=MeerkatClient._require_string_field(
-                data, "session_id", context
-            ),
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
             session_ref=MeerkatClient._optional_string_field(
                 data, "session_ref", context
             ),
-            message_count=int(
-                MeerkatClient._require_number_field(data, "message_count", context)
+            message_count=MeerkatClient._require_non_negative_integer_field(
+                data, "message_count", context
             ),
-            offset=int(MeerkatClient._require_number_field(data, "offset", context)),
-            limit=MeerkatClient._optional_number_field(data, "limit", context),
+            offset=MeerkatClient._require_non_negative_integer_field(
+                data, "offset", context
+            ),
+            limit=MeerkatClient._optional_non_negative_integer_field(
+                data, "limit", context
+            ),
             has_more=MeerkatClient._require_bool_field(data, "has_more", context),
             messages=[
                 MeerkatClient._parse_session_message(message)
-                for message in MeerkatClient._require_list_field(
+                for message in MeerkatClient._require_present_list_field(
                     data, "messages", context
                 )
             ],
@@ -4994,13 +6684,12 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_session_transcript_revision(
-        data: dict[str, Any],
+        data: Any,
     ) -> SessionTranscriptRevision:
         context = "Invalid session transcript revision"
+        data = MeerkatClient._require_dict(data, "result", context)
         return SessionTranscriptRevision(
-            session_id=MeerkatClient._require_string_field(
-                data, "session_id", context
-            ),
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
             session_ref=MeerkatClient._optional_string_field(
                 data, "session_ref", context
             ),
@@ -5008,15 +6697,19 @@ class MeerkatClient:
             head_revision=MeerkatClient._require_string_field(
                 data, "head_revision", context
             ),
-            message_count=int(
-                MeerkatClient._require_number_field(data, "message_count", context)
+            message_count=MeerkatClient._require_non_negative_integer_field(
+                data, "message_count", context
             ),
-            offset=int(MeerkatClient._require_number_field(data, "offset", context)),
-            limit=MeerkatClient._optional_number_field(data, "limit", context),
+            offset=MeerkatClient._require_non_negative_integer_field(
+                data, "offset", context
+            ),
+            limit=MeerkatClient._optional_non_negative_integer_field(
+                data, "limit", context
+            ),
             has_more=MeerkatClient._require_bool_field(data, "has_more", context),
             messages=[
                 MeerkatClient._parse_session_message(message)
-                for message in MeerkatClient._require_list_field(
+                for message in MeerkatClient._require_present_list_field(
                     data, "messages", context
                 )
             ],
@@ -5024,11 +6717,16 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_session_transcript_revision_list(
-        data: dict[str, Any],
+        data: Any,
     ) -> SessionTranscriptRevisionList:
         context = "Invalid session transcript revision list"
+        data = MeerkatClient._require_dict(data, "result", context)
         entries: list[SessionTranscriptRevisionEntry] = []
-        for entry in MeerkatClient._require_list_field(data, "entries", context):
+        for entry in MeerkatClient._require_present_list_field(
+            data,
+            "entries",
+            context,
+        ):
             if not isinstance(entry, dict):
                 raise MeerkatError(
                     "INVALID_RESPONSE", f"{context}: entries must be objects"
@@ -5041,16 +6739,14 @@ class MeerkatClient:
                     parent_revision=MeerkatClient._require_string_field(
                         entry, "parent_revision", context
                     ),
-                    actor=MeerkatClient._optional_string_field(
-                        entry, "actor", context
-                    ),
+                    actor=MeerkatClient._optional_string_field(entry, "actor", context),
                     reason=MeerkatClient._require_string_field(
                         entry, "reason", context
                     ),
-                    committed_at=int(
-                        MeerkatClient._require_number_field(
-                            entry, "committed_at", context
-                        )
+                    committed_at=MeerkatClient._require_non_negative_integer_field(
+                        entry,
+                        "committed_at",
+                        context,
                     ),
                 )
             )
@@ -5062,37 +6758,141 @@ class MeerkatClient:
         )
 
     @staticmethod
-    def _parse_session_fork_result(data: dict[str, Any]) -> SessionForkResult:
+    def _parse_session_fork_result(data: Any) -> SessionForkResult:
         context = "Invalid session/fork response"
+        data = MeerkatClient._require_dict(data, "result", context)
         return SessionForkResult(
             source_session_id=MeerkatClient._require_string_field(
                 data, "source_session_id", context
             ),
-            session_id=MeerkatClient._require_string_field(
-                data, "session_id", context
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
+            session_ref=MeerkatClient._optional_string_field(
+                data,
+                "session_ref",
+                context,
             ),
-            session_ref=data.get("session_ref"),
-            message_count=int(
-                MeerkatClient._require_number_field(data, "message_count", context)
+            message_count=MeerkatClient._require_non_negative_integer_field(
+                data, "message_count", context
             ),
         )
 
     @staticmethod
+    def _validate_transcript_rewrite_range(raw: Any, context: str) -> None:
+        rewrite_range = MeerkatClient._require_dict(raw, "range", context)
+        MeerkatClient._require_non_negative_integer_field(
+            rewrite_range,
+            "start",
+            context,
+        )
+        MeerkatClient._require_non_negative_integer_field(
+            rewrite_range,
+            "end",
+            context,
+        )
+
+    @staticmethod
+    def _validate_transcript_rewrite_selection(raw: Any, context: str) -> None:
+        selection = MeerkatClient._require_dict(raw, "selection", context)
+        selection_type = MeerkatClient._require_string_field(
+            selection,
+            "type",
+            context,
+        )
+        if selection_type == "message_range":
+            MeerkatClient._require_non_negative_integer_field(
+                selection,
+                "start",
+                context,
+            )
+            MeerkatClient._require_non_negative_integer_field(
+                selection,
+                "end",
+                context,
+            )
+        elif selection_type in {
+            "edit_message_range",
+            "compaction_message_range",
+        }:
+            MeerkatClient._validate_transcript_rewrite_range(
+                selection.get("range"),
+                f"{context}: range",
+            )
+        else:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unsupported selection type {selection_type!r}",
+            )
+
+    @staticmethod
+    def _validate_transcript_rewrite_commit(
+        raw: Any,
+        context: str,
+    ) -> dict[str, Any]:
+        commit = MeerkatClient._require_dict(raw, "commit", context)
+        for field in (
+            "parent_revision",
+            "revision",
+            "original_span_digest",
+            "replacement_digest",
+        ):
+            MeerkatClient._require_string_field(commit, field, context)
+        MeerkatClient._validate_nullable_response_string(commit, "actor", context)
+        for field in ("messages_before", "messages_after"):
+            MeerkatClient._require_non_negative_integer_field(
+                commit,
+                field,
+                context,
+            )
+
+        reason = MeerkatClient._require_dict(
+            commit.get("reason"),
+            "reason",
+            context,
+        )
+        MeerkatClient._require_string_field(reason, "kind", f"{context}: reason")
+        MeerkatClient._validate_nullable_response_string(
+            reason,
+            "note",
+            f"{context}: reason",
+        )
+        MeerkatClient._validate_transcript_rewrite_selection(
+            commit.get("selection"),
+            f"{context}: selection",
+        )
+
+        committed_at = MeerkatClient._require_dict(
+            commit.get("committed_at"),
+            "committed_at",
+            context,
+        )
+        for field in ("secs_since_epoch", "nanos_since_epoch"):
+            MeerkatClient._require_non_negative_integer_field(
+                committed_at,
+                field,
+                f"{context}: committed_at",
+            )
+        return commit
+
+    @staticmethod
     def _parse_session_transcript_rewrite_result(
-        data: dict[str, Any],
+        data: Any,
     ) -> SessionTranscriptRewriteResult:
         context = "Invalid session transcript rewrite response"
-        commit = data.get("commit")
-        if not isinstance(commit, dict):
-            raise MeerkatError("INVALID_RESPONSE", f"{context}: commit must be an object")
+        data = MeerkatClient._require_dict(data, "result", context)
+        commit = MeerkatClient._validate_transcript_rewrite_commit(
+            data.get("commit"),
+            f"{context}: commit",
+        )
         return SessionTranscriptRewriteResult(
             session_id=MeerkatClient._require_string_field(data, "session_id", context),
             parent_revision=MeerkatClient._require_string_field(
                 data, "parent_revision", context
             ),
             revision=MeerkatClient._require_string_field(data, "revision", context),
-            message_count=int(
-                MeerkatClient._require_number_field(data, "message_count", context)
+            message_count=MeerkatClient._require_non_negative_integer_field(
+                data,
+                "message_count",
+                context,
             ),
             commit=dict(commit),
         )
@@ -5103,6 +6903,7 @@ class MeerkatClient:
         # (role, created_at) or with malformed collections is a wire-contract
         # violation, never coerced to ""/[] placeholder truth.
         context = "Invalid session message"
+        MeerkatClient._validate_wire_history_row(data, context)
         role = MeerkatClient._require_string_field(data, "role", context)
         created_at = MeerkatClient._require_string_field(data, "created_at", context)
         content_value = (
@@ -5110,47 +6911,44 @@ class MeerkatClient:
             if role == "system_notice" and "content" not in data and "body" in data
             else data.get("content")
         )
+        transcript_role = data.get("transcript_role")
         return SessionMessage(
             role=role,
             created_at=created_at,
-            kind=str(data["kind"]) if "kind" in data else None,
-            body=str(data["body"]) if "body" in data else None,
+            kind=data.get("kind") if isinstance(data.get("kind"), str) else None,
+            body=data.get("body") if isinstance(data.get("body"), str) else None,
             content=MeerkatClient._parse_content_input(content_value)
             if content_value is not None
             else None,
+            transcript_role=cast(
+                TranscriptUserRole | None,
+                transcript_role,
+            ),
             stop_reason=data.get("stop_reason"),
-            interaction_id=str(data["interaction_id"])
-            if data.get("interaction_id") is not None
-            else None,
-            run_id=str(data["run_id"]) if data.get("run_id") is not None else None,
+            interaction_id=data.get("interaction_id"),
+            run_id=data.get("run_id"),
             blocks=[
                 MeerkatClient._parse_session_assistant_block(block)
                 for block in MeerkatClient._require_list_field(data, "blocks", context)
-            ],
+            ]
+            if role == "block_assistant"
+            else [],
             results=[
                 MeerkatClient._parse_session_tool_result(result, context)
-                for result in MeerkatClient._require_list_field(data, "results", context)
-            ],
+                for result in MeerkatClient._require_list_field(
+                    data, "results", context
+                )
+            ]
+            if role == "tool_results"
+            else [],
             raw=dict(data),
         )
 
     @staticmethod
     def _parse_session_tool_result(result: Any, context: str) -> SessionToolResult:
-        if not isinstance(result, dict):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: tool result must be an object"
-            )
+        MeerkatClient._validate_wire_tool_result(result, context)
+        result = cast(dict[str, Any], result)
         is_error = result.get("is_error", False)
-        if not isinstance(is_error, bool):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: is_error must be a boolean"
-            )
-        # `WireToolResult.content` is mandatory on the wire; a frame without
-        # it is malformed and must not be coalesced into an empty transcript.
-        if "content" not in result:
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: tool result missing content"
-            )
         return SessionToolResult(
             tool_use_id=MeerkatClient._require_string_field(
                 result, "tool_use_id", context
@@ -5165,12 +6963,16 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         if isinstance(message, SessionMessage):
             payload: dict[str, Any] = dict(message.raw)
-            payload.update({
-                "role": message.role,
-                "created_at": message.created_at,
-            })
+            payload.update(
+                {
+                    "role": message.role,
+                    "created_at": message.created_at,
+                }
+            )
             if message.kind is not None:
                 payload["kind"] = message.kind
+            if message.role == "user" and message.transcript_role is not None:
+                payload["transcript_role"] = message.transcript_role
             if message.role == "system_notice":
                 payload.pop("body", None)
                 payload.pop("content", None)
@@ -5219,7 +7021,10 @@ class MeerkatClient:
         if block.image_id is not None:
             data["image_id"] = block.image_id
         if block.blob_id is not None:
-            data["blob_ref"] = {"blob_id": block.blob_id}
+            raw_blob_ref = data.get("blob_ref")
+            blob_ref = dict(raw_blob_ref) if isinstance(raw_blob_ref, dict) else {}
+            blob_ref["blob_id"] = block.blob_id
+            data["blob_ref"] = blob_ref
         if block.media_type is not None:
             data["media_type"] = block.media_type
         if block.width is not None:
@@ -5233,83 +7038,56 @@ class MeerkatClient:
         if block.source is not None:
             data["source"] = block.source
         payload = dict(block.raw)
-        payload.update({"block_type": block.block_type, "data": data})
+        payload["block_type"] = block.block_type
+        if block.block_type == "unknown" and "data" not in block.raw and not data:
+            payload.pop("data", None)
+        else:
+            payload["data"] = data
         return payload
 
     @staticmethod
-    def _parse_content_input(value: Any) -> ContentInput:
+    def _parse_content_input(value: Any) -> SessionContentInput:
         if value is None:
             # Explicit `content: null` is a wire-contract violation (the
             # TypeScript and Rust surfaces reject it); never coalesce it into
             # empty-string transcript truth.
-            raise MeerkatError(
-                "INVALID_RESPONSE", "content must not be null"
-            )
+            raise MeerkatError("INVALID_RESPONSE", "content must not be null")
         if isinstance(value, list):
             return [
-                MeerkatClient._parse_content_block(block)
-                for block in value
-                if isinstance(block, dict)
+                MeerkatClient._parse_content_block(
+                    block,
+                    f"Invalid session content: content[{index}]",
+                )
+                for index, block in enumerate(value)
             ]
-        return str(value)
+        if isinstance(value, str):
+            return value
+        raise MeerkatError(
+            "INVALID_RESPONSE",
+            "Invalid session content: expected string or content-block list",
+        )
 
     @staticmethod
-    def _parse_content_block(data: dict[str, Any]) -> ContentBlock:
-        if data.get("type") == "image":
-            source = data.get("source", "inline")
-            if source == "blob":
-                return {
-                    "type": "image",
-                    "media_type": str(data.get("media_type", "")),
-                    "source": "blob",
-                    "blob_id": str(data.get("blob_id", "")),
-                }
-            return {
-                "type": "image",
-                "media_type": str(data.get("media_type", "")),
-                "source": "inline",
-                "data": str(data.get("data", "")),
-            }
-        if data.get("type") == "video":
-            source = data.get("source", "inline")
-            if source == "uri":
-                return {
-                    "type": "video",
-                    "media_type": str(data.get("media_type", "")),
-                    "duration_ms": int(data.get("duration_ms", 0) or 0),
-                    "source": "uri",
-                    "uri": str(data.get("uri", "")),
-                }
-            return {
-                "type": "video",
-                "media_type": str(data.get("media_type", "")),
-                "duration_ms": int(data.get("duration_ms", 0) or 0),
-                "source": "inline",
-                "data": str(data.get("data", "")),
-            }
-        return {
-            "type": "text",
-            "text": str(data.get("text", "")),
-        }
+    def _parse_content_block(
+        data: Any,
+        context: str = "Invalid session content block",
+    ) -> SessionContentBlock:
+        block = MeerkatClient._validate_wire_content_block(data, context)
+        # Keep the validated wire projection byte-for-byte meaningful. In
+        # particular structured/unknown variants and media source payloads are
+        # never collapsed into fabricated text/inline content.
+        return cast(SessionContentBlock, dict(block))
 
     @staticmethod
     def _parse_session_assistant_block(data: dict[str, Any]) -> SessionAssistantBlock:
         context = "Invalid session assistant block"
-        if not isinstance(data, dict):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: block must be an object"
-            )
+        MeerkatClient._validate_wire_assistant_block(data, context)
         block_data = data.get("data", {})
-        if not isinstance(block_data, dict):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: data must be an object"
-            )
+        block_data = cast(dict[str, Any], block_data)
         blob_ref = block_data.get("blob_ref")
         blob_id = blob_ref.get("blob_id") if isinstance(blob_ref, dict) else None
-        # Lane provenance for transcript blocks (typed enum on the wire,
-        # serialized as snake_case string — currently only ``"spoken"``).
         source_raw = block_data.get("source")
-        source = str(source_raw) if isinstance(source_raw, str) else None
+        source = dict(source_raw) if isinstance(source_raw, dict) else None
         return SessionAssistantBlock(
             block_type=MeerkatClient._require_string_field(data, "block_type", context),
             text=block_data.get("text"),
@@ -5319,9 +7097,11 @@ class MeerkatClient:
             image_id=block_data.get("image_id"),
             blob_id=str(blob_id) if blob_id is not None else None,
             media_type=block_data.get("media_type"),
-            width=MeerkatClient._parse_int(block_data.get("width")) if "width" in block_data else None,
-            height=MeerkatClient._parse_int(block_data.get("height")) if "height" in block_data else None,
-            revised_prompt=block_data.get("revised_prompt") if isinstance(block_data.get("revised_prompt"), dict) else None,
+            width=block_data.get("width"),
+            height=block_data.get("height"),
+            revised_prompt=block_data.get("revised_prompt")
+            if isinstance(block_data.get("revised_prompt"), dict)
+            else None,
             meta=block_data.get("meta"),
             source=source,
             raw=dict(data),
@@ -5448,7 +7228,9 @@ class MeerkatClient:
     @staticmethod
     def _parse_contract_version(raw: Any, context: str) -> dict[str, int]:
         def parse_component(value: Any, field: str) -> int:
-            message = f"{context}: contract_version.{field} must be non-negative integer"
+            message = (
+                f"{context}: contract_version.{field} must be non-negative integer"
+            )
             if isinstance(value, bool):
                 raise MeerkatError(
                     "INVALID_RESPONSE",

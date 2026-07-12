@@ -4,7 +4,7 @@
 use std::fmt;
 
 pub const SESSION_VERSION: u32 = 2;
-pub const STORED_INPUT_STATE_VERSION: u32 = 3;
+pub const STORED_INPUT_STATE_VERSION: u32 = 4;
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,8 +37,9 @@ fn restore_version(
     field: SessionPersistenceVersionField,
     observed: u32,
     current: u32,
+    accepted: &[u32],
 ) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    if observed == current {
+    if accepted.contains(&observed) {
         Ok(current)
     } else {
         Err(SessionPersistenceVersionAuthorityError {
@@ -71,6 +72,7 @@ pub fn restore_session_envelope_version(
         SessionPersistenceVersionField::SessionEnvelope,
         observed,
         SESSION_VERSION,
+        &[2],
     )
 }
 
@@ -81,6 +83,7 @@ pub fn restore_stored_input_state_version(
         SessionPersistenceVersionField::StoredInputState,
         observed,
         STORED_INPUT_STATE_VERSION,
+        &[3, 4],
     )
 }
 
@@ -91,5 +94,6 @@ pub fn restore_session_metadata_schema_version(
         SessionPersistenceVersionField::SessionMetadataSchema,
         observed,
         SESSION_METADATA_SCHEMA_VERSION,
+        &[2],
     )
 }

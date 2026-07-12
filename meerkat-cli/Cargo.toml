@@ -36,6 +36,16 @@ name = "cli_mobpack_live_smoke"
 path = "tests/cli_mobpack_live_smoke.rs"
 required-features = ["integration-real-tests"]
 
+[[test]]
+name = "system_mob_host_daemon"
+path = "tests/system_mob_host_daemon.rs"
+required-features = ["integration-real-tests", "mob", "comms"]
+
+[[test]]
+name = "system_mob_cli_verbs"
+path = "tests/system_mob_cli_verbs.rs"
+required-features = ["integration-real-tests", "mob", "comms"]
+
 [dependencies]
 meerkat = { workspace = true }
 meerkat-auth-core = { workspace = true }
@@ -57,6 +67,7 @@ meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-rpc = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
+meerkat-live = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jsonschema = { workspace = true }
@@ -83,7 +94,13 @@ default = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "m
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]
 openai = ["meerkat/openai"]
-openai-realtime = ["openai", "meerkat/openai-realtime", "meerkat-rpc?/openai-realtime"]
+openai-realtime = [
+    "openai",
+    "meerkat/openai-realtime",
+    "meerkat/live",
+    "dep:meerkat-live",
+    "meerkat-rpc?/openai-realtime",
+]
 gemini = ["meerkat/gemini"]
 
 # Storage backends (forwarded to facade)
@@ -126,6 +143,7 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 meerkat-comms = { workspace = true }
+meerkat-session = { workspace = true }
 meerkat-llm-core = { workspace = true }
 tokio-tungstenite = "0.28"
 

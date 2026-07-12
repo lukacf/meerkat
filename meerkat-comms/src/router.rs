@@ -51,6 +51,8 @@ pub fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> PeerId {
 
 pub const DEFAULT_ACK_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_MAX_MESSAGE_BYTES: u32 = crate::transport::MAX_PAYLOAD_SIZE;
+#[cfg(not(target_arch = "wasm32"))]
+const DECLARED_REPLY_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommsConfig {
@@ -92,11 +94,85 @@ pub enum SendError {
 
 /// Outcome of a successful router send.
 ///
-/// Carries the strongest delivery fact the transport can truthfully prove.
+/// Carries the strongest delivery fact the transport can truthfully prove:
+/// a verified peer ACK on stream transports, direct receiver-inbox admission
+/// on the wait-based inproc lane, or only a queued transport write.
 #[derive(Debug, Clone, Copy)]
 pub struct SendOutcome {
     pub envelope_id: Uuid,
     pub delivery: meerkat_core::comms::PeerDeliveryOutcome,
+}
+
+/// A one-shot callback endpoint for responses to peers outside the trust
+/// store.
+///
+/// A supervisor-bridge responder may need to deliver a typed `Rejected` reply
+/// to an authenticated sender it has never trusted. When that request carries
+/// an admissible callback capability, the responder stages it bound to the
+/// AUTHENTICATED ingress signer key:
+///
+/// * `pubkey` MUST be the verified envelope signer from the ingress fact,
+///   never a payload-claimed identity — the reply is addressed to the key
+///   that proved itself, so a spoofed payload identity cannot redirect the
+///   response to a third party's key.
+/// * On the correlated signed-request path, `address` is reconstructed from
+///   the kernel-observed TCP source IP plus the signed declared port. The
+///   sender-selected host is never retained. Legacy uncorrelated callers may
+///   use only machine-authorized stored endpoint truth, never the current
+///   untrusted request payload.
+///
+/// Entries are consumed on first use and ONLY for [`MessageKind::Response`]
+/// envelopes — this is a reply channel, not a general send capability. The
+/// legacy uncorrelated path is consulted only when trust resolution misses;
+/// an exact correlated route may override a stale trusted address for its one
+/// matching response.
+#[derive(Debug, Clone)]
+pub struct DeclaredReplyEndpoint {
+    /// Authenticated signer key of the request being answered.
+    pub pubkey: crate::identity::PubKey,
+    /// Callback-only reply address, e.g. `tcp://observed-source:port`.
+    pub address: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn declared_reply_timeout_error(address: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "declared reply endpoint operation timed out after {}s: {address}",
+            DECLARED_REPLY_OPERATION_TIMEOUT.as_secs()
+        ),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_declared_reply_with_timeout<T, F>(address: &str, operation: F) -> Result<T, SendError>
+where
+    F: std::future::Future<Output = Result<T, SendError>>,
+{
+    tokio::time::timeout(DECLARED_REPLY_OPERATION_TIMEOUT, operation)
+        .await
+        .map_err(|_| SendError::Io(declared_reply_timeout_error(address)))?
+}
+
+/// Apply the callback-only deadline at the socket-routing choke point.
+/// Durable trusted routes deliberately retain their transport's normal
+/// lifetime; a sender-declared callback can never impose an unbounded connect,
+/// write, or ACK wait on the responder.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_socket_route_operation<T, F>(
+    address: &str,
+    is_declared_reply: bool,
+    operation: F,
+) -> Result<T, SendError>
+where
+    F: std::future::Future<Output = Result<T, SendError>>,
+{
+    if is_declared_reply {
+        run_declared_reply_with_timeout(address, operation).await
+    } else {
+        operation.await
+    }
 }
 
 #[inline]
@@ -146,6 +222,20 @@ pub struct Router {
     /// Host-set config, not machine state: installed via
     /// [`Router::set_outbound_content_taint`].
     outbound_content_taint: RwLock<Option<SenderContentTaint>>,
+    /// Legacy uncorrelated one-shot reply endpoints for responses to peers the
+    /// trust store does not know (see [`DeclaredReplyEndpoint`]). Only
+    /// machine-authorized stored endpoint truth may enter this map. It grants
+    /// no admission or general sendability and is consumed by the first
+    /// [`MessageKind::Response`] send to that peer id.
+    staged_reply_endpoints: RwLock<std::collections::BTreeMap<PeerId, DeclaredReplyEndpoint>>,
+    /// Authenticated one-shot reply endpoints keyed by the exact destination
+    /// identity and request correlation id. Unlike the legacy uncorrelated
+    /// staging map above, an exact correlated endpoint overrides a durable
+    /// trusted route for that one Response only. This lets a peer rotate its
+    /// socket endpoint without granting a general routing capability or
+    /// misrouting concurrent responses for the same identity.
+    staged_correlated_reply_endpoints:
+        RwLock<std::collections::BTreeMap<(PeerId, Uuid), DeclaredReplyEndpoint>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -189,6 +279,8 @@ impl Router {
             )),
             private_peer_sources: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             outbound_content_taint: RwLock::new(None),
+            staged_reply_endpoints: RwLock::new(std::collections::BTreeMap::new()),
+            staged_correlated_reply_endpoints: RwLock::new(std::collections::BTreeMap::new()),
             config,
             require_peer_auth,
             inbox_sender,
@@ -419,6 +511,78 @@ impl Router {
         self.trusted_peers.read().get(peer_id).cloned()
     }
 
+    /// Stage a one-shot [`DeclaredReplyEndpoint`] for `dest`.
+    ///
+    /// Restaging the same peer id replaces the prior machine-authorized repair
+    /// endpoint. Raw Request metadata and decoded payload/sender addresses
+    /// must never call this legacy uncorrelated seam. Trust-store entries
+    /// always win at send time; a staged entry for a peer that is (or later
+    /// becomes) trusted is simply never consulted.
+    pub fn stage_reply_endpoint(&self, dest: PeerId, endpoint: DeclaredReplyEndpoint) {
+        self.staged_reply_endpoints.write().insert(dest, endpoint);
+    }
+
+    fn take_staged_reply_endpoint(&self, dest: &PeerId) -> Option<DeclaredReplyEndpoint> {
+        self.staged_reply_endpoints.write().remove(dest)
+    }
+
+    /// Stage a one-shot endpoint for the exact `(dest, in_reply_to)` Response.
+    ///
+    /// Restaging the same correlation replaces only that entry. Other
+    /// correlations for the same peer remain independent, which is required
+    /// when requests overlap during a socket rotation.
+    pub(crate) fn stage_correlated_reply_endpoint(
+        &self,
+        dest: PeerId,
+        in_reply_to: Uuid,
+        endpoint: DeclaredReplyEndpoint,
+    ) {
+        self.staged_correlated_reply_endpoints
+            .write()
+            .insert((dest, in_reply_to), endpoint);
+    }
+
+    fn take_staged_correlated_reply_endpoint(
+        &self,
+        dest: &PeerId,
+        in_reply_to: Uuid,
+    ) -> Option<DeclaredReplyEndpoint> {
+        self.staged_correlated_reply_endpoints
+            .write()
+            .remove(&(*dest, in_reply_to))
+    }
+
+    /// Idempotently remove one exact correlated endpoint without sending.
+    /// Returns whether an entry existed so focused callers/tests can observe
+    /// cleanup while the cross-crate capability keeps idempotent `Ok(())`
+    /// semantics.
+    pub(crate) fn unstage_correlated_reply_endpoint(
+        &self,
+        dest: PeerId,
+        in_reply_to: Uuid,
+    ) -> bool {
+        self.staged_correlated_reply_endpoints
+            .write()
+            .remove(&(dest, in_reply_to))
+            .is_some()
+    }
+
+    /// Remove every staged callback for a terminal interaction correlation.
+    ///
+    /// The machine cleanup effect carries the correlation but not the remote
+    /// destination, so cleanup must match the second key component across
+    /// peers. The map is bounded by active inbound requests and this path runs
+    /// only at interaction termination.
+    pub(crate) fn unstage_correlated_reply_endpoints_for_interaction(
+        &self,
+        in_reply_to: Uuid,
+    ) -> usize {
+        let mut endpoints = self.staged_correlated_reply_endpoints.write();
+        let before = endpoints.len();
+        endpoints.retain(|(_, correlation), _| *correlation != in_reply_to);
+        before - endpoints.len()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn send_on_stream<S>(
         &self,
@@ -531,8 +695,10 @@ impl Router {
                 .await
                 .map_err(|err| map_inproc_send_error(err, dest))?,
         };
-        // Inproc delivery is a direct inbox handoff: there is no ACK round-trip,
-        // so we never claim the envelope was acked.
+        // The wait-based inproc handoff returns only after the receiver's
+        // trust-gated inbox admitted the envelope (every drop maps to a typed
+        // error above). This proves direct handoff, not a cryptographic peer
+        // ACK, so retain that distinction in the typed delivery outcome.
         Ok(SendOutcome {
             envelope_id,
             delivery: meerkat_core::comms::PeerDeliveryOutcome::HandedOff,
@@ -564,9 +730,9 @@ impl Router {
     /// declaration is stamped here — the single outbound choke point — onto
     /// content-bearing kinds, INSIDE the signed region, before signing.
     ///
-    /// The returned [`SendOutcome`] carries the verified ACK truth: `acked` is
-    /// `true` only when a peer ACK was received and cryptographically verified
-    /// over a stream transport.
+    /// The returned [`SendOutcome`] carries the strongest typed delivery fact
+    /// proved by the selected transport; only a verified stream ACK yields
+    /// [`meerkat_core::comms::PeerDeliveryOutcome::Acked`].
     pub async fn send_with_id(
         &self,
         dest: PeerId,
@@ -574,10 +740,46 @@ impl Router {
         kind: MessageKind,
         content_taint: Option<SendTaintOverride>,
     ) -> Result<SendOutcome, SendError> {
-        let Some(peer) = self.trusted_peer_by_peer_id(&dest) else {
-            return Err(SendError::PeerNotFound(dest));
+        // An exact correlated endpoint is the authority for precisely one
+        // Response and therefore takes precedence over a potentially stale
+        // durable route. For every other send, durable trust remains the
+        // authority; the legacy uncorrelated endpoint is consulted only when
+        // trust misses, preserving its existing trust-store-wins contract.
+        enum ResolvedDest {
+            Trusted(TrustEntry),
+            Declared(DeclaredReplyEndpoint),
+        }
+        let correlated = match &kind {
+            MessageKind::Response { in_reply_to, .. } => {
+                self.take_staged_correlated_reply_endpoint(&dest, *in_reply_to)
+            }
+            _ => None,
         };
-        let addr = PeerAddr::parse(&peer.address.to_string())?;
+        let dest_entry = match correlated {
+            Some(endpoint) => ResolvedDest::Declared(endpoint),
+            None => match self.trusted_peer_by_peer_id(&dest) {
+                Some(peer) => ResolvedDest::Trusted(peer),
+                None => {
+                    let staged = if matches!(kind, MessageKind::Response { .. }) {
+                        self.take_staged_reply_endpoint(&dest)
+                    } else {
+                        None
+                    };
+                    match staged {
+                        Some(endpoint) => ResolvedDest::Declared(endpoint),
+                        None => return Err(SendError::PeerNotFound(dest)),
+                    }
+                }
+            },
+        };
+        let (addr, to_pubkey) = match &dest_entry {
+            ResolvedDest::Trusted(peer) => {
+                (PeerAddr::parse(&peer.address.to_string())?, peer.pubkey)
+            }
+            ResolvedDest::Declared(endpoint) => {
+                (PeerAddr::parse(&endpoint.address)?, endpoint.pubkey)
+            }
+        };
         let resolved_taint = match content_taint {
             // Absent override = inherit. A declaration the caller already
             // constructed INTO the kind wins over the runtime-level
@@ -593,7 +795,7 @@ impl Router {
         let mut envelope = Envelope {
             id: envelope_id,
             from: self.keypair.public_key(),
-            to: peer.pubkey,
+            to: to_pubkey,
             kind,
             sig: crate::identity::Signature::new([0u8; 64]),
         };
@@ -604,12 +806,17 @@ impl Router {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let wait_for_ack = should_wait_for_ack(&envelope.kind);
+            let is_declared_reply = matches!(&dest_entry, ResolvedDest::Declared(_));
             match addr {
                 #[cfg(unix)]
                 PeerAddr::Uds(path) => {
-                    let mut stream = UnixStream::connect(&path).await?;
-                    self.send_on_stream(&mut stream, envelope, wait_for_ack)
-                        .await
+                    let display = path.display().to_string();
+                    run_socket_route_operation(&display, is_declared_reply, async {
+                        let mut stream = UnixStream::connect(&path).await?;
+                        self.send_on_stream(&mut stream, envelope, wait_for_ack)
+                            .await
+                    })
+                    .await
                 }
                 #[cfg(not(unix))]
                 PeerAddr::Uds(_path) => Err(std::io::Error::new(
@@ -618,11 +825,24 @@ impl Router {
                 )
                 .into()),
                 PeerAddr::Tcp(addr_str) => {
-                    let mut stream = TcpStream::connect(&addr_str).await?;
-                    self.send_on_stream(&mut stream, envelope, wait_for_ack)
-                        .await
+                    run_socket_route_operation(&addr_str, is_declared_reply, async {
+                        let mut stream = TcpStream::connect(&addr_str).await?;
+                        self.send_on_stream(&mut stream, envelope, wait_for_ack)
+                            .await
+                    })
+                    .await
                 }
-                PeerAddr::Inproc(_) => self.send_inproc_in_namespace(&peer, envelope, dest).await,
+                PeerAddr::Inproc(_) => match &dest_entry {
+                    ResolvedDest::Trusted(peer) => {
+                        self.send_inproc_in_namespace(peer, envelope, dest).await
+                    }
+                    ResolvedDest::Declared(_) => {
+                        Err(SendError::Transport(TransportError::InvalidAddress(
+                            "declared reply endpoints must be socket addresses (tcp:// or uds://)"
+                                .to_string(),
+                        )))
+                    }
+                },
             }
         }
 
@@ -632,13 +852,22 @@ impl Router {
                 PeerAddr::Tcp(_) => Err(SendError::Transport(TransportError::InvalidAddress(
                     "TCP transport is not available on wasm32".to_string(),
                 ))),
-                PeerAddr::Inproc(_) => self.send_inproc_in_namespace(&peer, envelope, dest).await,
+                PeerAddr::Inproc(_) => match &dest_entry {
+                    ResolvedDest::Trusted(peer) => {
+                        self.send_inproc_in_namespace(peer, envelope, dest).await
+                    }
+                    ResolvedDest::Declared(_) => {
+                        Err(SendError::Transport(TransportError::InvalidAddress(
+                            "declared reply endpoints must be socket addresses (tcp:// or uds://)"
+                                .to_string(),
+                        )))
+                    }
+                },
             }
         }
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
     !matches!(kind, MessageKind::Ack { .. } | MessageKind::Response { .. })
 }
@@ -672,7 +901,7 @@ mod tests {
         }
     }
 
-    /// ROW #268 gate: `acked` reflects the verified ACK from the delivery path.
+    /// ROW #268 gate: the outcome reflects verified delivery-path authority.
     /// A stream send that receives and verifies a peer ACK reports
     /// [`PeerDeliveryOutcome::Acked`]; sends without receiver acknowledgement
     /// report the weaker typed `Queued` or `HandedOff` outcome.
@@ -1209,5 +1438,583 @@ mod tests {
         assert_eq!(received_taint("declared"), Some(SenderContentTaint::Clean));
 
         registry.unregister_in_namespace(&namespace, &receiver_pubkey);
+    }
+
+    /// One connection's framed envelope read off a raw loopback listener —
+    /// the receiver side for declared-reply-endpoint delivery tests.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn accept_one_envelope(
+        listener: tokio::net::TcpListener,
+    ) -> tokio::task::JoinHandle<Envelope> {
+        use crate::transport::codec::TransportCodec;
+        use futures::StreamExt;
+        use tokio_util::codec::Framed;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept reply connection");
+            let mut framed = Framed::new(stream, TransportCodec::new(DEFAULT_MAX_MESSAGE_BYTES));
+            framed
+                .next()
+                .await
+                .expect("reply frame arrives")
+                .expect("reply frame decodes")
+                .envelope
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn accept_envelopes(
+        listener: tokio::net::TcpListener,
+        count: usize,
+    ) -> tokio::task::JoinHandle<Vec<Envelope>> {
+        use crate::transport::codec::TransportCodec;
+        use futures::StreamExt;
+        tokio::spawn(async move {
+            let mut envelopes = Vec::with_capacity(count);
+            for _ in 0..count {
+                let (stream, _) = listener.accept().await.expect("accept reply connection");
+                let mut framed =
+                    Framed::new(stream, TransportCodec::new(DEFAULT_MAX_MESSAGE_BYTES));
+                envelopes.push(
+                    framed
+                        .next()
+                        .await
+                        .expect("reply frame arrives")
+                        .expect("reply frame decodes")
+                        .envelope,
+                );
+            }
+            envelopes
+        })
+    }
+
+    fn response_kind(marker: &str) -> MessageKind {
+        response_kind_for(Uuid::new_v4(), marker)
+    }
+
+    fn response_kind_for(in_reply_to: Uuid, marker: &str) -> MessageKind {
+        MessageKind::Response {
+            in_reply_to,
+            status: crate::types::Status::Failed,
+            result: serde_json::json!({ "marker": marker }),
+            blocks: None,
+            content_taint: None,
+            handling_mode: None,
+            objective_id: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn declared_reply_operation_is_bounded() {
+        let error = run_declared_reply_with_timeout(
+            "tcp://192.0.2.1:4311",
+            std::future::pending::<Result<(), SendError>>(),
+        )
+        .await
+        .expect_err("pending declared-route operation must time out");
+        assert!(matches!(
+            error,
+            SendError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
+    }
+
+    /// The production socket-routing wrapper applies its deadline only to a
+    /// declared callback. Advancing beyond that budget must not complete a
+    /// pending operation selected as durable trusted routing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn trusted_socket_route_operation_has_no_declared_reply_deadline() {
+        let mut operation = Box::pin(run_socket_route_operation(
+            "tcp://trusted-peer:4311",
+            false,
+            std::future::pending::<Result<(), SendError>>(),
+        ));
+        assert!(
+            futures::poll!(operation.as_mut()).is_pending(),
+            "trusted operation starts pending"
+        );
+
+        tokio::time::advance(DECLARED_REPLY_OPERATION_TIMEOUT + Duration::from_millis(1)).await;
+        assert!(
+            futures::poll!(operation.as_mut()).is_pending(),
+            "trusted routes must not inherit the untrusted callback deadline"
+        );
+    }
+
+    /// The declared-route deadline covers the frame write too, not just the
+    /// socket connect. A callback can accept a connection and then stop
+    /// reading; without this bound, a response larger than the socket buffer
+    /// strands the responder indefinitely.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn declared_tcp_reply_frame_write_is_bounded() {
+        let router = test_router();
+        let recipient = Keypair::generate().public_key();
+        let dest = recipient.to_peer_id();
+        let correlation = Uuid::new_v4();
+        let listener_socket = tokio::net::TcpSocket::new_v4().expect("create listener socket");
+        listener_socket
+            .set_recv_buffer_size(1024)
+            .expect("bound listener receive buffer");
+        listener_socket
+            .bind("127.0.0.1:0".parse().expect("loopback socket address"))
+            .expect("bind listener socket");
+        let listener = listener_socket.listen(1).expect("listen for callback");
+        let callback_address = listener.local_addr().expect("callback listener address");
+        router.stage_correlated_reply_endpoint(
+            dest,
+            correlation,
+            DeclaredReplyEndpoint {
+                pubkey: recipient,
+                address: format!("tcp://{callback_address}"),
+            },
+        );
+        let trap = tokio::spawn(async move {
+            let (_nonreading_receiver, _) = listener.accept().await.expect("accept callback");
+            std::future::pending::<()>().await;
+        });
+
+        // Stay below the protocol's 1 MiB frame ceiling while exceeding
+        // normal socket buffers after the trap advertises its tiny window.
+        let marker = "x".repeat(900 * 1024);
+        let error = router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(correlation, &marker),
+                None,
+            )
+            .await
+            .expect_err("non-reading correlated TCP callback must time out");
+        trap.abort();
+        assert!(matches!(
+            error,
+            SendError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn declared_uds_reply_frame_write_is_bounded() {
+        let router = test_router();
+        let recipient = Keypair::generate().public_key();
+        let dest = recipient.to_peer_id();
+        let correlation = Uuid::new_v4();
+        // macOS sockaddr_un paths are limited to 103 bytes and its per-user
+        // TMPDIR is already long. Keep this fixture path short enough that the
+        // test reaches the write-deadline behavior it is meant to exercise.
+        let socket_path = std::path::PathBuf::from("/tmp")
+            .join(format!("rkat-dr-{}.sock", Uuid::new_v4().simple()));
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind UDS callback");
+        router.stage_correlated_reply_endpoint(
+            dest,
+            correlation,
+            DeclaredReplyEndpoint {
+                pubkey: recipient,
+                address: format!("uds://{}", socket_path.display()),
+            },
+        );
+        let trap = tokio::spawn(async move {
+            let (_nonreading_receiver, _) = listener.accept().await.expect("accept UDS callback");
+            std::future::pending::<()>().await;
+        });
+
+        let marker = "x".repeat(900 * 1024);
+        let error = router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(correlation, &marker),
+                None,
+            )
+            .await
+            .expect_err("non-reading correlated UDS callback must time out");
+        trap.abort();
+        let _ = std::fs::remove_file(&socket_path);
+        assert!(matches!(
+            error,
+            SendError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
+    }
+
+    /// A staged [`DeclaredReplyEndpoint`] delivers a `Response` to a peer the
+    /// trust store does not know, addressed to the staged (authenticated)
+    /// key — and is consumed by that one send.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn staged_reply_endpoint_delivers_response_once_to_untrusted_peer() {
+        let router = test_router();
+        let sender_kp = Keypair::generate();
+        let sender_pubkey = sender_kp.public_key();
+        let dest = sender_pubkey.to_peer_id();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reply listener");
+        let address = format!("tcp://{}", listener.local_addr().expect("listener addr"));
+        let received = accept_one_envelope(listener).await;
+
+        router.stage_reply_endpoint(
+            dest,
+            DeclaredReplyEndpoint {
+                pubkey: sender_pubkey,
+                address,
+            },
+        );
+        let outcome = router
+            .send_with_id(dest, Uuid::new_v4(), response_kind("reject"), None)
+            .await
+            .expect("staged endpoint must deliver the response");
+        assert_eq!(
+            outcome.delivery,
+            meerkat_core::comms::PeerDeliveryOutcome::Queued,
+            "Response sends never wait for an ack"
+        );
+
+        let envelope = received.await.expect("receiver task");
+        assert_eq!(
+            envelope.to, sender_pubkey,
+            "the reply is addressed to the staged authenticated key"
+        );
+        assert!(
+            matches!(envelope.kind, MessageKind::Response { .. }),
+            "staged delivery carries the response kind"
+        );
+
+        // One-shot: the same destination misses the trust store again AND the
+        // staged entry is gone.
+        let second = router
+            .send_with_id(dest, Uuid::new_v4(), response_kind("replay"), None)
+            .await;
+        assert!(
+            matches!(second, Err(SendError::PeerNotFound(_))),
+            "a consumed staged endpoint must not serve a second send: {second:?}"
+        );
+    }
+
+    /// Staged endpoints are a REPLY channel: non-`Response` kinds never
+    /// consult them (and must not consume them).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn staged_reply_endpoint_never_serves_non_response_kinds() {
+        let router = test_router();
+        let sender_kp = Keypair::generate();
+        let sender_pubkey = sender_kp.public_key();
+        let dest = sender_pubkey.to_peer_id();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reply listener");
+        let address = format!("tcp://{}", listener.local_addr().expect("listener addr"));
+        let received = accept_one_envelope(listener).await;
+
+        router.stage_reply_endpoint(
+            dest,
+            DeclaredReplyEndpoint {
+                pubkey: sender_pubkey,
+                address,
+            },
+        );
+        let message = router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    body: "not a reply".to_string(),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: None,
+                    objective_id: None,
+                },
+                None,
+            )
+            .await;
+        assert!(
+            matches!(message, Err(SendError::PeerNotFound(_))),
+            "a staged endpoint must not grant general sendability: {message:?}"
+        );
+
+        // The refused Message send did not consume the entry: the Response
+        // still delivers.
+        router
+            .send_with_id(dest, Uuid::new_v4(), response_kind("still-staged"), None)
+            .await
+            .expect("the staged endpoint survives non-response sends");
+        let envelope = received.await.expect("receiver task");
+        assert_eq!(envelope.to, sender_pubkey);
+    }
+
+    /// Trust-store entries are the send authority: when the destination is
+    /// trusted, the response dials the TRUSTED address and the staged entry
+    /// is never consulted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn trust_store_wins_over_staged_reply_endpoint() {
+        let router = test_router();
+        let sender_kp = Keypair::generate();
+        let sender_pubkey = sender_kp.public_key();
+        let dest = sender_pubkey.to_peer_id();
+
+        let trusted_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind trusted listener");
+        let trusted_address = format!("tcp://{}", trusted_listener.local_addr().expect("addr"));
+        let received = accept_one_envelope(trusted_listener).await;
+
+        let staged_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind staged listener");
+        let staged_address = format!("tcp://{}", staged_listener.local_addr().expect("addr"));
+
+        router
+            .add_trusted_peer_for_source(
+                peer("trusted-sender", sender_pubkey.0, &trusted_address),
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                false,
+            )
+            .expect("install trusted entry");
+        router.stage_reply_endpoint(
+            dest,
+            DeclaredReplyEndpoint {
+                pubkey: sender_pubkey,
+                address: staged_address,
+            },
+        );
+
+        router
+            .send_with_id(dest, Uuid::new_v4(), response_kind("via-trust"), None)
+            .await
+            .expect("trusted response send");
+        let envelope = received.await.expect("trusted receiver task");
+        assert_eq!(
+            envelope.to, sender_pubkey,
+            "the trusted route serves the response; the staged endpoint is not consulted"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn correlated_reply_endpoints_are_exact_concurrent_and_one_shot() {
+        let router = test_router();
+        let sender_kp = Keypair::generate();
+        let sender_pubkey = sender_kp.public_key();
+        let dest = sender_pubkey.to_peer_id();
+        let correlation_a = Uuid::new_v4();
+        let correlation_b = Uuid::new_v4();
+
+        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reply listener A");
+        let address_a = format!(
+            "tcp://{}",
+            listener_a.local_addr().expect("listener A addr")
+        );
+        let received_a = accept_one_envelope(listener_a).await;
+        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reply listener B");
+        let address_b = format!(
+            "tcp://{}",
+            listener_b.local_addr().expect("listener B addr")
+        );
+        let received_b = accept_one_envelope(listener_b).await;
+
+        router.stage_correlated_reply_endpoint(
+            dest,
+            correlation_a,
+            DeclaredReplyEndpoint {
+                pubkey: sender_pubkey,
+                address: address_a,
+            },
+        );
+        router.stage_correlated_reply_endpoint(
+            dest,
+            correlation_b,
+            DeclaredReplyEndpoint {
+                pubkey: sender_pubkey,
+                address: address_b,
+            },
+        );
+
+        // A non-Response cannot consume either entry.
+        let non_response = router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    body: "not a response".to_string(),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: None,
+                    objective_id: None,
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(non_response, Err(SendError::PeerNotFound(_))));
+
+        // An unmatched correlation cannot consume either exact entry.
+        let unmatched = router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(Uuid::new_v4(), "unmatched"),
+                None,
+            )
+            .await;
+        assert!(matches!(unmatched, Err(SendError::PeerNotFound(_))));
+
+        let (sent_a, sent_b) = tokio::join!(
+            router.send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(correlation_a, "a"),
+                None,
+            ),
+            router.send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(correlation_b, "b"),
+                None,
+            )
+        );
+        sent_a.expect("correlation A must route independently");
+        sent_b.expect("correlation B must route independently");
+        let envelope_a = received_a.await.expect("receiver A task");
+        let envelope_b = received_b.await.expect("receiver B task");
+        assert!(matches!(
+            envelope_a.kind,
+            MessageKind::Response { in_reply_to, .. } if in_reply_to == correlation_a
+        ));
+        assert!(matches!(
+            envelope_b.kind,
+            MessageKind::Response { in_reply_to, .. } if in_reply_to == correlation_b
+        ));
+
+        for correlation in [correlation_a, correlation_b] {
+            let replay = router
+                .send_with_id(
+                    dest,
+                    Uuid::new_v4(),
+                    response_kind_for(correlation, "replay"),
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(replay, Err(SendError::PeerNotFound(_))),
+                "correlated endpoint must be one-shot: {replay:?}"
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn exact_correlated_reply_overrides_trusted_route_only_for_its_response() {
+        let router = test_router();
+        let sender_kp = Keypair::generate();
+        let sender_pubkey = sender_kp.public_key();
+        let dest = sender_pubkey.to_peer_id();
+        let correlation = Uuid::new_v4();
+        let other_correlation = Uuid::new_v4();
+
+        let trusted_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stale trusted listener");
+        let trusted_address = format!(
+            "tcp://{}",
+            trusted_listener
+                .local_addr()
+                .expect("trusted listener addr")
+        );
+        let trusted_received = accept_envelopes(trusted_listener, 2).await;
+        router
+            .add_trusted_peer_for_source(
+                peer("rotating-peer", sender_pubkey.0, &trusted_address),
+                GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
+                false,
+            )
+            .expect("install durable route");
+
+        let correlated_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind correlated listener");
+        let correlated_address = format!(
+            "tcp://{}",
+            correlated_listener
+                .local_addr()
+                .expect("correlated listener addr")
+        );
+        let correlated_received = accept_one_envelope(correlated_listener).await;
+        router.stage_correlated_reply_endpoint(
+            dest,
+            correlation,
+            DeclaredReplyEndpoint {
+                pubkey: sender_pubkey,
+                address: correlated_address,
+            },
+        );
+
+        router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(correlation, "exact"),
+                None,
+            )
+            .await
+            .expect("exact correlation must bypass stale durable route");
+        let exact = correlated_received.await.expect("correlated receiver task");
+        assert!(matches!(
+            exact.kind,
+            MessageKind::Response { in_reply_to, .. } if in_reply_to == correlation
+        ));
+
+        router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(other_correlation, "durable"),
+                None,
+            )
+            .await
+            .expect("other correlation must retain durable trust routing");
+        router
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                response_kind_for(correlation, "exact-replay"),
+                None,
+            )
+            .await
+            .expect("consumed exact endpoint must fall back to durable trust");
+        let durable = trusted_received.await.expect("trusted receiver task");
+        assert_eq!(durable.len(), 2);
+        assert!(matches!(
+            &durable[0].kind,
+            MessageKind::Response { in_reply_to, .. } if *in_reply_to == other_correlation
+        ));
+        assert!(matches!(
+            &durable[1].kind,
+            MessageKind::Response { in_reply_to, .. } if *in_reply_to == correlation
+        ));
+    }
+
+    #[test]
+    fn correlated_reply_endpoint_cleanup_is_idempotent_and_exact() {
+        let router = test_router();
+        let sender_pubkey = Keypair::generate().public_key();
+        let dest = sender_pubkey.to_peer_id();
+        let correlation = Uuid::new_v4();
+        router.stage_correlated_reply_endpoint(
+            dest,
+            correlation,
+            DeclaredReplyEndpoint {
+                pubkey: sender_pubkey,
+                address: "tcp://127.0.0.1:4311".to_string(),
+            },
+        );
+        assert!(!router.unstage_correlated_reply_endpoint(dest, Uuid::new_v4()));
+        assert!(router.unstage_correlated_reply_endpoint(dest, correlation));
+        assert!(!router.unstage_correlated_reply_endpoint(dest, correlation));
     }
 }

@@ -618,11 +618,10 @@ impl RuntimeStore for FailingOpsLifecycleStore {
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner
-            .commit_unregister_finalization(runtime_id, commit, input_states)
+            .commit_unregister_finalization(runtime_id, finalization)
             .await
     }
 
@@ -638,6 +637,21 @@ impl RuntimeStore for FailingOpsLifecycleStore {
             ));
         }
         self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+    }
+
+    async fn initialize_ops_lifecycle_if_absent(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        candidate: &PersistedOpsSnapshot,
+    ) -> Result<PersistedOpsSnapshot, meerkat_runtime::RuntimeStoreError> {
+        if self.fail_ops_load_for.as_ref() == Some(runtime_id) {
+            return Err(meerkat_runtime::RuntimeStoreError::ReadFailed(
+                "synthetic ops lifecycle load failure".to_string(),
+            ));
+        }
+        self.inner
+            .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+            .await
     }
 
     async fn load_ops_lifecycle(
@@ -946,7 +960,7 @@ async fn cold_persistent_adapter_fails_closed_on_canonical_ops_snapshot_load_fai
         .expect_err("ops lifecycle load failure must not rotate to a fresh empty epoch");
     assert!(
         err.to_string()
-            .contains("failed to load ops lifecycle from durable store"),
+            .contains("failed to initialize ops lifecycle authority"),
         "unexpected prepare error: {err}"
     );
     assert!(
@@ -978,7 +992,7 @@ async fn cold_executor_attach_fails_closed_on_canonical_ops_snapshot_load_failur
         .expect_err("executor attach must not report success after ops authority load failure");
     assert!(
         err.to_string()
-            .contains("failed to load ops lifecycle from durable store"),
+            .contains("failed to initialize ops lifecycle authority"),
         "unexpected attach error: {err}"
     );
     assert!(

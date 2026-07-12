@@ -3,6 +3,18 @@
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
 mod embedded;
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
+mod live_host;
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
+mod live_projection;
 mod request_execution;
 #[cfg(feature = "session-store")]
 mod runtime_backed;
@@ -16,6 +28,21 @@ pub use embedded::{
     build_embedded_service, build_embedded_service_from_builder, set_default_schedule_tools,
     set_default_workgraph_tools,
 };
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
+pub use live_host::{
+    MobOwnedOnlyIngress, ServiceLiveToolDispatcher, ServiceMemberLiveHost,
+    ServiceMemberLiveHostConfig, member_live_error_from_open, member_live_error_from_verb,
+};
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
+pub use live_projection::ServiceLiveProjection;
 pub use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
     SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
@@ -36,9 +63,16 @@ pub use runtime_backed::{
     PersistentRuntimeExecutor, RuntimeBackedInitialTurn, SurfaceRuntimeMaterializeError,
     build_runtime_backed_service, build_runtime_backed_service_with_capacities,
     default_persistent_executor, default_persistent_executor_with_workgraph_service,
-    install_prepared_runtime_interrupt_handle, materialize_session,
-    materialize_session_with_reserved_admission, run_runtime_backed_initial_turn_with_machine,
-    split_runtime_backed_eager_create_request,
+    install_prepared_runtime_interrupt_handle,
+    install_prepared_runtime_interrupt_handle_for_actor_slot,
+    materialize_attached_session_actor_only,
+    materialize_attached_session_actor_only_with_reserved_admission, materialize_session,
+    materialize_session_under_runtime_turn_boundary, materialize_session_with_reserved_admission,
+    materialize_session_with_reserved_admission_under_runtime_turn_boundary,
+    persistent_runtime_post_stop_cleanup_handle,
+    persistent_runtime_post_stop_cleanup_handle_for_actor_slot,
+    persistent_runtime_publication_handle, persistent_runtime_turn_finalization_boundary_handle,
+    run_runtime_backed_initial_turn_with_machine, split_runtime_backed_eager_create_request,
 };
 #[cfg(feature = "session-store")]
 pub use runtime_schedule_host::{
@@ -374,6 +408,7 @@ pub struct RuntimeHostSurfaceOptions {
     pub process_version: String,
     pub runtime_backed_sessions: bool,
     pub mobs: bool,
+    pub multi_host_mobs: bool,
     pub mcp_live: bool,
     pub comms: bool,
     pub blobs: bool,
@@ -426,6 +461,7 @@ impl RuntimeHostSurfaceOptions {
             process_version: process_version.into(),
             runtime_backed_sessions: false,
             mobs: false,
+            multi_host_mobs: false,
             mcp_live: false,
             comms: false,
             blobs: false,
@@ -511,6 +547,10 @@ pub fn build_runtime_host_capabilities(
             approvals: options.approvals,
             external_members: false,
             secure_remote_rpc: false,
+            // Multi-host mobs (SD-8) is an explicit producer fact rather
+            // than an alias for generic mob availability. This keeps the
+            // projection honest in compositions that ship local mobs only.
+            multi_host_mobs: options.multi_host_mobs,
         },
     }
 }
@@ -944,6 +984,23 @@ pub async fn emit_mcp_lifecycle_events(
 mod tests {
     use super::*;
     use meerkat_core::Config;
+
+    #[test]
+    fn runtime_host_capabilities_project_multi_host_mob_availability() {
+        let mut options = RuntimeHostSurfaceOptions::process("test-host", "0");
+        assert!(
+            !build_runtime_host_capabilities(&options)
+                .features
+                .multi_host_mobs,
+            "process defaults must not claim an unconfigured multi-host surface"
+        );
+
+        options.mobs = true;
+        options.multi_host_mobs = true;
+        let capabilities = build_runtime_host_capabilities(&options);
+        assert!(capabilities.features.mobs);
+        assert!(capabilities.features.multi_host_mobs);
+    }
 
     #[test]
     fn mob_owner_key_matches_session_by_mob_labels() {

@@ -1261,13 +1261,85 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let (effect_tx, boundary_handle, projected_effect, previous_snapshot, committed_snapshot) = {
-            let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await
-            else {
-                return Err(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                });
+        self.cancel_after_boundary_inner_for_incarnation(session_id, None, false)
+            .await
+    }
+
+    pub(super) async fn cancel_after_boundary_inner_for_incarnation(
+        &self,
+        session_id: &SessionId,
+        expected_member: Option<
+            &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        >,
+        fence_member_residency: bool,
+    ) -> Result<(), RuntimeDriverError> {
+        let expected_member = expected_member.cloned();
+        let (
+            member_lease,
+            witness,
+            held_mutation_gate,
+            boundary_handle,
+            expected_run_id,
+            projected_effect,
+            pending_dispatch,
+            dispatch_generation,
+            dispatch_lifecycle_phase,
+        ) = {
+            let member_lease = if fence_member_residency {
+                Some(
+                    self.acquire_member_effect_authority_lease(
+                        session_id,
+                        expected_member.as_ref(),
+                    )
+                    .await?,
+                )
+            } else {
+                match expected_member.as_ref() {
+                    Some(expected_member) => Some(
+                        self.acquire_member_effect_authority_lease(
+                            session_id,
+                            Some(expected_member),
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                }
             };
+            let captured_session_gate = match &member_lease {
+                Some(lease) => Arc::clone(&lease.session_mutation_gate),
+                None => self.session_mutation_gate(session_id).await.ok_or(
+                    RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    },
+                )?,
+            };
+            let held_mutation_gate = Arc::clone(&captured_session_gate).lock_owned().await;
+            let captured_dsl_authority = {
+                let sessions = self.sessions.read().await;
+                let Some(entry) = sessions.get(session_id) else {
+                    return Err(if member_lease.is_some() {
+                        RuntimeDriverError::StaleAuthority {
+                            reason: "boundary-cancel runtime session disappeared".to_string(),
+                        }
+                    } else {
+                        RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        }
+                    });
+                };
+                if !Arc::ptr_eq(&entry.mutation_gate, &captured_session_gate) {
+                    return Err(RuntimeDriverError::StaleAuthority {
+                        reason: "boundary-cancel runtime session was replaced".to_string(),
+                    });
+                }
+                Arc::clone(&entry.dsl_authority)
+            };
+            let state = self
+                .existing_session_runtime_state(session_id)
+                .await
+                .unwrap_or(RuntimeState::Destroyed);
+            self.reject_unregistration_drain_ingress(session_id, state)
+                .await?;
             let staged = match self
                 .stage_session_dsl_transition(
                     session_id,
@@ -1295,8 +1367,22 @@ impl MeerkatMachine {
                 }
             };
             let projected_effect =
-                crate::effect::runtime_effect_projection_optional_from_dsl_effects(&staged.effects)
-                    .map_err(RuntimeDriverError::Internal)?;
+                match crate::effect::runtime_effect_projection_optional_from_dsl_effects(
+                    &staged.effects,
+                ) {
+                    Ok(projected_effect) => projected_effect,
+                    Err(error) => {
+                        let dispatch_generation = staged
+                            .committed_snapshot
+                            .state()
+                            .boundary_cancel_dispatch_generation;
+                        Self::abort_dsl_boundary_cancel_dispatch_if_current(
+                            &captured_dsl_authority,
+                            dispatch_generation,
+                        )?;
+                        return Err(RuntimeDriverError::Internal(error));
+                    }
+                };
             let Some(projected_effect) = projected_effect else {
                 // Machine-owned convergence: a boundary-cancel dispatch is
                 // already outstanding, so the machine took the typed
@@ -1318,41 +1404,114 @@ impl MeerkatMachine {
                 }
                 return Ok(());
             };
+            let expected_run_id = staged
+                .committed_snapshot
+                .state()
+                .current_run_id
+                .as_ref()
+                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl)
+                .ok_or_else(|| {
+                    RuntimeDriverError::Internal(
+                        "CancelAfterBoundary committed a live dispatch without an exact active run id"
+                            .to_string(),
+                    )
+                })?;
+            let dispatch_generation = staged
+                .committed_snapshot
+                .state()
+                .boundary_cancel_dispatch_generation;
+            let dispatch_lifecycle_phase = staged.committed_snapshot.state().lifecycle_phase;
+            // Arm exact compensation before the first post-transition await.
+            // From this point caller cancellation may only drop an
+            // acknowledgement, never strand BoundaryCancelAlreadyPending.
+            let pending_dispatch = PendingBoundaryCancelDispatchGuard::new(
+                Arc::clone(&captured_dsl_authority),
+                dispatch_generation,
+            );
 
             let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
+            let Some(entry) = sessions.get(session_id) else {
+                drop(sessions);
+                Self::abort_dsl_boundary_cancel_dispatch_if_current(
+                    &captured_dsl_authority,
+                    dispatch_generation,
+                )?;
+                return Err(RuntimeDriverError::NotReady {
                     state: RuntimeState::Destroyed,
-                })?;
+                });
+            };
+            if !Arc::ptr_eq(&entry.mutation_gate, &captured_session_gate)
+                || !Arc::ptr_eq(&entry.dsl_authority, &captured_dsl_authority)
+            {
+                drop(sessions);
+                Self::abort_dsl_boundary_cancel_dispatch_if_current(
+                    &captured_dsl_authority,
+                    dispatch_generation,
+                )?;
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: "boundary-cancel runtime session authority changed while staging"
+                        .to_string(),
+                });
+            }
+            let Some(attachment_id) = entry.live_attachment_id() else {
+                drop(sessions);
+                Self::abort_dsl_boundary_cancel_dispatch_if_current(
+                    &captured_dsl_authority,
+                    dispatch_generation,
+                )?;
+                return Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Idle,
+                });
+            };
+            let Some(effect_tx) = entry.effect_sender() else {
+                drop(sessions);
+                Self::abort_dsl_boundary_cancel_dispatch_if_current(
+                    &captured_dsl_authority,
+                    dispatch_generation,
+                )?;
+                return Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Idle,
+                });
+            };
             (
-                entry.effect_sender(),
+                member_lease,
+                RuntimeEffectDispatchAttachmentWitness {
+                    mutation_gate: captured_session_gate,
+                    driver: entry.driver.clone(),
+                    dsl_authority: captured_dsl_authority,
+                    attachment_id,
+                    effect_tx,
+                },
+                held_mutation_gate,
                 entry.boundary_handle(),
+                expected_run_id,
                 projected_effect,
-                staged.previous_snapshot,
-                staged.committed_snapshot,
+                pending_dispatch,
+                dispatch_generation,
+                dispatch_lifecycle_phase,
             )
         };
 
-        if let Err(err) = self
+        let member_authority = member_lease.map(|lease| RuntimeEffectDispatchMemberAuthority {
+            lease,
+            expected_member,
+        });
+        let gate_guard = self
             .dispatch_cancel_after_boundary_runtime_effect(
                 session_id,
-                effect_tx,
+                witness,
+                held_mutation_gate,
                 boundary_handle,
+                member_authority,
+                pending_dispatch,
+                &expected_run_id,
                 projected_effect,
+                dispatch_generation,
+                dispatch_lifecycle_phase,
                 "CancelAfterBoundary",
             )
-            .await
-        {
-            self.restore_session_dsl_state_if_current(
-                session_id,
-                committed_snapshot,
-                previous_snapshot,
-            )
-            .await;
-            return Err(err);
-        }
-
+            .await?;
+        drop(gate_guard);
         Ok(())
     }
 
@@ -1409,6 +1568,461 @@ impl MeerkatMachine {
             .await
     }
 
+    /// Accept input only if one exact committed executor attachment still owns
+    /// the session. The machine holds that session's mutation gate from the
+    /// witness check through durable admission, so an attachment replacement
+    /// cannot split surface request context from the executor that consumes it.
+    pub async fn accept_input_with_completion_for_attachment(
+        &self,
+        witness: &RuntimeExecutorAttachmentWitness,
+        input: Input,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        if !witness.belongs_to(self) {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "input admission attachment witness belongs to another machine".to_string(),
+            });
+        }
+        match self
+            .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: witness.session_id().clone(),
+                input,
+                register_completion: true,
+                member_residency: MemberResidencyExpectation::Unfenced,
+                expected_attachment: Some(witness.clone()),
+            })
+            .await?
+        {
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome,
+                handle,
+                admission_signal: _,
+            } => Ok((outcome, handle)),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected exact-attachment accept result: {other:?}"
+            ))),
+        }
+    }
+
+    /// Accept one bridge/raw-peer input under an exact member-residency
+    /// expectation. `None` means true PeerOnly (never VacantPlaced). The
+    /// ingress command holds the stable slot and uses the session gate
+    /// captured by that lease, so same-SessionId replacement cannot occur
+    /// between fence validation and durable acceptance.
+    pub async fn accept_input_with_completion_for_member_residency(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+        expected_member: Option<
+            &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        >,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        let member_residency = expected_member
+            .map_or(MemberResidencyExpectation::PeerOnly, |expected| {
+                MemberResidencyExpectation::Placed(expected.clone())
+            });
+        match self
+            .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: session_id.clone(),
+                input,
+                register_completion: true,
+                member_residency,
+                expected_attachment: None,
+            })
+            .await?
+        {
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome,
+                handle,
+                admission_signal: _,
+            } => Ok((outcome, handle)),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected fenced accept result: {other:?}"
+            ))),
+        }
+    }
+
+    /// Converge one exact durable tracked input to a runtime terminal under a
+    /// full member-residency fence. Queued work is abandoned directly and
+    /// persisted; staged/applied work is cancelled only through its exact run
+    /// id so a retry can never interrupt a newer run.
+    ///
+    /// The host installs its durable `Cancelling` receipt before calling this
+    /// method. Consequently a transient error is safe to retry and no delayed
+    /// delivery can re-enter while runtime quiescence is incomplete.
+    pub async fn cancel_tracked_input_for_member_incarnation(
+        &self,
+        session_id: &SessionId,
+        idempotency_key: &str,
+        expected_member: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+    ) -> Result<(), RuntimeDriverError> {
+        use crate::input_state::{InputAbandonReason, InputLifecycleState};
+
+        const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+        const RETRY: std::time::Duration = std::time::Duration::from_millis(25);
+        let deadline = crate::tokio::time::Instant::now() + SETTLE;
+        loop {
+            enum Action {
+                Done,
+                PublishQueued {
+                    driver: crate::meerkat_machine::driver::SharedDriver,
+                    completions: crate::meerkat_machine::driver::SharedCompletionRegistry,
+                    publication_handle: Option<
+                        std::sync::Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
+                    >,
+                    input_id: meerkat_core::lifecycle::InputId,
+                    candidate_owner_input_id: Option<meerkat_core::lifecycle::InputId>,
+                },
+                CancelRun(meerkat_core::RunId),
+                Retry,
+            }
+
+            let authority = self
+                .lock_member_effect_authority(session_id, expected_member)
+                .await?;
+            let (driver, completions, publication_handle) = {
+                let sessions = self.sessions.read().await;
+                let entry =
+                    sessions
+                        .get(session_id)
+                        .ok_or_else(|| RuntimeDriverError::StaleAuthority {
+                            reason: "tracked-input cancellation runtime session disappeared"
+                                .to_string(),
+                        })?;
+                (
+                    entry.driver.clone(),
+                    entry.completions.clone(),
+                    entry.publication_handle(),
+                )
+            };
+            let action = {
+                let mut driver_guard = driver.lock().await;
+                let input_id = driver_guard
+                    .as_driver()
+                    .input_id_for_idempotency_key(idempotency_key);
+                match input_id {
+                    None => Action::Done,
+                    Some(input_id) => {
+                        let stored = driver_guard.as_driver().stored_input_state(&input_id);
+                        match stored {
+                            None => Action::Done,
+                            Some(stored) if stored.seed.terminal_outcome.is_some() => Action::Done,
+                            Some(stored) if stored.seed.phase == InputLifecycleState::Queued => {
+                                let input_ids = vec![input_id.clone()];
+                                let reason = "tracked input cancelled before run".to_string();
+                                let prepared = driver_guard
+                                    .prepare_runless_runtime_terminated_interaction_outboxes(
+                                        &input_ids, reason,
+                                    )?;
+                                if let Err(error) = driver_guard
+                                    .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
+                                    .await
+                                {
+                                    driver_guard
+                                        .rollback_prepared_runless_interaction_terminal_outboxes(
+                                            prepared,
+                                        );
+                                    return Err(error);
+                                }
+                                let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                                Action::PublishQueued {
+                                    driver: driver.clone(),
+                                    completions: completions.clone(),
+                                    publication_handle: publication_handle.clone(),
+                                    input_id,
+                                    candidate_owner_input_id,
+                                }
+                            }
+                            Some(stored) => stored
+                                .seed
+                                .last_run_id
+                                .map_or(Action::Retry, Action::CancelRun),
+                        }
+                    }
+                }
+            };
+            match action {
+                Action::Done => return Ok(()),
+                Action::PublishQueued {
+                    driver,
+                    completions,
+                    publication_handle,
+                    input_id,
+                    candidate_owner_input_id,
+                } => {
+                    // Retain `authority` across durable publication/waiter
+                    // handoff so replacement cannot overtake the exact queued
+                    // terminalization interval.
+                    crate::control_plane::publish_and_resolve_runless_runtime_termination(
+                        &driver,
+                        Some(&completions),
+                        publication_handle.as_deref(),
+                        &[input_id],
+                        candidate_owner_input_id.as_ref(),
+                        "tracked input cancelled before run",
+                    )
+                    .await?;
+                    drop(authority);
+                    return Ok(());
+                }
+                Action::CancelRun(run_id) => {
+                    drop(authority);
+                    let _ = self
+                        .hard_cancel_run_if_current_for_member_incarnation(
+                            session_id,
+                            &run_id,
+                            expected_member,
+                            "tracked input cancelled by supervisor".to_string(),
+                        )
+                        .await?;
+                }
+                Action::Retry => drop(authority),
+            }
+            if crate::tokio::time::Instant::now() >= deadline {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "tracked input '{idempotency_key}' did not reach a runtime terminal before the cancellation settle deadline"
+                )));
+            }
+            crate::tokio::time::sleep(RETRY).await;
+        }
+    }
+
+    /// Converge one exact accepted input to a runtime terminal without ever
+    /// falling back to the session's ambient current run.
+    ///
+    /// Request surfaces install this action only after admission has produced
+    /// the input id. A delayed cancellation for input A therefore either
+    /// abandons A while it is still queued or interrupts A's exact run id; it
+    /// cannot interrupt a newer input B that has since become current. The
+    /// captured driver pointer also turns same-`SessionId` replacement into a
+    /// level-triggered no-op.
+    ///
+    /// Returns `true` when the exact input was observed (including already
+    /// terminal) and `false` when its runtime attachment is gone or the input
+    /// is absent.
+    pub async fn cancel_input_if_present(
+        &self,
+        session_id: &SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+        reason: impl Into<String>,
+    ) -> Result<bool, RuntimeDriverError> {
+        let machine = self.clone();
+        let session_id = session_id.clone();
+        let input_id = input_id.clone();
+        let reason = reason.into();
+        let cleanup_spawner = MachineCleanupTaskSpawner::acquire()?;
+        let completion = cleanup_spawner.spawn(async move {
+            machine
+                .cancel_input_if_present_owned(&session_id, &input_id, reason)
+                .await
+        });
+        completion.await.map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "owned exact-input cancellation ended without a result: {error}"
+            ))
+        })?
+    }
+
+    async fn cancel_input_if_present_owned(
+        &self,
+        session_id: &SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+        reason: String,
+    ) -> Result<bool, RuntimeDriverError> {
+        const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+        self.cancel_input_if_present_owned_before(
+            session_id,
+            input_id,
+            reason,
+            crate::tokio::time::Instant::now() + SETTLE,
+        )
+        .await
+    }
+
+    async fn cancel_input_if_present_owned_before(
+        &self,
+        session_id: &SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+        reason: String,
+        deadline: crate::tokio::time::Instant,
+    ) -> Result<bool, RuntimeDriverError> {
+        use crate::input_state::{InputAbandonReason, InputLifecycleState};
+
+        const RETRY: std::time::Duration = std::time::Duration::from_millis(25);
+
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Ok(false);
+            };
+            entry.driver.clone()
+        };
+        loop {
+            enum Action {
+                Missing,
+                DrainTerminal {
+                    completions: crate::meerkat_machine::driver::SharedCompletionRegistry,
+                    publication_handle: Option<
+                        std::sync::Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
+                    >,
+                },
+                PublishQueued {
+                    completions: crate::meerkat_machine::driver::SharedCompletionRegistry,
+                    publication_handle: Option<
+                        std::sync::Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
+                    >,
+                    candidate_owner_input_id: Option<meerkat_core::lifecycle::InputId>,
+                },
+                CancelRun(meerkat_core::RunId),
+                Retry,
+            }
+
+            let authority = match self
+                .lock_current_session_driver_gate(session_id, &driver)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(
+                    RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    }
+                    | RuntimeDriverError::Destroyed,
+                ) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            let (completions, publication_handle) = {
+                let sessions = self.sessions.read().await;
+                let Some(entry) = sessions.get(session_id) else {
+                    return Ok(false);
+                };
+                if !std::sync::Arc::ptr_eq(&entry.driver, &driver) {
+                    return Ok(false);
+                }
+                (entry.completions.clone(), entry.publication_handle())
+            };
+            let action = {
+                let mut driver_guard = driver.lock().await;
+                match driver_guard.as_driver().stored_input_state(input_id) {
+                    None => Action::Missing,
+                    Some(stored) if stored.seed.terminal_outcome.is_some() => {
+                        Action::DrainTerminal {
+                            completions,
+                            publication_handle,
+                        }
+                    }
+                    Some(stored) if stored.seed.phase == InputLifecycleState::Queued => {
+                        let prepared = driver_guard
+                            .prepare_runless_runtime_terminated_interaction_outboxes(
+                                std::slice::from_ref(input_id),
+                                reason.clone(),
+                            )?;
+                        if let Err(error) = driver_guard
+                            .abandon_queued_input(input_id, InputAbandonReason::Cancelled)
+                            .await
+                        {
+                            driver_guard
+                                .rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                            return Err(error);
+                        }
+                        let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                        Action::PublishQueued {
+                            completions,
+                            publication_handle,
+                            candidate_owner_input_id,
+                        }
+                    }
+                    Some(stored) => stored
+                        .seed
+                        .last_run_id
+                        .map_or(Action::Retry, Action::CancelRun),
+                }
+            };
+
+            match action {
+                Action::Missing => return Ok(false),
+                Action::DrainTerminal {
+                    completions,
+                    publication_handle,
+                } => {
+                    // A prior attempt may have committed the runless terminal
+                    // carrier and then lost publication. Terminal observation
+                    // is not success until canonical recovery has published
+                    // that carrier and resolved its waiter.
+                    crate::control_plane::converge_known_committed_runless_runtime_terminations_before(
+                        &driver,
+                        Some(&completions),
+                        publication_handle.as_deref(),
+                        Some(deadline),
+                    )
+                    .await?;
+                    drop(authority);
+                    return Ok(true);
+                }
+                Action::PublishQueued {
+                    completions,
+                    publication_handle,
+                    candidate_owner_input_id,
+                } => {
+                    let publication = crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+                        &driver,
+                        Some(&completions),
+                        publication_handle.as_deref(),
+                        std::slice::from_ref(input_id),
+                        candidate_owner_input_id.as_ref(),
+                        &reason,
+                        Some(deadline),
+                    )
+                    .await;
+                    if let Err(error) = publication {
+                        if candidate_owner_input_id.is_none() {
+                            // Nondirected completion has no durable outbox to
+                            // authorize replay. Its process-owned handoff
+                            // either completed or returned the exact fatal
+                            // error; an empty recovery scan is not success.
+                            return Err(error);
+                        }
+                        tracing::warn!(
+                            %session_id,
+                            %input_id,
+                            error = %error,
+                            "exact queued-input cancellation committed its terminal carrier; retrying canonical publication recovery"
+                        );
+                        crate::control_plane::converge_known_committed_runless_runtime_terminations_before(
+                            &driver,
+                            Some(&completions),
+                            publication_handle.as_deref(),
+                            Some(deadline),
+                        )
+                        .await?;
+                    }
+                    drop(authority);
+                    return Ok(true);
+                }
+                Action::CancelRun(run_id) => {
+                    drop(authority);
+                    let _ = self
+                        .hard_cancel_run_if_current(session_id, &run_id, reason.clone())
+                        .await?;
+                    // The run may have terminalized between the exact input
+                    // read and the run-fenced interrupt. Re-read A instead of
+                    // ever widening to the ambient current run.
+                }
+                Action::Retry => {
+                    drop(authority);
+                }
+            }
+
+            if crate::tokio::time::Instant::now() >= deadline {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "input '{input_id}' did not reach a runtime terminal before the cancellation settle deadline"
+                )));
+            }
+            crate::tokio::time::sleep(RETRY).await;
+        }
+    }
+
     pub fn accept_input_with_completion_boxed<'a>(
         &'a self,
         session_id: &'a SessionId,
@@ -1433,6 +2047,8 @@ impl MeerkatMachine {
                         session_id: session_id.clone(),
                         input,
                         register_completion: true,
+                        member_residency: MemberResidencyExpectation::Unfenced,
+                        expected_attachment: None,
                     },
                 )
                 .await?
@@ -1531,6 +2147,45 @@ impl MeerkatMachine {
         }
     }
 
+    /// Install the exact runtime-placement tuple for a session whose local
+    /// resources were created with [`Self::prepare_local_session_bindings`].
+    ///
+    /// Remote mob hosts cannot use [`Self::prepare_bindings`]: that helper
+    /// derives a session-owned runtime id with fence/generation zero. The
+    /// controller already supplied the canonical member incarnation, so the
+    /// host must commit those exact facts through generated
+    /// `PrepareBindings` authority before attaching an executor or accepting a
+    /// turn.
+    pub async fn prepare_runtime_placement_binding(
+        &self,
+        session_id: SessionId,
+        agent_runtime_id: crate::identifiers::LogicalRuntimeId,
+        fence_token: u64,
+        generation: u64,
+    ) -> Result<(), RuntimeBindingsError> {
+        let _mutation_guard = self
+            .lock_current_session_mutation_gate(&session_id)
+            .await
+            .ok_or_else(|| RuntimeBindingsError::SessionNotFound(session_id.clone()))?;
+        let (driver_handle, epoch_id) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(&session_id)
+                .ok_or_else(|| RuntimeBindingsError::SessionNotFound(session_id.clone()))?;
+            (Arc::clone(&entry.driver), entry.epoch_id.clone())
+        };
+        self.commit_runtime_placement_binding(
+            &session_id,
+            &driver_handle,
+            &epoch_id,
+            agent_runtime_id,
+            fence_token,
+            generation,
+        )
+        .await
+        .map_err(|error| RuntimeBindingsError::PrepareFailed(session_id, error.to_string()))
+    }
+
     /// Prepare factory-consumable session runtime resources without emitting
     /// cross-machine binding signals.
     ///
@@ -1545,7 +2200,9 @@ impl MeerkatMachine {
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
         match Box::pin(self.prepare_session_runtime_bindings(
             session_id.clone(),
-            super::dispatch_session::SessionBindingPreparation::LocalSessionResources,
+            super::dispatch_session::SessionBindingPreparation::LocalSessionResources(
+                super::LocalSessionMaterializationMode::Ordinary,
+            ),
         ))
         .await
         {

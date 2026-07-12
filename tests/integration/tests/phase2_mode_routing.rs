@@ -1,46 +1,218 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::event_injector::{
     EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
 };
-use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
-    SessionQuery, SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage,
-    SessionView, StartTurnRequest,
-};
+use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay};
 use meerkat_core::types::{
     ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, Usage,
 };
-use meerkat_core::{InteractionId, PlainEventSource, Provider};
-use meerkat_mob::{
-    AgentIdentity, MobBackendKind, MobBuilder, MobDefinition, MobId, MobRuntimeMode,
-    MobSessionService, MobStorage, SpawnMemberSpec,
+use meerkat_core::{
+    InteractionId, PlainEventSource, Provider, Session, SessionLlmIdentity, SystemContextStateError,
 };
-use tokio::sync::{Notify, RwLock};
+use meerkat_mob::{
+    AgentIdentity, MobBackendKind, MobBuilder, MobDefinition, MobId, MobRuntimeMode, MobStorage,
+    SpawnMemberSpec,
+};
+use meerkat_session::{
+    EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+};
+use tokio::sync::mpsc;
 
-struct MockSessionService {
-    sessions: RwLock<HashMap<SessionId, ()>>,
-    keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
-    start_turn_calls: AtomicU64,
+struct MockSessionAgentBuilder {
+    start_turn_calls: Arc<AtomicU64>,
     inject_calls: Arc<AtomicU64>,
-    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
-impl Default for MockSessionService {
-    fn default() -> Self {
-        Self {
-            sessions: RwLock::new(HashMap::new()),
-            keep_alive_notifiers: RwLock::new(HashMap::new()),
-            start_turn_calls: AtomicU64::new(0),
-            inject_calls: Arc::new(AtomicU64::new(0)),
-            runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+struct MockSessionAgent {
+    session: Session,
+    llm_identity: SessionLlmIdentity,
+    keep_alive: bool,
+    start_turn_calls: Arc<AtomicU64>,
+    inject_calls: Arc<AtomicU64>,
+    system_context_state: meerkat_core::SystemContextStateHandle,
+}
+
+impl MockSessionAgent {
+    async fn run(&mut self) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if self.keep_alive {
+            // The autonomous host owns this long-lived turn. The native
+            // session task drops this future through its ordinary interrupt
+            // path during teardown.
+            std::future::pending::<()>().await;
         }
+        Ok(RunResult {
+            text: "ok".to_string(),
+            session_id: self.session.id().clone(),
+            usage: Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: None,
+            structured_output: None,
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        })
+    }
+}
+
+#[async_trait]
+impl SessionAgentBuilder for MockSessionAgentBuilder {
+    type Agent = MockSessionAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        let requested_session_id = req.build.as_ref().and_then(|build| {
+            build
+                .resume_session
+                .as_ref()
+                .map(|session| session.id().clone())
+                .or_else(|| match &build.runtime_build_mode {
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
+                        Some(bindings.session_id().clone())
+                    }
+                    meerkat_core::RuntimeBuildMode::StandaloneEphemeral => None,
+                })
+        });
+        let session = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.clone())
+            .unwrap_or_else(|| Session::with_id(requested_session_id.unwrap_or_default()));
+        let system_context_state = meerkat_core::SystemContextStateHandle::new(
+            session.system_context_state().unwrap_or_default(),
+        )
+        .map_err(|error| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to restore phase2 test system-context state: {error}"
+            )))
+        })?;
+        let build = req.build.as_ref();
+        Ok(MockSessionAgent {
+            session,
+            llm_identity: SessionLlmIdentity {
+                model: req.model.clone(),
+                provider: build
+                    .and_then(|build| build.provider)
+                    .unwrap_or(Provider::Other),
+                self_hosted_server_id: build.and_then(|build| build.self_hosted_server_id.clone()),
+                provider_params: build.and_then(|build| build.provider_params.clone()),
+                auth_binding: build.and_then(|build| build.auth_binding.clone()),
+            },
+            keep_alive: build.is_some_and(|build| build.keep_alive),
+            start_turn_calls: Arc::clone(&self.start_turn_calls),
+            inject_calls: Arc::clone(&self.inject_calls),
+            system_context_state,
+        })
+    }
+}
+
+#[async_trait]
+impl SessionAgent for MockSessionAgent {
+    async fn run_with_events(
+        &mut self,
+        _prompt: ContentInput,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.run().await
+    }
+
+    async fn run_turn_with_events(
+        &mut self,
+        _input: meerkat_session::ephemeral::SessionAgentTurnInput,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
+        self.run().await
+    }
+
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+    fn set_turn_tool_overlay(
+        &mut self,
+        _overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    fn cancel(&mut self) {}
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        _request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.llm_identity = identity;
+        Ok(())
+    }
+
+    fn session_id(&self) -> SessionId {
+        self.session.id().clone()
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            created_at: self.session.created_at(),
+            updated_at: self.session.updated_at(),
+            message_count: self.session.messages().len(),
+            total_tokens: self.session.total_tokens(),
+            usage: self.session.total_usage(),
+            last_assistant_text: None,
+        }
+    }
+
+    fn session_clone(&self) -> Result<Session, SystemContextStateError> {
+        let mut session = self.session.clone();
+        session
+            .set_system_context_state(self.system_context_state.snapshot())
+            .map_err(SystemContextStateError::SystemContext)?;
+        Ok(session)
+    }
+
+    fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+        Some(self.llm_identity.clone())
+    }
+
+    fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+        meerkat_core::pending_continuation::observe_session_tail(self.session.messages())
+    }
+
+    fn update_keep_alive(&mut self, keep_alive: bool) {
+        self.keep_alive = keep_alive;
+    }
+
+    fn apply_runtime_system_context(
+        &mut self,
+        appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+        self.session.append_system_context_blocks(appends);
+        let _ = self.system_context_state.replace_from_generated_restore(
+            self.session.system_context_state().unwrap_or_default(),
+        );
+    }
+
+    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
+        self.system_context_state.clone()
+    }
+
+    fn event_injector(&self) -> Option<Arc<dyn EventInjector>> {
+        Some(Arc::new(MockInjector {
+            inject_calls: Arc::clone(&self.inject_calls),
+        }))
+    }
+
+    fn interaction_event_injector(&self) -> Option<Arc<dyn SubscribableInjector>> {
+        Some(Arc::new(MockInjector {
+            inject_calls: Arc::clone(&self.inject_calls),
+        }))
     }
 }
 
@@ -100,224 +272,17 @@ impl SubscribableInjector for MockInjector {
     }
 }
 
-#[async_trait]
-impl SessionService for MockSessionService {
-    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        let sid = req
-            .build
-            .as_ref()
-            .and_then(|build| build.resume_session.as_ref())
-            .map(|session| session.id().clone())
-            .unwrap_or_default();
-        self.sessions.write().await.insert(sid.clone(), ());
-        let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
-        if is_keep_alive {
-            self.keep_alive_notifiers
-                .write()
-                .await
-                .insert(sid.clone(), Arc::new(Notify::new()));
-        }
-        Ok(RunResult {
-            text: "ok".to_string(),
-            session_id: sid,
-            usage: Usage::default(),
-            turns: 1,
-            tool_calls: 0,
-            terminal_cause_kind: None,
-            structured_output: None,
-            extraction_error: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        })
-    }
-
-    async fn start_turn(
-        &self,
-        id: &SessionId,
-        _req: StartTurnRequest,
-    ) -> Result<RunResult, SessionError> {
-        self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
-        if !self.sessions.read().await.contains_key(id) {
-            return Err(SessionError::NotFound { id: id.clone() });
-        }
-        // Block indefinitely for keep-alive sessions (autonomous host loop expects this)
-        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
-            notifier.notified().await;
-            return Ok(RunResult {
-                text: "Host loop interrupted".to_string(),
-                session_id: id.clone(),
-                usage: Usage::default(),
-                turns: 1,
-                tool_calls: 0,
-                terminal_cause_kind: None,
-                structured_output: None,
-                extraction_error: None,
-                schema_warnings: None,
-                skill_diagnostics: None,
-            });
-        }
-        Ok(RunResult {
-            text: "ok".to_string(),
-            session_id: id.clone(),
-            usage: Usage::default(),
-            turns: 1,
-            tool_calls: 0,
-            terminal_cause_kind: None,
-            structured_output: None,
-            extraction_error: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        })
-    }
-
-    async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
-            notifier.notify_waiters();
-        }
-        Ok(())
-    }
-
-    async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
-        if !self.sessions.read().await.contains_key(id) {
-            return Err(SessionError::NotFound { id: id.clone() });
-        }
-        Ok(SessionView {
-            state: SessionInfo {
-                session_id: id.clone(),
-                created_at: SystemTime::now(),
-                updated_at: SystemTime::now(),
-                message_count: 0,
-                is_active: false,
-                model: "claude-sonnet-4-5".to_string(),
-                provider: Provider::Anthropic,
-                last_assistant_text: None,
-                labels: Default::default(),
-            },
-            billing: SessionUsage {
-                total_tokens: 0,
-                usage: Usage::default(),
-            },
-        })
-    }
-
-    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
-        Ok(self.sessions.read().await.contains_key(id))
-    }
-
-    async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        Ok(Vec::new())
-    }
-
-    async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.sessions.write().await.remove(id);
-        if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
-            notifier.notify_waiters();
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl SessionServiceCommsExt for MockSessionService {
-    async fn comms_runtime(&self, _session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
-        None
-    }
-
-    async fn event_injector(&self, session_id: &SessionId) -> Option<Arc<dyn EventInjector>> {
-        if !self.sessions.read().await.contains_key(session_id) {
-            return None;
-        }
-        Some(Arc::new(MockInjector {
-            inject_calls: self.inject_calls.clone(),
-        }))
-    }
-
-    async fn interaction_event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn SubscribableInjector>> {
-        if !self.sessions.read().await.contains_key(session_id) {
-            return None;
-        }
-        Some(Arc::new(MockInjector {
-            inject_calls: self.inject_calls.clone(),
-        }))
-    }
-}
-
-#[async_trait]
-impl meerkat_core::service::SessionServiceHistoryExt for MockSessionService {
-    async fn read_history(
-        &self,
-        id: &SessionId,
-        query: SessionHistoryQuery,
-    ) -> Result<SessionHistoryPage, SessionError> {
-        if !self.sessions.read().await.contains_key(id) {
-            return Err(SessionError::NotFound { id: id.clone() });
-        }
-        Ok(SessionHistoryPage::from_messages(id.clone(), &[], query))
-    }
-}
-
-#[async_trait]
-impl meerkat_core::service::SessionServiceControlExt for MockSessionService {
-    async fn append_system_context(
-        &self,
-        id: &SessionId,
-        _req: meerkat_core::AppendSystemContextRequest,
-    ) -> Result<
-        meerkat_core::service::AppendSystemContextResult,
-        meerkat_core::service::SessionControlError,
-    > {
-        if !self.sessions.read().await.contains_key(id) {
-            return Err(meerkat_core::SessionError::NotFound { id: id.clone() }.into());
-        }
-        Ok(meerkat_core::service::AppendSystemContextResult {
-            status: meerkat_core::service::AppendSystemContextStatus::Staged,
-        })
-    }
-}
-
-#[async_trait]
-impl MobSessionService for MockSessionService {
-    fn supports_persistent_sessions(&self) -> bool {
-        true
-    }
-
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
-        Some(self.runtime_adapter.clone())
-    }
-
-    async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
-        true
-    }
-
-    async fn apply_runtime_turn(
-        &self,
-        session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        req: StartTurnRequest,
-        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        <Self as SessionService>::start_turn(self, session_id, req).await?;
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
-                run_id,
-                boundary,
-                contributing_input_ids,
-                conversation_digest: None,
-                message_count: 0,
-            },
-            session_snapshot: None,
-            terminal: None,
-        })
-    }
-}
-
 #[tokio::test]
 async fn test_phase2_external_turn_routing_by_runtime_mode() {
-    let service = Arc::new(MockSessionService::default());
+    let start_turn_calls = Arc::new(AtomicU64::new(0));
+    let inject_calls = Arc::new(AtomicU64::new(0));
+    let service = Arc::new(EphemeralSessionService::new(
+        MockSessionAgentBuilder {
+            start_turn_calls: Arc::clone(&start_turn_calls),
+            inject_calls: Arc::clone(&inject_calls),
+        },
+        16,
+    ));
     let mut definition = MobDefinition::from_toml(
         "[mob]\nid = \"phase2-routing\"\norchestrator = \"lead\"\n\n[profiles.lead]\nmodel = \"claude-opus-4-8\"\nexternal_addressable = true\n\n[profiles.lead.tools]\nbuiltins = true\ncomms = true\nmob = true\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\nbuiltins = true\ncomms = true\n",
     )
@@ -327,7 +292,8 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
     definition.wiring.auto_wire_orchestrator = false;
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
         .create()
         .await
         .expect("create");
@@ -342,8 +308,8 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         .spawn_spec(turn_spec)
         .await
         .expect("spawn turn-driven");
-    let start_before = service.start_turn_calls.load(Ordering::Relaxed);
-    let inject_before = service.inject_calls.load(Ordering::Relaxed);
+    let start_before = start_turn_calls.load(Ordering::Relaxed);
+    let inject_before = inject_calls.load(Ordering::Relaxed);
 
     handle
         .member(&AgentIdentity::from("lead-auto"))
@@ -351,20 +317,39 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         .expect("member auto")
         .send("auto".to_string(), meerkat_core::types::HandlingMode::Queue)
         .await
-        .expect("external autonomous");
+        .expect("external autonomous ingress accepted");
     handle
         .member(&AgentIdentity::from("lead-turn"))
         .await
         .expect("member turn")
         .send("turn".to_string(), meerkat_core::types::HandlingMode::Queue)
         .await
-        .expect("external turn-driven");
+        .expect("external turn-driven ingress accepted");
 
-    let start_after = service.start_turn_calls.load(Ordering::Relaxed);
-    let inject_after = service.inject_calls.load(Ordering::Relaxed);
+    // Runtime-backed external delivery acknowledges ingress admission, not
+    // executor completion. Wait for the two native routing effects instead of
+    // relying on the synchronous behavior of the former hand-written mock.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while start_turn_calls.load(Ordering::Relaxed) <= start_before {
+        assert!(
+            Instant::now() < deadline,
+            "turn-driven path should execute a native session turn"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    while inject_calls.load(Ordering::Relaxed) <= inject_before {
+        assert!(
+            Instant::now() < deadline,
+            "autonomous path should invoke event injector"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let start_after = start_turn_calls.load(Ordering::Relaxed);
+    let inject_after = inject_calls.load(Ordering::Relaxed);
     assert!(
         start_after > start_before,
-        "turn-driven path should invoke start_turn"
+        "turn-driven path should execute a native session turn"
     );
     assert!(
         inject_after > inject_before,

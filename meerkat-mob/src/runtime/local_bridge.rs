@@ -114,6 +114,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
         // transport-prefixed session string.
         let runtime_id = LogicalRuntimeId::for_session(&self.session_id);
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
@@ -371,6 +372,7 @@ mod tests {
         impl CoreExecutorBoundaryHandle for BoundaryHandle {
             async fn cancel_after_boundary(
                 &self,
+                _expected_run_id: &meerkat_core::RunId,
                 _reason: String,
             ) -> Result<(), CoreExecutorError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -533,6 +535,7 @@ mod tests {
         impl CoreExecutorBoundaryHandle for ReentrantBoundaryHandle {
             async fn cancel_after_boundary(
                 &self,
+                _expected_run_id: &meerkat_core::RunId,
                 _reason: String,
             ) -> Result<(), CoreExecutorError> {
                 let laps = self.handle_calls.fetch_add(1, Ordering::SeqCst);

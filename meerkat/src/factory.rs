@@ -270,6 +270,67 @@ pub fn decode_llm_client_override_from_service(
         .map(|typed| typed.0.clone())
 }
 
+/// Resolve a pre-built session comms runtime override (multi-host mobs
+/// DEC-P3H-3). Fail closed on both failure modes: an unrecognized payload
+/// never falls back to config-mode construction, and a runtime whose
+/// participant name disagrees with the build's `comms_name` never builds a
+/// session under the wrong identity.
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+fn resolve_session_comms_runtime_override(
+    override_payload: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    expected_comms_name: Option<&str>,
+) -> Result<Option<Arc<meerkat_comms::CommsRuntime>>, BuildAgentError> {
+    let Some(payload) = override_payload else {
+        return Ok(None);
+    };
+    let Some(runtime) = crate::sdk::decode_session_comms_runtime_override_from_service(&payload)
+    else {
+        return Err(BuildAgentError::Config(
+            "session_comms_runtime_override carried an unrecognized payload; refusing to fall \
+             back to config-mode comms construction"
+                .to_string(),
+        ));
+    };
+    let actual = runtime.participant_name().to_string();
+    match expected_comms_name {
+        Some(expected) if expected == actual => Ok(Some(runtime)),
+        Some(expected) => Err(BuildAgentError::Config(format!(
+            "session comms runtime override name '{actual}' does not match the build's \
+             comms_name '{expected}'"
+        ))),
+        None => Err(BuildAgentError::Config(
+            "session comms runtime override provided without a comms_name on the build".to_string(),
+        )),
+    }
+}
+
+/// wasm32 posture for the session comms runtime override: the encoding
+/// helper (`sdk`) and every producer of the payload (the member-host
+/// daemon's materializer) are native-only, so a payload arriving here is a
+/// wiring error — fail closed, never silently ignore it.
+#[cfg(all(feature = "comms", target_arch = "wasm32"))]
+fn resolve_session_comms_runtime_override(
+    override_payload: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    _expected_comms_name: Option<&str>,
+) -> Result<Option<Arc<meerkat_comms::CommsRuntime>>, BuildAgentError> {
+    match override_payload {
+        None => Ok(None),
+        Some(_) => Err(BuildAgentError::Config(
+            "session_comms_runtime_override is not supported on wasm32 builds".to_string(),
+        )),
+    }
+}
+
+/// A1/ADJ-17 predicate: the factory-appended skill-inventory prompt section
+/// applies to `Full` builds only. `SpecPinned` (set ONLY by the member-host
+/// spec decompiler, and by revival re-running it) keeps spec-built session
+/// prompts byte-pinned across placements; local mobs are unchanged.
+fn skill_inventory_prompt_section_enabled(
+    sections: meerkat_core::service::HostPromptSections,
+) -> bool {
+    matches!(sections, meerkat_core::service::HostPromptSections::Full)
+}
+
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
 #[derive(Clone)]
 pub struct AgentBuildConfig {
@@ -524,6 +585,18 @@ pub struct AgentBuildConfig {
     /// `SessionMetadata.tooling.tool_access_policy` so children can inherit
     /// it transitively.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Pre-built session comms runtime, type-erased (multi-host mobs
+    /// DEC-P3H-3 — the `llm_client_override` precedent). Produced by
+    /// [`crate::encode_session_comms_runtime_override_for_service`]; the
+    /// factory's comms arm downcasts fail-closed, verifies the participant
+    /// name equals `comms_name`, and skips config-mode construction. Set by
+    /// the mob member-host materializer; never by ordinary surfaces.
+    pub session_comms_runtime_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// ADJ-17 prompt-section policy: `SpecPinned` (set ONLY by the member
+    /// host's spec decompiler, and by revival re-running it) suppresses the
+    /// factory-appended skill-inventory section so spec-built prompts are
+    /// byte-pinned across placements. `Full` (default) is unchanged.
+    pub host_prompt_sections: meerkat_core::service::HostPromptSections,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -635,6 +708,11 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
             .field("tool_access_policy", &self.tool_access_policy)
+            .field(
+                "session_comms_runtime_override",
+                &self.session_comms_runtime_override.is_some(),
+            )
+            .field("host_prompt_sections", &self.host_prompt_sections)
             .finish()
     }
 }
@@ -710,6 +788,8 @@ impl AgentBuildConfig {
             initial_tool_visibility_state: None,
             initial_tool_filter: None,
             tool_access_policy: None,
+            session_comms_runtime_override: None,
+            host_prompt_sections: meerkat_core::service::HostPromptSections::default(),
         }
     }
 
@@ -828,6 +908,11 @@ impl AgentBuildConfig {
         self.call_timeout_override = build.call_timeout_override.clone();
         self.resume_override_mask = build.resume_override_mask;
         self.runtime_build_mode = build.runtime_build_mode.clone();
+        // Carried erased: the comms arm downcasts fail-closed at build time
+        // (a foreign payload is a typed build error there, never a silent
+        // drop here).
+        self.session_comms_runtime_override = build.session_comms_runtime_override.clone();
+        self.host_prompt_sections = build.host_prompt_sections;
     }
 
     /// Convert build options to the service transport representation.
@@ -892,6 +977,8 @@ impl AgentBuildConfig {
             resume_override_mask: self.resume_override_mask,
             runtime_build_mode: self.runtime_build_mode.clone(),
             initial_turn_metadata: None,
+            session_comms_runtime_override: self.session_comms_runtime_override.clone(),
+            host_prompt_sections: self.host_prompt_sections,
         }
     }
 }
@@ -4790,10 +4877,23 @@ impl AgentFactory {
         }
 
         // 6b. Create comms runtime before tool wiring.
+        // A per-session override (DEC-P3H-3: the mob member-host
+        // materializer pre-builds the member runtime with a durable
+        // session-scoped keypair and the machine-claimed session identity)
+        // wins outright: downcast fail-closed, participant name verified
+        // against comms_name, config-mode construction skipped. peer_meta /
+        // blob-store were already applied by the materializer.
+        #[cfg(feature = "comms")]
+        let session_comms_runtime_override = resolve_session_comms_runtime_override(
+            build_config.session_comms_runtime_override.take(),
+            build_config.comms_name.as_deref(),
+        )?;
         // If the factory has a pre-built runtime (surface with stable identity),
         // use it directly. Otherwise create a per-session runtime from config.
         #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
-        let comms_runtime = if let Some(ref shared) = self.comms_runtime
+        let comms_runtime = if let Some(runtime) = session_comms_runtime_override {
+            Some(runtime)
+        } else if let Some(ref shared) = self.comms_runtime
             && build_config.comms_name.is_none()
         {
             // Use the factory's shared runtime only when no per-session comms_name
@@ -4855,7 +4955,9 @@ impl AgentFactory {
             None
         };
         #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let comms_runtime = if let Some(ref shared) = self.comms_runtime
+        let comms_runtime = if let Some(runtime) = session_comms_runtime_override {
+            Some(runtime)
+        } else if let Some(ref shared) = self.comms_runtime
             && build_config.comms_name.is_none()
         {
             Some(Arc::clone(shared))
@@ -4891,6 +4993,15 @@ impl AgentFactory {
         } else {
             None
         };
+        #[cfg(not(feature = "comms"))]
+        if build_config.session_comms_runtime_override.take().is_some() {
+            // Fail closed: a pre-built comms runtime cannot be honored
+            // without the comms feature; ignoring it would build the member
+            // under the wrong (absent) identity.
+            return Err(BuildAgentError::Config(
+                "session comms runtime override requires the comms feature".to_string(),
+            ));
+        }
         #[cfg(not(feature = "comms"))]
         #[allow(clippy::no_effect_underscore_binding)]
         let _comms_runtime: Option<()> = None;
@@ -5521,8 +5632,13 @@ impl AgentFactory {
         // 12. Build system prompt (single canonical path)
         let mut extra_sections: Vec<&str> = Vec::new();
         // Only inject skill inventory (with tool guidance) when builtins are
-        // enabled — otherwise browse_skills/load_skill don't exist.
-        if !inventory_section.is_empty() && effective_builtins {
+        // enabled — otherwise browse_skills/load_skill don't exist — and only
+        // for `Full` prompt-section builds (A1/ADJ-17: SpecPinned mob-
+        // materialized builds keep spec-built prompts byte-pinned).
+        if !inventory_section.is_empty()
+            && effective_builtins
+            && skill_inventory_prompt_section_enabled(build_config.host_prompt_sections)
+        {
             extra_sections.push(inventory_section.as_str());
         }
         for section in &preloaded_skill_sections {
@@ -12815,6 +12931,93 @@ mod prompt_tests {
         assert!(
             visible_names.contains("secret_lookup"),
             "the session-plane tool should remain inline until adaptive deferred mode activates"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "comms"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod session_comms_override_tests {
+    use super::*;
+
+    fn scratch_runtime(name: &str) -> Arc<meerkat_comms::CommsRuntime> {
+        Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+                name,
+                None,
+                meerkat_comms::Keypair::generate(),
+                Arc::new(std::collections::HashSet::new()),
+            )
+            .expect("scratch runtime"),
+        )
+    }
+
+    // T22 — foreign payload: typed reject, never a silent fallback.
+    #[test]
+    fn foreign_override_payload_is_a_typed_build_error() {
+        let payload: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u32);
+        let Err(err) = resolve_session_comms_runtime_override(Some(payload), Some("mob-1/w/a"))
+        else {
+            panic!("foreign payload must fail closed");
+        };
+        assert!(matches!(err, BuildAgentError::Config(_)));
+    }
+
+    // T22 — comms-name mismatch: typed reject.
+    #[test]
+    fn override_comms_name_mismatch_is_a_typed_build_error() {
+        let runtime = scratch_runtime("mob-1/worker/w-1");
+        let payload = crate::encode_session_comms_runtime_override_for_service(runtime);
+        let Err(err) =
+            resolve_session_comms_runtime_override(Some(payload), Some("mob-1/worker/OTHER"))
+        else {
+            panic!("name mismatch must fail closed");
+        };
+        assert!(matches!(err, BuildAgentError::Config(_)));
+    }
+
+    // T22 — matching override resolves to the SAME runtime (no second
+    // construction; pointer identity is the proof).
+    #[test]
+    fn matching_override_resolves_to_the_injected_runtime() {
+        let runtime = scratch_runtime("mob-1/worker/w-2");
+        let payload =
+            crate::encode_session_comms_runtime_override_for_service(Arc::clone(&runtime));
+        let resolved =
+            resolve_session_comms_runtime_override(Some(payload), Some("mob-1/worker/w-2"))
+                .expect("resolves")
+                .expect("present");
+        assert!(Arc::ptr_eq(&resolved, &runtime));
+    }
+
+    #[test]
+    fn absent_override_resolves_to_none() {
+        assert!(
+            resolve_session_comms_runtime_override(None, None)
+                .expect("resolves")
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod host_prompt_sections_tests {
+    use super::*;
+
+    // T23 — the A1 switch: SpecPinned suppresses the skill-inventory
+    // section; Full (default) keeps it.
+    #[test]
+    fn spec_pinned_suppresses_the_skill_inventory_section() {
+        assert!(skill_inventory_prompt_section_enabled(
+            meerkat_core::service::HostPromptSections::Full
+        ));
+        assert!(!skill_inventory_prompt_section_enabled(
+            meerkat_core::service::HostPromptSections::SpecPinned
+        ));
+        assert_eq!(
+            meerkat_core::service::HostPromptSections::default(),
+            meerkat_core::service::HostPromptSections::Full,
+            "local builds default to Full"
         );
     }
 }

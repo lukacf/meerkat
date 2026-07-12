@@ -117,6 +117,12 @@ impl SessionAgent for FactoryAgent {
         self.agent.abort_uncommitted_compaction_projections().await
     }
 
+    fn take_runtime_terminal_failure_witness(
+        &mut self,
+    ) -> Result<Option<meerkat_core::TurnErrorMetadata>, meerkat_core::error::AgentError> {
+        self.agent.take_runtime_terminal_failure_witness()
+    }
+
     async fn run_turn_with_events(
         &mut self,
         input: SessionAgentTurnInput,

@@ -63,7 +63,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireMemberLaunchMode": schema_for!(crate::wire::WireMemberLaunchMode),
         "WireForkContext": schema_for!(crate::wire::WireForkContext),
         "WireToolAccessPolicy": schema_for!(crate::wire::WireToolAccessPolicy),
-        "WireBudgetSplitPolicy": schema_for!(crate::wire::WireBudgetSplitPolicy),
         "WireToolFilter": schema_for!(crate::wire::WireToolFilter),
         "WireMobToolConfig": schema_for!(crate::wire::WireMobToolConfig),
         "WireMobProfile": schema_for!(crate::wire::WireMobProfile),
@@ -332,6 +331,91 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "BridgeRetireResponse": schema_for!(crate::wire::BridgeRetireResponse),
         "BridgeSupervisorDelivery": schema_for!(crate::wire::BridgeSupervisorDelivery),
         "BridgeSupervisorPayload": schema_for!(crate::wire::BridgeSupervisorPayload),
+        "BridgeEventCursor": schema_for!(crate::wire::BridgeEventCursor),
+        "BridgeHostBindPayload": schema_for!(crate::wire::BridgeHostBindPayload),
+        "BridgeHostBindResponse": schema_for!(crate::wire::BridgeHostBindResponse),
+        "BridgeHostBootstrapProof": schema_for!(crate::wire::BridgeHostBootstrapProof),
+        "BridgeHostMemberRecord": schema_for!(crate::wire::BridgeHostMemberRecord),
+        "BridgeHostRebindPayload": schema_for!(crate::wire::BridgeHostRebindPayload),
+        "BridgeHostReboundResponse": schema_for!(crate::wire::BridgeHostReboundResponse),
+        "BridgeHostStatusPayload": schema_for!(crate::wire::BridgeHostStatusPayload),
+        "BridgeHostStatusResponse": schema_for!(crate::wire::BridgeHostStatusResponse),
+        "BridgeLiveChannelPayload": schema_for!(crate::wire::BridgeLiveChannelPayload),
+        "BridgeLiveControlOutcome": schema_for!(crate::wire::BridgeLiveControlOutcome),
+        "BridgeLiveControlPayload": schema_for!(crate::wire::BridgeLiveControlPayload),
+        "BridgeLiveControlVerb": schema_for!(crate::wire::BridgeLiveControlVerb),
+        "BridgeLiveControlledResponse": schema_for!(crate::wire::BridgeLiveControlledResponse),
+        "BridgeLiveOpenPayload": schema_for!(crate::wire::BridgeLiveOpenPayload),
+        "BridgeLiveOpenedResponse": schema_for!(crate::wire::BridgeLiveOpenedResponse),
+        "BridgeLiveStatusPayload": schema_for!(crate::wire::BridgeLiveStatusPayload),
+        "BridgeMaterializePayload": schema_for!(crate::wire::BridgeMaterializePayload),
+        "BridgeMaterializedResponse": schema_for!(crate::wire::BridgeMaterializedResponse),
+        "BridgeMemberEventsPage": schema_for!(crate::wire::BridgeMemberEventsPage),
+        "BridgeMemberHistoryPage": schema_for!(crate::wire::BridgeMemberHistoryPage),
+        "BridgeMemberOperatorPayload": schema_for!(crate::wire::BridgeMemberOperatorPayload),
+        "BridgeMemberReleasedResponse": schema_for!(crate::wire::BridgeMemberReleasedResponse),
+        "BridgePeerTrustPayload": schema_for!(crate::wire::BridgePeerTrustPayload),
+        "BridgePollEventsPayload": schema_for!(crate::wire::BridgePollEventsPayload),
+        "BridgeReadHistoryPayload": schema_for!(crate::wire::BridgeReadHistoryPayload),
+        "BridgeReleasePayload": schema_for!(crate::wire::BridgeReleasePayload),
+        "BridgeTurnCorrelation": schema_for!(crate::wire::BridgeTurnCorrelation),
+        "BridgeTurnDirective": schema_for!(crate::wire::BridgeTurnDirective),
+        "BridgeTurnOutcomeRecord": schema_for!(crate::wire::BridgeTurnOutcomeRecord),
+        "ConnectionTargetErrorKind": schema_for!(crate::wire::ConnectionTargetErrorKind),
+        "MaterializeLaunchMode": schema_for!(crate::wire::MaterializeLaunchMode),
+        "MaterializeLaunchOutcome": schema_for!(crate::wire::MaterializeLaunchOutcome),
+        "MemberBuildRejection": schema_for!(crate::wire::MemberBuildRejection),
+        "MemberEventCursor": schema_for!(crate::wire::MemberEventCursor),
+        "MemberOperatorOp": schema_for!(crate::wire::MemberOperatorOp),
+        "MemberOperatorOutcome": schema_for!(crate::wire::MemberOperatorOutcome),
+        "MemberOperatorReply": schema_for!(crate::wire::MemberOperatorReply),
+        "MemberOperatorSpawnSpec": schema_for!(crate::wire::MemberOperatorSpawnSpec),
+        "MemberSessionDisposal": schema_for!(crate::wire::MemberSessionDisposal),
+        "RuntimeReleaseCause": schema_for!(crate::wire::RuntimeReleaseCause),
+        "WireFlowTurnOutcome": schema_for!(crate::wire::WireFlowTurnOutcome),
+        "WireHostBindingDescriptor": schema_for!(crate::wire::WireHostBindingDescriptor),
+        "WireHostBindingDescriptorKind": schema_for!(crate::wire::WireHostBindingDescriptorKind),
+        "WireOpaqueJson": schema_for!(crate::wire::WireOpaqueJson),
+        "WireEventRow": schema_for!(crate::wire::WireEventRow),
+        "WireHistoryRow": schema_for!(crate::wire::WireHistoryRow),
+        "PortableDefinitionExtract": schema_for!(crate::wire::PortableDefinitionExtract),
+        "PortableMcpDecl": schema_for!(crate::wire::PortableMcpDecl),
+        "PortableMemberSpec": schema_for!(crate::wire::PortableMemberSpec),
+        "PortableProfile": schema_for!(crate::wire::PortableProfile),
+        "PortableSkillSource": schema_for!(crate::wire::PortableSkillSource),
+        "PortableSpawnOverlay": schema_for!(crate::wire::PortableSpawnOverlay),
+        "PortableSystemPrompt": schema_for!(crate::wire::PortableSystemPrompt),
+        "PortableToolConfig": schema_for!(crate::wire::PortableToolConfig),
+        "WireMobToolAuthorityContext": schema_for!(crate::wire::WireMobToolAuthorityContext),
+        "WireMobToolCallerProvenance": schema_for!(crate::wire::WireMobToolCallerProvenance),
+        "WireNonPortableResourceKind": schema_for!(crate::wire::WireNonPortableResourceKind),
+        "WireResolvedToolAccessPolicy": schema_for!(crate::wire::WireResolvedToolAccessPolicy),
+        "WireSecretBearingFieldKind": schema_for!(crate::wire::WireSecretBearingFieldKind),
+        "WireSpawnContinuityIntent": schema_for!(crate::wire::WireSpawnContinuityIntent),
+        "WireControlScope": schema_for!(crate::wire::WireControlScope),
+        "WireGrantRecord": schema_for!(crate::wire::WireGrantRecord),
+        "WireHostBindPhase": schema_for!(crate::wire::WireHostBindPhase),
+        "WireHostCapabilityFlags": schema_for!(crate::wire::WireHostCapabilityFlags),
+        "WireHostRef": schema_for!(crate::wire::WireHostRef),
+        "WireMemberHistoryPageBody": schema_for!(crate::wire::WireMemberHistoryPageBody),
+        "WireMemberLifecycleCapabilities": schema_for!(crate::wire::WireMemberLifecycleCapabilities),
+        "WireProjectionProvenance": schema_for!(crate::wire::WireProjectionProvenance),
+        "WireReachability": schema_for!(crate::wire::WireReachability),
+        "WireRouteInstallObligation": schema_for!(crate::wire::WireRouteInstallObligation),
+        "WireScopeDeniedDetail": schema_for!(crate::wire::WireScopeDeniedDetail),
+        "WireHostUnavailableDetail": schema_for!(crate::wire::WireHostUnavailableDetail),
+        "WireStaleCursorDetail": schema_for!(crate::wire::WireStaleCursorDetail),
+        "WireStaleFenceDetail": schema_for!(crate::wire::WireStaleFenceDetail),
+        "MobBindHostResult": schema_for!(crate::wire::MobBindHostResult),
+        "MobGrantScopesResult": schema_for!(crate::wire::MobGrantScopesResult),
+        "MobGrantsResult": schema_for!(crate::wire::MobGrantsResult),
+        "MobHardCancelResult": schema_for!(crate::wire::MobHardCancelResult),
+        "MobHostStatus": schema_for!(crate::wire::MobHostStatus),
+        "MobHostsResult": schema_for!(crate::wire::MobHostsResult),
+        "MobMemberHistoryResult": schema_for!(crate::wire::MobMemberHistoryResult),
+        "MobRevokeHostResult": schema_for!(crate::wire::MobRevokeHostResult),
+        "MobRevokeScopesResult": schema_for!(crate::wire::MobRevokeScopesResult),
+        "MobRouteInstallsResult": schema_for!(crate::wire::MobRouteInstallsResult),
         "BridgeSupervisorRotationObservation": schema_for!(crate::wire::BridgeSupervisorRotationObservation),
         "BridgeSupervisorRotationObserve": schema_for!(crate::wire::BridgeSupervisorRotationObserve),
         "BridgeSupervisorRotationOperationReceipt": schema_for!(crate::wire::BridgeSupervisorRotationOperationReceipt),
@@ -438,6 +522,16 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobConcludeObjectiveParams": schema_for!(crate::wire::MobConcludeObjectiveParams),
         "MobCancelWorkParams": schema_for!(crate::wire::MobCancelWorkParams),
         "MobCancelAllWorkParams": schema_for!(crate::wire::MobCancelAllWorkParams),
+        "MobMemberHistoryParams": schema_for!(crate::wire::MobMemberHistoryParams),
+        "MobHardCancelParams": schema_for!(crate::wire::MobHardCancelParams),
+        "MobBindHostParams": schema_for!(crate::wire::MobBindHostParams),
+        "MobRevokeHostParams": schema_for!(crate::wire::MobRevokeHostParams),
+        "MobGrantScopesParams": schema_for!(crate::wire::MobGrantScopesParams),
+        "MobRevokeScopesParams": schema_for!(crate::wire::MobRevokeScopesParams),
+        "MobMemberLiveOpenParams": schema_for!(crate::wire::MobMemberLiveOpenParams),
+        "MobMemberLiveChannelParams": schema_for!(crate::wire::MobMemberLiveChannelParams),
+        "MobMemberLiveStatusParams": schema_for!(crate::wire::MobMemberLiveStatusParams),
+        "MobMemberLiveControlParams": schema_for!(crate::wire::MobMemberLiveControlParams),
         "RealmIdParams": schema_for!(crate::wire::RealmIdParams),
         "BindingIdParams": schema_for!(crate::wire::BindingIdParams),
         "CreateProfileParams": schema_for!(crate::wire::CreateProfileParams),
@@ -494,11 +588,24 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     write_pretty_json(output_dir.join("params.json"), &params)?;
 
     // Errors
+    let multi_host_jsonrpc_codes = [
+        crate::error::ErrorCode::ScopeDenied,
+        crate::error::ErrorCode::HostUnavailable,
+        crate::error::ErrorCode::StaleCursor,
+        crate::error::ErrorCode::StaleFence,
+    ]
+    .into_iter()
+    .map(|code| (code.to_string(), Value::from(code.jsonrpc_code())))
+    .collect::<Map<String, Value>>();
     let errors = serde_json::json!({
         "ErrorCode": schema_for!(crate::error::ErrorCode),
         "ErrorCategory": schema_for!(crate::error::ErrorCategory),
         "WireError": schema_for!(crate::error::WireError),
         "CapabilityHint": schema_for!(crate::error::CapabilityHint),
+        // Machine-readable numeric allocation for generated SDK factories.
+        // ErrorCode remains the semantic vocabulary authority; this projection
+        // prevents TypeScript/Python from hand-copying jsonrpc_code().
+        "JsonRpcErrorCodes": multi_host_jsonrpc_codes,
     });
     write_pretty_json(output_dir.join("errors.json"), &errors)?;
 
@@ -912,6 +1019,33 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         }
     }
 
+    fn rest_mob_query_parameters(path: &str, method: &str) -> Vec<Value> {
+        if method != "get" {
+            return Vec::new();
+        }
+        match path {
+            "/mob/{id}/members/{agent_identity}/history" => vec![
+                rest_query_parameter(
+                    "from_index",
+                    serde_json::json!({
+                        "type": "integer",
+                        "format": "uint64",
+                        "minimum": 0
+                    }),
+                ),
+                rest_query_parameter(
+                    "limit",
+                    serde_json::json!({
+                        "type": "integer",
+                        "format": "uint32",
+                        "minimum": 0
+                    }),
+                ),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     fn rest_responses(operation: &crate::RestOperationDescriptor) -> Value {
         serde_json::json!({
             "200": {
@@ -986,6 +1120,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                     }
                     let mut parameters = rest_path_parameters(path.path);
                     parameters.extend(rest_workgraph_query_parameters(path.path, operation.method));
+                    parameters.extend(rest_mob_query_parameters(path.path, operation.method));
                     if !parameters.is_empty() {
                         operation_map.insert("parameters".to_string(), Value::Array(parameters));
                     }
@@ -1611,7 +1746,6 @@ mod tests {
         for (field, expected_ref) in [
             ("launch_mode", "WireMemberLaunchMode"),
             ("tool_access_policy", "WireToolAccessPolicy"),
-            ("budget_split_policy", "WireBudgetSplitPolicy"),
             ("inherited_tool_filter", "WireToolFilter"),
             ("override_profile", "WireMobProfile"),
         ] {
@@ -1629,6 +1763,30 @@ mod tests {
             Some(&serde_json::Value::Bool(false)),
             "mob/spawn can be closed only when all accepted fields are in the typed schema"
         );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_session_fork_params_use_closed_tool_access_policy_schema() {
+        let output_dir = temp_output_dir("session-fork-tool-policy");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let params: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("params.json")).unwrap()).unwrap();
+        for request_type in ["ForkSessionAtParams", "ForkSessionReplaceParams"] {
+            let request = params
+                .get(request_type)
+                .unwrap_or_else(|| panic!("{request_type} schema must be emitted"));
+            let policy = request
+                .pointer("/properties/tool_access_policy")
+                .unwrap_or_else(|| panic!("{request_type} must expose tool_access_policy"));
+            let policy_schema = serde_json::to_string(policy).unwrap();
+            assert!(
+                policy_schema.contains("#/$defs/WireToolAccessPolicy"),
+                "{request_type}.tool_access_policy must reference the closed wire union, got {policy_schema}"
+            );
+        }
 
         fs::remove_dir_all(&output_dir).unwrap();
     }
@@ -1942,6 +2100,50 @@ mod tests {
             assert!(
                 workgraph_item_query_names.contains(expected),
                 "WorkGraph items REST OpenAPI must expose query parameter {expected}"
+            );
+        }
+
+        let member_history =
+            &rest_openapi["paths"]["/mob/{id}/members/{agent_identity}/history"]["get"];
+        let member_history_parameters = member_history["parameters"]
+            .as_array()
+            .expect("member history parameters");
+        for (expected, expected_format) in [("from_index", "uint64"), ("limit", "uint32")] {
+            let parameter = member_history_parameters
+                .iter()
+                .find(|parameter| {
+                    parameter.get("in").and_then(serde_json::Value::as_str) == Some("query")
+                        && parameter.get("name").and_then(serde_json::Value::as_str)
+                            == Some(expected)
+                })
+                .unwrap_or_else(|| {
+                    panic!("member history REST OpenAPI missing query parameter {expected}")
+                });
+            assert_eq!(
+                parameter.get("required"),
+                Some(&serde_json::Value::Bool(false)),
+                "member history query parameter {expected} must remain optional"
+            );
+            assert_eq!(
+                parameter
+                    .pointer("/schema/type")
+                    .and_then(serde_json::Value::as_str),
+                Some("integer"),
+                "member history query parameter {expected} must be an integer"
+            );
+            assert_eq!(
+                parameter
+                    .pointer("/schema/minimum")
+                    .and_then(serde_json::Value::as_u64),
+                Some(0),
+                "member history query parameter {expected} must be nonnegative"
+            );
+            assert_eq!(
+                parameter
+                    .pointer("/schema/format")
+                    .and_then(serde_json::Value::as_str),
+                Some(expected_format),
+                "member history query parameter {expected} must retain its unsigned width"
             );
         }
 

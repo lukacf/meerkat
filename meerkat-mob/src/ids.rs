@@ -43,6 +43,47 @@ impl FromStr for RunId {
     }
 }
 
+/// Controller-minted identity for one placed-member spawn attempt.
+///
+/// Unlike member generation, this id is never reused after an aborted attempt.
+/// It is the ABA fence shared by the generated MobMachine handoff, the durable
+/// placed-spawn carrier, and the internal stored-event projection.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlacedSpawnId(Uuid);
+
+impl PlacedSpawnId {
+    /// Mint a fresh controller-owned placed-spawn attempt id.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Return the underlying UUID.
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for PlacedSpawnId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for PlacedSpawnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for PlacedSpawnId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(value)?))
+    }
+}
+
 macro_rules! string_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -247,9 +288,13 @@ impl Generation {
         self.0
     }
 
-    /// Advance to the next generation.
-    pub const fn next(self) -> Self {
-        Self(self.0 + 1)
+    /// Advance to the next generation, or return `None` when the identity has
+    /// exhausted the `u64` generation space. Generation zero is never reused.
+    pub const fn next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 }
 
@@ -616,8 +661,9 @@ mod tests {
     #[test]
     fn test_generation_initial_and_next() {
         assert_eq!(Generation::INITIAL.get(), 0);
-        assert_eq!(Generation::INITIAL.next().get(), 1);
-        assert_eq!(Generation::new(5).next().get(), 6);
+        assert_eq!(Generation::INITIAL.next().expect("generation 1").get(), 1);
+        assert_eq!(Generation::new(5).next().expect("generation 6").get(), 6);
+        assert_eq!(Generation::new(u64::MAX).next(), None);
     }
 
     #[test]

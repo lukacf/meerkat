@@ -1,6 +1,152 @@
 use super::*;
 
+struct MutationGuardedControlEntry {
+    driver: SharedDriver,
+    completions: SharedCompletionRegistry,
+    wake_tx: Option<mpsc::Sender<()>>,
+    publication_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>>,
+}
+
 impl MeerkatMachine {
+    /// Capture every incarnation-local control handle from one current entry
+    /// while its exact mutation gate is retained. Logical RuntimeControlPlane
+    /// commands linearize at M acquisition: replacement may win before M, but
+    /// no command may combine predecessor handles with successor DSL state.
+    async fn capture_current_control_entry_under_mutation_guard(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_id: &SessionId,
+        _mutation_guard: &crate::tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<MutationGuardedControlEntry, RuntimeControlPlaneError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .filter(|entry| &entry.runtime_id == runtime_id)
+            .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+        Ok(MutationGuardedControlEntry {
+            driver: Arc::clone(&entry.driver),
+            completions: Arc::clone(&entry.completions),
+            wake_tx: entry.wake_sender(),
+            publication_handle: entry.publication_handle(),
+        })
+    }
+
+    async fn realize_reset_under_mutation_guard(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+        completions: &SharedCompletionRegistry,
+    ) -> Result<ResetReport, RuntimeControlPlaneError> {
+        let publication_handle = self
+            .sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(RuntimeSessionEntry::publication_handle);
+        crate::control_plane::drain_recovered_runless_runtime_terminations(
+            driver,
+            Some(completions),
+            publication_handle.as_deref(),
+        )
+        .await
+        .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+
+        let reason = "runtime reset";
+        let (completion_input_ids, prepared_terminals) = {
+            let mut drv = driver.lock().await;
+            let completion_input_ids = drv.as_driver().active_input_ids();
+            let prepared_terminals = drv
+                .prepare_runless_runtime_terminated_interaction_outboxes(
+                    &completion_input_ids,
+                    reason.to_string(),
+                )
+                .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+            (completion_input_ids, prepared_terminals)
+        };
+
+        if let Err(error) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Reset,
+                "Reset",
+            )
+            .await
+        {
+            driver
+                .lock()
+                .await
+                .rollback_prepared_runless_interaction_terminal_outboxes(prepared_terminals);
+            return Err(RuntimeControlPlaneError::Internal(error));
+        }
+
+        let mut drv = driver.lock().await;
+        let report = match machine_reset(&mut drv).await {
+            Ok(report) => report,
+            Err(err) => {
+                drv.rollback_prepared_runless_interaction_terminal_outboxes(prepared_terminals);
+                drv.sync_control_projection_from_dsl_authority();
+                return Err(RuntimeControlPlaneError::Internal(err.to_string()));
+            }
+        };
+        let candidate_owner_input_id =
+            crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared_terminals);
+        drop(drv);
+
+        crate::control_plane::publish_and_resolve_runless_runtime_termination(
+            driver,
+            Some(completions),
+            publication_handle.as_deref(),
+            &completion_input_ids,
+            candidate_owner_input_id.as_ref(),
+            reason,
+        )
+        .await
+        .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+        Ok(report)
+    }
+
+    pub(super) async fn reset_runtime_for_promoted_archived_resume(
+        &self,
+        lease: &PromotedArchivedResumeCommitLease,
+    ) -> Result<ResetReport, RuntimeDriverError> {
+        let lease = &lease.prepared;
+        let (driver, completions) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions.get(&lease.session_id).ok_or_else(|| {
+                RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "archived-resume session {} disappeared before exact reset",
+                        lease.session_id
+                    ),
+                }
+            })?;
+            let exact_claim = entry.epoch_id == lease.epoch_id
+                && Arc::ptr_eq(&entry.materialization_claim_state, &lease.claim_state)
+                && !entry.physical_attachment_is_live()
+                && entry.control_snapshot().phase == RuntimeState::Retired
+                && lease
+                    .claim_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .exact_claim_is(
+                        lease.claim_id,
+                        &[crate::RuntimeActorMaterializationClaimPhase::ActorMaterializedPendingCommit],
+                    );
+            if !exact_claim {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "archived-resume session {} lost its exact Retired claim before reset",
+                        lease.session_id
+                    ),
+                });
+            }
+            (Arc::clone(&entry.driver), Arc::clone(&entry.completions))
+        };
+        self.realize_reset_under_mutation_guard(&lease.session_id, &driver, &completions)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))
+    }
+
     fn accept_outcome_matches_preview(preview: &AcceptOutcome, committed: &AcceptOutcome) -> bool {
         match (preview, committed) {
             (
@@ -39,59 +185,90 @@ impl MeerkatMachine {
         &self,
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
+        if matches!(&command, MeerkatMachineCommand::Ingest { .. }) {
+            let spawner = MachineCleanupTaskSpawner::acquire()
+                .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+            let machine = self.clone();
+            return spawner
+                .spawn(async move {
+                    machine
+                        .execute_meerkat_machine_control_command_owned(command)
+                        .await
+                })
+                .await
+                .map_err(|error| {
+                    RuntimeControlPlaneError::Internal(format!(
+                        "process-owned direct-ingest transaction ended without a result: {error}"
+                    ))
+                })?;
+        }
+        self.execute_meerkat_machine_control_command_owned(command)
+            .await
+    }
+
+    async fn execute_meerkat_machine_control_command_owned(
+        &self,
+        command: MeerkatMachineCommand,
+    ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
         match command {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
+                let (session_id, driver, completions, _wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+                let mutation_gate = self.session_mutation_gate(&session_id).await.ok_or(
+                    RuntimeControlPlaneError::InvalidState {
+                        state: RuntimeState::Destroyed,
+                    },
+                )?;
+                let mut gate_guard = Some(Arc::clone(&mutation_gate).lock_owned().await);
                 let (
-                    session_id,
-                    driver,
-                    _completions,
                     wake_tx,
                     effect_tx,
                     boundary_handle,
+                    attachment_id,
+                    dsl_authority,
                     active_fence_token,
                     active_runtime_generation,
                     active_runtime_epoch_id,
+                    publication_handle,
                 ) = {
-                    let (sid, d, c, w) = self.lookup_entry(&runtime_id).await?;
-                    let (effect, boundary_handle, fence, generation, epoch) = {
-                        let sessions = self.sessions.read().await;
-                        match sessions.get(&sid) {
-                            Some(entry) => {
-                                let authority = entry
-                                    .dsl_authority
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                let state = authority.state();
-                                (
-                                    entry.effect_sender(),
-                                    entry.boundary_handle(),
-                                    state.active_fence_token,
-                                    state.active_runtime_generation,
-                                    state.active_runtime_epoch_id.clone(),
-                                )
-                            }
-                            None => (None, None, None, None, None),
-                        }
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions.get(&session_id).ok_or(
+                        RuntimeControlPlaneError::InvalidState {
+                            state: RuntimeState::Destroyed,
+                        },
+                    )?;
+                    if !Arc::ptr_eq(&entry.mutation_gate, &mutation_gate)
+                        || !Arc::ptr_eq(&entry.driver, &driver)
+                        || entry.runtime_id != runtime_id
+                    {
+                        return Err(RuntimeControlPlaneError::Internal(
+                            "direct Ingest runtime attachment changed before admission".to_string(),
+                        ));
+                    }
+                    let dsl_authority = Arc::clone(&entry.dsl_authority);
+                    let (fence, generation, epoch) = {
+                        let authority = dsl_authority
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let state = authority.state();
+                        (
+                            state.active_fence_token,
+                            state.active_runtime_generation,
+                            state.active_runtime_epoch_id.clone(),
+                        )
                     };
                     (
-                        sid,
-                        d,
-                        c,
-                        w,
-                        effect,
-                        boundary_handle,
+                        entry.wake_sender(),
+                        entry.effect_sender(),
+                        entry.boundary_handle(),
+                        entry.live_attachment_id(),
+                        dsl_authority,
                         fence,
                         generation,
                         epoch,
+                        entry.publication_handle(),
                     )
                 };
-
-                let _gate_guard = self
-                    .lock_current_session_mutation_gate(&session_id)
-                    .await
-                    .ok_or(RuntimeControlPlaneError::InvalidState {
-                        state: RuntimeState::Destroyed,
-                    })?;
 
                 // Use the canonical admission input id (the id the `Input`
                 // already carries, which admission reports back verbatim as
@@ -137,14 +314,19 @@ impl MeerkatMachine {
                 .await
                 .map_err(RuntimeControlPlaneError::Internal)?;
 
-                let active_turn_boundary_available = Self::observe_active_turn_boundary_available(
-                    &session_id,
-                    boundary_handle.as_ref(),
-                )
-                .await
-                .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
+                // A sampled actor Boolean is not admission authority. Direct
+                // ingest resolves from generated machine state, then attempts
+                // exact post-admission boundary preparation when applicable.
+                let active_turn_boundary_available = false;
 
-                let (outcome, signal, runtime_effect) = {
+                let (
+                    outcome,
+                    signal,
+                    cancel_plan,
+                    mut fallback_wake,
+                    stages_run_boundary,
+                    accepted_input_id,
+                ) = {
                     let resolved = {
                         let drv = driver.lock().await;
                         drv.resolve_admission_with_active_turn_boundary(
@@ -154,6 +336,7 @@ impl MeerkatMachine {
                         .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?
                     };
                     let flags = resolved.coarse_flags();
+                    let stages_run_boundary = resolved.stages_run_boundary();
                     let preview_result = {
                         let drv = driver.lock().await;
                         drv.preview_accept_resolved_input(input.clone(), &resolved)
@@ -161,10 +344,17 @@ impl MeerkatMachine {
                             .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?
                     };
 
-                    let (signal, runtime_effect, accepted_effects) = match &preview_result {
-                        AcceptOutcome::Accepted { input_id, .. } => {
-                            let (_, effects) = self
-                                .apply_session_dsl_input(
+                    let (signal, cancel_plan, accepted_effects, fallback_wake) =
+                        match &preview_result {
+                            AcceptOutcome::Accepted { input_id, .. } => {
+                                let fallback_wake = AcceptedIngressFallbackWakeGuard::new(
+                                    wake_tx.clone(),
+                                    flags.request_immediate_processing
+                                        || flags.interrupt_yielding
+                                        || flags.wake_if_idle,
+                                );
+                                let staged = self
+                                .stage_session_dsl_transition(
                                     &session_id,
                                     crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
                                         input_id: crate::meerkat_machine::dsl::InputId::from_domain(
@@ -178,25 +368,88 @@ impl MeerkatMachine {
                                 )
                                 .await
                                 .map_err(RuntimeControlPlaneError::Internal)?;
-                            let signal = Self::post_admission_signal_from_effects(&effects);
-                            let runtime_effect =
+                                let effects = staged.effects.clone();
+                                let signal = Self::post_admission_signal_from_effects(&effects);
+                                let runtime_effect =
                                 crate::effect::runtime_effect_projection_optional_from_dsl_effects(
                                     &effects,
                                 )
                                 .map_err(RuntimeControlPlaneError::Internal)?;
-                            if signal.should_wake() && wake_tx.is_none() {
-                                return Err(RuntimeControlPlaneError::InvalidState {
-                                    state: RuntimeState::Destroyed,
-                                });
+                                // Arm exact compensation synchronously after the
+                                // DSL stage, before routed-signal or driver awaits.
+                                let cancel_plan = runtime_effect
+                                .map(|projected_effect| {
+                                    let committed_state = staged.committed_snapshot.state();
+                                    let expected_run_id = committed_state
+                                        .current_run_id
+                                        .as_ref()
+                                        .and_then(
+                                            crate::meerkat_machine::dsl_authority::current_run_id_from_dsl,
+                                        )
+                                        .ok_or_else(|| {
+                                            RuntimeControlPlaneError::Internal(
+                                                "AcceptWithCompletion(Ingest) emitted boundary cancel without an exact active run id"
+                                                    .to_string(),
+                                            )
+                                        })?;
+                                    let dispatch_generation =
+                                        committed_state.boundary_cancel_dispatch_generation;
+                                    let pending_dispatch =
+                                        PendingBoundaryCancelDispatchGuard::new(
+                                            Arc::clone(&dsl_authority),
+                                            dispatch_generation,
+                                        );
+                                    let effect_tx = effect_tx.clone().ok_or(
+                                        RuntimeControlPlaneError::InvalidState {
+                                            state: RuntimeState::Destroyed,
+                                        },
+                                    )?;
+                                    let attachment_id = attachment_id.ok_or_else(|| {
+                                        RuntimeControlPlaneError::Internal(
+                                            "AcceptWithCompletion(Ingest) lost its exact runtime attachment"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                    Ok(RuntimeAcceptedBoundaryCancelPlan {
+                                        witness: RuntimeEffectDispatchAttachmentWitness {
+                                            mutation_gate: Arc::clone(&mutation_gate),
+                                            driver: driver.clone(),
+                                            dsl_authority: Arc::clone(&dsl_authority),
+                                            attachment_id,
+                                            effect_tx,
+                                        },
+                                        boundary_handle: boundary_handle.clone(),
+                                        pending_dispatch,
+                                        expected_run_id,
+                                        projected_effect,
+                                        dispatch_generation,
+                                        dispatch_lifecycle_phase: committed_state.lifecycle_phase,
+                                    })
+                                })
+                                .transpose()?;
+                                self.commit_session_dsl_transition(
+                                    &session_id,
+                                    staged,
+                                    "AcceptWithCompletion(Ingest)",
+                                )
+                                .await
+                                .map_err(RuntimeControlPlaneError::Internal)?;
+                                if signal.should_wake() && wake_tx.is_none() {
+                                    return Err(RuntimeControlPlaneError::InvalidState {
+                                        state: RuntimeState::Destroyed,
+                                    });
+                                }
+                                (signal, cancel_plan, Some(effects), fallback_wake)
                             }
-                            (signal, runtime_effect, Some(effects))
-                        }
-                        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => (
-                            crate::driver::ephemeral::PostAdmissionSignal::None,
-                            None,
-                            None,
-                        ),
-                    };
+                            AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
+                                (
+                                    crate::driver::ephemeral::PostAdmissionSignal::None,
+                                    None,
+                                    None,
+                                    AcceptedIngressFallbackWakeGuard::new(None, false),
+                                )
+                            }
+                        };
 
                     let result = {
                         let mut drv = driver.lock().await;
@@ -214,35 +467,118 @@ impl MeerkatMachine {
                         }
                         result
                     };
-                    (result, signal, runtime_effect)
+                    let accepted_input_id = match &result {
+                        AcceptOutcome::Accepted { input_id, .. } => Some(input_id.clone()),
+                        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => None,
+                    };
+                    (
+                        result,
+                        signal,
+                        cancel_plan,
+                        fallback_wake,
+                        stages_run_boundary,
+                        accepted_input_id,
+                    )
                 };
 
-                if signal.should_wake()
-                    && let Some(ref tx) = wake_tx
-                {
-                    let _ = tx.try_send(());
-                }
-                if let Some(projected_effect) = runtime_effect
-                    && let Err(err) = self
-                        .dispatch_cancel_after_boundary_runtime_effect(
+                let live_boundary_consumed = if signal.should_interrupt_yielding()
+                    && stages_run_boundary
+                    && let (Some(input_id), Some(boundary_handle), Some(attachment_id)) = (
+                        accepted_input_id.as_ref(),
+                        boundary_handle.clone(),
+                        attachment_id,
+                    ) {
+                    let witness = RuntimeLiveBoundaryAttachmentWitness {
+                        mutation_gate: Arc::clone(&mutation_gate),
+                        driver: driver.clone(),
+                        dsl_authority: Arc::clone(&dsl_authority),
+                        attachment_id,
+                        boundary_handle,
+                    };
+                    let held_mutation_gate = gate_guard.take().ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(
+                            "AcceptWithCompletion(Ingest) lost its held session mutation gate before exact live-boundary preparation"
+                                .to_string(),
+                        )
+                    })?;
+                    let (returned_gate, consumed) = self
+                        .commit_live_boundary_input_if_available(
                             &session_id,
-                            effect_tx,
-                            boundary_handle,
-                            projected_effect,
-                            "AcceptWithCompletion(Ingest)",
+                            &witness,
+                            held_mutation_gate,
+                            input_id,
+                            &completions,
+                            publication_handle.clone(),
+                            &mut fallback_wake,
                         )
                         .await
-                {
-                    return Err(RuntimeControlPlaneError::Internal(err.to_string()));
+                        .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+                    gate_guard = Some(returned_gate);
+                    consumed
+                } else {
+                    false
+                };
+
+                // Exact context injection supersedes the older
+                // cancel-after-boundary fallback. Dropping the un-dispatched
+                // plan under M lets its guard clear the pending generated
+                // dispatch fact without invoking the live cancel handle.
+                let cancel_plan = if live_boundary_consumed {
+                    None
+                } else {
+                    cancel_plan
+                };
+                let should_wake = signal.should_wake() && !live_boundary_consumed;
+                if cancel_plan.is_some() || should_wake {
+                    let held_mutation_gate = gate_guard.take().ok_or_else(|| {
+                        RuntimeControlPlaneError::Internal(
+                            "AcceptWithCompletion(Ingest) lost its held session mutation gate"
+                                .to_string(),
+                        )
+                    })?;
+                    gate_guard = Some(
+                        self.dispatch_accepted_ingress_boundary_work(
+                            &session_id,
+                            held_mutation_gate,
+                            cancel_plan,
+                            completions,
+                            wake_tx,
+                            should_wake,
+                        )
+                        .await
+                        .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?,
+                    );
                 }
+                fallback_wake.disarm();
+                drop(gate_guard.take());
 
                 Ok(MeerkatMachineCommandResult::AcceptOutcome(outcome))
             }
             MeerkatMachineCommand::PublishEvent { event } => {
                 let runtime_id = event.runtime_id.clone();
-                let (session_id, driver, _completions, _wake_tx) =
-                    self.lookup_entry(&runtime_id).await?;
+                let session_id = self.resolve_session_id(&runtime_id).await?;
+                #[cfg(test)]
+                self.run_control_command_after_logical_lookup_test_hook(
+                    ControlCommandLookupTestKind::PublishEvent,
+                    &session_id,
+                )
+                .await;
+                let mutation_guard = self
+                    .lock_current_session_mutation_gate(&session_id)
+                    .await
+                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                let MutationGuardedControlEntry { driver, .. } = self
+                    .capture_current_control_entry_under_mutation_guard(
+                        &runtime_id,
+                        &session_id,
+                        &mutation_guard,
+                    )
+                    .await?;
 
+                // PublishEvent is a logical-runtime command, not an
+                // attachment-originated event: whichever incarnation owns M
+                // is its target. Retaining that current M across both legs
+                // keeps the DSL transition and driver callback on one entry.
                 // DSL-first: stage PublishEvent before driver mutation.
                 // Classify the event into the typed RuntimeEventKind discriminant
                 // before consuming the event — the DSL carries the closed enum, not
@@ -290,155 +626,33 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::Retire { runtime_id } => {
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    "MeerkatMachine::Retire command start"
-                );
-                let (session_id, driver, completions, wake_tx) =
-                    self.lookup_entry(&runtime_id).await?;
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command looked up entry"
-                );
-
-                // Acquire the per-session mutation gate to serialize the
-                // full DSL-stage → driver-mutate → DSL-sync span.
-                let gate = self.session_mutation_gate(&session_id).await;
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command locking mutation gate"
-                );
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command locked mutation gate"
-                );
-
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command staging DSL"
-                );
-                let staged_dsl = self
-                    .stage_session_dsl_transition(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Retire {
-                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                                &session_id,
-                            ),
-                        },
-                        "Retire",
-                    )
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command staged DSL"
-                );
-
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command locking driver"
-                );
-                let mut drv = driver.lock().await;
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command locked driver"
-                );
-                let mut report = match machine_retire(&mut drv).await {
-                    Ok(report) => report,
-                    Err(err) => {
-                        drv.sync_control_projection_from_dsl_authority();
-                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                    }
-                };
-                drop(drv);
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    inputs_pending_drain = report.inputs_pending_drain,
-                    "MeerkatMachine::Retire command retired driver"
-                );
-
-                let mut commit_error = None;
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command committing DSL"
-                );
-                if let Err(reason) = self
-                    .commit_session_dsl_transition_preserving_committed_state(
-                        &session_id,
-                        staged_dsl,
-                        "Retire",
-                    )
-                    .await
-                {
-                    driver
-                        .lock()
-                        .await
-                        .sync_control_projection_from_dsl_authority();
-                    commit_error = Some(reason);
-                }
-                tracing::info!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_id,
-                    "MeerkatMachine::Retire command committed DSL"
-                );
-
-                if report.inputs_pending_drain > 0 {
-                    if let Some(ref tx) = wake_tx
-                        && tx.send(()).await.is_ok()
-                    {
-                        if let Some(reason) = commit_error {
-                            return Err(RuntimeControlPlaneError::Internal(reason));
-                        }
-                        return Ok(MeerkatMachineCommandResult::RetireReport(report));
-                    }
-
-                    let mut drv = driver.lock().await;
-                    let abandoned = drv
-                        .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
-                        .await
-                        .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-                    drop(drv);
-                    let result_class =
-                        crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
-                            &driver,
-                        )
-                        .await
-                        .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
-                    let mut comp = completions.lock().await;
-                    comp.resolve_all_runtime_terminated(
-                        "retired without runtime loop",
-                        result_class,
-                    );
-                    report.inputs_abandoned += abandoned;
-                    report.inputs_pending_drain = 0;
-                }
-                if let Some(reason) = commit_error {
-                    return Err(RuntimeControlPlaneError::Internal(reason));
-                }
+                let report = self.retire_runtime_control_plane(&runtime_id).await?;
                 Ok(MeerkatMachineCommandResult::RetireReport(report))
             }
             MeerkatMachineCommand::Recycle { runtime_id } => {
-                let (session_id, driver, completions, wake_tx) =
-                    self.lookup_entry(&runtime_id).await?;
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let session_id = self.resolve_session_id(&runtime_id).await?;
+                #[cfg(test)]
+                self.run_control_command_after_logical_lookup_test_hook(
+                    ControlCommandLookupTestKind::Recycle,
+                    &session_id,
+                )
+                .await;
+                let mutation_guard = self
+                    .lock_current_session_mutation_gate(&session_id)
+                    .await
+                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                let MutationGuardedControlEntry {
+                    driver,
+                    completions,
+                    wake_tx,
+                    ..
+                } = self
+                    .capture_current_control_entry_under_mutation_guard(
+                        &runtime_id,
+                        &session_id,
+                        &mutation_guard,
+                    )
+                    .await?;
 
                 self.apply_session_dsl_input(
                     &session_id,
@@ -465,17 +679,13 @@ impl MeerkatMachine {
                 {
                     let pending_after: HashSet<InputId> =
                         active_after_recycle.into_iter().collect();
-                    let result_class =
-                        crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
-                            &driver,
-                        )
-                        .await
-                        .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
                     let mut comp = completions.lock().await;
-                    comp.resolve_not_pending_runtime_terminated(
+                    comp.fail_not_pending_waiters(
                         |input_id| pending_after.contains(input_id),
-                        "recycled input no longer pending",
-                        result_class,
+                        crate::completion::CompletionWaitError::AuthorityUnavailable(
+                            "recycled input no longer pending after preserve-work reconciliation"
+                                .to_string(),
+                        ),
                     );
                 }
 
@@ -487,52 +697,70 @@ impl MeerkatMachine {
                 }))
             }
             MeerkatMachineCommand::Reset { runtime_id } => {
-                let (session_id, driver, completions, _wake_tx) =
-                    self.lookup_entry(&runtime_id).await?;
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
-
-                self.apply_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Reset,
-                    "Reset",
-                )
-                .await
-                .map_err(RuntimeControlPlaneError::Internal)?;
-
-                let mut drv = driver.lock().await;
-                let report = match machine_reset(&mut drv).await {
-                    Ok(report) => report,
-                    Err(err) => {
-                        drv.sync_control_projection_from_dsl_authority();
-                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                    }
-                };
-                drop(drv);
-
-                let result_class =
-                    crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
-                        &driver,
-                    )
+                // Resolve only the logical SessionId before M. The driver and
+                // completion handles are incarnation-local and must be
+                // captured after `lock_current_session_mutation_gate` has
+                // revalidated the exact current gate; otherwise an A -> B
+                // replacement while waiting can reset A's driver while
+                // applying B's DSL transition.
+                let (session_id, _, _, _) = self.lookup_entry(&runtime_id).await?;
+                let _gate_guard = self
+                    .lock_current_session_mutation_gate(&session_id)
                     .await
-                    .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
-                let mut comp = completions.lock().await;
-                comp.resolve_all_runtime_terminated("runtime reset", result_class);
+                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                let (locked_session_id, driver, completions, _wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+                if locked_session_id != session_id {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "runtime reset lookup changed logical session from {session_id} to {locked_session_id} while holding the current mutation gate"
+                    )));
+                }
+                let claim_outstanding = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions
+                        .get(&session_id)
+                        .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                    entry
+                        .materialization_claim_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .current
+                        .is_some()
+                };
+                if claim_outstanding {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "runtime reset for session {session_id} requires the exact prepared materialization lease while an actor/attachment claim is outstanding"
+                    )));
+                }
+                let report = self
+                    .realize_reset_under_mutation_guard(&session_id, &driver, &completions)
+                    .await?;
                 Ok(MeerkatMachineCommandResult::ResetReport(report))
             }
             MeerkatMachineCommand::Recover { runtime_id } => {
-                let (session_id, driver, completions, wake_tx) =
-                    self.lookup_entry(&runtime_id).await?;
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let session_id = self.resolve_session_id(&runtime_id).await?;
+                #[cfg(test)]
+                self.run_control_command_after_logical_lookup_test_hook(
+                    ControlCommandLookupTestKind::Recover,
+                    &session_id,
+                )
+                .await;
+                let mutation_guard = self
+                    .lock_current_session_mutation_gate(&session_id)
+                    .await
+                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                let MutationGuardedControlEntry {
+                    driver,
+                    completions,
+                    wake_tx,
+                    ..
+                } = self
+                    .capture_current_control_entry_under_mutation_guard(
+                        &runtime_id,
+                        &session_id,
+                        &mutation_guard,
+                    )
+                    .await?;
 
                 self.apply_session_dsl_input(
                     &session_id,
@@ -558,17 +786,13 @@ impl MeerkatMachine {
                 {
                     let pending_after: HashSet<InputId> =
                         active_after_recover.into_iter().collect();
-                    let result_class =
-                        crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
-                            &driver,
-                        )
-                        .await
-                        .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
                     let mut comp = completions.lock().await;
-                    comp.resolve_not_pending_runtime_terminated(
+                    comp.fail_not_pending_waiters(
                         |input_id| pending_after.contains(input_id),
-                        "recovered input no longer pending",
-                        result_class,
+                        crate::completion::CompletionWaitError::AuthorityUnavailable(
+                            "recovered input no longer pending after preserve-work reconciliation"
+                                .to_string(),
+                        ),
                     );
                 }
 
@@ -578,14 +802,47 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::RecoveryReport(report))
             }
             MeerkatMachineCommand::Destroy { runtime_id } => {
-                let (session_id, driver, completions, _wake_tx) =
-                    self.lookup_entry(&runtime_id).await?;
-
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let session_id = self.resolve_session_id(&runtime_id).await?;
+                #[cfg(test)]
+                self.run_control_command_after_logical_lookup_test_hook(
+                    ControlCommandLookupTestKind::Destroy,
+                    &session_id,
+                )
+                .await;
+                #[cfg(feature = "live")]
+                let live_lifecycle_lease = self
+                    .acquire_member_live_disposal_lease(&session_id)
+                    .await
+                    .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+                // Live lifecycle replacement takes L before M. Retain the
+                // exact current L while acquiring its matching M so a
+                // replacement cannot reopen between absence proof and the
+                // destroy commit.
+                #[cfg(feature = "live")]
+                let mutation_guard = self
+                    .lock_session_mutation_gate_for_live_lifecycle_lease(
+                        &session_id,
+                        &live_lifecycle_lease,
+                    )
+                    .await
+                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                #[cfg(not(feature = "live"))]
+                let mutation_guard = self
+                    .lock_current_session_mutation_gate(&session_id)
+                    .await
+                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                let MutationGuardedControlEntry {
+                    driver,
+                    completions,
+                    publication_handle,
+                    ..
+                } = self
+                    .capture_current_control_entry_under_mutation_guard(
+                        &runtime_id,
+                        &session_id,
+                        &mutation_guard,
+                    )
+                    .await?;
                 let mutation_blocked = {
                     let sessions = self.sessions.read().await;
                     sessions
@@ -595,6 +852,13 @@ impl MeerkatMachine {
                 if let Some(error) = mutation_blocked {
                     return Err(RuntimeControlPlaneError::Internal(error.to_string()));
                 }
+                crate::control_plane::drain_recovered_runless_runtime_terminations(
+                    &driver,
+                    Some(&completions),
+                    publication_handle.as_deref(),
+                )
+                .await
+                .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
 
                 let destroy_input = crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
@@ -604,9 +868,22 @@ impl MeerkatMachine {
                     .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
+                let reason = "runtime destroyed";
+                let completion_input_ids = drv.as_driver().active_input_ids();
+                let prepared_terminals = drv
+                    .prepare_runless_runtime_terminated_interaction_outboxes(
+                        &completion_input_ids,
+                        reason.to_string(),
+                    )
+                    .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
                 let prepared_destroy = match machine_prepare_destroy(&mut drv) {
                     Ok(prepared) => prepared,
-                    Err(err) => return Err(RuntimeControlPlaneError::Internal(err.to_string())),
+                    Err(err) => {
+                        drv.rollback_prepared_runless_interaction_terminal_outboxes(
+                            prepared_terminals,
+                        );
+                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
+                    }
                 };
                 let staged_dsl = Self::stage_dsl_transition_on_authority(
                     &drv.shared_dsl_authority(),
@@ -617,6 +894,9 @@ impl MeerkatMachine {
                     Ok(staged) => staged,
                     Err(reason) => {
                         drv.rollback_prepared_destroy_lifecycle(prepared_destroy.lifecycle);
+                        drv.rollback_prepared_runless_interaction_terminal_outboxes(
+                            prepared_terminals,
+                        );
                         drv.sync_control_projection_from_dsl_authority();
                         return Err(RuntimeControlPlaneError::Internal(reason));
                     }
@@ -630,10 +910,15 @@ impl MeerkatMachine {
                 {
                     Ok(()) => {}
                     Err(err) => {
+                        drv.rollback_prepared_runless_interaction_terminal_outboxes(
+                            prepared_terminals,
+                        );
                         drv.sync_control_projection_from_dsl_authority();
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }
                 }
+                let candidate_owner_input_id =
+                    crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared_terminals);
                 drop(drv);
 
                 // The durable destroy is already committed above, so a
@@ -642,11 +927,6 @@ impl MeerkatMachine {
                 // would leave staged driver-side state behind a committed
                 // terminal. Finish the commit/terminalize legs, then surface
                 // the typed fault.
-                let result_class =
-                    crate::meerkat_machine::driver::machine_resolve_runtime_terminated_completion_result(
-                        &driver,
-                    )
-                    .await;
                 let apply_result = self
                     .commit_session_dsl_transition_preserving_committed_state(
                         &session_id,
@@ -658,29 +938,21 @@ impl MeerkatMachine {
                     .lock()
                     .await
                     .sync_control_projection_from_dsl_authority();
-
-                let mut comp = completions.lock().await;
-                let result_class_err = match result_class {
-                    Ok(result_class) => {
-                        comp.resolve_all_runtime_terminated("runtime destroyed", result_class);
-                        None
-                    }
-                    Err(err) => {
-                        comp.fail_all_waiters(
-                            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
-                                "runtime destroyed without completion authority: {err}"
-                            )),
-                        );
-                        Some(RuntimeControlPlaneError::Internal(err.to_string()))
-                    }
-                };
-                drop(comp);
+                let publication_result =
+                    crate::control_plane::publish_and_resolve_runless_runtime_termination(
+                        &driver,
+                        Some(&completions),
+                        publication_handle.as_deref(),
+                        &completion_input_ids,
+                        candidate_owner_input_id.as_ref(),
+                        reason,
+                    )
+                    .await;
                 if let Err(reason) = apply_result {
                     return Err(RuntimeControlPlaneError::Internal(reason));
                 }
-                if let Some(err) = result_class_err {
-                    return Err(err);
-                }
+                publication_result
+                    .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
                 Ok(MeerkatMachineCommandResult::DestroyReport(report))
             }
             MeerkatMachineCommand::RuntimeState { runtime_id } => {

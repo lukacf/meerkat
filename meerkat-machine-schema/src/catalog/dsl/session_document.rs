@@ -543,9 +543,12 @@ machine! {
             ResolveSystemContextSteerCleanupItem {
                 source_kind: Enum<SystemContextSource>,
             },
-            // Snapshot-restore consistency authorization, ported verbatim.
+            // Snapshot-restore consistency authorization. Active-turn
+            // membership is independent of optional idempotency keys, so the
+            // shell reports one structural consistency fact covering both the
+            // exact pending-position witness and its keyed rollback projection.
             RestoreSystemContextSnapshot {
-                active_keys_have_known_pending_or_seen: bool,
+                active_turn_membership_is_consistent: bool,
                 seen_keys_match_known_appends: bool,
             },
             // Persist-time system-context append-admission continuity check.
@@ -1878,16 +1881,17 @@ machine! {
 
         // ---------------------------------------------------------------
         // RestoreSystemContextSnapshot — snapshot-restore consistency
-        // authorization, ported verbatim from AuthorizeRestoreSystemContextState.
+        // authorization for key-independent active-turn membership and seen
+        // idempotency projections.
         // ---------------------------------------------------------------
         transition RestoreSystemContextSnapshot {
             on input RestoreSystemContextSnapshot {
-                active_keys_have_known_pending_or_seen,
+                active_turn_membership_is_consistent,
                 seen_keys_match_known_appends
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && active_keys_have_known_pending_or_seen
+                && active_turn_membership_is_consistent
                 && seen_keys_match_known_appends
             }
             update {}

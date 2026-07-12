@@ -282,6 +282,12 @@ pub use staged_sessions::{
 // `SESSION_RUNTIME_SPLIT_TODO.md`.
 pub mod session_runtime;
 
+// Explicitly-featured deterministic test fixtures (ADJ-P6B-4). Native-only:
+// the scripted realtime fakes park on tokio sync primitives the wasm alias
+// does not expose, and no wasm lane consumes them.
+#[cfg(all(feature = "test-realtime-fixtures", not(target_arch = "wasm32")))]
+pub mod test_fixtures;
+
 // Session service
 pub use meerkat_core::service::InitialTurnPolicy;
 pub use meerkat_core::service::StartTurnRuntimeSemantics;
@@ -299,10 +305,12 @@ pub use meerkat_session::DefaultCompactor;
 // EphemeralSessionService: in-memory substrate for testing/embedded use only.
 // Both implement SessionService. Production paths add MeerkatMachine on top.
 pub use meerkat_session::{
-    EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
+    EphemeralSessionService, LiveSessionActorWitness, RuntimeContextAdmissionGuard, SessionAgent,
+    SessionAgentBuilder,
 };
 #[cfg(feature = "session-store")]
 pub use meerkat_session::{
+    LiveSessionActorTurnBoundaryLease, LiveSessionActorWitnessSlot,
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
 // Durable stored-event row (typed envelope identity) for replay surfaces.

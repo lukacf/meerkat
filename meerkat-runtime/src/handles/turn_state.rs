@@ -219,6 +219,11 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                     tool_count: u64::from(tool_count),
                 }
             }
+            TurnExecutionInput::CallbackPending { run_id } => {
+                mm_dsl::MeerkatMachineInput::CallbackPending {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                }
+            }
             TurnExecutionInput::LlmReturnedTerminal { run_id } => {
                 mm_dsl::MeerkatMachineInput::LlmReturnedTerminal {
                     run_id: mm_dsl::RunId::from_domain(&run_id),
@@ -705,6 +710,10 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         };
         TurnStateSnapshot {
             active_run_id,
+            terminal_run_id: state
+                .turn_terminal_run_id
+                .as_ref()
+                .map(parse_snapshot_run_id),
             loop_state: map_loop_state(state.turn_phase),
             turn_phase,
             turn_terminal,

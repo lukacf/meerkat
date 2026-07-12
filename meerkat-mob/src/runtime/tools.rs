@@ -338,7 +338,7 @@ pub(super) fn compose_external_tools_for_profile(
     Ok(Some(Arc::new(DynamicToolComposite::new(dispatchers))))
 }
 
-struct MobOperatorToolDispatcher {
+pub(crate) struct MobOperatorToolDispatcher {
     handle: MobHandle,
     authority_context: MobToolAuthorityContext,
     tools: Arc<[Arc<ToolDef>]>,
@@ -346,12 +346,57 @@ struct MobOperatorToolDispatcher {
 }
 
 impl MobOperatorToolDispatcher {
-    fn new(
+    pub(crate) fn new(
         handle: MobHandle,
         enable_mob: bool,
         authority_context: MobToolAuthorityContext,
     ) -> Self {
+        // §15.2 lane separation (phase 5, DEC-P5E-8/12): member-session
+        // operator tools and the upcall executor are the AGENT authority
+        // lane — their gates are the machine-composed authority context
+        // below, never principal ControlScope grants. Rebinding here keeps
+        // chokepoint (a) from consulting grants for this dispatcher's
+        // commands, and `agent_lane()` is pub(crate) so no surface crate
+        // can launder a console call onto this lane. An already-agent-lane
+        // handle must be preserved byte-for-byte: the controlling-side upcall
+        // executor attaches an exact residency fence to that authority, and
+        // rebinding it to a fresh plain AgentLane here would erase the
+        // actor-dispatch ABA fence after the initial validation turn.
+        let handle = if matches!(
+            handle.command_authority_kind(),
+            crate::control_policy::CommandAuthorityKind::AgentLane
+        ) {
+            handle
+        } else {
+            handle.with_command_authority(crate::control_policy::CommandAuthority::agent_lane())
+        };
+        debug_assert!(matches!(
+            handle.command_authority_kind(),
+            crate::control_policy::CommandAuthorityKind::AgentLane
+        ));
         let enable_mob = enable_mob && authority_context.is_generated_authority_context();
+        Self::build(handle, enable_mob, authority_context)
+    }
+
+    /// T-LS4 introspection: the lane this dispatcher's commands travel on.
+    #[cfg(test)]
+    pub(crate) fn command_authority_kind(&self) -> crate::control_policy::CommandAuthorityKind {
+        self.handle.command_authority_kind()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_member_operator_execution_fence(&self) -> bool {
+        self.handle
+            .command_authority
+            .member_operator_execution_fence()
+            .is_some()
+    }
+
+    fn build(
+        handle: MobHandle,
+        enable_mob: bool,
+        authority_context: MobToolAuthorityContext,
+    ) -> Self {
         let mut defs: Vec<Arc<ToolDef>> = Vec::new();
         if enable_mob {
             defs.push(tool_def(
@@ -375,11 +420,8 @@ impl MobOperatorToolDispatcher {
                             "type": "object",
                             "description": "Tool access policy: inherit (default), allow_list, or deny_list"
                         },
-                        "budget_split_policy": {
-                            "type": "object",
-                            "description": "Budget split policy: equal, proportional, remaining, or fixed"
-                        },
-                        "auto_wire_parent": {"type": "boolean", "description": "Auto-wire to spawner after spawn"}
+                        "auto_wire_parent": {"type": "boolean", "description": "Auto-wire to spawner after spawn"},
+                        "placement": {"type": "string", "description": "Comms peer id of a bound member host to place this member on (multi-host mobs)"}
                     },
                     "required": ["profile", "member_id"]
                 }),
@@ -402,7 +444,8 @@ impl MobOperatorToolDispatcher {
                                     "resume_bridge_session_id": {"type": "string"},
                                     "resume_session_id": {"type": "string"},
                                     "backend": {"type": "string", "enum": ["session", "external"]},
-                                    "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
+                                    "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
+                                    "placement": {"type": "string", "description": "Comms peer id of a bound member host to place this member on (multi-host mobs)"}
                                 },
                                 "required": ["profile", "member_id"]
                             }
@@ -583,7 +626,6 @@ impl MobOperatorToolDispatcher {
             runtime_mode_present: args.runtime_mode.is_some(),
             launch_mode_present: args.launch_mode.is_some(),
             tool_access_policy_present: args.tool_access_policy.is_some(),
-            budget_split_policy_present: args.budget_split_policy.is_some(),
             ..SpawnMemberAdmissionObservations::default()
         };
         let admission = self
@@ -807,9 +849,12 @@ struct SpawnMemberArgs {
     #[serde(default)]
     tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     #[serde(default)]
-    budget_split_policy: Option<crate::launch::BudgetSplitPolicy>,
-    #[serde(default)]
     auto_wire_parent: Option<bool>,
+    /// Host placement (comms peer id of a bound member host). ADJ-7
+    /// passthrough: admission is owned by the spawn-exec ladder's typed
+    /// placement denial causes, not by this surface.
+    #[serde(default)]
+    placement: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -900,11 +945,11 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 if let Some(policy) = args.tool_access_policy {
                     spec = spec.with_tool_access_policy(policy);
                 }
-                if let Some(policy) = args.budget_split_policy {
-                    spec = spec.with_budget_split_policy(policy);
-                }
                 if let Some(auto_wire) = args.auto_wire_parent {
                     spec = spec.with_auto_wire_parent(auto_wire);
+                }
+                if let Some(placement) = args.placement {
+                    spec.placement = Some(crate::machines::mob_machine::HostId::from(placement));
                 }
                 let (result, async_ops) =
                     if let Some(owner_bridge_session_id) = self.owner_bridge_session_id.clone() {
@@ -967,11 +1012,12 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         if let Some(policy) = spec.tool_access_policy {
                             spawn_spec = spawn_spec.with_tool_access_policy(policy);
                         }
-                        if let Some(policy) = spec.budget_split_policy {
-                            spawn_spec = spawn_spec.with_budget_split_policy(policy);
-                        }
                         if let Some(auto_wire) = spec.auto_wire_parent {
                             spawn_spec = spawn_spec.with_auto_wire_parent(auto_wire);
+                        }
+                        if let Some(placement) = spec.placement {
+                            spawn_spec.placement =
+                                Some(crate::machines::mob_machine::HostId::from(placement));
                         }
                         spawn_spec
                     })

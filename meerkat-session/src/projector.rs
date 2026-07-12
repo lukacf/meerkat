@@ -472,9 +472,182 @@ mod tests {
             session_id: &SessionId,
             envelopes: &[meerkat_core::event::EventEnvelope<AgentEvent>],
         ) -> Result<u64, EventStoreError> {
-            let events: Vec<AgentEvent> = envelopes.iter().map(|env| env.payload.clone()).collect();
-            self.add_events(session_id, &events);
-            self.last_seq(session_id).await
+            let mut interaction_related = envelopes.iter().filter_map(|envelope| {
+                crate::event_store::interaction_related_envelope_id(envelope)
+                    .map(|interaction_id| (interaction_id, envelope))
+            });
+            if let Some((interaction_id, envelope)) = interaction_related.next() {
+                if envelopes.len() != 1 || interaction_related.next().is_some() {
+                    return Err(EventStoreError::InvalidExactInteractionTerminal {
+                        interaction_id,
+                        reason: "generic interaction batches are forbidden".to_string(),
+                    });
+                }
+                return self
+                    .append_interaction_terminal_exact(session_id, interaction_id, envelope)
+                    .await
+                    .map(|result| result.stored_event().seq);
+            }
+
+            let mut map = self.events.lock().unwrap();
+            let entry = map.entry(session_id.to_string()).or_default();
+            for envelope in envelopes {
+                let seq = entry.len() as u64 + 1;
+                entry.push(StoredEvent {
+                    seq,
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    timestamp: SystemTime::now(),
+                    source: envelope.source.clone(),
+                    mob_id: envelope.mob_id.clone(),
+                    stream_seq: envelope.seq,
+                    event: envelope.payload.clone(),
+                });
+            }
+            Ok(entry.last().map_or(0, |event| event.seq))
+        }
+
+        async fn append_interaction_terminal_exact(
+            &self,
+            session_id: &SessionId,
+            interaction_id: meerkat_core::interaction::InteractionId,
+            envelope: &meerkat_core::event::EventEnvelope<AgentEvent>,
+        ) -> Result<crate::event_store::ExactInteractionAppend, EventStoreError> {
+            crate::event_store::validate_exact_interaction_terminal(interaction_id, envelope)?;
+            let mut map = self.events.lock().unwrap();
+            let entry = map.entry(session_id.to_string()).or_default();
+            let exact: Vec<_> = entry
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        &event.source,
+                        EventSourceIdentity::Interaction {
+                            interaction_id: existing
+                        } if *existing == interaction_id
+                    )
+                })
+                .cloned()
+                .collect();
+            match exact.as_slice() {
+                [] => {
+                    let stored = StoredEvent {
+                        seq: entry.len() as u64 + 1,
+                        schema_version: EVENT_SCHEMA_VERSION,
+                        timestamp: SystemTime::now(),
+                        source: envelope.source.clone(),
+                        mob_id: envelope.mob_id.clone(),
+                        stream_seq: envelope.seq,
+                        event: envelope.payload.clone(),
+                    };
+                    entry.push(stored.clone());
+                    Ok(crate::event_store::ExactInteractionAppend::Inserted(stored))
+                }
+                [existing]
+                    if existing.mob_id == envelope.mob_id
+                        && crate::event_store::interaction_terminal_events_semantically_equal(
+                            &existing.event,
+                            &envelope.payload,
+                        ) =>
+                {
+                    Ok(crate::event_store::ExactInteractionAppend::Replayed(
+                        existing.clone(),
+                    ))
+                }
+                [existing] => Err(EventStoreError::ExactInteractionTerminalConflict {
+                    session_id: session_id.clone(),
+                    interaction_id,
+                    existing_count: 1,
+                    reason: format!(
+                        "stored event {:?} does not match incoming {:?}",
+                        existing.event, envelope.payload
+                    ),
+                }),
+                duplicates => Err(EventStoreError::ExactInteractionTerminalConflict {
+                    session_id: session_id.clone(),
+                    interaction_id,
+                    existing_count: duplicates.len(),
+                    reason: "multiple exact interaction rows".to_string(),
+                }),
+            }
+        }
+
+        async fn append_interaction_terminals_exact_batch(
+            &self,
+            session_id: &SessionId,
+            stream_seq_floor: u64,
+            terminals: &[(
+                meerkat_core::interaction::InteractionId,
+                meerkat_core::event::EventEnvelope<AgentEvent>,
+            )],
+        ) -> Result<Vec<crate::event_store::ExactInteractionAppend>, EventStoreError> {
+            crate::event_store::validate_exact_interaction_terminal_batch(terminals)?;
+            if terminals.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut map = self.events.lock().unwrap();
+            let entry = map.entry(session_id.to_string()).or_default();
+            let occupants: Vec<_> = terminals
+                .iter()
+                .map(|(interaction_id, _)| {
+                    let exact: Vec<_> = entry
+                        .iter()
+                        .filter(|event| {
+                            matches!(
+                                &event.source,
+                                EventSourceIdentity::Interaction {
+                                    interaction_id: existing
+                                } if *existing == *interaction_id
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    match exact.as_slice() {
+                        [] => crate::event_store::ExactInteractionOccupancy::Empty,
+                        [stored] => {
+                            crate::event_store::ExactInteractionOccupancy::One(stored.clone())
+                        }
+                        [first, ..] => crate::event_store::ExactInteractionOccupancy::Multiple {
+                            first: first.clone(),
+                            count: exact.len(),
+                        },
+                    }
+                })
+                .collect();
+            let prefix_len = crate::event_store::validate_exact_interaction_terminal_replay_prefix(
+                session_id, terminals, &occupants,
+            )?;
+            let mut results = Vec::with_capacity(terminals.len());
+            let mut replay_tail = 0_u64;
+            for occupant in occupants.iter().take(prefix_len) {
+                let crate::event_store::ExactInteractionOccupancy::One(stored) = occupant else {
+                    return Err(EventStoreError::Store(
+                        "validated replay prefix lost its stored row".to_string(),
+                    ));
+                };
+                replay_tail = stored.stream_seq;
+                results.push(crate::event_store::ExactInteractionAppend::Replayed(
+                    stored.clone(),
+                ));
+            }
+            let mut next_stream_seq = stream_seq_floor.max(replay_tail);
+            for (_, envelope) in &terminals[prefix_len..] {
+                next_stream_seq = next_stream_seq.checked_add(1).ok_or_else(|| {
+                    EventStoreError::InvalidExactInteractionTerminalBatch {
+                        reason: "session event stream sequence overflow".to_string(),
+                    }
+                })?;
+                let stored = StoredEvent {
+                    seq: entry.len() as u64 + 1,
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    timestamp: SystemTime::now(),
+                    source: envelope.source.clone(),
+                    mob_id: envelope.mob_id.clone(),
+                    stream_seq: next_stream_seq,
+                    event: envelope.payload.clone(),
+                };
+                entry.push(stored.clone());
+                results.push(crate::event_store::ExactInteractionAppend::Inserted(stored));
+            }
+            Ok(results)
         }
 
         async fn record_projection_halt(

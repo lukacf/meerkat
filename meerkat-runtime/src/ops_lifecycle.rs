@@ -412,6 +412,8 @@ struct ShellState {
     feed_buffer: Arc<FeedBuffer>,
     /// Persistence channel for durable snapshot writes (set via `set_persistence_channel`).
     persist_tx: Option<crate::tokio::sync::mpsc::UnboundedSender<OpsLifecyclePersistenceRequest>>,
+    /// Terminal unregister permanently fences any later channel replacement.
+    persistence_sealed: bool,
     /// Epoch ID for persistence snapshots.
     persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
     /// Shared cursor state for persistence snapshots.
@@ -476,6 +478,7 @@ impl ShellState {
             // the oldest entry is evicted.
             feed_buffer,
             persist_tx: None,
+            persistence_sealed: false,
             persist_epoch_id: None,
             persist_cursor_state: None,
             owner_retired: false,
@@ -930,11 +933,14 @@ impl ShellState {
         Ok(Some(OperationLifecycleSnapshot {
             id: shell.spec.id.clone(),
             kind,
+            owner_session_id: shell.spec.owner_session_id.clone(),
             display_name: shell.spec.display_name.clone(),
+            source_label: shell.spec.source_label.clone(),
             child_session_id: Self::child_session_id_from_operation_source(
                 operation_source.as_ref(),
             ),
             operation_source,
+            expect_peer_channel: shell.spec.expect_peer_channel,
             status,
             terminal,
             public_result_class,
@@ -2045,6 +2051,7 @@ impl RuntimeOpsLifecycleRegistry {
                 wait_request_id: None,
                 feed_buffer,
                 persist_tx: None,
+                persistence_sealed: false,
                 persist_epoch_id: None,
                 persist_cursor_state: None,
                 owner_retired: false,
@@ -2122,7 +2129,10 @@ impl RuntimeOpsLifecycleRegistry {
         cursor_state: Arc<meerkat_core::EpochCursorState>,
     ) {
         if let Ok(mut state) = self.state.write() {
-            if state.owner_retired {
+            if state.owner_retired || state.persistence_sealed {
+                tracing::warn!(
+                    "ignored attempt to rewire a terminally sealed ops persistence channel"
+                );
                 return;
             }
             state.persist_tx = Some(tx);
@@ -2150,6 +2160,7 @@ impl RuntimeOpsLifecycleRegistry {
             }
             terminate_owner_locked(&mut state, &reason)?;
             state.owner_retired = true;
+            state.persistence_sealed = true;
             state.persist_epoch_id = None;
             state.persist_cursor_state = None;
             state.persist_tx.take()

@@ -453,11 +453,24 @@ class InteractionComplete(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class InteractionFailureReason:
+    """Typed reason carried by an ``interaction_failed`` wire event."""
+
+    kind: str = "unknown"
+    last_output: str = ""
+    attempts: int = 0
+    reason: str = ""
+    detail: str = ""
+    raw_kind: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class InteractionFailed(Event):
     """An interaction failed."""
 
     interaction_id: str = ""
-    error: str = ""
+    reason: InteractionFailureReason = field(default_factory=InteractionFailureReason)
 
 
 # ---------------------------------------------------------------------------
@@ -465,10 +478,24 @@ class InteractionFailed(Event):
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
+class StreamTruncationReason:
+    """Typed reason carried by a ``stream_truncated`` wire event."""
+
+    kind: str = "unknown"
+    dropped: int | None = None
+    watermark: int | None = None
+    durable_seq: int | None = None
+    encoded_bytes: int | None = None
+    max_bytes: int | None = None
+    raw_kind: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class StreamTruncated(Event):
     """The event stream was truncated."""
 
-    reason: str = ""
+    reason: StreamTruncationReason = field(default_factory=StreamTruncationReason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -953,11 +980,73 @@ def _require_number(raw: dict[str, Any], field_name: str) -> int | float:
     return value
 
 
+def _require_non_negative_int(raw: dict[str, Any], field_name: str) -> int:
+    value = raw.get(field_name)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
 def _require_bool(raw: dict[str, Any], field_name: str) -> bool:
     value = raw.get(field_name)
     if not isinstance(value, bool):
         raise ValueError(f"{field_name} must be boolean")
     return value
+
+
+def _parse_interaction_failure_reason(raw: Any) -> InteractionFailureReason:
+    if not isinstance(raw, dict):
+        raise ValueError("interaction_failed.reason must be object")
+    kind = _require_str(raw, "kind")
+    if kind == "cancelled":
+        return InteractionFailureReason(kind=kind)
+    if kind == "extraction_failed":
+        return InteractionFailureReason(
+            kind=kind,
+            last_output=_require_str(raw, "last_output"),
+            attempts=_require_non_negative_int(raw, "attempts"),
+            reason=_require_str(raw, "reason"),
+        )
+    if kind in {"abandoned", "finalization_failed"}:
+        return InteractionFailureReason(
+            kind=kind,
+            detail=_require_str(raw, "detail"),
+        )
+    return InteractionFailureReason(
+        kind="unknown",
+        raw_kind=kind,
+        raw=dict(raw),
+    )
+
+
+def _parse_stream_truncation_reason(raw: Any) -> StreamTruncationReason:
+    if not isinstance(raw, dict):
+        raise ValueError("stream_truncated.reason must be object")
+    kind = _require_str(raw, "kind")
+    if kind == "channel_full":
+        return StreamTruncationReason(kind=kind)
+    if kind in {"stream_lagged", "output_audio_degraded"}:
+        return StreamTruncationReason(
+            kind=kind,
+            dropped=_require_non_negative_int(raw, "dropped"),
+        )
+    if kind == "remote_cursor_overrun":
+        return StreamTruncationReason(
+            kind=kind,
+            watermark=_require_non_negative_int(raw, "watermark"),
+        )
+    if kind == "oversized_remote_event":
+        return StreamTruncationReason(
+            kind=kind,
+            durable_seq=_require_non_negative_int(raw, "durable_seq"),
+            encoded_bytes=_require_non_negative_int(raw, "encoded_bytes"),
+            max_bytes=_require_non_negative_int(raw, "max_bytes"),
+        )
+    return StreamTruncationReason(
+        kind="unknown",
+        raw_kind=kind,
+        raw=dict(raw),
+    )
 
 
 def _parse_content_blocks(raw: Any, legacy_text: Any = None) -> list[ContentBlock]:
@@ -1039,9 +1128,12 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "hook_denied": ("hook_id", "point", "reason_code", "message"),
         "skills_resolved": ("skills", "injection_bytes"),
         "interaction_complete": ("interaction_id", "result"),
-        "interaction_failed": ("interaction_id", "error"),
-        "stream_truncated": ("reason",),
+        "interaction_failed": ("interaction_id",),
     }
+    if event_type == "interaction_failed":
+        _parse_interaction_failure_reason(raw.get("reason"))
+    if event_type == "stream_truncated":
+        _parse_stream_truncation_reason(raw.get("reason"))
     if event_type == "background_job_completed":
         _require_str(raw, "job_id")
         _require_str(raw, "display_name")
@@ -1192,6 +1284,10 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 kwargs["reason"] = _parse_skill_resolution_failure_reason(
                     raw.get("reason"),
                 )
+            elif f == "reason" and cls is InteractionFailed:
+                kwargs["reason"] = _parse_interaction_failure_reason(raw.get("reason"))
+            elif f == "reason" and cls is StreamTruncated:
+                kwargs["reason"] = _parse_stream_truncation_reason(raw.get("reason"))
             elif f == "payload" and cls is ToolConfigChanged:
                 payload_raw = raw["payload"]
                 assert isinstance(payload_raw, dict)

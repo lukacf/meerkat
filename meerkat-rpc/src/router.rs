@@ -966,6 +966,34 @@ async fn resolve_mob_stream_close_authority(
 // MethodRouter
 // ---------------------------------------------------------------------------
 
+fn lower_session_fork_at_request(
+    params: &meerkat_contracts::ForkSessionAtParams,
+) -> SessionForkAtRequest {
+    SessionForkAtRequest {
+        message_index: params.message_index,
+        running_behavior: params.running_behavior,
+        tool_access_policy: params
+            .tool_access_policy
+            .clone()
+            .map(meerkat_contracts::wire::WireToolAccessPolicy::into_core),
+    }
+}
+
+fn lower_session_fork_replace_request(
+    params: &meerkat_contracts::ForkSessionReplaceParams,
+    replacement: meerkat_core::session::TranscriptReplacement,
+) -> SessionForkReplaceRequest {
+    SessionForkReplaceRequest {
+        message_index: params.message_index,
+        replacement,
+        running_behavior: params.running_behavior,
+        tool_access_policy: params
+            .tool_access_policy
+            .clone()
+            .map(meerkat_contracts::wire::WireToolAccessPolicy::into_core),
+    }
+}
+
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
 #[derive(Clone)]
 pub struct MethodRouter {
@@ -1044,6 +1072,10 @@ impl MethodRouter {
                 meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                     runtime.session_service(),
                     Some(runtime_adapter.clone()),
+                    // A16: the local stdio/loopback RPC console is the
+                    // owning operator (explicit mint, DEC-P5E-8; bearer
+                    // principals are the v2 seam).
+                    meerkat_mob::MobControlPrincipal::Owner,
                 )
                 .with_persistent_storage_root(persistent_mob_root)
                 .with_workgraph_service(runtime.workgraph_service().ok())
@@ -1120,7 +1152,48 @@ impl MethodRouter {
         self.attach_live_host(Arc::clone(state.host()));
         self.live_ws_state = Some(state);
         self.live_ws_base_url = Some(base_url);
+        self.sync_member_live_host();
         self
+    }
+
+    /// Phase 6b (ADJ-P6B-16): once the live-capable composition is complete
+    /// (any live transport + per-open factory), install the facade
+    /// `ServiceMemberLiveHost` on (a) the machine slot — member sessions
+    /// bound to a remote mob supervisor serve the bridge live arms through
+    /// it — and (b) the mob console state, which passes it through the
+    /// `MobBuilder::with_member_live_host` knob for the LOCAL placement
+    /// branch. Partial composition installs nothing: the arms and the
+    /// local branch degrade typed `LiveTransportUnavailable`.
+    fn sync_member_live_host(&self) {
+        let Some(session_factory) = self.live_session_factory.as_ref() else {
+            return;
+        };
+        if !self.live_enabled() {
+            return;
+        }
+        let live_host = meerkat::surface::ServiceMemberLiveHost::new(
+            meerkat::surface::ServiceMemberLiveHostConfig {
+                service: self.runtime.persistent_service(),
+                runtime_adapter: Arc::clone(&self.runtime_adapter),
+                host: Arc::clone(&self.live_adapter_host),
+                ws_state: self.live_ws_state.clone(),
+                base_url: self.live_ws_base_url.clone(),
+                session_factory: Arc::clone(session_factory),
+                realm_id: self.runtime.realm_id(),
+                instance_id: self.runtime.instance_id(),
+                backend: self.runtime.backend(),
+            },
+        );
+        #[cfg(feature = "live-webrtc")]
+        let live_host = match self.live_webrtc_state.as_ref() {
+            Some(state) => live_host.with_webrtc_cleanup_state(Arc::clone(state)),
+            None => live_host,
+        };
+        let live_host: Arc<dyn meerkat_runtime::member_live::MemberLiveHost> = Arc::new(live_host);
+        self.runtime_adapter
+            .set_member_live_host(Arc::clone(&live_host));
+        #[cfg(feature = "mob")]
+        self.mob_state.set_member_live_host(live_host);
     }
 
     /// Attach live WebRTC signaling state for `live/open` token minting and
@@ -1129,6 +1202,7 @@ impl MethodRouter {
     pub fn with_live_webrtc(mut self, state: Arc<meerkat_live::LiveWebrtcState>) -> Self {
         self.attach_live_host(Arc::clone(state.host()));
         self.live_webrtc_state = Some(state);
+        self.sync_member_live_host();
         self
     }
 
@@ -1162,6 +1236,7 @@ impl MethodRouter {
         factory: Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
     ) -> Self {
         self.live_session_factory = Some(factory);
+        self.sync_member_live_host();
         self
     }
 
@@ -1914,6 +1989,52 @@ impl MethodRouter {
             "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
             #[cfg(feature = "mob")]
             "mob/stream_close" => self.handle_mob_stream_close(id, params).await,
+            #[cfg(feature = "mob")]
+            "mob/grant_scopes" => {
+                handlers::mob::handle_grant_scopes(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/revoke_scopes" => {
+                handlers::mob::handle_revoke_scopes(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/grants" => handlers::mob::handle_grants(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/member_history" => {
+                handlers::mob::handle_member_history(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/hosts" => handlers::mob::handle_hosts(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/route_installs" => {
+                handlers::mob::handle_route_installs(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/bind_host" => handlers::mob::handle_bind_host(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/revoke_host" => {
+                handlers::mob::handle_revoke_host(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/hard_cancel_member" => {
+                handlers::mob::handle_hard_cancel_member(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/member_live_open" => {
+                handlers::mob::handle_member_live_open(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/member_live_close" => {
+                handlers::mob::handle_member_live_close(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/member_live_status" => {
+                handlers::mob::handle_member_live_status(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/member_live_control" => {
+                handlers::mob::handle_member_live_control(id, params, &self.mob_state).await
+            }
             #[cfg(feature = "comms")]
             "comms/send" => self.handle_comms_send(id, params).await,
             #[cfg(feature = "comms")]
@@ -2620,14 +2741,7 @@ impl MethodRouter {
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self
                 .runtime
-                .fork_session_at(
-                    &session_id,
-                    SessionForkAtRequest {
-                        message_index: params.message_index,
-                        running_behavior: params.running_behavior,
-                        tool_access_policy: params.tool_access_policy,
-                    },
-                )
+                .fork_session_at(&session_id, lower_session_fork_at_request(&params))
                 .await
             {
                 Ok(mut result) => {
@@ -2675,7 +2789,7 @@ impl MethodRouter {
         // Lower the typed wire replacement into the core `TranscriptReplacement`
         // at the boundary; a malformed replacement fails closed with a typed
         // parse error rather than being forwarded.
-        let replacement = match params.replacement.into_core() {
+        let replacement = match params.replacement.clone().into_core() {
             Ok(replacement) => replacement,
             Err(err) => {
                 return RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string());
@@ -2687,12 +2801,7 @@ impl MethodRouter {
                 .runtime
                 .fork_session_replace(
                     &session_id,
-                    SessionForkReplaceRequest {
-                        message_index: params.message_index,
-                        replacement,
-                        running_behavior: params.running_behavior,
-                        tool_access_policy: params.tool_access_policy,
-                    },
+                    lower_session_fork_replace_request(&params, replacement),
                 )
                 .await
             {
@@ -3397,16 +3506,6 @@ impl MethodRouter {
         };
 
         let mob_id = meerkat_mob::MobId::from(params.mob_id.as_str());
-        let handle: meerkat_mob::MobHandle = match self.mob_state.handle_for(&mob_id).await {
-            Ok(h) => h,
-            Err(e) => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Mob not found: {e}"),
-                );
-            }
-        };
 
         let stream_id = StreamRef::mint();
         let notification_sink = self.notification_sink.clone();
@@ -3417,17 +3516,16 @@ impl MethodRouter {
         let opened = if let Some(agent_identity) = params.agent_identity {
             // Per-member stream: subscribe to a specific member's agent events.
             let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
-            let stream: meerkat_core::comms::EventStream =
-                match handle.subscribe_agent_events(&identity).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return RpcResponse::error(
-                            id,
-                            error::INVALID_PARAMS,
-                            format!("Failed to subscribe to member events: {e}"),
-                        );
-                    }
-                };
+            let stream: meerkat_core::comms::EventStream = match self
+                .mob_state
+                .subscribe_agent_events(&mob_id, &identity)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    return handlers::mob::mob_error_response(id, &e);
+                }
+            };
 
             let open_authority =
                 match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {
@@ -3526,14 +3624,10 @@ impl MethodRouter {
             open_authority.opened
         } else {
             // Mob-wide stream: subscribe to all members' events (attributed).
-            let mut router_handle = match handle.subscribe_mob_events().await {
+            let mut router_handle = match self.mob_state.subscribe_mob_events(&mob_id).await {
                 Ok(handle) => handle,
                 Err(error) => {
-                    return RpcResponse::error(
-                        id,
-                        error::INTERNAL_ERROR,
-                        format!("Failed to subscribe to mob event stream: {error}"),
-                    );
+                    return handlers::mob::mob_error_response(id, &error);
                 }
             };
 
@@ -3747,6 +3841,59 @@ mod tests {
     use serde_json::value::RawValue;
 
     use crate::protocol::RpcId;
+
+    #[test]
+    fn session_fork_request_lowering_preserves_each_tool_policy() {
+        let policies = [
+            None,
+            Some(meerkat_contracts::wire::WireToolAccessPolicy::Inherit),
+            Some(meerkat_contracts::wire::WireToolAccessPolicy::AllowList(
+                vec!["shell".to_string()],
+            )),
+            Some(meerkat_contracts::wire::WireToolAccessPolicy::DenyList(
+                vec!["browser".to_string()],
+            )),
+        ];
+
+        for policy in policies {
+            let expected = policy
+                .clone()
+                .map(meerkat_contracts::wire::WireToolAccessPolicy::into_core);
+            let at_params = meerkat_contracts::ForkSessionAtParams {
+                session_id: "source-session".to_string(),
+                message_index: 4,
+                running_behavior: Default::default(),
+                tool_access_policy: policy.clone(),
+            };
+            let at_request = lower_session_fork_at_request(&at_params);
+            assert_eq!(at_request.tool_access_policy, expected);
+
+            let replace_params = meerkat_contracts::ForkSessionReplaceParams {
+                session_id: "source-session".to_string(),
+                message_index: 4,
+                replacement: serde_json::from_value(serde_json::json!({
+                    "type": "message",
+                    "message": {
+                        "role": "system",
+                        "content": "replacement"
+                    }
+                }))
+                .expect("typed replacement should parse"),
+                running_behavior: Default::default(),
+                tool_access_policy: policy,
+            };
+            let replace_request = lower_session_fork_replace_request(
+                &replace_params,
+                meerkat_core::session::TranscriptReplacement::UserContentBlock {
+                    block_index: 0,
+                    block: meerkat_core::types::ContentBlock::Text {
+                        text: "replacement".to_string(),
+                    },
+                },
+            );
+            assert_eq!(replace_request.tool_access_policy, expected);
+        }
+    }
 
     macro_rules! notification_params {
         ($notification:expr) => {
@@ -4449,6 +4596,11 @@ mod tests {
         assert_eq!(
             capabilities["result"]["features"]["runtime_backed_sessions"],
             true
+        );
+        assert_eq!(
+            capabilities["result"]["features"]["multi_host_mobs"],
+            cfg!(feature = "mob"),
+            "runtime/capabilities must advertise the multi-host mob surface when compiled"
         );
         assert_eq!(
             capabilities["result"]["features"]["secure_remote_rpc"],
@@ -5999,6 +6151,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-forward-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -6050,6 +6203,7 @@ mod tests {
             open_deferred_keep_alive_live_controller("live-smoke-controller-steer-test").await;
 
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -8158,6 +8312,74 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    async fn mob_stream_open_requires_subscribe_events_scope_before_registration() {
+        let owner = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let mob_id = meerkat_mob::MobId::from("scope-denied-mob-stream");
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            })),
+        );
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles = profiles;
+        owner
+            .mob_create_definition(definition)
+            .await
+            .expect("owner creates stream fixture mob");
+
+        let viewer = meerkat_mob_mcp::MobMcpState::new_in_memory_as(
+            meerkat_mob::MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("viewer").expect("principal id"),
+            ),
+        );
+        let handle = owner.handle_for(&mob_id).await.expect("fixture mob handle");
+        viewer.mob_insert_handle(mob_id.clone(), handle).await;
+        let (router, _notif_rx) = test_router_with_mob_state(viewer).await;
+
+        let response = router
+            .dispatch(make_request(
+                "mob/stream_open",
+                serde_json::json!({ "mob_id": mob_id.as_str() }),
+            ))
+            .await
+            .expect("request response");
+
+        let error = response.error.expect("scope denial");
+        assert_eq!(
+            error.code,
+            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code()
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "required": "subscribe_events",
+                "presented": []
+            }))
+        );
+        assert!(
+            router.active_mob_streams.lock().await.is_empty(),
+            "a denied open must not register a forwarder"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
     async fn mob_stream_close_removes_forwarder_from_active_map() {
         let (router, mut notif_rx) = test_router().await;
 
@@ -10090,7 +10312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_create_returns_request_cancelled_and_rolls_back_when_pre_cancelled() {
+    async fn session_create_returns_request_cancelled_before_stateful_work_when_pre_cancelled() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
 
         let mut create_req = make_request(
@@ -10119,7 +10341,7 @@ mod tests {
             .expect("session/list should return an array");
         assert!(
             sessions.is_empty(),
-            "pre-start cancelled create should not leave a live session behind: {sessions:?}"
+            "pre-cancelled create must stop before creating a session: {sessions:?}"
         );
     }
 
@@ -10453,6 +10675,74 @@ mod tests {
                 "live transport is attached, but `{expected}` was not advertised: {methods:?}"
             );
         }
+    }
+
+    #[cfg(all(feature = "live-webrtc", feature = "comms"))]
+    #[tokio::test]
+    async fn webrtc_only_composition_installs_transport_neutral_lifecycle_cleanup() {
+        let (router, _notif_rx) = test_router().await;
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let close_feedback: Arc<dyn meerkat_live::LiveChannelCloseFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let status_feedback: Arc<dyn meerkat_live::LiveChannelStatusFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let router = router
+            .with_live_webrtc(Arc::new(meerkat_live::LiveWebrtcState::new(
+                Arc::clone(&host),
+                close_feedback,
+                status_feedback,
+            )))
+            .with_live_session_factory(Arc::new(RecordingLiveFactory {
+                log: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            }));
+
+        let session_id = SessionId::new();
+        router
+            .runtime_adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register WebRTC-only session");
+        let channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let authority = router
+            .runtime_adapter
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("machine admits fixture channel");
+        host.open_channel_with_authority(
+            authority
+                .channel_open_authority()
+                .expect("generated host open handoff"),
+        )
+        .await
+        .expect("materialize transport-neutral host entry");
+
+        router
+            .runtime_adapter
+            .close_member_live_channel_for_disposal(&session_id)
+            .await
+            .expect("WebRTC-only composition must expose lifecycle cleanup");
+        assert_eq!(
+            router
+                .runtime_adapter
+                .live_active_channel_for_session(&session_id)
+                .await,
+            None
+        );
     }
 
     #[tokio::test]

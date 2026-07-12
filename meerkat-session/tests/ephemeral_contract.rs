@@ -21,8 +21,8 @@ use meerkat_core::service::{
 use meerkat_core::types::{AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, Usage};
 use meerkat_core::{
     CancelAfterBoundaryCommand, CancelAfterBoundarySender, HookDecision, HookEngine,
-    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, Session,
-    SessionDeferredTurnState, SystemContextStateError,
+    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, RunId,
+    Session, SessionDeferredTurnState, SystemContextStateError,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -563,7 +563,7 @@ impl SessionAgent for RealSessionAgent {
     fn cancel(&mut self) {
         let _ = self
             .cancel_after_boundary_tx
-            .send(CancelAfterBoundaryCommand);
+            .send(CancelAfterBoundaryCommand::for_run(RunId::new()));
     }
 
     fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
@@ -683,7 +683,7 @@ impl SessionAgent for CompactionSessionAgent {
     fn cancel(&mut self) {
         let _ = self
             .cancel_after_boundary_tx
-            .send(CancelAfterBoundaryCommand);
+            .send(CancelAfterBoundaryCommand::for_run(RunId::new()));
     }
 
     fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {

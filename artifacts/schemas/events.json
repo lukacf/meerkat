@@ -1024,6 +1024,36 @@
               "detail"
             ],
             "type": "object"
+          },
+          {
+            "description": "The main interaction run completed, but structured-output extraction\nfailed. Keeping the extraction facts typed lets journal consumers\npreserve the extraction terminal class even though the exact\nper-input carrier is an `InteractionFailed` event.",
+            "properties": {
+              "attempts": {
+                "description": "Number of extraction attempts made before failure.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "extraction_failed",
+                "type": "string"
+              },
+              "last_output": {
+                "description": "The committed main-turn output extraction attempted to transform.",
+                "type": "string"
+              },
+              "reason": {
+                "description": "Human-readable extraction failure reason.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "last_output",
+              "attempts",
+              "reason"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1800,6 +1830,56 @@
             "required": [
               "kind",
               "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A remote member's retained event window advanced beyond the\ncontrolling-side durable cursor. The pump resumes immediately after\n`watermark`; subscribers receive this marker before later events.",
+            "properties": {
+              "kind": {
+                "const": "remote_cursor_overrun",
+                "type": "string"
+              },
+              "watermark": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "watermark"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One immutable durable event row could not cross the bounded member\nbridge reply. The pump skips exactly this row and resumes at the next\ndurable sequence; the omission is visible rather than log-only.",
+            "properties": {
+              "durable_seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "encoded_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "oversized_remote_event",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "durable_seq",
+              "encoded_bytes",
+              "max_bytes"
             ],
             "type": "object"
           }
@@ -5217,6 +5297,36 @@
               "detail"
             ],
             "type": "object"
+          },
+          {
+            "description": "The main interaction run completed, but structured-output extraction\nfailed. Keeping the extraction facts typed lets journal consumers\npreserve the extraction terminal class even though the exact\nper-input carrier is an `InteractionFailed` event.",
+            "properties": {
+              "attempts": {
+                "description": "Number of extraction attempts made before failure.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "extraction_failed",
+                "type": "string"
+              },
+              "last_output": {
+                "description": "The committed main-turn output extraction attempted to transform.",
+                "type": "string"
+              },
+              "reason": {
+                "description": "Human-readable extraction failure reason.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "last_output",
+              "attempts",
+              "reason"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -6036,6 +6146,56 @@
             "required": [
               "kind",
               "dropped"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A remote member's retained event window advanced beyond the\ncontrolling-side durable cursor. The pump resumes immediately after\n`watermark`; subscribers receive this marker before later events.",
+            "properties": {
+              "kind": {
+                "const": "remote_cursor_overrun",
+                "type": "string"
+              },
+              "watermark": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "watermark"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One immutable durable event row could not cross the bounded member\nbridge reply. The pump skips exactly this row and resumes at the next\ndurable sequence; the omission is visible rather than log-only.",
+            "properties": {
+              "durable_seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "encoded_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "oversized_remote_event",
+                "type": "string"
+              },
+              "max_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "durable_seq",
+              "encoded_bytes",
+              "max_bytes"
             ],
             "type": "object"
           }

@@ -724,6 +724,7 @@ fn mob_machine_native_reducer_helpers_are_formally_defined() {
         .expect("read generated MobMachine TLA");
     for helper in [
         "mob_machine_identity_has_session_binding",
+        "mob_machine_remote_turn_custody_admits",
         "mob_machine_node_terminal",
         "mob_machine_run_step_status_after_set",
         "mob_machine_run_step_bool_after_set",

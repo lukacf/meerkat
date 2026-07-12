@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason, dsl};
+use crate::meerkat_machine::{
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, RuntimeExecutorAttachmentWitness, dsl,
+};
 use indexmap::IndexSet;
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
@@ -201,6 +203,20 @@ pub enum ImageOperationRoutingResult {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SessionLlmReconfigureHost: Send + Sync {
+    /// Acquire the stable session-service boundary that must enclose the
+    /// complete hydrate -> generated-machine commit -> live mutation ->
+    /// persistence transaction. Runtime-loop callers already hold the same
+    /// boundary; direct control-plane callers acquire it through this hook.
+    async fn acquire_turn_finalization_boundary(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        RuntimeDriverError,
+    > {
+        Ok(Box::new(()))
+    }
+
     async fn hydrate_session_llm_state(
         &self,
         session_id: &SessionId,
@@ -212,20 +228,24 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
         current_identity: &meerkat_core::SessionLlmIdentity,
     ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError>;
 
+    /// Caller must hold the turn-finalization boundary.
     async fn apply_live_session_llm_identity(
         &self,
         session_id: &SessionId,
         identity: &meerkat_core::SessionLlmIdentity,
     ) -> Result<(), RuntimeDriverError>;
 
+    /// Caller must hold the turn-finalization boundary.
     async fn apply_live_session_tool_visibility_state(
         &self,
         session_id: &SessionId,
         visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
     ) -> Result<(), RuntimeDriverError>;
 
+    /// Caller must hold the turn-finalization boundary.
     async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError>;
 
+    /// Caller must hold the turn-finalization boundary.
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError>;
 }
 
@@ -271,6 +291,7 @@ pub(crate) enum MeerkatMachineCommand {
     },
     CommitServiceTurnTerminalReceipt {
         session_id: SessionId,
+        session_snapshot: Vec<u8>,
     },
     #[cfg_attr(not(test), allow(dead_code))]
     ContainsSession {
@@ -370,6 +391,10 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn CommsRuntime>>,
+        /// When present, the peer-ingress mutation is authorized only for
+        /// this exact committed executor attachment. A delayed publisher for
+        /// attachment A can therefore never configure replacement B.
+        expected_attachment: Option<crate::RuntimeExecutorAttachmentWitness>,
         /// Mob-owned path sets this to the spawning mob's id so the DSL
         /// transitions to `PeerIngressOwnerKind::MobOwned` rather than
         /// `SessionOwned`. Session-owned and detach paths leave it `None`.
@@ -466,6 +491,8 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         input: Input,
         register_completion: bool,
+        member_residency: MemberResidencyExpectation,
+        expected_attachment: Option<RuntimeExecutorAttachmentWitness>,
     },
     AcceptWithoutWake {
         session_id: SessionId,
@@ -474,18 +501,31 @@ pub(crate) enum MeerkatMachineCommand {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum MemberResidencyExpectation {
+    Unfenced,
+    PeerOnly,
+    Placed(meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation),
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct MeerkatMachineRunFailure {
     pub source: Option<dsl::RunFailureSourceKind>,
     pub machine_terminal_failure_observed: bool,
+    pub machine_terminal_error: Option<meerkat_core::TurnErrorMetadata>,
     pub error: String,
 }
 
 impl MeerkatMachineRunFailure {
-    pub(crate) fn from_machine_terminal_failure(error: impl Into<String>) -> Self {
+    pub(crate) fn from_machine_terminal_failure(error: meerkat_core::TurnErrorMetadata) -> Self {
+        let detail = error
+            .detail
+            .clone()
+            .unwrap_or_else(|| "machine terminal failure".to_string());
         Self {
             source: None,
             machine_terminal_failure_observed: true,
-            error: error.into(),
+            machine_terminal_error: Some(error),
+            error: detail,
         }
     }
 }
@@ -723,6 +763,7 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     RunExecutionLifecycle => [
         AcknowledgeTerminal,
+        CallbackPending,
         AdvanceAgentCompletionCursor,
         AdvanceRuntimeInjectedCompletionCursor,
         AdvanceRuntimeObservedCompletionCursor,
@@ -755,6 +796,7 @@ meerkat_machine_runtime_internal_inputs!(
         TurnLimitReached,
     ],
     CancellationLifecycle => [
+        AbortCancelAfterBoundaryDispatch,
         CancelNow,
         CancelRun,
         CancellationObserved,
@@ -923,6 +965,7 @@ meerkat_machine_runtime_internal_inputs!(
         SurfaceStageRemove,
     ],
     FailureRecoveryLifecycle => [
+        AuthorizeInteractionTerminalOutboxAdoption,
         ClassifyLlmFailureRecovery,
         ClassifyRuntimeLifecycleDurability,
         ClassifyRuntimeLifecycleState,
@@ -1048,6 +1091,331 @@ pub enum MeerkatMachineFieldlessRuntimeInternalAuthority {
 pub fn canonical_meerkat_machine_runtime_internal_classifications()
 -> Vec<MeerkatMachineRuntimeInternalClassificationRecord> {
     MeerkatMachineRuntimeInternalInput::CLASSIFICATIONS.to_vec()
+}
+
+/// Closed typed manifest of supervisor bridge wire command kinds
+/// (`meerkat_contracts::wire::supervisor_bridge::BridgeCommand` variants).
+///
+/// The wire enum is `#[non_exhaustive]`, so no match over it outside
+/// `meerkat-contracts` can be compiler-checked for completeness. This manifest
+/// is the runtime's completeness authority instead:
+/// `supervisor_bridge_command_manifest_matches_wire_enum` pins it against the
+/// wire enum's variant list and
+/// `supervisor_bridge_command_realization_matches_drain_dispatch` pins each
+/// kind's realization posture against the `comms_drain` bridge dispatch match,
+/// so a new wire command or dispatch arm cannot land without a typed
+/// admission classification here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorBridgeCommandKind {
+    BindMember,
+    AuthorizeSupervisor,
+    ObserveSupervisorRotation,
+    RevokeSupervisor,
+    DeliverMemberInput,
+    ObserveMember,
+    InterruptMember,
+    HardCancelMember,
+    CancelTrackedMemberInput,
+    RetireMember,
+    DestroyMember,
+    WireMember,
+    UnwireMember,
+    DeclareMemberOutboundTaint,
+    // Multi-host (protocol V4) member-addressed family (plan §6.4/§16.4):
+    // admission-classified ahead of realization; the comms drain stays
+    // fail-closed until the execution arms land.
+    ReadMemberHistory,
+    PollMemberEvents,
+    OpenMemberLiveChannel,
+    CloseMemberLiveChannel,
+    MemberLiveChannelStatus,
+    ControlMemberLiveChannel,
+    // Multi-host (protocol V4) host-addressed + member-originated families:
+    // admitted by `MobHostBindingAuthority` on the host daemon / `MobMachine`
+    // on the controlling host, never by MeerkatMachine on a member runtime.
+    BindHost,
+    RebindHost,
+    RevokeHost,
+    MaterializeMember,
+    ReleaseMember,
+    InstallPeerTrust,
+    RemovePeerTrust,
+    HostStatus,
+    MemberOperatorRequest,
+}
+
+impl SupervisorBridgeCommandKind {
+    pub const ALL: &'static [Self] = &[
+        Self::BindMember,
+        Self::AuthorizeSupervisor,
+        Self::ObserveSupervisorRotation,
+        Self::RevokeSupervisor,
+        Self::DeliverMemberInput,
+        Self::ObserveMember,
+        Self::InterruptMember,
+        Self::HardCancelMember,
+        Self::CancelTrackedMemberInput,
+        Self::RetireMember,
+        Self::DestroyMember,
+        Self::WireMember,
+        Self::UnwireMember,
+        Self::DeclareMemberOutboundTaint,
+        Self::ReadMemberHistory,
+        Self::PollMemberEvents,
+        Self::OpenMemberLiveChannel,
+        Self::CloseMemberLiveChannel,
+        Self::MemberLiveChannelStatus,
+        Self::ControlMemberLiveChannel,
+        Self::BindHost,
+        Self::RebindHost,
+        Self::RevokeHost,
+        Self::MaterializeMember,
+        Self::ReleaseMember,
+        Self::InstallPeerTrust,
+        Self::RemovePeerTrust,
+        Self::HostStatus,
+        Self::MemberOperatorRequest,
+    ];
+
+    /// Wire enum variant identifier this kind mirrors.
+    #[must_use]
+    pub const fn variant_name(self) -> &'static str {
+        match self {
+            Self::BindMember => "BindMember",
+            Self::AuthorizeSupervisor => "AuthorizeSupervisor",
+            Self::ObserveSupervisorRotation => "ObserveSupervisorRotation",
+            Self::RevokeSupervisor => "RevokeSupervisor",
+            Self::DeliverMemberInput => "DeliverMemberInput",
+            Self::ObserveMember => "ObserveMember",
+            Self::InterruptMember => "InterruptMember",
+            Self::HardCancelMember => "HardCancelMember",
+            Self::CancelTrackedMemberInput => "CancelTrackedMemberInput",
+            Self::RetireMember => "RetireMember",
+            Self::DestroyMember => "DestroyMember",
+            Self::WireMember => "WireMember",
+            Self::UnwireMember => "UnwireMember",
+            Self::DeclareMemberOutboundTaint => "DeclareMemberOutboundTaint",
+            Self::ReadMemberHistory => "ReadMemberHistory",
+            Self::PollMemberEvents => "PollMemberEvents",
+            Self::OpenMemberLiveChannel => "OpenMemberLiveChannel",
+            Self::CloseMemberLiveChannel => "CloseMemberLiveChannel",
+            Self::MemberLiveChannelStatus => "MemberLiveChannelStatus",
+            Self::ControlMemberLiveChannel => "ControlMemberLiveChannel",
+            Self::BindHost => "BindHost",
+            Self::RebindHost => "RebindHost",
+            Self::RevokeHost => "RevokeHost",
+            Self::MaterializeMember => "MaterializeMember",
+            Self::ReleaseMember => "ReleaseMember",
+            Self::InstallPeerTrust => "InstallPeerTrust",
+            Self::RemovePeerTrust => "RemovePeerTrust",
+            Self::HostStatus => "HostStatus",
+            Self::MemberOperatorRequest => "MemberOperatorRequest",
+        }
+    }
+
+    /// MeerkatMachine admission route for this command on a member runtime.
+    #[must_use]
+    pub const fn admission_route(self) -> SupervisorBridgeCommandAdmissionRoute {
+        match self {
+            Self::BindMember => SupervisorBridgeCommandAdmissionRoute::SupervisorBind,
+            Self::AuthorizeSupervisor => SupervisorBridgeCommandAdmissionRoute::SupervisorAuthorize,
+            Self::ObserveSupervisorRotation => {
+                SupervisorBridgeCommandAdmissionRoute::SupervisorRotationObservation
+            }
+            Self::RevokeSupervisor
+            | Self::DeliverMemberInput
+            | Self::ObserveMember
+            | Self::InterruptMember
+            | Self::HardCancelMember
+            | Self::CancelTrackedMemberInput
+            | Self::RetireMember
+            | Self::DestroyMember
+            | Self::WireMember
+            | Self::UnwireMember
+            | Self::DeclareMemberOutboundTaint
+            | Self::ReadMemberHistory
+            | Self::PollMemberEvents
+            | Self::OpenMemberLiveChannel
+            | Self::CloseMemberLiveChannel
+            | Self::MemberLiveChannelStatus
+            | Self::ControlMemberLiveChannel => {
+                SupervisorBridgeCommandAdmissionRoute::SupervisorBridgeCommand
+            }
+            Self::BindHost
+            | Self::RebindHost
+            | Self::RevokeHost
+            | Self::MaterializeMember
+            | Self::ReleaseMember
+            | Self::InstallPeerTrust
+            | Self::RemovePeerTrust
+            | Self::HostStatus
+            | Self::MemberOperatorRequest => {
+                SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed
+            }
+        }
+    }
+
+    /// Current realization posture: member-runtime comms drain arm,
+    /// off-drain responder, or fail-closed unsupported.
+    #[must_use]
+    pub const fn realization(self) -> SupervisorBridgeCommandRealization {
+        match self {
+            Self::BindMember
+            | Self::AuthorizeSupervisor
+            | Self::ObserveSupervisorRotation
+            | Self::RevokeSupervisor
+            | Self::DeliverMemberInput
+            | Self::ObserveMember
+            | Self::InterruptMember
+            | Self::RetireMember
+            | Self::DestroyMember
+            | Self::WireMember
+            | Self::UnwireMember
+            | Self::DeclareMemberOutboundTaint
+            // Phase 6 (§7.4): member-input cancellation + the observation
+            // pair gained member-drain arms (DEC-P6E-1/3/6/7).
+            | Self::HardCancelMember
+            | Self::CancelTrackedMemberInput
+            | Self::ReadMemberHistory
+            | Self::PollMemberEvents
+            // Phase 6b (§16): the live-channel family gained member-drain
+            // arms served through the MemberLiveHost slot (ADJ-P6B-1); an
+            // absent slot rejects typed LiveTransportUnavailable at the arm.
+            | Self::OpenMemberLiveChannel
+            | Self::CloseMemberLiveChannel
+            | Self::MemberLiveChannelStatus
+            | Self::ControlMemberLiveChannel => SupervisorBridgeCommandRealization::Realized,
+            // Host-addressed bind/rebind (phase 2), materialize/release/
+            // status (phase 3), and the peer-trust pair (phase 4) are served
+            // by the mob host daemon's serving loop, never a member drain
+            // arm (ADJ-13; admission is MobHostBindingAuthority-owned — the
+            // trust mutation itself applies through the member session's
+            // machine-gated direct-peer-endpoint seam).
+            Self::BindHost
+            | Self::RebindHost
+            | Self::RevokeHost
+            | Self::MaterializeMember
+            | Self::ReleaseMember
+            | Self::InstallPeerTrust
+            | Self::RemovePeerTrust
+            | Self::HostStatus => SupervisorBridgeCommandRealization::RealizedOffDrain {
+                by: OffDrainResponder::HostDaemon,
+            },
+            // Member-originated operator requests are served by the
+            // controlling host's supervisor-inbox responder (ADJ-13;
+            // admission is MobMachine's ResolveMemberOperatorAdmission).
+            Self::MemberOperatorRequest => SupervisorBridgeCommandRealization::RealizedOffDrain {
+                by: OffDrainResponder::ControllingSupervisorInbox,
+            },
+        }
+    }
+}
+
+/// MeerkatMachine admission route for a supervisor bridge command arriving at
+/// a member runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorBridgeCommandAdmissionRoute {
+    /// Bind bootstrap ladder (`ResolveSupervisorBindAdmission` +
+    /// `ResolveSupervisorBindMaterialAdmission`): establishes initial
+    /// supervisor authority, so it cannot require a bound supervisor.
+    SupervisorBind,
+    /// Supervisor rotation ladder (`ResolveSupervisorAuthorizeAdmission`).
+    SupervisorAuthorize,
+    /// Typed observation of the machine-owned supervisor rotation operation.
+    SupervisorRotationObservation,
+    /// Bound-supervisor command ladder
+    /// (`ResolveSupervisorBridgeCommandAdmission`).
+    ///
+    /// v1 posture (multi-host plan §6.4, deliberate and recorded): the ladder
+    /// guards on bound supervisor identity + epoch + sender only. There is no
+    /// member-side fence or topology-epoch validation on delivery — fences
+    /// are validated supervisor-side on submit (`StaleFenceToken`).
+    SupervisorBridgeCommand,
+    /// Never admitted by MeerkatMachine: host-addressed commands are admitted
+    /// by `MobHostBindingAuthority` on the host daemon; the member-originated
+    /// operator request is admitted by `MobMachine` on the controlling host.
+    NotMemberAddressed,
+}
+
+impl SupervisorBridgeCommandAdmissionRoute {
+    /// Generated MeerkatMachine admission inputs staged for this route.
+    #[must_use]
+    pub const fn admission_inputs(self) -> &'static [MeerkatMachineRuntimeInternalInput] {
+        match self {
+            Self::SupervisorBind => &[
+                MeerkatMachineRuntimeInternalInput::ResolveSupervisorBindAdmission,
+                MeerkatMachineRuntimeInternalInput::ResolveSupervisorBindMaterialAdmission,
+            ],
+            Self::SupervisorAuthorize => {
+                &[MeerkatMachineRuntimeInternalInput::ResolveSupervisorAuthorizeAdmission]
+            }
+            Self::SupervisorRotationObservation => {
+                &[MeerkatMachineRuntimeInternalInput::ObserveSupervisorRotation]
+            }
+            Self::SupervisorBridgeCommand => {
+                &[MeerkatMachineRuntimeInternalInput::ResolveSupervisorBridgeCommandAdmission]
+            }
+            Self::NotMemberAddressed => &[],
+        }
+    }
+}
+
+/// Realization posture of a supervisor bridge command in the member runtime's
+/// comms drain (the `comms_drain.rs` bridge dispatch match) or an off-drain
+/// responder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorBridgeCommandRealization {
+    /// A dispatch arm stages admission and realizes the command today.
+    Realized,
+    /// Served OFF the member runtime's comms drain by a dedicated responder
+    /// (ADJ-13): the drain keeps ZERO arms for these kinds — the drain-scan
+    /// gate asserts `Realized` ⇔ drain arm, so an off-drain-served command
+    /// is never recorded as a false `Realized` and never left as an
+    /// under-describing `FailClosedUnsupported`.
+    RealizedOffDrain { by: OffDrainResponder },
+    /// No dispatch arm anywhere: the fail-closed `_ =>` arm replies
+    /// `BridgeRejectionCause::Unsupported` (the `HardCancelMember` precedent).
+    /// Admission classification is declared ahead of realization; when the
+    /// execution arm lands it must flip this record to `Realized` (drain arm)
+    /// or `RealizedOffDrain` (dedicated responder) in the same change-set
+    /// (`supervisor_bridge_command_realization_matches_drain_dispatch`
+    /// enforces the flip).
+    FailClosedUnsupported,
+}
+
+/// Which off-drain responder realizes a `RealizedOffDrain` command (ADJ-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffDrainResponder {
+    /// The mob host daemon's `MobHostActor` serving loop — host-addressed
+    /// commands admitted by `MobHostBindingAuthority`.
+    HostDaemon,
+    /// The controlling host's supervisor-inbox responder — the
+    /// member-originated operator family admitted by `MobMachine`
+    /// (`ResolveMemberOperatorAdmission`).
+    ControllingSupervisorInbox,
+}
+
+/// Per-wire-command admission classification record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupervisorBridgeCommandClassificationRecord {
+    pub kind: SupervisorBridgeCommandKind,
+    pub route: SupervisorBridgeCommandAdmissionRoute,
+    pub realization: SupervisorBridgeCommandRealization,
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_supervisor_bridge_command_classifications()
+-> Vec<SupervisorBridgeCommandClassificationRecord> {
+    SupervisorBridgeCommandKind::ALL
+        .iter()
+        .copied()
+        .map(|kind| SupervisorBridgeCommandClassificationRecord {
+            kind,
+            route: kind.admission_route(),
+            realization: kind.realization(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1698,7 +2066,7 @@ pub struct MeerkatControlSnapshot {
 }
 
 /// Snapshot of one admitted runtime input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeerkatAdmittedInputSnapshot {
     pub input_id: InputId,
     pub content_shape: Option<ContentShape>,
@@ -1717,7 +2085,7 @@ pub struct MeerkatAdmittedInputSnapshot {
 }
 
 /// Snapshot of runtime ingress truth for one session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeerkatInputsSnapshot {
     pub admission_order: Vec<MeerkatAdmittedInputSnapshot>,
     pub queue: Vec<InputId>,

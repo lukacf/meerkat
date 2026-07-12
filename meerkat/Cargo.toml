@@ -139,6 +139,16 @@ skills = [
 # Live-channel orchestration (LiveAdapterHost wiring + realtime open/refresh
 # helpers shared by RPC, Rust SDK, REST, etc.). Pulls in `meerkat-live`.
 live = ["dep:meerkat-live", "meerkat-runtime/live"]
+# WebRTC live transport (phase 6b, DEC-P6B-L8): the webrtc bootstrap branch
+# of the extracted open pipeline compiles only under this feature; the
+# member host never enables it (a `transport=webrtc` request degrades typed
+# as the non-compiled arm).
+live-webrtc = ["live", "meerkat-live/webrtc"]
+# Deterministic realtime test fixtures (ADJ-P6B-4): exposes
+# `meerkat::test_fixtures::realtime::ScriptedRealtimeSessionFactory` for the
+# cross-host live batteries (facade tests, meerkat-mob/tests, integration
+# rows). Test-support only — never enable in production compositions.
+test-realtime-fixtures = []
 
 [package.metadata.cargo-machete]
 ignored = ["which"]  # dev-dependency used in e2e tests

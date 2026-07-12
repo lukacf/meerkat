@@ -863,9 +863,13 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         "NotifyDrainExitedRunning",
         "EnsureDrainRunningAttached",
         "EnsureDrainRunningRunning",
-        "AcceptWithCompletionAttachedQueued",
+        "AcceptWithCompletionIdleQueuedPassive",
+        "AcceptWithCompletionIdleQueuedWakeIfIdle",
+        "AcceptWithCompletionAttachedQueuedPassive",
+        "AcceptWithCompletionAttachedQueuedWakeIfIdle",
         "AcceptWithCompletionAttachedImmediate",
         "AcceptWithCompletionRunningQueuedPassive",
+        "AcceptWithCompletionRunningQueuedWakeIfIdle",
         "AcceptWithCompletionRunningInterruptYielding",
         "AcceptWithCompletionRunningImmediate",
         "AcceptWithoutWakeAttached",
@@ -945,6 +949,80 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         assert!(
             effect_names.iter().any(|name| name == &required),
             "MeerkatMachine should retain absorbed effect {required}"
+        );
+    }
+}
+
+/// A queued admission plan's `wake_if_idle` fact remains authoritative when
+/// the acceptance transition runs. Peer-response progress deliberately emits
+/// `false`; collapsing Idle/Attached onto an unconditional wake makes the
+/// runtime loop race later lifecycle commands despite the no-wake plan.
+#[test]
+fn queued_accept_with_completion_respects_wake_if_idle_in_quiescent_phases() {
+    fn wake_guard(transition: &meerkat_machine_schema::TransitionSchema) -> Option<&Expr> {
+        transition
+            .guards
+            .iter()
+            .find(|guard| guard.name == "wake_if_idle")
+            .map(|guard| &guard.expr)
+    }
+
+    let schema = meerkat_machine();
+
+    for (phase, passive_name, waking_name) in [
+        (
+            "Idle",
+            "AcceptWithCompletionIdleQueuedPassive",
+            "AcceptWithCompletionIdleQueuedWakeIfIdle",
+        ),
+        (
+            "Attached",
+            "AcceptWithCompletionAttachedQueuedPassive",
+            "AcceptWithCompletionAttachedQueuedWakeIfIdle",
+        ),
+    ] {
+        let passive_guard = Expr::Eq(
+            Box::new(Expr::Binding("wake_if_idle".to_string())),
+            Box::new(Expr::Bool(false)),
+        );
+        let waking_guard = Expr::Eq(
+            Box::new(Expr::Binding("wake_if_idle".to_string())),
+            Box::new(Expr::Bool(true)),
+        );
+        let passive = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == passive_name)
+            .unwrap_or_else(|| panic!("missing {phase} passive queued acceptance"));
+        let waking = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == waking_name)
+            .unwrap_or_else(|| panic!("missing {phase} waking queued acceptance"));
+
+        assert_eq!(
+            wake_guard(passive),
+            Some(&passive_guard),
+            "{phase} passive acceptance must require wake_if_idle=false"
+        );
+        assert_eq!(
+            wake_guard(waking),
+            Some(&waking_guard),
+            "{phase} waking acceptance must require wake_if_idle=true"
+        );
+        assert!(
+            passive
+                .emit
+                .iter()
+                .all(|effect| effect.variant.as_str() != "PostAdmissionSignal"),
+            "{phase} passive acceptance must not wake the runtime loop"
+        );
+        assert!(
+            waking
+                .emit
+                .iter()
+                .any(|effect| effect.variant.as_str() == "PostAdmissionSignal"),
+            "{phase} waking acceptance must emit the runtime-loop signal"
         );
     }
 }

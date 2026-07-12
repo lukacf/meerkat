@@ -209,11 +209,14 @@ into:
 ```rust
 use std::sync::Arc;
 use meerkat_core::service::SessionBuildOptions;
-use meerkat_mob::MobSessionService;
+use meerkat_mob::{MobControlPrincipal, MobSessionService};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 
 fn with_mob_tools(session_service: Arc<dyn MobSessionService>) -> SessionBuildOptions {
-    let state = Arc::new(MobMcpState::new(session_service));
+    let state = Arc::new(MobMcpState::new(
+        session_service,
+        MobControlPrincipal::Owner,
+    ));
     SessionBuildOptions {
         mob_tools: Some(Arc::new(AgentMobToolSurfaceFactory::new(state))),
         ..Default::default()

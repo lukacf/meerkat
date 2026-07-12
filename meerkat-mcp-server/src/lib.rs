@@ -11,9 +11,8 @@ mod schedule_host;
 #[cfg(test)]
 use meerkat::SessionStore;
 use meerkat::surface::{
-    RequestContext, install_prepared_runtime_interrupt_handle, prepare_surface_session,
-    request_action, run_runtime_backed_initial_turn_with_machine,
-    split_runtime_backed_eager_create_request,
+    RequestContext, install_prepared_runtime_interrupt_handle_for_actor_slot,
+    prepare_surface_session, request_action, split_runtime_backed_eager_create_request,
 };
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
@@ -63,34 +62,586 @@ fn surface_materialize_error_to_session_error(
     }
 }
 
-async fn create_runtime_backed_session_and_run_initial_turn(
+/// Minimal MCP-owned actor materialization shell.
+///
+/// The machine owns the exact claim and the session service mints the actor
+/// witness. MCP retains neither the service turn boundary nor a post-commit
+/// rollback receipt: once durable actor creation succeeds, cancellation may
+/// leave a discoverable session that an explicit resume can reconstruct.
+pub(crate) struct McpPreparedActorMaterialization {
+    prepared: meerkat_runtime::PreparedSessionMaterialization,
+    actor_witness_slot: meerkat::LiveSessionActorWitnessSlot,
+    replaces_predecessor: bool,
+}
+
+impl McpPreparedActorMaterialization {
+    fn new(
+        prepared: meerkat_runtime::PreparedSessionMaterialization,
+        actor_witness_slot: meerkat::LiveSessionActorWitnessSlot,
+        replaces_predecessor: bool,
+    ) -> Self {
+        Self {
+            prepared,
+            actor_witness_slot,
+            replaces_predecessor,
+        }
+    }
+
+    pub(crate) fn actor_witness_slot(&self) -> &meerkat::LiveSessionActorWitnessSlot {
+        &self.actor_witness_slot
+    }
+
+    pub(crate) fn replaces_predecessor(&self) -> bool {
+        self.replaces_predecessor
+    }
+}
+
+impl std::ops::Deref for McpPreparedActorMaterialization {
+    type Target = meerkat_runtime::PreparedSessionMaterialization;
+
+    fn deref(&self) -> &Self::Target {
+        &self.prepared
+    }
+}
+
+impl std::ops::DerefMut for McpPreparedActorMaterialization {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.prepared
+    }
+}
+
+/// Explicitly replace the current MCP actor/executor incarnation.
+///
+/// Replacement uses the machine's exact unregister seam. The old actor is
+/// discarded only through the witness captured before retirement; a
+/// same-session successor is never removed by this operation.
+async fn prepare_mcp_actor_materialization(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &meerkat::SessionId,
+) -> Result<McpPreparedActorMaterialization, ToolCallError> {
+    let old_actor = match service
+        .acquire_live_session_actor_turn_boundary_lease(session_id)
+        .await
+    {
+        Ok(lease) => Some(lease.witness().clone()),
+        Err(SessionError::NotFound { .. }) => None,
+        Err(error) => {
+            return Err(ToolCallError::internal(format!(
+                "failed to inspect exact live actor before resuming {session_id}: {error}"
+            )));
+        }
+    };
+
+    // Explicit resume always establishes a new attachment incarnation. Even
+    // after a process restart, when no live witness remains to unregister,
+    // durable active inputs may still belong to the vanished attachment.
+    // Replacement commit terminalizes those inputs before the new executor
+    // can serve, so work is never silently transferred from A to B.
+    let replaces_predecessor = true;
+    if let Some(witness) = runtime_adapter
+        .current_executor_attachment_witness(session_id)
+        .await
+    {
+        let retired = runtime_adapter
+            .unregister_executor_attachment_if_current(&witness)
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to retire exact runtime attachment before resuming {session_id}: {error}"
+                ))
+            })?;
+        if !retired {
+            return Err(ToolCallError::internal(format!(
+                "runtime attachment changed before explicit resume of {session_id}; retry resume"
+            )));
+        }
+    } else if runtime_adapter
+        .session_has_executor(session_id)
+        .await
+        .map_err(|error| ToolCallError::internal(error.to_string()))?
+    {
+        return Err(runtime_ingress::resume_required_tool_error(
+            session_id,
+            "runtime executor is transitional and has no exact attachment witness",
+        ));
+    }
+
+    if let Some(old_actor) = old_actor
+        && let Some(lease) = service
+            .acquire_live_session_actor_turn_boundary_lease_exact(&old_actor)
+            .await
+            .map_err(|error| ToolCallError::internal(error.to_string()))?
+    {
+        service
+            .discard_live_session_actor(&lease)
+            .await
+            .map_err(|error| ToolCallError::internal(error.to_string()))?;
+    }
+
+    prepare_mcp_actor_materialization_claim(
+        service,
+        runtime_adapter,
+        session_id,
+        replaces_predecessor,
+    )
+    .await
+}
+
+async fn prepare_new_mcp_actor_materialization(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &meerkat::SessionId,
+) -> Result<McpPreparedActorMaterialization, ToolCallError> {
+    let has_live_actor = match service
+        .acquire_live_session_actor_turn_boundary_lease(session_id)
+        .await
+    {
+        Ok(_lease) => true,
+        Err(SessionError::NotFound { .. }) => false,
+        Err(error) => {
+            return Err(ToolCallError::internal(format!(
+                "failed to inspect exact live actor before creating {session_id}: {error}"
+            )));
+        }
+    };
+    if has_live_actor
+        || runtime_adapter
+            .current_executor_attachment_witness(session_id)
+            .await
+            .is_some()
+        || runtime_adapter
+            .session_has_executor(session_id)
+            .await
+            .map_err(|error| ToolCallError::internal(error.to_string()))?
+    {
+        return Err(runtime_ingress::resume_required_tool_error(
+            session_id,
+            "new materialization raced an existing live incarnation",
+        ));
+    }
+    prepare_mcp_actor_materialization_claim(service, runtime_adapter, session_id, false).await
+}
+
+async fn prepare_mcp_actor_materialization_claim(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &meerkat::SessionId,
+    replaces_predecessor: bool,
+) -> Result<McpPreparedActorMaterialization, ToolCallError> {
+    let mut prepared = runtime_adapter
+        .prepare_session_materialization(session_id.clone())
+        .await
+        .map_err(|error| {
+            ToolCallError::internal(format!(
+                "failed to prepare exact actor materialization for {session_id}: {error}"
+            ))
+        })?;
+    let actor_witness_slot = meerkat::LiveSessionActorWitnessSlot::default();
+    if let Err(error) = install_prepared_runtime_interrupt_handle_for_actor_slot(
+        service,
+        runtime_adapter,
+        prepared.bindings(),
+        actor_witness_slot.clone(),
+    )
+    .await
+    {
+        let rollback = prepared.rollback_now().await.err();
+        let rollback = rollback
+            .map(|error| format!("; exact rollback also failed: {error}"))
+            .unwrap_or_default();
+        return Err(ToolCallError::internal(format!(
+            "failed to install prepared runtime handles for {session_id}: {error}{rollback}"
+        )));
+    }
+    Ok(McpPreparedActorMaterialization::new(
+        prepared,
+        actor_witness_slot,
+        replaces_predecessor,
+    ))
+}
+
+/// Release an uncommitted machine claim without trying to erase durable work.
+/// If the actor already published, retain it as actor-unattached so discovery
+/// and the explicit resume seam can recover it.
+async fn release_mcp_actor_materialization(
+    prepared: &mut Option<McpPreparedActorMaterialization>,
+    session_id: &meerkat::SessionId,
+    context: &str,
+) -> Result<(), ToolCallError> {
+    let Some(mut prepared) = prepared.take() else {
+        return Ok(());
+    };
+    let result = if prepared.actor_witness_slot().witness().is_some() {
+        prepared.commit_actor_unattached().await.map(|()| false)
+    } else {
+        prepared.rollback_now().await
+    };
+    result.map(|_| ()).map_err(|error| {
+        ToolCallError::internal(format!(
+            "{context} for session {session_id}; exact materialization release failed: {error}"
+        ))
+    })
+}
+
+#[derive(Debug)]
+enum McpRuntimeBackedCreateError {
+    Session {
+        error: SessionError,
+        preserves_runtime_session: bool,
+    },
+    CreatedSessionIdentityMismatch(SessionError),
+    InitialTurnIdentityMismatch(SessionError),
+}
+
+async fn create_runtime_backed_session_and_run_initial_turn_prepared(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     session_id: &meerkat::SessionId,
     req: CreateSessionRequest,
     admission: Option<meerkat::RuntimeContextAdmissionGuard>,
-) -> Result<meerkat::RunResult, SessionError> {
+    transaction: &McpPreparedActorMaterialization,
+) -> Result<meerkat::RunResult, McpRuntimeBackedCreateError> {
+    if transaction.session_id() != session_id {
+        return Err(McpRuntimeBackedCreateError::Session {
+            error: SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "MCP actor transaction belongs to {}, not {session_id}",
+                transaction.session_id()
+            ))),
+            preserves_runtime_session: false,
+        });
+    }
     let (req, initial_turn) = split_runtime_backed_eager_create_request(req);
-    let create_result = match admission {
+    let create_attempt = match admission {
         Some(admission) => {
             service
-                .create_session_with_reserved_admission(req, admission)
+                .create_session_with_reserved_admission_and_actor_witness(
+                    req,
+                    admission,
+                    transaction.actor_witness_slot(),
+                )
                 .await
         }
-        None => service.create_session(req).await,
-    }?;
+        None => {
+            let admission = service.reserve_create_session_admission().await;
+            match admission {
+                Ok(admission) => {
+                    service
+                        .create_session_with_reserved_admission_and_actor_witness(
+                            req,
+                            admission,
+                            transaction.actor_witness_slot(),
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            }
+        }
+    };
+    let create_result = match create_attempt {
+        Ok(result) => result,
+        Err(error) => {
+            let preserves_runtime_session = service
+                .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
+                .await;
+            return Err(McpRuntimeBackedCreateError::Session {
+                error,
+                preserves_runtime_session,
+            });
+        }
+    };
+    if &create_result.session_id != session_id {
+        let returned_session_id = create_result.session_id.clone();
+        return Err(McpRuntimeBackedCreateError::CreatedSessionIdentityMismatch(
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "runtime-backed actor materialization returned session {returned_session_id}, expected {session_id}"
+            ))),
+        ));
+    }
 
-    match initial_turn {
-        Some(initial_turn) => run_runtime_backed_initial_turn_with_machine(
+    let result = match initial_turn {
+        Some(initial_turn) => match meerkat::surface::run_runtime_backed_initial_turn_with_machine(
             service,
             runtime_adapter,
             session_id,
             initial_turn,
         )
         .await
-        .map_err(surface_materialize_error_to_session_error),
-        None => Ok(create_result),
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let error = surface_materialize_error_to_session_error(error);
+                let preserves_runtime_session = service
+                    .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
+                    .await;
+                return Err(McpRuntimeBackedCreateError::Session {
+                    error,
+                    preserves_runtime_session,
+                });
+            }
+        },
+        None => create_result,
+    };
+    if &result.session_id != session_id {
+        let returned_session_id = result.session_id;
+        return Err(McpRuntimeBackedCreateError::InitialTurnIdentityMismatch(
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "runtime-backed initial turn returned session {returned_session_id}, expected {session_id}"
+            ))),
+        ));
     }
+    Ok(result)
+}
+
+struct McpCallLocalActorCreateOutcome {
+    result: Result<meerkat::RunResult, McpRuntimeBackedCreateError>,
+    transaction: McpPreparedActorMaterialization,
+}
+
+/// Call-local actor construction. There is deliberately no MCP-owned detached
+/// rollback saga: the shared machine claim still performs its normal exact
+/// provisional cleanup on drop, but it never archives durable creation.
+/// Cancellation can lose the response while leaving the session discoverable;
+/// explicit resume reconstructs any missing runtime pieces.
+async fn create_runtime_backed_session_and_run_initial_turn_call_local(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &meerkat::SessionId,
+    req: CreateSessionRequest,
+    admission: Option<meerkat::RuntimeContextAdmissionGuard>,
+    transaction: McpPreparedActorMaterialization,
+) -> Result<McpCallLocalActorCreateOutcome, ToolCallError> {
+    let result = create_runtime_backed_session_and_run_initial_turn_prepared(
+        service,
+        runtime_adapter,
+        session_id,
+        req,
+        admission,
+        &transaction,
+    )
+    .await;
+    Ok(McpCallLocalActorCreateOutcome {
+        result,
+        transaction,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum McpActorMaterializationMode {
+    Fresh,
+    Resume,
+}
+
+pub(crate) struct McpActorMaterializationPlan {
+    pub request: CreateSessionRequest,
+    pub callback_config: runtime_ingress::McpCallbackConfig,
+    pub router_to_publish: Option<Arc<meerkat_mcp::McpRouterAdapter>>,
+}
+
+pub(crate) struct McpActorMaterializationOutcome {
+    pub result: Result<meerkat::RunResult, SessionError>,
+    pub committed: bool,
+}
+
+/// The single MCP actor materialization transaction used by ordinary create,
+/// explicit resume, and trusted autonomous owners. Product-specific callers
+/// build the request/router plan, while this seam alone owns
+/// prepare -> create -> exact attachment commit (or pre-commit release).
+pub(crate) async fn materialize_mcp_actor_transaction<F, Fut>(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    ingress: &runtime_ingress::McpRuntimeIngressContext,
+    session_id: &meerkat::SessionId,
+    mode: McpActorMaterializationMode,
+    admission: Option<meerkat::RuntimeContextAdmissionGuard>,
+    build_plan: F,
+) -> Result<McpActorMaterializationOutcome, ToolCallError>
+where
+    F: FnOnce(
+        meerkat_core::SessionRuntimeBindings,
+        runtime_ingress::McpLogicalConfigSnapshot,
+    ) -> Fut,
+    Fut: Future<Output = Result<McpActorMaterializationPlan, ToolCallError>>,
+{
+    let prepared = match mode {
+        McpActorMaterializationMode::Fresh => {
+            prepare_new_mcp_actor_materialization(service, runtime_adapter, session_id).await?
+        }
+        McpActorMaterializationMode::Resume => {
+            prepare_mcp_actor_materialization(service, runtime_adapter, session_id).await?
+        }
+    };
+    let logical_config = ingress
+        .logical_config_for_prepared_actor(session_id, &prepared)
+        .await
+        .map_err(|error| {
+            ToolCallError::internal(format!(
+                "failed to snapshot MCP configuration for exact materialization {session_id}: {error}"
+            ))
+        });
+    let logical_config = match logical_config {
+        Ok(config) => config,
+        Err(error) => {
+            let mut prepared = Some(prepared);
+            release_mcp_actor_materialization(
+                &mut prepared,
+                session_id,
+                "exact MCP configuration snapshot failed",
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let plan = match build_plan(prepared.bindings_clone(), logical_config.clone()).await {
+        Ok(plan) => plan,
+        Err(error) => {
+            let mut prepared = Some(prepared);
+            release_mcp_actor_materialization(
+                &mut prepared,
+                session_id,
+                "MCP materialization plan failed",
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let McpActorMaterializationPlan {
+        request,
+        callback_config,
+        router_to_publish,
+    } = plan;
+    let create = create_runtime_backed_session_and_run_initial_turn_call_local(
+        service,
+        runtime_adapter,
+        session_id,
+        request,
+        admission,
+        prepared,
+    )
+    .await?;
+    let McpCallLocalActorCreateOutcome {
+        result,
+        transaction,
+    } = create;
+    let (result, error_preserves_runtime_session) = match result {
+        Ok(result) => (Ok(result), false),
+        Err(McpRuntimeBackedCreateError::Session {
+            error,
+            preserves_runtime_session,
+        }) => (Err(error), preserves_runtime_session),
+        Err(McpRuntimeBackedCreateError::CreatedSessionIdentityMismatch(error)) => {
+            let mut prepared = Some(transaction);
+            release_mcp_actor_materialization(
+                &mut prepared,
+                session_id,
+                "MCP materialization returned a mismatched session identity",
+            )
+            .await?;
+            return Err(ToolCallError::internal(format!("Agent error: {error}")));
+        }
+        Err(McpRuntimeBackedCreateError::InitialTurnIdentityMismatch(error)) => {
+            let mut prepared = Some(transaction);
+            release_mcp_actor_materialization(
+                &mut prepared,
+                session_id,
+                "MCP materialization initial turn returned a mismatched session identity",
+            )
+            .await?;
+            return Err(ToolCallError::internal(format!("Agent error: {error}")));
+        }
+    };
+
+    if result.is_err() && !error_preserves_runtime_session {
+        let mut prepared = Some(transaction);
+        release_mcp_actor_materialization(
+            &mut prepared,
+            session_id,
+            "MCP materialization failed before a durable actor commit",
+        )
+        .await?;
+        return Ok(McpActorMaterializationOutcome {
+            result,
+            committed: false,
+        });
+    }
+
+    ingress
+        .commit_prepared_session(session_id, transaction, callback_config, router_to_publish)
+        .await
+        .map_err(|error| {
+            runtime_ingress::session_error_to_tool_error(
+                error,
+                format!("failed to commit exact MCP materialization for {session_id}"),
+            )
+        })?;
+    Ok(McpActorMaterializationOutcome {
+        result,
+        committed: true,
+    })
+}
+
+/// Legacy test-fixture helper for actors built without an MCP prepared claim.
+/// Production paths must use the call-local transaction above.
+#[cfg(test)]
+async fn create_runtime_backed_session_and_run_initial_turn(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &meerkat::SessionId,
+    req: CreateSessionRequest,
+    admission: Option<meerkat::RuntimeContextAdmissionGuard>,
+    actor_witness_slot: &meerkat::LiveSessionActorWitnessSlot,
+) -> Result<meerkat::RunResult, McpRuntimeBackedCreateError> {
+    let (req, initial_turn) = split_runtime_backed_eager_create_request(req);
+    let admission = match admission {
+        Some(admission) => Ok(admission),
+        None => service.reserve_create_session_admission().await,
+    }
+    .map_err(|error| McpRuntimeBackedCreateError::Session {
+        error,
+        preserves_runtime_session: false,
+    })?;
+    let create_result = service
+        .create_session_with_reserved_admission_and_actor_witness(
+            req,
+            admission,
+            actor_witness_slot,
+        )
+        .await
+        .map_err(|error| McpRuntimeBackedCreateError::Session {
+            preserves_runtime_session: false,
+            error,
+        })?;
+    if &create_result.session_id != session_id {
+        return Err(McpRuntimeBackedCreateError::CreatedSessionIdentityMismatch(
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "runtime-backed actor materialization returned session {}, expected {session_id}",
+                create_result.session_id
+            ))),
+        ));
+    }
+    let result = match initial_turn {
+        Some(initial_turn) => meerkat::surface::run_runtime_backed_initial_turn_with_machine(
+            service,
+            runtime_adapter,
+            session_id,
+            initial_turn,
+        )
+        .await
+        .map_err(|error| McpRuntimeBackedCreateError::Session {
+            error: surface_materialize_error_to_session_error(error),
+            preserves_runtime_session: false,
+        })?,
+        None => create_result,
+    };
+    if &result.session_id != session_id {
+        return Err(McpRuntimeBackedCreateError::InitialTurnIdentityMismatch(
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "runtime-backed initial turn returned session {}, expected {session_id}",
+                result.session_id
+            ))),
+        ));
+    }
+    Ok(result)
 }
 
 /// Wrap the REAL source-identity record (projected from the skill runtime's
@@ -585,9 +1136,7 @@ pub struct MeerkatMcpState {
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
-    mcp_adapters: Arc<Mutex<HashMap<String, Arc<meerkat_mcp::McpRouterAdapter>>>>,
-    runtime_sessions: runtime_ingress::SharedMcpRuntimeSessions,
-    runtime_pre_admissions: runtime_ingress::SharedMcpRuntimePreAdmissions,
+    sidecars: runtime_ingress::SharedMcpSidecars,
     runtime_registration_locks: runtime_ingress::SharedMcpRuntimeRegistrationLocks,
     session_event_streams: Arc<Mutex<HashMap<McpStreamId, Arc<SessionEventStreamHandle>>>>,
     #[cfg(feature = "mob")]
@@ -653,9 +1202,7 @@ impl MeerkatMcpState {
                 realm_id: self.realm_id.clone(),
                 instance_id: self.instance_id.clone(),
                 backend: self.backend.clone(),
-                mcp_adapters: Arc::clone(&self.mcp_adapters),
-                runtime_sessions: Arc::clone(&self.runtime_sessions),
-                runtime_pre_admissions: Arc::clone(&self.runtime_pre_admissions),
+                sidecars: Arc::clone(&self.sidecars),
                 runtime_registration_locks: Arc::clone(&self.runtime_registration_locks),
             },
         )
@@ -670,15 +1217,6 @@ impl MeerkatMcpState {
             .await
     }
 
-    async fn clear_surface_bindings_locked(
-        &self,
-        session_id: &meerkat::SessionId,
-    ) -> Result<(), SessionError> {
-        self.runtime_ingress_context()
-            .clear_session_locked(session_id)
-            .await
-    }
-
     async fn cleanup_archived_session_runtime(
         &self,
         session_id: &meerkat::SessionId,
@@ -690,32 +1228,6 @@ impl MeerkatMcpState {
             .await
             .map_err(|error| error.into_session_error("archived-session mob cleanup incomplete"))?;
         Ok(())
-    }
-
-    /// Clean up an archived session while the caller owns the per-session
-    /// runtime-registration lock.
-    async fn cleanup_archived_session_runtime_locked(
-        &self,
-        session_id: &meerkat::SessionId,
-    ) -> Result<(), SessionError> {
-        self.clear_surface_bindings_locked(session_id).await?;
-        #[cfg(feature = "mob")]
-        self.mob_state
-            .destroy_bridge_session_mobs(&session_id.to_string())
-            .await
-            .map_err(|error| error.into_session_error("archived-session mob cleanup incomplete"))?;
-        Ok(())
-    }
-
-    async fn clear_surface_bindings_if_new(
-        &self,
-        session_id: &meerkat::SessionId,
-        runtime_was_registered: bool,
-        runtime_state_existed: bool,
-    ) -> Result<(), SessionError> {
-        self.runtime_ingress_context()
-            .clear_session_if_new(session_id, runtime_was_registered, runtime_state_existed)
-            .await
     }
 
     /// Create a new MCP state with a session service backed by `AgentFactory`.
@@ -869,6 +1381,9 @@ impl MeerkatMcpState {
                 meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                     service.clone(),
                     Some(runtime_adapter.clone()),
+                    // A16: the local MCP console is the owning operator
+                    // (phase 5 explicit mint, DEC-P5E-8).
+                    meerkat_mob::MobControlPrincipal::Owner,
                 )
                 .with_persistent_storage_root(Some(persistent_mob_root))
                 .with_workgraph_service(Some(workgraph_service.clone())),
@@ -894,9 +1409,7 @@ impl MeerkatMcpState {
             skill_runtime,
             #[cfg(feature = "mob")]
             mob_state,
-            mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
-            runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            sidecars: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
@@ -950,6 +1463,24 @@ impl MeerkatMcpState {
         runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
         max_sessions_override: Option<usize>,
     ) -> Self {
+        Self::new_with_store_options_and_llm(store, runtime_store, max_sessions_override, None)
+            .await
+    }
+
+    /// Test-only constructor with an optional explicit deterministic client.
+    ///
+    /// Persisted-session fixtures that exercise resume and attachment
+    /// ownership can supply the client at the factory seam, keeping those
+    /// tests hermetic while still allowing ownership tests to observe exactly
+    /// when the first LLM turn starts. Other tests retain the production-like
+    /// provider-resolution path by passing `None`.
+    #[cfg(test)]
+    async fn new_with_store_options_and_llm(
+        store: Arc<dyn SessionStore>,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+        max_sessions_override: Option<usize>,
+        default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
+    ) -> Self {
         let bootstrap = RuntimeBootstrap::default();
         let locator = match bootstrap.realm.resolve_locator() {
             Ok(locator) => locator,
@@ -1002,8 +1533,9 @@ impl MeerkatMcpState {
         }
 
         let max_sessions = config.max_sessions();
-        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store)
+        let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store)
             .with_realm_inheritance(Arc::clone(&realm_config_source), realm_id.clone());
+        builder.default_llm_client = default_llm_client;
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
@@ -1046,9 +1578,7 @@ impl MeerkatMcpState {
             skill_runtime: None,
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
-            mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
-            runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            sidecars: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
@@ -1076,37 +1606,36 @@ impl MeerkatMcpState {
         self.expose_paths
     }
 
-    async fn upsert_mcp_adapter(
+    async fn live_mcp_router_lease(
         &self,
         session_id: &meerkat::SessionId,
-        adapter: Arc<meerkat_mcp::McpRouterAdapter>,
-    ) {
-        self.mcp_adapters
-            .lock()
-            .await
-            .insert(session_id.to_string(), adapter);
-    }
-
-    async fn mcp_adapter_for_session(
-        &self,
-        session_id: &meerkat::SessionId,
-    ) -> Result<Arc<meerkat_mcp::McpRouterAdapter>, String> {
+    ) -> Result<runtime_ingress::McpLiveRouterLease, ToolCallError> {
         if self
             .service
             .load_authoritative_session(session_id)
             .await
-            .map_err(|error| format!("Failed to load session: {error}"))?
+            .map_err(|error| {
+                runtime_ingress::session_error_to_tool_error(
+                    error,
+                    format!("failed to load session {session_id}"),
+                )
+            })?
             .is_none()
         {
-            return Err(format!("Session not found: {session_id}"));
+            return Err(ToolCallError::new(
+                meerkat_contracts::ErrorCode::SessionNotFound.jsonrpc_code(),
+                format!("session not found: {session_id}"),
+                Some(json!({ "session_id": session_id.to_string() })),
+            ));
         }
-        self.mcp_adapters
-            .lock()
+        self.runtime_ingress_context()
+            .live_router_lease(session_id)
             .await
-            .get(&session_id.to_string())
-            .cloned()
-            .ok_or_else(|| {
-                "Live MCP unavailable for this session. Resume the session with this MCP server before staging live MCP changes.".to_string()
+            .map_err(|error| {
+                runtime_ingress::session_error_to_tool_error(
+                    error,
+                    format!("failed to acquire live MCP router for {session_id}"),
+                )
             })
     }
 }
@@ -2139,23 +2668,17 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_mcp_add" => {
             let input: MeerkatMcpAddInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_mcp_add(state, input)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_mcp_add(state, input).await
         }
         "meerkat_mcp_remove" => {
             let input: MeerkatMcpRemoveInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_mcp_remove(state, input)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_mcp_remove(state, input).await
         }
         "meerkat_mcp_reload" => {
             let input: MeerkatMcpReloadInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_mcp_reload(state, input)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_mcp_reload(state, input).await
         }
         "meerkat_event_stream_open" => {
             let input: MeerkatSessionEventStreamOpenInput =
@@ -2205,9 +2728,7 @@ pub async fn handle_tools_call_with_notifier(
                 .map_err(|e| {
                 ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
             })?;
-            handle_meerkat_mob_event_stream_open(state, input)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_mob_event_stream_open(state, input).await
         }
         #[cfg(feature = "mob")]
         "meerkat_mob_event_stream_read" => {
@@ -2670,27 +3191,6 @@ struct McpArchiveCleanup {
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
 }
 
-async fn clear_new_mcp_runtime_after_error(
-    ingress: &runtime_ingress::McpRuntimeIngressContext,
-    session_id: &meerkat::SessionId,
-    runtime_was_registered: bool,
-    runtime_state_existed: bool,
-    primary_error: &impl std::fmt::Display,
-) -> Result<(), ToolCallError> {
-    ingress
-        .clear_session_if_new_locked(
-            session_id,
-            runtime_was_registered,
-            runtime_state_existed,
-        )
-        .await
-        .map_err(|cleanup| {
-            ToolCallError::internal(format!(
-                "{primary_error}; additionally failed to clear newly prepared MCP runtime session {session_id}: {cleanup}"
-            ))
-        })
-}
-
 impl McpArchiveCleanup {
     async fn clear_surface_session(
         &self,
@@ -2724,33 +3224,6 @@ async fn archive_with_mcp_machine_authority(
             MachineSessionArchiveProtocol::from_machine(runtime_adapter),
         )
         .await
-}
-
-async fn cleanup_unpublished_prepared_session(
-    service: &PersistentSessionService<FactoryAgentBuilder>,
-    runtime_adapter: &meerkat_runtime::MeerkatMachine,
-    ingress: &runtime_ingress::McpRuntimeIngressContext,
-    session_id: &meerkat::SessionId,
-) -> Result<(), SessionError> {
-    let runtime_was_registered = runtime_adapter.contains_session(session_id).await;
-    if service
-        .load_authoritative_session(session_id)
-        .await?
-        .is_some()
-    {
-        match archive_with_mcp_machine_authority(service, runtime_adapter, session_id).await {
-            Ok(()) => {}
-            Err(SessionError::NotFound { .. }) if runtime_was_registered => {}
-            Err(error) => return Err(error),
-        }
-    } else if runtime_was_registered {
-        runtime_adapter
-            .unregister_session(session_id)
-            .await
-            .map_err(runtime_driver_error_to_session_error)?;
-    }
-    ingress.clear_session(session_id).await?;
-    Ok(())
 }
 
 async fn archive_session_with_runtime_cleanup(
@@ -2837,19 +3310,21 @@ fn archive_session_error_to_tool_error(error: SessionError) -> ToolCallError {
 async fn handle_meerkat_mcp_add(
     state: &MeerkatMcpState,
     input: MeerkatMcpAddInput,
-) -> Result<Value, String> {
+) -> Result<Value, ToolCallError> {
     let server_name = input.server_config.name.clone();
     if server_name.trim().is_empty() {
-        return Err("server_name cannot be empty".to_string());
+        return Err(ToolCallError::invalid_params("server_name cannot be empty"));
     }
-    let session_id =
-        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
-    let adapter = state.mcp_adapter_for_session(&session_id).await?;
+    let session_id = meerkat::SessionId::parse(&input.session_id)
+        .map_err(|error| ToolCallError::invalid_params(invalid_session_id_message(error)))?;
+    let router_lease = state.live_mcp_router_lease(&session_id).await?;
+    let adapter = router_lease.router();
 
     adapter
         .stage_add(input.server_config)
         .await
-        .map_err(|e| format!("failed to stage add: {e}"))?;
+        .map_err(|e| ToolCallError::internal(format!("failed to stage add: {e}")))?;
+    drop(router_lease);
 
     mcp_live_response_value(
         input.session_id,
@@ -2858,22 +3333,25 @@ async fn handle_meerkat_mcp_add(
         false,
     )
     .and_then(wrap_tool_payload)
+    .map_err(ToolCallError::internal)
 }
 
 async fn handle_meerkat_mcp_remove(
     state: &MeerkatMcpState,
     input: MeerkatMcpRemoveInput,
-) -> Result<Value, String> {
+) -> Result<Value, ToolCallError> {
     if input.server_name.trim().is_empty() {
-        return Err("server_name cannot be empty".to_string());
+        return Err(ToolCallError::invalid_params("server_name cannot be empty"));
     }
-    let session_id =
-        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
-    let adapter = state.mcp_adapter_for_session(&session_id).await?;
+    let session_id = meerkat::SessionId::parse(&input.session_id)
+        .map_err(|error| ToolCallError::invalid_params(invalid_session_id_message(error)))?;
+    let router_lease = state.live_mcp_router_lease(&session_id).await?;
+    let adapter = router_lease.router();
     adapter
         .stage_remove(input.server_name.clone())
         .await
-        .map_err(|e| format!("failed to stage remove: {e}"))?;
+        .map_err(|e| ToolCallError::internal(format!("failed to stage remove: {e}")))?;
+    drop(router_lease);
 
     mcp_live_response_value(
         input.session_id,
@@ -2882,25 +3360,27 @@ async fn handle_meerkat_mcp_remove(
         false,
     )
     .and_then(wrap_tool_payload)
+    .map_err(ToolCallError::internal)
 }
 
 async fn handle_meerkat_mcp_reload(
     state: &MeerkatMcpState,
     input: MeerkatMcpReloadInput,
-) -> Result<Value, String> {
-    let session_id =
-        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
-    let adapter = state.mcp_adapter_for_session(&session_id).await?;
+) -> Result<Value, ToolCallError> {
+    let session_id = meerkat::SessionId::parse(&input.session_id)
+        .map_err(|error| ToolCallError::invalid_params(invalid_session_id_message(error)))?;
+    let router_lease = state.live_mcp_router_lease(&session_id).await?;
+    let adapter = router_lease.router();
 
     match input.server_name.clone() {
         Some(name) => {
             if name.trim().is_empty() {
-                return Err("server_name cannot be empty".to_string());
+                return Err(ToolCallError::invalid_params("server_name cannot be empty"));
             }
             adapter
                 .stage_reload(McpReloadTarget::ServerName(name))
                 .await
-                .map_err(|e| format!("failed to stage reload: {e}"))?;
+                .map_err(|e| ToolCallError::internal(format!("failed to stage reload: {e}")))?;
         }
         None => {
             // K14: the lifecycle owner's reload-all primitive stages the whole
@@ -2911,7 +3391,7 @@ async fn handle_meerkat_mcp_reload(
             let report = adapter
                 .stage_reload_all()
                 .await
-                .map_err(|e| format!("failed to stage reload-all: {e}"))?;
+                .map_err(|e| ToolCallError::internal(format!("failed to stage reload-all: {e}")))?;
             if !report.is_clean() {
                 let failed = report
                     .failed
@@ -2919,13 +3399,14 @@ async fn handle_meerkat_mcp_reload(
                     .map(|failure| format!("{}: {}", failure.server, failure.error))
                     .collect::<Vec<_>>()
                     .join("; ");
-                return Err(format!(
+                return Err(ToolCallError::internal(format!(
                     "failed to stage reload for [{failed}]; reload already staged for [{}] and will still apply at the next boundary",
                     report.staged.join(", ")
-                ));
+                )));
             }
         }
     }
+    drop(router_lease);
 
     mcp_live_response_value(
         input.session_id,
@@ -2934,6 +3415,7 @@ async fn handle_meerkat_mcp_reload(
         false,
     )
     .and_then(wrap_tool_payload)
+    .map_err(ToolCallError::internal)
 }
 
 fn mcp_live_response_value(
@@ -3037,7 +3519,7 @@ async fn handle_meerkat_event_stream_close(
 async fn handle_meerkat_mob_event_stream_open(
     state: &MeerkatMcpState,
     input: MeerkatMobEventStreamOpenInput,
-) -> Result<Value, String> {
+) -> Result<Value, ToolCallError> {
     let mob_id = meerkat_mob::MobId::from(input.mob_id.as_str());
     let stream_id = McpStreamId::mint();
 
@@ -3047,14 +3529,20 @@ async fn handle_meerkat_mob_event_stream_open(
             .mob_state
             .subscribe_agent_events(&mob_id, &identity)
             .await
-            .map_err(|e| format!("Failed to subscribe to member events: {e}"))?;
+            .map_err(|error| {
+                let mapped = meerkat_mob_mcp::McpToolError::from_mob(&error);
+                ToolCallError::new(mapped.code, mapped.message, mapped.data)
+            })?;
         MobEventStreamInner::Member(Mutex::new(stream))
     } else {
         let router_handle = state
             .mob_state
             .subscribe_mob_events(&mob_id)
             .await
-            .map_err(|e| format!("Failed to subscribe to mob events: {e}"))?;
+            .map_err(|error| {
+                let mapped = meerkat_mob_mcp::McpToolError::from_mob(&error);
+                ToolCallError::new(mapped.code, mapped.message, mapped.data)
+            })?;
         MobEventStreamInner::MobWide(Mutex::new(router_handle))
     };
 
@@ -3069,6 +3557,7 @@ async fn handle_meerkat_mob_event_stream_open(
         "mob_id": input.mob_id,
         "member_id": input.member_id,
     }))
+    .map_err(ToolCallError::internal)
 }
 
 #[cfg(feature = "mob")]
@@ -3455,94 +3944,18 @@ async fn handle_meerkat_run(
         .reserve_create_session_admission()
         .await
         .map_err(|err| ToolCallError::internal(format!("Agent error: {err}")))?;
-    let prepared_session = prepare_surface_session(&state.runtime_adapter)
-        .await
-        .map_err(ToolCallError::internal)?;
-    let session = prepared_session.session;
-    let session_id = prepared_session.session_id;
-    let bindings = prepared_session.bindings;
-    if let Err(e) = install_prepared_runtime_interrupt_handle(
-        &state.service,
-        &state.runtime_adapter,
-        &session_id,
-    )
-    .await
-    {
-        if let Err(cleanup_error) = state.runtime_adapter.unregister_session(&session_id).await {
-            return Err(ToolCallError::internal(format!(
-                "failed to install prepared interrupt handle for session {session_id}: {e}; additionally failed to unregister the prepared runtime session: {cleanup_error}"
-            )));
-        }
-        ingress.clear_session(&session_id).await.map_err(|cleanup| {
-            ToolCallError::internal(format!(
-                "failed to install prepared interrupt handle for session {session_id}: {e}; additionally failed to clear prepared MCP runtime state: {cleanup}"
-            ))
-        })?;
-        return Err(ToolCallError::internal(format!(
-            "failed to install prepared interrupt handle for session {session_id}: {e}"
-        )));
-    }
-    let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
-        McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface())),
-    ));
-    let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
-    let external_tools = compose_run_external_tool_dispatchers(
-        state,
-        &session_id,
-        callback_tools.clone(),
-        Some(mcp_tools),
-    )
-    .await?;
+    let session = meerkat::Session::new();
+    let session_id = session.id().clone();
 
     if let Some(context) = request_context.as_ref() {
-        let runtime_adapter = state.runtime_adapter.clone();
-        let session_id_for_cancel = session_id.clone();
+        // Before the runtime returns an exact accepted input identity, this
+        // request owns no authority to cancel a session-current run. Request
+        // cancellation may drop the response while durable creation remains
+        // discoverable; it must never target a replacement incarnation.
         let install = context
-            .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime_adapter = runtime_adapter.clone();
-                let session_id = session_id_for_cancel.clone();
-                async move {
-                    let _ = runtime_adapter
-                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
-                        .await;
-                }
-            }))
+            .install_cancel_action_or_cancelled(meerkat::surface::noop_request_action())
             .await;
-        let service = state.service.clone();
-        let archive_runtime_adapter = state.runtime_adapter.clone();
-        let session_id_for_cleanup = session_id.clone();
-        let ingress_for_cleanup = ingress.clone();
-        context.set_unpublished_cleanup(request_action(move || {
-            let service = service.clone();
-            let archive_runtime_adapter = archive_runtime_adapter.clone();
-            let ingress = ingress_for_cleanup.clone();
-            let session_id = session_id_for_cleanup.clone();
-            async move {
-                if let Err(error) = cleanup_unpublished_prepared_session(
-                    service.as_ref(),
-                    archive_runtime_adapter.as_ref(),
-                    &ingress,
-                    &session_id,
-                )
-                .await
-                {
-                    tracing::error!(
-                        session_id = %session_id,
-                        error = %error,
-                        "MCP unpublished create archive failed; leaving runtime ingress registered"
-                    );
-                }
-            }
-        }));
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            cleanup_unpublished_prepared_session(
-                state.service.as_ref(),
-                state.runtime_adapter.as_ref(),
-                &ingress,
-                &session_id,
-            )
-            .await
-            .map_err(archive_session_error_to_tool_error)?;
             return Err(request_cancelled_tool_error());
         }
     }
@@ -3555,187 +3968,160 @@ async fn handle_meerkat_run(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let mut build = SessionBuildOptions {
-        tool_access_policy: None,
-        custom_models: std::collections::BTreeMap::new(),
-        image_generation_provider: None,
-        auto_compact_threshold_override: None,
-        provider: Some(model_resolution.provider),
-        override_comms: Default::default(),
-        self_hosted_server_id: None,
-        output_schema,
-        structured_output_retries: input.structured_output_retries,
-        hooks_override: input.hooks_override.clone().unwrap_or_default(),
-        comms_name: input.comms_name.clone(),
-        peer_meta: input.peer_meta.clone(),
-        resume_session: Some(session),
-        budget_limits: input.budget_limits.clone().map(Into::into),
-        provider_params: input.provider_params.clone(),
-        call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
-        external_tools,
-        mcp_servers: Vec::new(),
-        recoverable_tool_defs: (!input.tools.is_empty())
-            .then(|| recoverable_callback_tool_defs(&input.tools)),
-        llm_client_override: None,
-        agent_llm_client_decorator: None,
-        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-        initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
-        override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
-        override_shell: ToolCategoryOverride::from_override(enable_shell_override),
-        override_memory: ToolCategoryOverride::from_override(input.enable_memory),
-        override_schedule: ToolCategoryOverride::from_override(input.enable_schedule),
-        override_workgraph: ToolCategoryOverride::from_override(input.enable_workgraph),
-        override_mob: ToolCategoryOverride::Inherit,
-        override_image_generation: ToolCategoryOverride::Inherit,
-        override_web_search: ToolCategoryOverride::from_override(input.enable_web_search),
-        schedule_tools: None,
-        workgraph_tools: None,
-        mob_tool_authority_context: None,
-        preload_skills,
-        realm_id: Some(state.realm_id.clone()),
-        instance_id: state.instance_id.clone(),
-        backend: meerkat_core::RecoveryBackendKind::parse(&state.backend),
-        config_generation: current_generation,
-        auth_binding: model_resolution.auth_binding,
-        mob_member_binding: None,
-        keep_alive,
-        checkpointer: None,
-        silent_comms_intents: Vec::new(),
-        max_inline_peer_notifications: None,
-        app_context: input.app_context.clone(),
-        additional_instructions: input.additional_instructions.clone(),
-        initial_metadata_entries: std::collections::BTreeMap::new(),
-        initial_tool_filter: None,
-        shell_env: input.shell_env.clone(),
-        resume_override_mask: ResumeOverrideMask {
-            model: input.model.is_some(),
-            provider: input.provider.is_some(),
-            auth_binding: input.auth_binding.is_some(),
-            max_tokens: input.max_tokens.is_some(),
-            structured_output_retries: input.structured_output_retries.is_some(),
-            provider_params: input.provider_params.is_some(),
-            preload_skills: input.preload_skills.is_some(),
-            keep_alive: keep_alive_override.is_some(),
-            comms_name: input.comms_name.is_some(),
-            peer_meta: input.peer_meta.is_some(),
-            override_schedule: input.enable_schedule.is_some(),
-            override_workgraph: input.enable_workgraph.is_some(),
-            override_web_search: input.enable_web_search.is_some(),
-            ..Default::default()
-        },
-        blob_store_override: None,
-        mob_tools: None,
-    };
-    build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
-        input.enable_mob,
-    ));
-    // Dogma K10: initial-turn skill references ride the ONE typed carrier
-    // (`build.initial_turn_metadata`), not a request-level duplicate.
-    if let Some(refs) = skill_references.clone() {
-        build
-            .initial_turn_metadata
-            .get_or_insert_with(Default::default)
-            .skill_references
-            .get_or_insert_with(Vec::new)
-            .extend(refs);
-    }
-
-    reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
-        archive_with_mcp_machine_authority(
-            state.service.as_ref(),
-            state.runtime_adapter.as_ref(),
-            &session_id,
-        )
-        .await
-        .map_err(archive_session_error_to_tool_error)?;
-        state
-            .runtime_adapter
-            .unregister_session(&session_id)
-            .await
-            .map_err(|error| {
-                ToolCallError::internal(format!(
-                    "session {session_id} archived but runtime unregister failed: {error}"
-                ))
-            })?;
-        ingress
-            .clear_session(&session_id)
-            .await
-            .map_err(archive_session_error_to_tool_error)?;
-        Ok(())
-    })
-    .await?;
-
-    let req = CreateSessionRequest {
-        injected_context: Vec::new(),
-        model,
-        prompt: input.prompt.into(),
-        system_prompt: match input.system_prompt {
-            Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
-            None => meerkat::SystemPromptOverride::Inherit,
-        },
-        max_tokens: input.max_tokens,
-        event_tx: event_tx.clone(),
-
-        initial_turn: InitialTurnPolicy::RunImmediately,
-        deferred_prompt_policy: DeferredPromptPolicy::Discard,
-        build: Some(build),
-        labels: input.labels,
-    };
-
-    let result = create_runtime_backed_session_and_run_initial_turn(
+    let realm_id = state.realm_id.clone();
+    let instance_id = state.instance_id.clone();
+    let backend = meerkat_core::RecoveryBackendKind::parse(&state.backend);
+    let callback_tools_for_plan = callback_tools.clone();
+    let event_tx_for_plan = event_tx.clone();
+    let request_context_for_plan = request_context.clone();
+    let materialization = materialize_mcp_actor_transaction(
         &state.service,
         &state.runtime_adapter,
+        &ingress,
         &session_id,
-        req,
+        McpActorMaterializationMode::Fresh,
         Some(create_admission),
+        move |bindings, _logical_config| async move {
+            if request_context_for_plan
+                .as_ref()
+                .is_some_and(RequestContext::cancel_already_requested)
+            {
+                return Err(request_cancelled_tool_error());
+            }
+            let adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
+                McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface())),
+            ));
+            let mcp_tools: Arc<dyn AgentToolDispatcher> = adapter.clone();
+            let external_tools =
+                compose_external_tool_dispatchers(callback_tools_for_plan.clone(), Some(mcp_tools))
+                    .map_err(ToolCallError::internal)?;
+            let mut build = SessionBuildOptions {
+                tool_access_policy: None,
+                custom_models: std::collections::BTreeMap::new(),
+                image_generation_provider: None,
+                auto_compact_threshold_override: None,
+                provider: Some(model_resolution.provider),
+                override_comms: Default::default(),
+                self_hosted_server_id: None,
+                output_schema,
+                structured_output_retries: input.structured_output_retries,
+                hooks_override: input.hooks_override.clone().unwrap_or_default(),
+                comms_name: input.comms_name.clone(),
+                peer_meta: input.peer_meta.clone(),
+                resume_session: Some(session),
+                budget_limits: input.budget_limits.clone().map(Into::into),
+                provider_params: input.provider_params.clone(),
+                call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
+                external_tools,
+                mcp_servers: Vec::new(),
+                recoverable_tool_defs: (!input.tools.is_empty())
+                    .then(|| recoverable_callback_tool_defs(&input.tools)),
+                llm_client_override: None,
+                session_comms_runtime_override: None,
+                host_prompt_sections: Default::default(),
+                agent_llm_client_decorator: None,
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+                    None,
+                )),
+                override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
+                override_shell: ToolCategoryOverride::from_override(enable_shell_override),
+                override_memory: ToolCategoryOverride::from_override(input.enable_memory),
+                override_schedule: ToolCategoryOverride::from_override(input.enable_schedule),
+                override_workgraph: ToolCategoryOverride::from_override(input.enable_workgraph),
+                override_mob: ToolCategoryOverride::Inherit,
+                override_image_generation: ToolCategoryOverride::Inherit,
+                override_web_search: ToolCategoryOverride::from_override(input.enable_web_search),
+                schedule_tools: None,
+                workgraph_tools: None,
+                mob_tool_authority_context: None,
+                preload_skills,
+                realm_id: Some(realm_id),
+                instance_id,
+                backend,
+                config_generation: current_generation,
+                auth_binding: model_resolution.auth_binding,
+                mob_member_binding: None,
+                keep_alive,
+                checkpointer: None,
+                silent_comms_intents: Vec::new(),
+                max_inline_peer_notifications: None,
+                app_context: input.app_context.clone(),
+                additional_instructions: input.additional_instructions.clone(),
+                initial_metadata_entries: std::collections::BTreeMap::new(),
+                initial_tool_filter: None,
+                shell_env: input.shell_env.clone(),
+                resume_override_mask: ResumeOverrideMask {
+                    model: input.model.is_some(),
+                    provider: input.provider.is_some(),
+                    auth_binding: input.auth_binding.is_some(),
+                    max_tokens: input.max_tokens.is_some(),
+                    structured_output_retries: input.structured_output_retries.is_some(),
+                    provider_params: input.provider_params.is_some(),
+                    preload_skills: input.preload_skills.is_some(),
+                    keep_alive: keep_alive_override.is_some(),
+                    comms_name: input.comms_name.is_some(),
+                    peer_meta: input.peer_meta.is_some(),
+                    override_schedule: input.enable_schedule.is_some(),
+                    override_workgraph: input.enable_workgraph.is_some(),
+                    override_web_search: input.enable_web_search.is_some(),
+                    ..Default::default()
+                },
+                blob_store_override: None,
+                mob_tools: None,
+            };
+            build.apply_generated_create_only_mob_operator_access(
+                ToolCategoryOverride::from_override(input.enable_mob),
+            );
+            // Dogma K10: initial-turn skill references ride the one typed
+            // carrier (`build.initial_turn_metadata`).
+            if let Some(refs) = skill_references {
+                build
+                    .initial_turn_metadata
+                    .get_or_insert_with(Default::default)
+                    .skill_references
+                    .get_or_insert_with(Vec::new)
+                    .extend(refs);
+            }
+            let request = CreateSessionRequest {
+                injected_context: Vec::new(),
+                model,
+                prompt: input.prompt.into(),
+                system_prompt: match input.system_prompt {
+                    Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                    None => meerkat::SystemPromptOverride::Inherit,
+                },
+                max_tokens: input.max_tokens,
+                event_tx: event_tx_for_plan,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(build),
+                labels: input.labels,
+            };
+            Ok(McpActorMaterializationPlan {
+                request,
+                callback_config: runtime_ingress::McpCallbackConfig::Replace(
+                    callback_tools_for_plan,
+                ),
+                router_to_publish: Some(Arc::clone(&adapter)),
+            })
+        },
     )
     .await;
+
     drop(event_tx);
     if let Some(task) = event_task
         && let Err(e) = task.await
     {
         tracing::warn!("event task panicked: {e}");
     }
-
-    let session_exists = match state.service.load_authoritative_session(&session_id).await {
-        Ok(Some(session)) => {
-            match state
-                .service
-                .session_archived_by_authority(&session_id, &session)
-                .await
-            {
-                Ok(true) => {
-                    state
-                        .cleanup_archived_session_runtime(&session_id)
-                        .await
-                        .map_err(archive_session_error_to_tool_error)?;
-                    false
-                }
-                Ok(false) => true,
-                Err(error) => {
-                    return Err(ToolCallError::internal(format!(
-                        "failed to load session archive state for {session_id}: {error}"
-                    )));
-                }
-            }
-        }
-        Ok(None) => false,
-        Err(error) => {
-            return Err(ToolCallError::internal(format!(
-                "failed to load authoritative session {session_id}: {error}"
-            )));
-        }
-    };
-    if session_exists {
-        state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
-        ingress
-            .configure_session(&session_id, callback_tools, false)
-            .await
-            .map_err(|error| {
-                ToolCallError::internal(format!(
-                    "failed to attach MCP runtime executor for {session_id}: {error}"
-                ))
-            })?;
+    let outcome = materialization?;
+    let should_attach_runtime = outcome.committed;
+    let result = outcome.result;
+    if result.is_ok() && !should_attach_runtime {
+        return Err(ToolCallError::internal(format!(
+            "MCP create succeeded without committing its exact actor attachment for {session_id}"
+        )));
     }
 
     // Manage comms drain lifecycle for the new session.
@@ -3743,30 +4129,24 @@ async fn handle_meerkat_run(
     // first-turn success, so once the session exists we align the drain state
     // even when the initial turn fails.
     #[cfg(feature = "comms")]
-    if session_exists {
-        let comms_rt = state.service.comms_runtime(&session_id).await;
-        state
-            .runtime_adapter
-            .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+    if should_attach_runtime {
+        ingress
+            .configure_peer_ingress_exact(&session_id, keep_alive)
             .await
             .map_err(|error| {
-                ToolCallError::internal(format!(
-                    "failed to update peer ingress context for {session_id}: {error}"
-                ))
+                runtime_ingress::session_error_to_tool_error(
+                    error,
+                    format!("failed to update peer ingress context for {session_id}"),
+                )
             })?;
     }
     match result {
         Ok(run_result) => format_agent_result_tool(Ok(run_result), &session_id),
         Err(err) => {
-            if session_exists {
+            if should_attach_runtime {
                 Err(post_commit_session_created_error(&session_id, &err))
             } else {
-                match ingress.clear_session(&session_id).await {
-                    Ok(()) => format_agent_result_tool(Err(err), &session_id),
-                    Err(cleanup) => Err(ToolCallError::internal(format!(
-                        "{err}; additionally failed to clear MCP runtime session {session_id}: {cleanup}"
-                    ))),
-                }
+                format_agent_result_tool(Err(err), &session_id)
             }
         }
     }
@@ -3792,18 +4172,11 @@ async fn handle_meerkat_resume(
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
 
     if let Some(context) = request_context.as_ref() {
-        let runtime_adapter = state.runtime_adapter.clone();
-        let session_id_for_cancel = session_id.clone();
+        // A generic resume request does not own the session-current run. Keep
+        // cancellation request-scoped until an exact input witness exists;
+        // never let a late cancel hit replacement attachment B.
         let install = context
-            .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime_adapter = runtime_adapter.clone();
-                let session_id = session_id_for_cancel.clone();
-                async move {
-                    let _ = runtime_adapter
-                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
-                        .await;
-                }
-            }))
+            .install_cancel_action_or_cancelled(meerkat::surface::noop_request_action())
             .await;
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             return Err(request_cancelled_tool_error());
@@ -3901,35 +4274,68 @@ async fn handle_meerkat_resume(
         ));
     }
 
-    let runtime_registration_lock = ingress.runtime_registration_lock(&session_id);
-    let _runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-    let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
-    let runtime_state_existed = state
-        .runtime_sessions
-        .read()
+    let replace_callback_tools = !input.tools.is_empty();
+    let requested_callback_tools = if replace_callback_tools {
+        build_callback_dispatcher(&input.tools)
+    } else {
+        None
+    };
+    let live_actor_lease = match state
+        .service
+        .acquire_live_session_actor_turn_boundary_lease(&session_id)
         .await
-        .contains_key(&session_id);
-    let callback_tools = build_callback_dispatcher(&input.tools);
-    let existing_adapter = state
-        .mcp_adapters
-        .lock()
-        .await
-        .get(&session_id.to_string())
-        .cloned();
-
-    // Decide the branch before moving any owned request fields.
-    let needs_rebuild = existing_adapter.is_none() || mcp_resume_requires_rebuild(&input);
-    let live_session_existed =
+    {
+        Ok(lease) => Some(lease),
+        Err(SessionError::NotFound { .. }) => None,
+        Err(error) => {
+            return Err(ToolCallError::internal(format!(
+                "failed to acquire exact live actor authority for {session_id}: {error}"
+            )));
+        }
+    };
+    let live_snapshot = match live_actor_lease.as_ref() {
+        Some(actor_lease) => Some(
+            ingress
+                .logical_config_for_live_actor(&session_id, actor_lease)
+                .await
+                .map_err(|error| {
+                    ToolCallError::internal(format!(
+                        "failed to snapshot live MCP configuration for {session_id}: {error}"
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    let machine_witness = if live_actor_lease.is_some() {
         state
-            .service
-            .has_live_session(&session_id)
+            .runtime_adapter
+            .current_executor_attachment_witness(&session_id)
             .await
-            .map_err(|err| {
-                ToolCallError::internal(format!(
-                    "failed to read live-session authority for {session_id}: {err}"
-                ))
-            })?;
-    let create_requires_materialization = needs_rebuild || !live_session_existed;
+    } else {
+        None
+    };
+    let exact_live_attachment = live_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.attachment_witness.is_some() && snapshot.attachment_witness == machine_witness
+    });
+    let sidecar_existed = live_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.sidecar_exists);
+    let callback_config = if replace_callback_tools {
+        runtime_ingress::McpCallbackConfig::Replace(requested_callback_tools.clone())
+    } else {
+        runtime_ingress::McpCallbackConfig::Preserve
+    };
+    let existing_adapter = live_snapshot.and_then(|snapshot| snapshot.router);
+
+    // Decide from one exact B-owned actor/config/attachment snapshot. Any
+    // rebuild re-snapshots logical config after its own prepared transaction
+    // acquires B, so no pre-boundary router can enter the replacement actor.
+    let needs_rebuild = live_actor_lease.is_none()
+        || existing_adapter.is_none()
+        || !exact_live_attachment
+        || mcp_resume_requires_rebuild(&input);
+    drop(live_actor_lease);
+    let create_requires_materialization = needs_rebuild;
     let mut resume_admission = if create_requires_materialization {
         Some(
             state
@@ -3957,14 +4363,6 @@ async fn handle_meerkat_resume(
     ) {
         Ok(keys) => keys,
         Err(error) => {
-            clear_new_mcp_runtime_after_error(
-                &ingress,
-                &session_id,
-                runtime_was_registered,
-                runtime_state_existed,
-                &error,
-            )
-            .await?;
             return Err(ToolCallError::invalid_params(error));
         }
     };
@@ -3981,14 +4379,6 @@ async fn handle_meerkat_resume(
         Some(schema) => match OutputSchema::from_json_value(schema) {
             Ok(schema) => Some(schema),
             Err(error) => {
-                clear_new_mcp_runtime_after_error(
-                    &ingress,
-                    &session_id,
-                    runtime_was_registered,
-                    runtime_state_existed,
-                    &error,
-                )
-                .await?;
                 return Err(ToolCallError::invalid_params(format!(
                     "Invalid output_schema: {error}"
                 )));
@@ -4025,6 +4415,8 @@ async fn handle_meerkat_resume(
             recoverable_tool_defs: (!input.tools.is_empty())
                 .then(|| recoverable_callback_tool_defs(&input.tools)),
             llm_client_override: None,
+            session_comms_runtime_override: None,
+            host_prompt_sections: Default::default(),
             agent_llm_client_decorator: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings),
             initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
@@ -4092,128 +4484,98 @@ async fn handle_meerkat_resume(
         build
     };
 
-    let result = if create_requires_materialization {
-        let resume_bindings = match state
-            .runtime_adapter
-            .prepare_bindings(session_id.clone())
-            .await
-        {
-            Ok(bindings) => bindings,
-            Err(e) => {
-                clear_new_mcp_runtime_after_error(
-                    &ingress,
-                    &session_id,
-                    runtime_was_registered,
-                    runtime_state_existed,
-                    &e,
-                )
-                .await?;
-                return Err(ToolCallError::internal(format!(
-                    "failed to prepare bindings for session {session_id}: {e}"
-                )));
-            }
-        };
-        if let Err(e) = install_prepared_runtime_interrupt_handle(
+    // Both the initially-missing actor path and the live-turn disappearance
+    // race use this same explicit resume transaction. The caller supplies only
+    // the recovered admission; prepare, exact config snapshot, actor creation,
+    // and attachment commit remain owned by one seam.
+    let materialize_resume = |admission: Option<meerkat::RuntimeContextAdmissionGuard>| {
+        let build_session_options = &build_session_options;
+        let model_for_plan = model.clone();
+        let prompt_for_plan = prompt.clone();
+        let system_prompt_for_plan = input.system_prompt.clone();
+        let event_tx_for_plan = event_tx.clone();
+        let skill_references_for_plan = skill_references.clone();
+        let requested_callback_tools_for_plan = requested_callback_tools.clone();
+        let request_context_for_plan = request_context.clone();
+        materialize_mcp_actor_transaction(
             &state.service,
             &state.runtime_adapter,
+            &ingress,
             &session_id,
-        )
-        .await
-        {
-            clear_new_mcp_runtime_after_error(
-                &ingress,
-                &session_id,
-                runtime_was_registered,
-                runtime_state_existed,
-                &e,
-            )
-            .await?;
-            return Err(ToolCallError::internal(format!(
-                "failed to install prepared interrupt handle for session {session_id}: {e}"
-            )));
-        }
-        let adapter = mcp_adapter.clone().unwrap_or_else(|| {
-            Arc::new(meerkat_mcp::McpRouterAdapter::new(
-                McpRouter::new_with_surface_handle(Arc::clone(
-                    resume_bindings.external_tool_surface(),
-                )),
-            ))
-        });
-        let mcp_tools: Arc<dyn AgentToolDispatcher> = adapter.clone();
-        let external_tools =
-            match compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools)) {
-                Ok(tools) => tools,
-                Err(error) => {
-                    clear_new_mcp_runtime_after_error(
-                        &ingress,
-                        &session_id,
-                        runtime_was_registered,
-                        runtime_state_existed,
-                        &error,
-                    )
-                    .await?;
-                    return Err(ToolCallError::internal(error));
+            McpActorMaterializationMode::Resume,
+            admission,
+            move |resume_bindings, exact_config| async move {
+                if request_context_for_plan
+                    .as_ref()
+                    .is_some_and(RequestContext::cancel_already_requested)
+                {
+                    return Err(request_cancelled_tool_error());
                 }
-            };
-        mcp_adapter = Some(adapter);
-        let mut build = build_session_options(resume_bindings, external_tools);
-        // Dogma K10: initial-turn skill references ride the ONE typed carrier
-        // (`build.initial_turn_metadata`), not a request-level duplicate.
-        if let Some(refs) = skill_references.clone() {
-            build
-                .initial_turn_metadata
-                .get_or_insert_with(Default::default)
-                .skill_references
-                .get_or_insert_with(Vec::new)
-                .extend(refs);
-        }
-        reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
-            clear_new_mcp_runtime_after_error(
-                &ingress,
-                &session_id,
-                runtime_was_registered,
-                runtime_state_existed,
-                &"MCP request cancelled before service admission",
-            )
-            .await
-        })
-        .await?;
-        let req = CreateSessionRequest {
-            injected_context: Vec::new(),
-            model,
-            prompt: prompt.clone().into(),
-            system_prompt: match input.system_prompt.clone() {
-                Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
-                None => meerkat::SystemPromptOverride::Inherit,
+                let exact_callback_tools = if replace_callback_tools {
+                    requested_callback_tools_for_plan
+                } else {
+                    exact_config.callback_tools.clone()
+                };
+                let adapter = exact_config.router.clone().unwrap_or_else(|| {
+                    Arc::new(meerkat_mcp::McpRouterAdapter::new(
+                        McpRouter::new_with_surface_handle(Arc::clone(
+                            resume_bindings.external_tool_surface(),
+                        )),
+                    ))
+                });
+                let mcp_tools: Arc<dyn AgentToolDispatcher> = adapter.clone();
+                let external_tools = compose_external_tool_dispatchers(
+                    exact_callback_tools.clone(),
+                    Some(mcp_tools),
+                )
+                .map_err(ToolCallError::internal)?;
+                let mut build = build_session_options(resume_bindings, external_tools);
+                if let Some(refs) = skill_references_for_plan {
+                    build
+                        .initial_turn_metadata
+                        .get_or_insert_with(Default::default)
+                        .skill_references
+                        .get_or_insert_with(Vec::new)
+                        .extend(refs);
+                }
+                let request = CreateSessionRequest {
+                    injected_context: Vec::new(),
+                    model: model_for_plan,
+                    prompt: prompt_for_plan.into(),
+                    system_prompt: match system_prompt_for_plan {
+                        Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+                        None => meerkat::SystemPromptOverride::Inherit,
+                    },
+                    max_tokens,
+                    event_tx: event_tx_for_plan,
+                    initial_turn: InitialTurnPolicy::RunImmediately,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(build),
+                    labels: None,
+                };
+                Ok(McpActorMaterializationPlan {
+                    request,
+                    callback_config: if replace_callback_tools {
+                        runtime_ingress::McpCallbackConfig::Replace(exact_callback_tools)
+                    } else {
+                        runtime_ingress::McpCallbackConfig::Preserve
+                    },
+                    router_to_publish: exact_config.router.is_none().then(|| Arc::clone(&adapter)),
+                })
             },
-            max_tokens,
-            event_tx: event_tx.clone(),
-            initial_turn: InitialTurnPolicy::RunImmediately,
-            deferred_prompt_policy: DeferredPromptPolicy::Discard,
-            build: Some(build),
-            labels: None,
-        };
-        create_runtime_backed_session_and_run_initial_turn(
-            &state.service,
-            &state.runtime_adapter,
-            &session_id,
-            req,
-            resume_admission.take(),
         )
-        .await
+    };
+
+    let mut runtime_materialization_committed = false;
+    let result = if create_requires_materialization {
+        let outcome = materialize_resume(resume_admission.take()).await?;
+        runtime_materialization_committed = outcome.committed;
+        outcome.result
     } else {
         let mut live_turn_admission = None;
         if keep_alive_override.is_some() {
             let comms_rt = state.service.comms_runtime(&session_id).await;
             if keep_alive && comms_rt.is_none() {
-                clear_new_mcp_runtime_after_error(
-                    &ingress,
-                    &session_id,
-                    runtime_was_registered,
-                    runtime_state_existed,
-                    &"keep_alive requires a session created with comms_name",
-                )
-                .await?;
                 return Err(ToolCallError::invalid_params(
                     "keep_alive requires a session created with comms_name",
                 ));
@@ -4228,14 +4590,14 @@ async fn handle_meerkat_resume(
             // RuntimeTurnMetadata carries the keep_alive mutation; the
             // session service applies it only after generated turn-admission
             // feedback. The surface may refresh machine-owned peer ingress.
-            state
-                .runtime_adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+            ingress
+                .configure_peer_ingress_exact(&session_id, keep_alive)
                 .await
                 .map_err(|error| {
-                    ToolCallError::internal(format!(
-                        "failed to update peer ingress context for {session_id}: {error}"
-                    ))
+                    runtime_ingress::session_error_to_tool_error(
+                        error,
+                        format!("failed to update peer ingress context for {session_id}"),
+                    )
                 })?;
         }
         // Live MCP resumes still use the runtime/machine service-turn receipt
@@ -4304,118 +4666,9 @@ async fn handle_meerkat_resume(
                         .await
                         .map_err(|err| ToolCallError::internal(format!("Agent error: {err}")))?,
                 };
-                let resume_bindings = match state
-                    .runtime_adapter
-                    .prepare_bindings(session_id.clone())
-                    .await
-                {
-                    Ok(bindings) => bindings,
-                    Err(e) => {
-                        clear_new_mcp_runtime_after_error(
-                            &ingress,
-                            &session_id,
-                            runtime_was_registered,
-                            runtime_state_existed,
-                            &e,
-                        )
-                        .await?;
-                        return Err(ToolCallError::internal(format!(
-                            "failed to prepare bindings for session {session_id}: {e}"
-                        )));
-                    }
-                };
-                if let Err(e) = install_prepared_runtime_interrupt_handle(
-                    &state.service,
-                    &state.runtime_adapter,
-                    &session_id,
-                )
-                .await
-                {
-                    clear_new_mcp_runtime_after_error(
-                        &ingress,
-                        &session_id,
-                        runtime_was_registered,
-                        runtime_state_existed,
-                        &e,
-                    )
-                    .await?;
-                    return Err(ToolCallError::internal(format!(
-                        "failed to install prepared interrupt handle for session {session_id}: {e}"
-                    )));
-                }
-                let adapter = mcp_adapter.clone().unwrap_or_else(|| {
-                    Arc::new(meerkat_mcp::McpRouterAdapter::new(
-                        McpRouter::new_with_surface_handle(Arc::clone(
-                            resume_bindings.external_tool_surface(),
-                        )),
-                    ))
-                });
-                let mcp_tools: Arc<dyn AgentToolDispatcher> = adapter.clone();
-                let external_tools = match compose_external_tool_dispatchers(
-                    callback_tools.clone(),
-                    Some(mcp_tools),
-                ) {
-                    Ok(tools) => tools,
-                    Err(error) => {
-                        clear_new_mcp_runtime_after_error(
-                            &ingress,
-                            &session_id,
-                            runtime_was_registered,
-                            runtime_state_existed,
-                            &error,
-                        )
-                        .await?;
-                        return Err(ToolCallError::internal(error));
-                    }
-                };
-                mcp_adapter = Some(adapter);
-                let mut build = build_session_options(resume_bindings, external_tools);
-                // Dogma K10: initial-turn skill references ride the ONE typed
-                // carrier (`build.initial_turn_metadata`), not a request-level
-                // duplicate.
-                if let Some(refs) = skill_references.clone() {
-                    build
-                        .initial_turn_metadata
-                        .get_or_insert_with(Default::default)
-                        .skill_references
-                        .get_or_insert_with(Vec::new)
-                        .extend(refs);
-                }
-                reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
-                    clear_new_mcp_runtime_after_error(
-                        &ingress,
-                        &session_id,
-                        runtime_was_registered,
-                        runtime_state_existed,
-                        &"MCP request cancelled before recovery service admission",
-                    )
-                    .await
-                })
-                .await?;
-                let req = CreateSessionRequest {
-                    injected_context: Vec::new(),
-                    model,
-                    prompt: prompt.into(),
-                    system_prompt: match input.system_prompt.clone() {
-                        Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
-                        None => meerkat::SystemPromptOverride::Inherit,
-                    },
-                    max_tokens,
-                    event_tx: event_tx.clone(),
-
-                    initial_turn: InitialTurnPolicy::RunImmediately,
-                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                    build: Some(build),
-                    labels: None,
-                };
-                create_runtime_backed_session_and_run_initial_turn(
-                    &state.service,
-                    &state.runtime_adapter,
-                    &session_id,
-                    req,
-                    Some(admission),
-                )
-                .await
+                let outcome = materialize_resume(Some(admission)).await?;
+                runtime_materialization_committed = outcome.committed;
+                outcome.result
             }
             Err((other, _admission)) => Err(other),
         }
@@ -4428,7 +4681,7 @@ async fn handle_meerkat_resume(
         {
             Ok(true) => {
                 state
-                    .cleanup_archived_session_runtime_locked(&session_id)
+                    .cleanup_archived_session_runtime(&session_id)
                     .await
                     .map_err(archive_session_error_to_tool_error)?;
                 false
@@ -4460,43 +4713,18 @@ async fn handle_meerkat_resume(
     let live_session_exists = if session_exists {
         state
             .service
-            .has_live_session(&session_id)
+            .acquire_live_session_actor_turn_boundary_lease(&session_id)
             .await
-            .map_err(|err| {
-                ToolCallError::internal(format!(
-                    "failed to read live-session authority for {session_id}: {err}"
-                ))
-            })?
+            .is_ok()
     } else {
         false
     };
-    if result.is_err() {
-        if !session_exists {
-            if let Err(cleanup) = ingress.clear_session_locked(&session_id).await {
-                let primary = result
-                    .as_ref()
-                    .err()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "MCP request failed".to_string());
-                return Err(ToolCallError::internal(format!(
-                    "{primary}; additionally failed to clear MCP runtime session {session_id}: {cleanup}"
-                )));
-            }
-        } else if !live_session_exists {
-            let primary = result
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "MCP request left no live session".to_string());
-            clear_new_mcp_runtime_after_error(
-                &ingress,
-                &session_id,
-                runtime_was_registered,
-                runtime_state_existed,
-                &primary,
-            )
-            .await?;
-        }
+    let runtime_was_materialized =
+        create_requires_materialization || runtime_materialization_committed;
+    if result.is_ok() && (!session_exists || !live_session_exists) {
+        return Err(ToolCallError::internal(format!(
+            "MCP resume returned success without authoritative live session {session_id}"
+        )));
     }
 
     drop(event_tx);
@@ -4507,49 +4735,58 @@ async fn handle_meerkat_resume(
     }
 
     let should_configure_runtime_ingress = session_exists
+        && live_session_exists
         && (result.is_ok()
-            || (live_session_exists
-                && (create_requires_materialization
-                    || runtime_was_registered
-                    || runtime_state_existed)));
-    if should_configure_runtime_ingress {
-        if let Some(mcp_adapter) = mcp_adapter {
-            state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
-        }
-        if input.tools.is_empty() {
-            ingress
-                .ensure_session_locked(&session_id)
-                .await
-                .map_err(|error| {
-                    ToolCallError::internal(format!(
-                        "failed to attach MCP runtime executor for {session_id}: {error}"
-                    ))
-                })?;
+            || runtime_materialization_committed
+            || (!runtime_was_materialized && sidecar_existed));
+    if should_configure_runtime_ingress && !runtime_materialization_committed {
+        let router = if existing_adapter.is_some() {
+            None
         } else {
-            ingress
-                .configure_session_locked(&session_id, callback_tools, false)
-                .await
-                .map_err(|error| {
-                    ToolCallError::internal(format!(
-                        "failed to attach MCP runtime executor for {session_id}: {error}"
-                    ))
-                })?;
+            let Some(mcp_adapter) = mcp_adapter.take() else {
+                return Err(ToolCallError::internal(format!(
+                    "MCP resume completed without a logical router for {session_id}"
+                )));
+            };
+            Some(mcp_adapter)
+        };
+        let callback_config = if result.is_ok() {
+            callback_config
+        } else {
+            runtime_ingress::McpCallbackConfig::Preserve
+        };
+        let attachment = match router {
+            Some(router) => {
+                ingress
+                    .configure_session_with_router(&session_id, callback_config, router)
+                    .await
+            }
+            None => {
+                ingress
+                    .configure_session(&session_id, callback_config)
+                    .await
+            }
+        };
+        if let Err(error) = attachment {
+            return Err(runtime_ingress::session_error_to_tool_error(
+                error,
+                format!("failed to attach MCP runtime executor for {session_id}"),
+            ));
         }
     }
 
     // Manage comms drain lifecycle for rebuilt sessions after the session
     // commit boundary. keep_alive may commit independently of turn success.
     #[cfg(feature = "comms")]
-    if session_exists && create_requires_materialization {
-        let comms_rt = state.service.comms_runtime(&session_id).await;
-        state
-            .runtime_adapter
-            .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+    if session_exists && runtime_was_materialized && should_configure_runtime_ingress {
+        ingress
+            .configure_peer_ingress_exact(&session_id, keep_alive)
             .await
             .map_err(|error| {
-                ToolCallError::internal(format!(
-                    "failed to update peer ingress context for {session_id}: {error}"
-                ))
+                runtime_ingress::session_error_to_tool_error(
+                    error,
+                    format!("failed to update peer ingress context for {session_id}"),
+                )
             })?;
     }
 
@@ -4620,32 +4857,15 @@ fn compose_external_tool_dispatchers(
         (None, None) => Ok(None),
         (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
         (Some(a), Some(b)) => {
-            let primary_names: HashSet<String> =
-                a.tools().iter().map(|t| t.name.to_string()).collect();
-            let secondary_tools = b.tools();
-            let secondary_unique: Vec<String> = secondary_tools
-                .iter()
-                .map(|t| t.name.to_string())
-                .filter(|name| !primary_names.contains(name.as_str()))
-                .collect();
-
-            if secondary_unique.is_empty() {
-                return Ok(Some(a));
-            }
-
-            let secondary: Arc<dyn AgentToolDispatcher> =
-                if secondary_unique.len() == secondary_tools.len() {
-                    b
-                } else {
-                    Arc::new(meerkat_core::FilteredToolDispatcher::new(
-                        b,
-                        secondary_unique,
-                    ))
-                };
-
+            // Keep both live dispatchers even when one currently exposes no
+            // tools. MCP routers populate asynchronously and must remain in
+            // the composition so factory handle binding and later catalog
+            // updates reach them. ToolGateway retains its children, resolves
+            // live additions, and fails closed on name collisions; filtering
+            // from a one-time snapshot would freeze dynamic ownership.
             let gateway = meerkat_core::ToolGatewayBuilder::new()
                 .add_dispatcher(a)
-                .add_dispatcher(secondary)
+                .add_dispatcher(b)
                 .build()
                 .map_err(|e| format!("failed to compose external tools: {e}"))?;
             Ok(Some(Arc::new(gateway)))
@@ -4870,7 +5090,7 @@ mod tests {
         );
     }
 
-    struct RuntimeTerminationFixtureExecutor;
+    struct RuntimeTerminationFixtureExecutor(Option<Arc<AtomicBool>>);
 
     #[async_trait]
     impl meerkat_core::lifecycle::CoreExecutor for RuntimeTerminationFixtureExecutor {
@@ -4903,6 +5123,9 @@ mod tests {
             &mut self,
             _reason: String,
         ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            if let Some(stopped) = self.0.as_ref() {
+                stopped.store(true, Ordering::SeqCst);
+            }
             Ok(())
         }
     }
@@ -4944,6 +5167,73 @@ mod tests {
         }
     }
 
+    struct OwnershipCheckingLlmClient {
+        old_executor_stopped: Arc<AtomicBool>,
+        turn_started: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LlmClient for OwnershipCheckingLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            assert!(
+                self.old_executor_stopped.load(Ordering::SeqCst),
+                "plain resume must stop the exact foreign executor before starting its LLM turn"
+            );
+            self.turn_started.store(true, Ordering::SeqCst);
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    struct MutableToolDispatcher {
+        tools: Arc<StdMutex<Vec<Arc<ToolDef>>>>,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for MutableToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .into()
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
     #[test]
     fn test_wrap_tool_payload_returns_typed_result_envelope() {
         // wrap_tool_payload must surface serialization as a typed Result, never a
@@ -4971,7 +5261,13 @@ mod tests {
 
     async fn state_with_persisted_session() -> (MeerkatMcpState, String) {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state = MeerkatMcpState::new_with_store(store.clone()).await;
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+            Some(Arc::new(TestClient::default())),
+        )
+        .await;
         let mut session = Session::new();
         let session_id = session.id().to_string();
         session
@@ -5000,6 +5296,91 @@ mod tests {
             .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
         (state, session_id)
+    }
+
+    async fn attach_test_mcp_router(
+        state: &MeerkatMcpState,
+        session_id: &meerkat::SessionId,
+        router: Arc<meerkat_mcp::McpRouterAdapter>,
+    ) {
+        let ingress = state.runtime_ingress_context();
+        if ingress
+            .current_attachment_witness(session_id)
+            .await
+            .is_some()
+        {
+            ingress
+                .configure_session_with_router(
+                    session_id,
+                    runtime_ingress::McpCallbackConfig::Preserve,
+                    router,
+                )
+                .await
+                .expect("test MCP router must update an exact live attachment");
+            return;
+        }
+
+        let session = state
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .expect("load test MCP session")
+            .expect("test MCP session must be persisted");
+        let prepared =
+            prepare_mcp_actor_materialization(&state.service, &state.runtime_adapter, session_id)
+                .await
+                .expect("test MCP attachment must use the shared resume seam");
+        let router_tools: Arc<dyn AgentToolDispatcher> = router.clone();
+        let request = CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: session
+                .session_metadata()
+                .map(|metadata| metadata.model)
+                .unwrap_or_else(|| "mock-only-model".to_string()),
+            prompt: meerkat_core::ContentInput::Text(String::new()),
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
+            max_tokens: Some(256),
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                provider: Some(Provider::Other),
+                resume_session: Some(session),
+                external_tools: Some(router_tools),
+                llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                    Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
+                )),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(
+                    prepared.bindings_clone(),
+                ),
+                ..Default::default()
+            }),
+            labels: None,
+        };
+        let outcome = create_runtime_backed_session_and_run_initial_turn_call_local(
+            &state.service,
+            &state.runtime_adapter,
+            session_id,
+            request,
+            None,
+            prepared,
+        )
+        .await
+        .expect("test MCP actor reconstruction should report");
+        let McpCallLocalActorCreateOutcome {
+            result,
+            transaction,
+        } = outcome;
+        result.expect("test MCP actor reconstruction should succeed");
+        ingress
+            .commit_prepared_session(
+                session_id,
+                transaction,
+                runtime_ingress::McpCallbackConfig::Preserve,
+                Some(router),
+            )
+            .await
+            .expect("test MCP router must publish with an exact live attachment");
     }
 
     fn bounded_resume_input(session_id: String, tools: Vec<McpToolDef>) -> MeerkatResumeInput {
@@ -5038,6 +5419,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_only_explicit_resume_always_fences_preexisting_attachment_work() {
+        let (state, session_id) = state_with_persisted_session().await;
+        let session_id = meerkat::SessionId::parse(&session_id).expect("valid session id");
+        assert!(
+            state
+                .runtime_adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "persisted-only fixture must not have a process-local attachment witness"
+        );
+        assert!(
+            !state
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live actor lookup"),
+            "persisted-only fixture must not have a live actor"
+        );
+
+        let mut prepared =
+            prepare_mcp_actor_materialization(&state.service, &state.runtime_adapter, &session_id)
+                .await
+                .expect("explicit resume prepares a cold materialization");
+        assert!(
+            prepared.replaces_predecessor(),
+            "cold explicit resume must terminalize any durable A-era inputs before B serves"
+        );
+        prepared
+            .rollback_now()
+            .await
+            .expect("cold replacement claim releases cleanly");
+    }
+
+    #[tokio::test]
     async fn resume_success_path_without_tools_does_not_reenter_registration_lock() {
         let (state, session_id) = state_with_persisted_session().await;
         let result = tokio::time::timeout(
@@ -5063,8 +5479,140 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_success_path_with_callback_tools_does_not_reenter_registration_lock() {
+    async fn plain_resume_resolves_foreign_attachment_before_running_a_turn() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let old_executor_stopped = Arc::new(AtomicBool::new(false));
+        let turn_started = Arc::new(AtomicBool::new(false));
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+            Some(Arc::new(OwnershipCheckingLlmClient {
+                old_executor_stopped: Arc::clone(&old_executor_stopped),
+                turn_started: Arc::clone(&turn_started),
+            })),
+        )
+        .await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare target runtime bindings");
+        let router = Arc::new(meerkat_mcp::McpRouterAdapter::new(
+            McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface())),
+        ));
+        create_runtime_backed_session_and_run_initial_turn(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+            CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "mock-only-model".to_string(),
+                prompt: "deferred fixture".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(256),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    provider: Some(Provider::Other),
+                    resume_session: Some(session),
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
+                    )),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            },
+            None,
+            &meerkat::LiveSessionActorWitnessSlot::default(),
+        )
+        .await
+        .expect("materialize a live actor backed only by the injected mock client");
+        attach_test_mcp_router(&state, &session_id, router).await;
+        let target_witness = state
+            .runtime_adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .expect("target MCP attachment must be committed");
+
+        assert!(
+            state
+                .runtime_adapter
+                .unregister_executor_attachment_if_current(&target_witness)
+                .await
+                .expect("detach the original MCP executor"),
+            "the original exact MCP attachment must still own the machine slot"
+        );
+        state
+            .runtime_adapter
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(RuntimeTerminationFixtureExecutor(Some(Arc::clone(
+                    &old_executor_stopped,
+                )))),
+            )
+            .await
+            .expect("install a same-session executor not owned by the MCP sidecar");
+        let foreign_witness = state
+            .runtime_adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .expect("foreign fixture witness");
+        assert_ne!(foreign_witness, target_witness);
+        assert_ne!(
+            state
+                .runtime_ingress_context()
+                .current_attachment_witness(&session_id)
+                .await,
+            Some(foreign_witness.clone()),
+            "the replacement executor is deliberately foreign to MCP ownership"
+        );
+
+        let result = handle_meerkat_resume(
+            &state,
+            bounded_resume_input(session_id.to_string(), vec![]),
+            None,
+            None,
+        )
+        .await
+        .expect("plain resume should replace the foreign executor and run the turn");
+        assert!(
+            result.get("content").is_some(),
+            "successful resume should return the MCP content envelope: {result:?}"
+        );
+        assert!(
+            old_executor_stopped.load(Ordering::SeqCst),
+            "plain resume must detach the exact foreign executor"
+        );
+        assert!(
+            turn_started.load(Ordering::SeqCst),
+            "the replacement actor must execute the requested turn"
+        );
+        let replacement_witness = state
+            .runtime_adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .expect("plain resume must commit a replacement MCP attachment");
+        assert_ne!(replacement_witness, target_witness);
+        assert_ne!(replacement_witness, foreign_witness);
+        assert_eq!(
+            state
+                .runtime_ingress_context()
+                .current_attachment_witness(&session_id)
+                .await,
+            Some(replacement_witness),
+            "machine and MCP sidecar must converge on the exact replacement witness"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_callback_config_commits_on_success_and_empty_tools_preserve_it() {
         let (state, session_id) = state_with_persisted_session().await;
+        let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
         let callback = McpToolDef {
             name: "resume_callback".to_string(),
             description: "Resume callback".to_string(),
@@ -5075,7 +5623,7 @@ mod tests {
             Duration::from_secs(3),
             Box::pin(handle_meerkat_resume(
                 &state,
-                bounded_resume_input(session_id, vec![callback]),
+                bounded_resume_input(session_id.clone(), vec![callback]),
                 None,
                 None,
             )),
@@ -5090,6 +5638,79 @@ mod tests {
                         .contains("failed to update peer ingress context")
                 }),
             "callback resume must reach its post-completion boundary: {result:?}"
+        );
+
+        let committed = state
+            .runtime_ingress_context()
+            .current_callback_tools(&parsed)
+            .await
+            .expect("successful callback resume must publish callback config");
+        assert!(
+            committed
+                .tools()
+                .iter()
+                .any(|tool| tool.name.as_ref() == "resume_callback")
+        );
+
+        let empty_resume = tokio::time::timeout(
+            Duration::from_secs(3),
+            Box::pin(handle_meerkat_resume(
+                &state,
+                bounded_resume_input(session_id.clone(), vec![]),
+                None,
+                None,
+            )),
+        )
+        .await
+        .expect("empty-tools resume must not deadlock");
+        assert!(
+            empty_resume.is_ok()
+                || empty_resume.as_ref().is_err_and(|error| {
+                    error
+                        .message
+                        .contains("failed to update peer ingress context")
+                }),
+            "empty-tools resume must reach its post-completion boundary: {empty_resume:?}"
+        );
+        let preserved = state
+            .runtime_ingress_context()
+            .current_callback_tools(&parsed)
+            .await
+            .expect("empty-tools resume must preserve callback config");
+        assert!(
+            preserved
+                .tools()
+                .iter()
+                .any(|tool| tool.name.as_ref() == "resume_callback")
+        );
+
+        let replacement = McpToolDef {
+            name: "replacement_callback".to_string(),
+            description: "Replacement callback".to_string(),
+            input_schema: meerkat_tools::empty_object_schema(),
+            handler: Some("callback".to_string()),
+        };
+        let mut rejected_override = bounded_resume_input(session_id, vec![replacement]);
+        rejected_override.output_schema = Some(json!("not-an-output-schema"));
+        let error = Box::pin(handle_meerkat_resume(&state, rejected_override, None, None))
+            .await
+            .expect_err("invalid resume override must fail before publication");
+        assert!(error.message.contains("Invalid output_schema"));
+        let after_rejection = state
+            .runtime_ingress_context()
+            .current_callback_tools(&parsed)
+            .await
+            .expect("failed override must retain prior callback config");
+        let after_rejection_tools = after_rejection.tools();
+        assert!(
+            after_rejection_tools
+                .iter()
+                .any(|tool| tool.name.as_ref() == "resume_callback")
+        );
+        assert!(
+            !after_rejection_tools
+                .iter()
+                .any(|tool| tool.name.as_ref() == "replacement_callback")
         );
     }
 
@@ -5111,31 +5732,23 @@ mod tests {
         .expect("missing-session cleanup must not deadlock");
         assert!(result.is_err());
         assert!(!state.runtime_adapter.contains_session(&missing).await);
-        assert!(!state.runtime_sessions.read().await.contains_key(&missing));
+        assert!(!state.runtime_ingress_context().has_sidecar(&missing).await);
     }
 
     #[tokio::test]
     async fn archived_resume_cleanup_does_not_reenter_registration_lock() {
         let (state, session_id) = state_with_persisted_session().await;
         let session_id = meerkat::SessionId::parse(&session_id).expect("valid session id");
-        state
-            .runtime_adapter
-            .prepare_bindings(session_id.clone())
-            .await
-            .expect("archived resume fixture should register runtime bindings");
-        state
-            .upsert_mcp_adapter(
-                &session_id,
-                Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())),
-            )
-            .await;
+        attach_test_mcp_router(
+            &state,
+            &session_id,
+            Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())),
+        )
+        .await;
 
-        let ingress = state.runtime_ingress_context();
-        let registration_lock = ingress.runtime_registration_lock(&session_id);
-        let _registration_guard = registration_lock.mutex().lock().await;
         tokio::time::timeout(
             Duration::from_secs(3),
-            state.cleanup_archived_session_runtime_locked(&session_id),
+            state.cleanup_archived_session_runtime(&session_id),
         )
         .await
         .expect("archived resume cleanup must not deadlock")
@@ -5144,11 +5757,38 @@ mod tests {
         assert!(!state.runtime_adapter.contains_session(&session_id).await);
         assert!(
             !state
-                .mcp_adapters
-                .lock()
+                .runtime_ingress_context()
+                .has_sidecar(&session_id)
                 .await
-                .contains_key(&session_id.to_string())
         );
+    }
+
+    fn mock_deferred_materialization_request(
+        session: Session,
+        bindings: meerkat_core::SessionRuntimeBindings,
+        max_inline_peer_notifications: Option<i32>,
+    ) -> CreateSessionRequest {
+        CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "mock-materialization".to_string(),
+            prompt: "deferred materialization".to_string().into(),
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
+            max_tokens: Some(128),
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                provider: Some(Provider::Other),
+                resume_session: Some(session),
+                llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                    Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
+                )),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                max_inline_peer_notifications,
+                ..Default::default()
+            }),
+            labels: None,
+        }
     }
 
     #[cfg(feature = "mob")]
@@ -6419,6 +7059,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn external_tool_composition_retains_an_initially_empty_dynamic_router() {
+        let primary = Arc::new(MpcToolDispatcher::new(&[McpToolDef {
+            name: "callback_tool".to_string(),
+            description: "Callback tool".to_string(),
+            input_schema: meerkat_tools::empty_object_schema(),
+            handler: Some("callback".to_string()),
+        }])) as Arc<dyn AgentToolDispatcher>;
+        let live_tools = Arc::new(StdMutex::new(Vec::new()));
+        let dynamic = Arc::new(MutableToolDispatcher {
+            tools: Arc::clone(&live_tools),
+        }) as Arc<dyn AgentToolDispatcher>;
+
+        let composed = compose_external_tool_dispatchers(Some(primary), Some(dynamic))
+            .expect("empty dynamic router must remain composable")
+            .expect("two dispatchers must produce a composite");
+        assert_eq!(
+            composed.tools().len(),
+            1,
+            "only the callback tool is initially visible"
+        );
+
+        live_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::new(ToolDef {
+                name: "late_mcp_tool".into(),
+                description: "Connected after agent construction".to_string(),
+                input_schema: meerkat_tools::empty_object_schema(),
+                provenance: Some(meerkat_core::types::ToolProvenance {
+                    kind: meerkat_core::types::ToolSourceKind::Mcp,
+                    source_id: "late-server".into(),
+                }),
+            }));
+
+        assert!(
+            composed
+                .tools()
+                .iter()
+                .any(|tool| tool.name.as_ref() == "late_mcp_tool"),
+            "the composite must query its retained dynamic router after connection"
+        );
+    }
+
     #[tokio::test]
     async fn test_meerkat_run_composition_failure_unregisters_prepared_runtime() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -6465,13 +7149,197 @@ mod tests {
         let next_prepared = prepare_surface_session(&state.runtime_adapter)
             .await
             .expect("composition failure should release the single runtime slot");
-        state
-            .runtime_adapter
-            .unregister_session(&next_prepared.session_id)
-            .await
-            .expect("next prepared runtime session should unregister cleanly");
+        drop(next_prepared);
     }
 
+    #[tokio::test]
+    async fn exact_mcp_rebuild_detaches_old_executor_and_discards_old_actor() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let legacy_bindings = state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("legacy fixture bindings");
+        create_runtime_backed_session_and_run_initial_turn(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+            mock_deferred_materialization_request(session, legacy_bindings, None),
+            None,
+            &meerkat::LiveSessionActorWitnessSlot::default(),
+        )
+        .await
+        .expect("fixture actor should materialize");
+        let pending = state
+            .runtime_adapter
+            .ensure_session_with_executor_factory(session_id.clone(), |_witness| {
+                Box::new(RuntimeTerminationFixtureExecutor(None))
+                    as Box<dyn meerkat_core::lifecycle::CoreExecutor>
+            })
+            .await
+            .expect("fixture runtime executor should prepare");
+        let pending = match pending {
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(witness) => {
+                panic!("fixture unexpectedly found attached executor {witness:?}")
+            }
+        };
+        pending
+            .commit()
+            .await
+            .expect("fixture runtime executor should attach");
+        assert!(
+            state
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live actor lookup")
+        );
+        assert!(
+            state
+                .runtime_adapter
+                .session_has_executor(&session_id)
+                .await
+                .expect("executor lookup")
+        );
+
+        let mut prepared =
+            prepare_mcp_actor_materialization(&state.service, &state.runtime_adapter, &session_id)
+                .await
+                .expect("rebuild should replace old runtime ownership with an exact claim");
+        assert!(
+            !state
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live actor lookup after rebuild prepare"),
+            "old actor must be discarded before replacement creation"
+        );
+        assert!(state.runtime_adapter.contains_session(&session_id).await);
+        assert!(
+            !state
+                .runtime_adapter
+                .session_has_executor(&session_id)
+                .await
+                .expect("prepared executor lookup"),
+            "prepared replacement must not retain the old executor"
+        );
+
+        prepared
+            .rollback_now()
+            .await
+            .expect("exact replacement rollback");
+        assert!(!state.runtime_adapter.contains_session(&session_id).await);
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_create_classifies_validation_failure_as_non_preserving() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let prepared = prepare_new_mcp_actor_materialization(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+        )
+        .await
+        .expect("exact materialization should prepare");
+
+        let owned = create_runtime_backed_session_and_run_initial_turn_call_local(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+            mock_deferred_materialization_request(session, prepared.bindings_clone(), Some(-2)),
+            None,
+            prepared,
+        )
+        .await
+        .expect("owned validation attempt should report");
+        let McpCallLocalActorCreateOutcome {
+            result: error,
+            transaction: mut prepared,
+        } = owned;
+        let error = error.expect_err("invalid inline peer budget must reject actor creation");
+        assert!(matches!(
+            error,
+            McpRuntimeBackedCreateError::Session {
+                preserves_runtime_session: false,
+                ..
+            }
+        ));
+        prepared
+            .rollback_now()
+            .await
+            .expect("failed actor create must retain exact rollback authority");
+        assert!(!state.runtime_adapter.contains_session(&session_id).await);
+    }
+
+    #[tokio::test]
+    async fn durable_create_remains_discoverable_and_resumable_after_response_loss() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let prepared = prepare_new_mcp_actor_materialization(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+        )
+        .await
+        .expect("exact materialization should prepare");
+        let outcome = create_runtime_backed_session_and_run_initial_turn_call_local(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+            mock_deferred_materialization_request(session, prepared.bindings_clone(), None),
+            None,
+            prepared,
+        )
+        .await
+        .expect("call-local create should report");
+        let McpCallLocalActorCreateOutcome {
+            result,
+            transaction,
+        } = outcome;
+        result.expect("durable deferred create should succeed");
+
+        let mut transaction = Some(transaction);
+        release_mcp_actor_materialization(
+            &mut transaction,
+            &session_id,
+            "simulated response loss after durable create",
+        )
+        .await
+        .expect("release must preserve committed durable work");
+
+        let persisted = state
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative lookup")
+            .expect("durable session must remain discoverable");
+        assert!(
+            !state
+                .service
+                .session_archived_by_authority(&session_id, &persisted)
+                .await
+                .expect("archive authority lookup"),
+            "response loss must not archive a committed create"
+        );
+
+        let mut resumed =
+            prepare_mcp_actor_materialization(&state.service, &state.runtime_adapter, &session_id)
+                .await
+                .expect("the ordinary explicit-resume seam must reclaim the session");
+        resumed
+            .rollback_now()
+            .await
+            .expect("test resume claim should release cleanly");
+    }
     #[tokio::test]
     async fn test_handle_meerkat_resume_returns_request_cancelled_when_pre_cancelled() {
         let (state, session_id) = state_with_persisted_session().await;
@@ -6620,7 +7488,7 @@ mod tests {
             .runtime_adapter
             .ensure_session_with_executor(
                 parsed.clone(),
-                Box::new(RuntimeTerminationFixtureExecutor),
+                Box::new(RuntimeTerminationFixtureExecutor(None)),
             )
             .await
             .expect("MCP runtime executor should attach");
@@ -6676,75 +7544,6 @@ mod tests {
         assert!(
             state.runtime_adapter.contains_session(&parsed).await,
             "post-prepare resume validation failure should preserve existing runtime state"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mcp_resume_new_binding_cleanup_preserves_foreign_active_input() {
-        use meerkat_runtime::SessionServiceRuntimeExt;
-        use meerkat_runtime::input::{
-            ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
-        };
-
-        let (state, session_id) = state_with_persisted_session().await;
-        let parsed = meerkat::SessionId::parse(&session_id).expect("valid session id");
-        let runtime_was_registered = state.runtime_adapter.contains_session(&parsed).await;
-        let runtime_state_existed = state.runtime_sessions.read().await.contains_key(&parsed);
-        state
-            .runtime_adapter
-            .ensure_session_with_executor(
-                parsed.clone(),
-                Box::new(RuntimeTerminationFixtureExecutor),
-            )
-            .await
-            .expect("attach runtime executor");
-
-        let input = Input::ExternalEvent(ExternalEventInput {
-            objective_id: None,
-            header: InputHeader {
-                id: meerkat_core::lifecycle::InputId::new(),
-                timestamp: meerkat_core::types::message_timestamp_now(),
-                source: InputOrigin::External {
-                    source_name: "mcp-review".to_string(),
-                },
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            event_type: "mcp-review".to_string(),
-            payload: json!({"status": "queued"}),
-            blocks: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            render_metadata: None,
-        });
-        let accepted = state
-            .runtime_adapter
-            .accept_input_without_wake(&parsed, input)
-            .await
-            .expect("foreign active input should queue");
-        assert!(
-            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
-            "foreign input should be accepted: {accepted:?}"
-        );
-        assert!(
-            !state
-                .runtime_adapter
-                .list_active_inputs(&parsed)
-                .await
-                .expect("list active inputs")
-                .is_empty(),
-            "test requires an active runtime input"
-        );
-
-        state
-            .clear_surface_bindings_if_new(&parsed, runtime_was_registered, runtime_state_existed)
-            .await
-            .expect("active input should make new-session cleanup a no-op");
-        assert!(
-            state.runtime_adapter.contains_session(&parsed).await,
-            "new-binding cleanup must preserve a foreign active runtime input"
         );
     }
 
@@ -6916,10 +7715,11 @@ mod tests {
                 labels: None,
             },
             None,
+            &meerkat::LiveSessionActorWitnessSlot::default(),
         )
         .await
         .expect("live session create should succeed");
-        state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
+        attach_test_mcp_router(&state, &session_id, mcp_adapter).await;
         assert!(
             state
                 .service
@@ -6928,11 +7728,16 @@ mod tests {
                 .expect("live session lookup"),
             "test requires an existing live session"
         );
+        let witness = state
+            .runtime_adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .expect("runtime session should have an exact attachment");
         state
             .runtime_adapter
-            .unregister_session(&session_id)
+            .unregister_executor_attachment_if_current(&witness)
             .await
-            .expect("runtime session should unregister cleanly");
+            .expect("runtime session should unregister exactly");
         assert!(
             !state.runtime_adapter.contains_session(&session_id).await,
             "test starts with no runtime adapter registration"
@@ -7053,10 +7858,11 @@ mod tests {
                 labels: None,
             },
             None,
+            &meerkat::LiveSessionActorWitnessSlot::default(),
         )
         .await
         .expect("live session create should succeed");
-        state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
+        attach_test_mcp_router(&state, &session_id, mcp_adapter).await;
         assert!(
             state.service.comms_runtime(&session_id).await.is_some(),
             "test requires a live session with comms runtime"
@@ -7182,13 +7988,6 @@ mod tests {
             .set_build_state(meerkat_core::SessionBuildState::default())
             .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
-        state
-            .upsert_mcp_adapter(
-                &session_id,
-                Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())),
-            )
-            .await;
-
         let result = Box::pin(handle_meerkat_resume(
             &state,
             MeerkatResumeInput {
@@ -7277,16 +8076,10 @@ mod tests {
             .runtime_adapter
             .ensure_session_with_executor(
                 session_id.clone(),
-                Box::new(RuntimeTerminationFixtureExecutor),
+                Box::new(RuntimeTerminationFixtureExecutor(None)),
             )
             .await
             .expect("MCP runtime executor should attach");
-        state
-            .upsert_mcp_adapter(
-                &session_id,
-                Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())),
-            )
-            .await;
         assert!(
             state.runtime_adapter.contains_session(&session_id).await,
             "test requires a pre-existing runtime registration"
@@ -8065,7 +8858,18 @@ mod tests {
         ))
         .await
         .expect_err("mcp add should fail without adapter registration");
-        assert!(err.message.contains("Live MCP unavailable"));
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::SessionNotRunning.jsonrpc_code()
+        );
+        assert!(err.message.contains("meerkat_resume"));
+        assert_eq!(
+            err.data
+                .as_ref()
+                .and_then(|data| data.get("session_resume_required"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -8136,16 +8940,26 @@ mod tests {
             .await
             .expect("session runtime bindings");
         seed_active_external_surface(bindings.external_tool_surface().as_ref(), "demo");
-        state
-            .upsert_mcp_adapter(
-                &parsed,
-                Arc::new(meerkat_mcp::McpRouterAdapter::new(
-                    McpRouter::new_with_surface_handle(Arc::clone(
-                        bindings.external_tool_surface(),
-                    )),
-                )),
-            )
-            .await;
+        let router = Arc::new(meerkat_mcp::McpRouterAdapter::new(
+            McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface())),
+        ));
+        let session = state
+            .service
+            .load_authoritative_session(&parsed)
+            .await
+            .expect("load MCP handler fixture")
+            .expect("persisted MCP handler fixture");
+        create_runtime_backed_session_and_run_initial_turn(
+            &state.service,
+            &state.runtime_adapter,
+            &parsed,
+            mock_deferred_materialization_request(session, bindings, None),
+            None,
+            &meerkat::LiveSessionActorWitnessSlot::default(),
+        )
+        .await
+        .expect("MCP handler fixture should materialize its live actor");
+        attach_test_mcp_router(&state, &parsed, router).await;
 
         let add = Box::pin(handle_tools_call(
             &state,
@@ -8188,6 +9002,36 @@ mod tests {
         let reload_payload = unwrap_payload(reload);
         assert_eq!(reload_payload["operation"], "reload");
         assert_eq!(reload_payload["status"], "staged");
+
+        let witness = state
+            .runtime_adapter
+            .current_executor_attachment_witness(&parsed)
+            .await
+            .expect("runtime attachment should have an exact witness");
+        state
+            .runtime_adapter
+            .unregister_executor_attachment_if_current(&witness)
+            .await
+            .expect("runtime attachment should unregister exactly");
+        assert!(
+            state
+                .runtime_ingress_context()
+                .logical_router(&parsed)
+                .await
+                .is_some(),
+            "logical router should survive an attachment replacement window"
+        );
+        let error = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mcp_add",
+            &json!({
+                "session_id": parsed.to_string(),
+                "server_config": {"name": "stale", "command": "cat", "args": [], "env": {}}
+            }),
+        ))
+        .await
+        .expect_err("a logical router without an exact live attachment must be rejected");
+        assert!(error.message.contains("Live MCP unavailable"));
     }
 
     #[tokio::test]
@@ -8203,6 +9047,52 @@ mod tests {
         .await
         .expect_err("open should fail for missing session");
         assert!(err.message.contains("Failed to open session event stream"));
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_event_stream_open_preserves_scope_denial_before_registration() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut state = MeerkatMcpState::new_with_store(store).await;
+        let owner = Arc::clone(&state.mob_state);
+        let (mob_id, _session_id) = insert_mcp_archive_live_member(&owner).await;
+
+        let viewer = meerkat_mob_mcp::MobMcpState::new_in_memory_as(
+            meerkat_mob::MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("mcp-stream-viewer").expect("principal id"),
+            ),
+        );
+        viewer
+            .mob_insert_handle(
+                mob_id.clone(),
+                owner.handle_for(&mob_id).await.expect("owner handle"),
+            )
+            .await;
+        state.mob_state = viewer;
+
+        let error = handle_tools_call(
+            &state,
+            "meerkat_mob_event_stream_open",
+            &json!({ "mob_id": mob_id.as_str() }),
+        )
+        .await
+        .expect_err("ungranted stream open must deny");
+
+        assert_eq!(
+            error.code,
+            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code()
+        );
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "required": "subscribe_events",
+                "presented": []
+            }))
+        );
+        assert!(
+            state.mob_event_streams.lock().await.is_empty(),
+            "denied open must not register stream authority"
+        );
     }
 
     #[tokio::test]

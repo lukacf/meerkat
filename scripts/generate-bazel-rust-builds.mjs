@@ -572,6 +572,18 @@ const nativeE2eSystemTests = [
   },
   {
     packageKey: "meerkat-cli",
+    cargoTestTarget: "system_mob_host_daemon",
+    name: "e2e_system_mob_host_daemon_lifecycle_bazel_test",
+    testName: "integration_real_mob_host_daemon_lifecycle",
+  },
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "system_mob_cli_verbs",
+    name: "e2e_system_mob_cli_verbs_over_tcp_bazel_test",
+    testName: "integration_real_mob_cli_verbs_over_tcp",
+  },
+  {
+    packageKey: "meerkat-cli",
     cargoTestTarget: "cli_mobpack_live_smoke",
     name: "e2e_system_cli_mobpack_pack_inspect_validate_bazel_test",
     testName: "e2e_smoke_mobpack_pack_inspect_validate",
@@ -635,6 +647,37 @@ function nativeE2eSystemSpecsFor(pkg, target) {
     spec.packageKey === key && spec.cargoTestTarget === target.name
   );
 }
+
+function assertNativeE2eSystemCoverage() {
+  const ignorePattern = /#\s*\[\s*ignore\s*=\s*"lane:e2e-system"\s*\]\s*(?:#\s*\[[^\]]*\]\s*)*(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/gu;
+  for (const pkg of localPackages.values()) {
+    for (const target of pkg.targets) {
+      // `e2e_*` suites may be selected through the shared Rust lane harness;
+      // standalone `system_*` Cargo targets require an explicit native Bazel
+      // wrapper so their ignored tests actually execute.
+      if (
+        !target.kind.includes("test")
+        || packageKey(pkg) !== "meerkat-cli"
+        || !target.name.startsWith("system_")
+        || !existsSync(target.src_path)
+      ) continue;
+      const source = readFileSync(target.src_path, "utf8");
+      const ignoredTests = [...source.matchAll(ignorePattern)].map((match) => match[1]);
+      if (!ignoredTests.length) continue;
+      const specs = nativeE2eSystemSpecsFor(pkg, target);
+      const covered = new Set(specs.map((spec) => spec.testName));
+      const missing = ignoredTests.filter((testName) => !covered.has(testName));
+      if (missing.length) {
+        throw new Error(
+          `${packageKey(pkg)} test target ${target.name} has lane:e2e-system tests without `
+            + `Bazel-native coverage: ${missing.join(", ")}`,
+        );
+      }
+    }
+  }
+}
+
+assertNativeE2eSystemCoverage();
 
 let staleFileCount = 0;
 

@@ -32,12 +32,12 @@ use meerkat_core::{
     DeferredFirstTurnPhase, InputId, PendingSystemContextAppend, RealtimeTranscriptApplyOutcome,
     RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage, RunId,
     SessionDeferredTurnState, SessionLlmIdentity, SnapshotProjectionError, SystemContextStateError,
-    TurnPhase, TurnStateHandle, TurnStateSnapshot,
+    TurnStateHandle,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -162,10 +162,320 @@ pub struct SessionSnapshot {
     pub last_assistant_text: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ActiveTurnBoundaryStagingToken {
-    pub(crate) active_run_id: RunId,
-    pub(crate) boundary_count: u64,
+/// Opaque identity for one exact in-process session actor.
+///
+/// A [`SessionId`] names the logical session and is intentionally reusable
+/// across actor recovery.  This witness instead names the concrete handle
+/// stored in the session service registry.  Callers may clone and compare it,
+/// but cannot manufacture authority over a replacement actor.
+#[derive(Clone)]
+pub struct LiveSessionActorWitness {
+    session_id: SessionId,
+    incarnation: Arc<LiveSessionActorIncarnation>,
+}
+
+struct LiveSessionActorIncarnation {
+    live: AtomicBool,
+    system_context_state: meerkat_core::SystemContextStateHandle,
+}
+
+/// One-shot publication cell for the exact actor inserted by a service create.
+///
+/// The slot lives at the ephemeral registry boundary so both native and wasm
+/// persistent facades can publish the witness synchronously after insertion,
+/// before an eager first turn reaches its first suspension point.
+#[derive(Clone, Default)]
+pub struct LiveSessionActorWitnessSlot {
+    witness: Arc<OnceLock<LiveSessionActorWitness>>,
+}
+
+impl LiveSessionActorWitnessSlot {
+    /// Capture the exact actor witness once it has been published by the
+    /// session service. An empty slot proves only that actor construction did
+    /// not reach its atomic registry-publication boundary.
+    pub fn witness(&self) -> Option<LiveSessionActorWitness> {
+        self.witness.get().cloned()
+    }
+
+    /// Publish the service-minted actor identity at registry insertion.
+    #[doc(hidden)]
+    pub fn publish(&self, witness: LiveSessionActorWitness) -> Result<(), SessionError> {
+        self.witness.set(witness).map_err(|duplicate| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "live actor witness for session {} was published more than once",
+                duplicate.session_id()
+            )))
+        })
+    }
+}
+
+impl LiveSessionActorWitness {
+    fn new(
+        session_id: SessionId,
+        system_context_state: meerkat_core::SystemContextStateHandle,
+    ) -> Self {
+        Self {
+            session_id,
+            incarnation: Arc::new(LiveSessionActorIncarnation {
+                live: AtomicBool::new(true),
+                system_context_state,
+            }),
+        }
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    fn is_handle(&self, handle: &SessionHandle) -> bool {
+        self.session_id == handle.actor_witness.session_id
+            && Arc::ptr_eq(&self.incarnation, &handle.actor_witness.incarnation)
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.incarnation.live.load(Ordering::Acquire)
+    }
+
+    fn revoke(&self) {
+        self.incarnation
+            .system_context_state
+            .revoke_boundary_actor();
+        self.incarnation.live.store(false, Ordering::Release);
+    }
+}
+
+impl PartialEq for LiveSessionActorWitness {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id && Arc::ptr_eq(&self.incarnation, &other.incarnation)
+    }
+}
+
+impl Eq for LiveSessionActorWitness {}
+
+impl std::fmt::Debug for LiveSessionActorWitness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveSessionActorWitness")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Service-owned registry for exact in-process session actor incarnations.
+///
+/// A logical [`SessionId`] may be reused after recovery, so removal is fenced
+/// by [`LiveSessionActorWitness`] identity. Removing actor A can therefore
+/// never revoke or remove a later actor B for the same logical session.
+#[derive(Default)]
+pub struct LiveSessionActorRegistry {
+    current: std::sync::Mutex<IndexMap<SessionId, LiveSessionActorWitness>>,
+}
+
+impl LiveSessionActorRegistry {
+    fn lock_current(
+        &self,
+    ) -> std::sync::MutexGuard<'_, IndexMap<SessionId, LiveSessionActorWitness>> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Mint, store, and synchronously publish one exact actor incarnation.
+    ///
+    /// Existing current actors are never replaced implicitly. If slot
+    /// publication fails, the newly stored incarnation is removed and
+    /// revoked before this method returns.
+    pub fn insert_and_publish(
+        &self,
+        slot: &LiveSessionActorWitnessSlot,
+        session_id: SessionId,
+        system_context_state: meerkat_core::SystemContextStateHandle,
+    ) -> Result<LiveSessionActorWitness, SessionError> {
+        let mut current = self.lock_current();
+        if current.contains_key(&session_id) {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "live session actor is already registered: {session_id}"
+            ))));
+        }
+
+        let witness = LiveSessionActorWitness::new(session_id.clone(), system_context_state);
+        current.insert(session_id.clone(), witness.clone());
+        if let Err(error) = slot.publish(witness.clone()) {
+            let removed = current.swap_remove(&session_id);
+            drop(current);
+            if let Some(removed) = removed {
+                removed.revoke();
+            }
+            return Err(error);
+        }
+
+        Ok(witness)
+    }
+
+    /// Return the exact actor currently registered for a logical session.
+    pub fn current(&self, session_id: &SessionId) -> Option<LiveSessionActorWitness> {
+        self.lock_current().get(session_id).cloned()
+    }
+
+    /// Return whether a logical session currently has a registered actor.
+    pub fn contains(&self, session_id: &SessionId) -> bool {
+        self.lock_current().contains_key(session_id)
+    }
+
+    /// Remove and synchronously revoke `witness` only if it is still current.
+    pub fn compare_remove(&self, witness: &LiveSessionActorWitness) -> bool {
+        let removed = {
+            let mut current = self.lock_current();
+            match current.get(witness.session_id()) {
+                Some(candidate) if candidate == witness => {
+                    current.swap_remove(witness.session_id())
+                }
+                Some(_) | None => None,
+            }
+        };
+        let Some(removed) = removed else {
+            return false;
+        };
+        removed.revoke();
+        true
+    }
+
+    /// Remove and synchronously revoke whichever actor is currently registered.
+    ///
+    /// This session-scoped operation is only for callers that own the service's
+    /// archive/discard boundary and therefore exclude replacement. Delayed or
+    /// incarnation-scoped cleanup must use [`Self::compare_remove`] instead.
+    pub fn remove_current(&self, session_id: &SessionId) -> bool {
+        let removed = self.lock_current().swap_remove(session_id);
+        let Some(removed) = removed else {
+            return false;
+        };
+        removed.revoke();
+        true
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod live_session_actor_registry_tests {
+    use super::*;
+
+    fn system_context_state() -> meerkat_core::SystemContextStateHandle {
+        meerkat_core::SystemContextStateHandle::new(Default::default())
+            .expect("default system-context state should restore")
+    }
+
+    #[test]
+    fn duplicate_current_actor_is_rejected_without_replacement() {
+        let registry = LiveSessionActorRegistry::default();
+        let session_id = SessionId::new();
+        let first_slot = LiveSessionActorWitnessSlot::default();
+        let first = registry
+            .insert_and_publish(&first_slot, session_id.clone(), system_context_state())
+            .expect("first actor should register");
+        let duplicate_slot = LiveSessionActorWitnessSlot::default();
+
+        let error = registry
+            .insert_and_publish(&duplicate_slot, session_id.clone(), system_context_state())
+            .expect_err("a current actor must not be replaced implicitly");
+
+        assert!(error.to_string().contains("already registered"));
+        assert_eq!(registry.current(&session_id), Some(first.clone()));
+        assert_eq!(first_slot.witness(), Some(first.clone()));
+        assert!(duplicate_slot.witness().is_none());
+        assert!(first.is_live());
+    }
+
+    #[test]
+    fn stale_compare_remove_cannot_remove_or_revoke_replacement() {
+        let registry = LiveSessionActorRegistry::default();
+        let session_id = SessionId::new();
+        let actor_a = registry
+            .insert_and_publish(
+                &LiveSessionActorWitnessSlot::default(),
+                session_id.clone(),
+                system_context_state(),
+            )
+            .expect("actor A should register");
+        assert!(registry.remove_current(&session_id));
+        assert!(!actor_a.is_live());
+
+        let actor_b = registry
+            .insert_and_publish(
+                &LiveSessionActorWitnessSlot::default(),
+                session_id.clone(),
+                system_context_state(),
+            )
+            .expect("actor B should register");
+
+        assert!(!registry.compare_remove(&actor_a));
+        assert_eq!(registry.current(&session_id), Some(actor_b.clone()));
+        assert!(actor_b.is_live());
+    }
+
+    #[test]
+    fn exact_current_actor_remove_revokes_and_clears_registration() {
+        let registry = LiveSessionActorRegistry::default();
+        let session_id = SessionId::new();
+        let actor_b = registry
+            .insert_and_publish(
+                &LiveSessionActorWitnessSlot::default(),
+                session_id.clone(),
+                system_context_state(),
+            )
+            .expect("actor B should register");
+
+        assert!(registry.compare_remove(&actor_b));
+        assert!(!actor_b.is_live());
+        assert!(!registry.contains(&session_id));
+        assert!(registry.current(&session_id).is_none());
+    }
+}
+
+/// Internal result of one admitted session turn.
+///
+/// The public turn result intentionally preserves the original `AgentError`.
+/// Runtime-backed callers additionally consume the exact machine-terminal
+/// witness produced by the concrete agent after its current run was admitted.
+#[derive(Debug)]
+pub(crate) struct SessionTurnExecutionOutcome {
+    pub(crate) result: Result<RunResult, meerkat_core::error::AgentError>,
+    pub(crate) machine_terminal_failure:
+        Result<Option<meerkat_core::TurnErrorMetadata>, meerkat_core::error::AgentError>,
+}
+
+impl SessionTurnExecutionOutcome {
+    fn without_machine_terminal(
+        result: Result<RunResult, meerkat_core::error::AgentError>,
+    ) -> Self {
+        Self {
+            result,
+            machine_terminal_failure: Ok(None),
+        }
+    }
+
+    pub(crate) fn into_runtime_parts(
+        self,
+    ) -> Result<
+        (
+            Result<RunResult, meerkat_core::error::AgentError>,
+            Option<meerkat_core::TurnErrorMetadata>,
+        ),
+        meerkat_core::error::AgentError,
+    > {
+        let machine_terminal_failure = self.machine_terminal_failure?;
+        if self.result.is_ok() && machine_terminal_failure.is_some() {
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "runtime turn returned success with a machine-terminal failure witness".to_string(),
+            ));
+        }
+        Ok((self.result, machine_terminal_failure))
+    }
+
+    fn into_public_result(self) -> Result<RunResult, meerkat_core::error::AgentError> {
+        let (result, _machine_terminal_failure) = self.into_runtime_parts()?;
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +491,7 @@ enum SessionCommand {
         injected_context: Vec<meerkat_core::types::ContentInput>,
         runtime: Box<meerkat_core::service::StartTurnRuntimeSemantics>,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-        result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
+        result_tx: oneshot::Sender<SessionTurnExecutionOutcome>,
         active_admission: Option<RuntimeContextAdmissionGuard>,
     },
     ReplaceClient {
@@ -252,6 +562,31 @@ enum SessionCommand {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
     },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    PublishInteractionTerminalExact {
+        interaction_id: meerkat_core::interaction::InteractionId,
+        event: AgentEvent,
+        event_store: Arc<dyn crate::event_store::EventStore>,
+        reply_tx: oneshot::Sender<
+            Result<
+                meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt,
+                SessionError,
+            >,
+        >,
+    },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    PublishInteractionTerminalsExactBatch {
+        events: Vec<AgentEvent>,
+        event_store: Arc<dyn crate::event_store::EventStore>,
+        reply_tx: oneshot::Sender<
+            Result<
+                Vec<
+                    meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt,
+                >,
+                SessionError,
+            >,
+        >,
+    },
     RecordLiveTerminalError {
         cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
         reply_tx: oneshot::Sender<()>,
@@ -306,6 +641,9 @@ struct SessionSummaryCache {
 
 /// Handle stored in the sessions map.
 struct SessionHandle {
+    /// Exact incarnation identity for this registry entry.  Logical-session
+    /// recovery creates a new witness even when it reuses the same SessionId.
+    actor_witness: LiveSessionActorWitness,
     command_tx: mpsc::Sender<SessionCommand>,
     state_tx: watch::Sender<SessionState>,
     state_rx: watch::Receiver<SessionState>,
@@ -652,6 +990,16 @@ pub trait SessionAgent: Send {
         Ok(())
     }
 
+    /// Consume the exact current-run machine-terminal failure witness, if the
+    /// concrete agent produced one. Implementations must not infer this from a
+    /// post-only snapshot; `Ok(None)` is the safe default for agents without
+    /// generated turn-machine authority.
+    fn take_runtime_terminal_failure_witness(
+        &mut self,
+    ) -> Result<Option<meerkat_core::TurnErrorMetadata>, meerkat_core::error::AgentError> {
+        Ok(None)
+    }
+
     /// Run the next turn.
     ///
     /// `handling_mode` and `render_metadata` are runtime-owned semantics:
@@ -941,15 +1289,17 @@ pub trait SessionAgent: Send {
         Ok(())
     }
 
-    /// Drop active-turn-only context that missed the active turn's model
-    /// boundary so it cannot become ordinary context for the next run.
+    /// Drop active-turn-only context that missed model consumption, including
+    /// a candidate published by boundary commit and then superseded by a later
+    /// hard cancel, so it cannot become ordinary context for the next run.
     fn discard_unapplied_active_turn_system_context(
         &mut self,
     ) -> Result<usize, SystemContextStateError> {
         let discarded_count = {
             let state = self.system_context_state();
             state.discard_unapplied_active_turn_pending()
-        };
+        }
+        .map_err(SystemContextStateError::Boundary)?;
         if discarded_count > 0 {
             self.sync_system_context_state()?;
         }
@@ -1052,6 +1402,50 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
+    /// Deliver cooperative cancellation to one exact live run.
+    ///
+    /// Machine-owned boundary handles must use this run-scoped seam. The
+    /// command itself retains the witness, so a turn transition between this
+    /// validation and agent observation cannot redirect the request to a
+    /// successor run.
+    pub async fn cancel_after_boundary_for_run(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let Some(cancel_after_boundary_handle) = handle.cancel_after_boundary_handle.as_ref()
+        else {
+            return Err(SessionError::Unsupported(
+                "cancel_after_boundary".to_string(),
+            ));
+        };
+        let current_run_id = handle
+            .turn_state_handle
+            .as_deref()
+            .and_then(|turn_state| turn_state.snapshot().active_run_id);
+        if current_run_id.as_ref() != Some(expected_run_id) {
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+
+        {
+            let mut slot = lock_turn_admission(&handle.turn_admission);
+            slot.authorize_cancel_after_boundary()
+                .map_err(|_| SessionError::NotRunning { id: id.clone() })?;
+            // The agent task owns the receiver. If the exact run already ended,
+            // send failure is benign; a delivered stale command is rejected by
+            // the run-id check in Agent::observe_cancel_after_boundary_request.
+            let _ = cancel_after_boundary_handle
+                .send(CancelAfterBoundaryCommand::for_run(expected_run_id.clone()));
+        }
+        wake_interrupt_notify(&handle.interrupt_notify);
+        Ok(())
+    }
+
     fn build_runtime_receipt(
         run_id: RunId,
         boundary: RunApplyBoundary,
@@ -1089,41 +1483,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         }
     }
 
-    pub(crate) fn active_turn_boundary_staging_token_from_snapshot(
-        snapshot: &TurnStateSnapshot,
-    ) -> Option<ActiveTurnBoundaryStagingToken> {
-        if matches!(
-            snapshot.turn_phase,
-            TurnPhase::ApplyingPrimitive | TurnPhase::WaitingForOps
-        ) {
-            return snapshot.active_run_id.clone().map(|active_run_id| {
-                ActiveTurnBoundaryStagingToken {
-                    active_run_id,
-                    boundary_count: snapshot.boundary_count,
-                }
-            });
-        }
-        None
-    }
-
-    pub(crate) fn active_turn_boundary_staging_token(
-        turn_state_handle: &dyn TurnStateHandle,
-    ) -> Option<ActiveTurnBoundaryStagingToken> {
-        let snapshot = turn_state_handle.snapshot();
-        Self::active_turn_boundary_staging_token_from_snapshot(&snapshot)
-    }
-
-    pub(crate) async fn active_turn_state_handle(
-        &self,
-        id: &SessionId,
-    ) -> Result<Option<Arc<dyn TurnStateHandle>>, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        Ok(handle.turn_state_handle.clone())
-    }
-
     async fn build_runtime_output(
         &self,
         id: &SessionId,
@@ -1157,6 +1516,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 receipt,
                 session_snapshot: Some(session_snapshot),
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
+            },
+            Some(terminal @ CoreApplyTerminal::MachineTerminalFailure { .. }) => CoreApplyOutput {
+                receipt,
+                session_snapshot: Some(session_snapshot),
+                terminal: Some(terminal),
             },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
         })
@@ -1341,6 +1705,54 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 usage: cache.usage.clone(),
             },
         }
+    }
+
+    /// Mechanical registry witness for the live session actor.
+    ///
+    /// Unlike `SessionService::has_live_session`, this deliberately performs
+    /// no actor RPC or durable-authority arbitration, so an in-flight turn
+    /// cannot stall host-health observation.
+    pub async fn live_session_actor_registered(&self, id: &SessionId) -> bool {
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .is_some_and(|handle| !handle.command_tx.is_closed())
+    }
+
+    /// Capture the exact currently registered live actor incarnation.
+    ///
+    /// This is a registry observation only.  Persistent/runtime-backed
+    /// callers that need the observation to remain stable must use the
+    /// persistent service's turn-boundary lease rather than retaining this
+    /// clone by itself.
+    pub async fn live_session_actor_witness(
+        &self,
+        id: &SessionId,
+    ) -> Option<LiveSessionActorWitness> {
+        self.sessions.read().await.get(id).and_then(|handle| {
+            (!handle.command_tx.is_closed()).then(|| handle.actor_witness.clone())
+        })
+    }
+
+    /// Reserve runtime capacity for one exact actor incarnation.
+    ///
+    /// Unlike the persisted-session compatibility path, this never falls
+    /// back to a capacity-only permit.  A removed, exited, or replaced actor
+    /// is a typed `NotFound`, so the caller cannot carry resource capacity as
+    /// if it were actor authority.
+    pub async fn acquire_runtime_context_admission_for_actor(
+        &self,
+        witness: &LiveSessionActorWitness,
+    ) -> Result<RuntimeContextAdmissionGuard, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(witness.session_id())
+            .filter(|handle| witness.is_handle(handle) && !handle.command_tx.is_closed())
+            .ok_or_else(|| SessionError::NotFound {
+                id: witness.session_id().clone(),
+            })?;
+        self.acquire_runtime_context_admission_for_handle(witness.session_id(), handle)
     }
 
     /// Export the full session (messages + metadata) for persistence.
@@ -1721,11 +2133,46 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// caller already encodes this (`Ok(()) | Err(NotFound) => Ok(())`); this
     /// makes the contract itself idempotent.
     pub async fn discard_live_session(&self, id: &SessionId) -> Result<(), SessionError> {
-        let mut sessions = self.sessions.write().await;
-        let Some(handle) = sessions.swap_remove(id) else {
+        let handle = self.sessions.write().await.swap_remove(id);
+        let Some(handle) = handle else {
             return Ok(());
         };
-        drop(sessions);
+        self.shutdown_removed_live_session_handle(id, handle).await;
+        Ok(())
+    }
+
+    /// Drop only the actor incarnation named by `witness`.
+    ///
+    /// Returns `false` when the actor is already absent or a replacement with
+    /// the same logical SessionId is current.  In particular, stale cleanup
+    /// can never remove the replacement.
+    pub async fn discard_live_session_actor(
+        &self,
+        witness: &LiveSessionActorWitness,
+    ) -> Result<bool, SessionError> {
+        let handle = {
+            let mut sessions = self.sessions.write().await;
+            if !sessions
+                .get(witness.session_id())
+                .is_some_and(|handle| witness.is_handle(handle))
+            {
+                return Ok(false);
+            }
+            sessions.swap_remove(witness.session_id())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        self.shutdown_removed_live_session_handle(witness.session_id(), handle)
+            .await;
+        Ok(true)
+    }
+
+    async fn shutdown_removed_live_session_handle(&self, id: &SessionId, handle: SessionHandle) {
+        // Revoke the exact incarnation synchronously before any shutdown await.
+        // Prepared boundary authorities can now fail closed even while the
+        // actor is still processing the shutdown command.
+        handle.actor_witness.revoke();
         // Clear the singular typed materialization record. For a staged
         // session the registry-held capacity permit drops with it, so the
         // registry never retains a phantom record (or orphaned reservation)
@@ -1740,7 +2187,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             handle.state_tx.send_replace(projection);
         }
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
-        Ok(())
     }
 
     pub async fn apply_runtime_system_context(
@@ -1840,132 +2286,51 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })?
     }
 
-    /// Stage runtime-owned context for the active turn's next model boundary.
-    ///
-    /// This path intentionally mutates the shared system-context state directly
-    /// instead of sending a command to the session task. During a long turn the
-    /// session task is busy inside `run_turn_with_events`, and mailbox delivery
-    /// would make an operator steer visible only after the turn had already
-    /// completed.
-    pub async fn stage_runtime_system_context_for_active_turn(
+    /// Prepare one exact active-turn model boundary and wait until its actor is
+    /// parked immediately before consumption. The returned non-clone authority
+    /// is tied to the exact registry actor allocation captured here; replacement
+    /// or removal revokes it before any shutdown await.
+    pub async fn prepare_runtime_system_context_for_active_turn(
         &self,
         id: &SessionId,
         expected_run_id: &RunId,
         appends: Vec<PendingSystemContextAppend>,
-    ) -> Result<(), SessionError> {
-        if appends.is_empty() {
-            return Ok(());
-        }
-
-        let turn_state_handle = self.active_turn_state_handle(id).await?;
-        let turn_state_handle =
-            turn_state_handle.ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
-        let initial_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
-            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
-        if initial_token.active_run_id != *expected_run_id {
-            return Err(SessionError::NotRunning { id: id.clone() });
-        }
-
-        let state = self
-            .system_context_state(id)
-            .await
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-
-        let locked_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
-            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
-        if locked_token != initial_token {
-            return Err(SessionError::NotRunning { id: id.clone() });
-        }
-
-        let staged_appends = appends
-            .into_iter()
-            .map(|append| {
-                (
-                    AppendSystemContextRequest {
-                        content: append.content,
-                        source: append.source,
-                        idempotency_key: append.idempotency_key,
-                        source_kind: append.source_kind,
-                        peer_response_terminal: None,
-                    },
-                    append.accepted_at,
-                )
-            })
-            .collect();
-        let (snapshot_state, staged_state) = state
-            .stage_active_turn_appends_with_snapshot(staged_appends)
-            .map_err(|err| crate::control_error_into_session_error(err.into_control_error(id)))?;
-        let staged_token = Self::active_turn_boundary_staging_token(turn_state_handle.as_ref())
-            .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?;
-        if staged_token != initial_token {
-            let _ = state.replace_from_generated_restore_if_current(&staged_state, snapshot_state);
-            return Err(SessionError::NotRunning { id: id.clone() });
-        }
-        tracing::debug!(
-            session_id = %id,
-            pending_count = staged_state.pending().len(),
-            active_turn_pending_count = staged_state.active_turn_pending_len(),
-            "staged active-turn runtime system context"
-        );
-
-        Ok(())
-    }
-
-    /// Roll back active-turn-only runtime context that is still pending.
-    ///
-    /// This is intentionally best-effort with respect to the current turn
-    /// phase: the runtime calls it after its own commit failed, and the cleanup
-    /// must still remove the staged session projection if the turn has already
-    /// advanced or finished.
-    pub async fn discard_runtime_system_context_for_active_turn(
-        &self,
-        id: &SessionId,
-        expected_run_id: &RunId,
-        idempotency_keys: Vec<String>,
-    ) -> Result<usize, SessionError> {
-        if idempotency_keys.is_empty() {
-            return Ok(0);
-        }
-
-        let state = self
-            .system_context_state(id)
-            .await
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-
-        let discarded = state.discard_active_turn_pending_by_keys(&idempotency_keys);
-        if !discarded.is_empty() {
-            tracing::debug!(
-                session_id = %id,
-                expected_run_id = %expected_run_id,
-                discarded_count = discarded.len(),
-                "rolled back staged active-turn runtime system context"
-            );
-        }
-        Ok(discarded.len())
-    }
-
-    /// Report whether the current runtime-owned turn phase still has a
-    /// cooperative model boundary that can consume active-turn system context.
-    pub async fn active_turn_system_context_boundary_available(
-        &self,
-        id: &SessionId,
-    ) -> Result<Option<bool>, SessionError> {
-        let turn_state_handle = self.active_turn_state_handle(id).await?;
-
-        let Some(turn_state_handle) = turn_state_handle else {
-            return Ok(None);
+    ) -> Result<meerkat_core::PreparedSystemContextBoundary, meerkat_core::CoreBoundaryStageError>
+    {
+        let (actor_witness, state) = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions.get(id).ok_or_else(|| {
+                meerkat_core::CoreBoundaryStageError::stale(format!(
+                    "session {id} has no live actor"
+                ))
+            })?;
+            if handle.command_tx.is_closed() || !handle.actor_witness.is_live() {
+                return Err(meerkat_core::CoreBoundaryStageError::stale(format!(
+                    "session {id} actor is closed"
+                )));
+            }
+            (
+                handle.actor_witness.clone(),
+                handle.system_context_state.clone(),
+            )
         };
 
-        let snapshot = turn_state_handle.snapshot();
-        let available = Self::active_turn_boundary_staging_token_from_snapshot(&snapshot).is_some();
-        tracing::debug!(
-            session_id = %id,
-            active_run_id = ?snapshot.active_run_id,
-            turn_phase = %snapshot.turn_phase,
-            available,
-            "observed runtime turn phase for live system-context boundary"
-        );
-        Ok(Some(available))
+        let prepared = state
+            .prepare_active_turn_boundary(expected_run_id, appends)
+            .await?;
+
+        let still_exact = self.sessions.read().await.get(id).is_some_and(|handle| {
+            actor_witness.is_handle(handle)
+                && actor_witness.is_live()
+                && !handle.command_tx.is_closed()
+        });
+        if !still_exact {
+            drop(prepared);
+            return Err(meerkat_core::CoreBoundaryStageError::stale(format!(
+                "session {id} actor was replaced while preparing boundary"
+            )));
+        }
+        Ok(prepared)
     }
 
     pub async fn publish_runtime_system_context_events(
@@ -1992,6 +2357,78 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn publish_interaction_terminal_exact(
+        &self,
+        id: &SessionId,
+        interaction_id: meerkat_core::interaction::InteractionId,
+        event: AgentEvent,
+        event_store: Arc<dyn crate::event_store::EventStore>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt,
+        SessionError,
+    > {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::PublishInteractionTerminalExact {
+                interaction_id,
+                event,
+                event_store,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })?
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn publish_interaction_terminals_exact_batch(
+        &self,
+        id: &SessionId,
+        events: Vec<AgentEvent>,
+        event_store: Arc<dyn crate::event_store::EventStore>,
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        SessionError,
+    > {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::PublishInteractionTerminalsExactBatch {
+                events,
+                event_store,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })?
     }
 
     /// Record a typed live-adapter terminal error onto the session's owned
@@ -2239,7 +2676,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
         Self::require_runtime_execution_kind_stamp(&req)?;
-        match self.start_turn(id, req).await {
+        let execution = self.start_runtime_turn_execution(id, req).await?;
+        let (result, machine_terminal_failure) =
+            execution.into_runtime_parts().map_err(|error| {
+                SessionError::runtime_executor_stopped(format!(
+                    "runtime terminal-witness projection failed after live mutation: {error}"
+                ))
+            })?;
+        match result.map_err(SessionError::Agent) {
             Ok(run_result) => {
                 self.build_runtime_output(
                     id,
@@ -2262,7 +2706,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 .await
             }
             Err(error) => {
-                if let Some(terminal) = Self::callback_pending_terminal(&error) {
+                if let Some(error) = machine_terminal_failure {
+                    self.build_runtime_output(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::MachineTerminalFailure { error }),
+                    )
+                    .await
+                } else if let Some(terminal) = Self::callback_pending_terminal(&error) {
                     self.build_runtime_output(
                         id,
                         run_id,
@@ -2442,26 +2895,25 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    #[cfg(feature = "session-store")]
-    pub(crate) async fn start_turn_with_runtime_context_admission(
+    pub(crate) async fn start_runtime_turn_execution(
         &self,
         id: &SessionId,
         req: StartTurnRequest,
-        admission: RuntimeContextAdmissionGuard,
-    ) -> Result<RunResult, SessionError> {
-        self.start_turn_with_admission_recovering_not_found(id, req, Some(admission))
+    ) -> Result<SessionTurnExecutionOutcome, SessionError> {
+        self.start_turn_execution_with_admission_recovering_not_found(id, req, None)
             .await
             .map_err(|(error, _admission)| error)
     }
 
     #[cfg(feature = "session-store")]
-    pub(crate) async fn start_turn_with_runtime_context_admission_recovering_not_found(
+    pub(crate) async fn start_runtime_turn_execution_with_admission_recovering_not_found(
         &self,
         id: &SessionId,
         req: StartTurnRequest,
         admission: RuntimeContextAdmissionGuard,
-    ) -> Result<RunResult, (SessionError, Option<RuntimeContextAdmissionGuard>)> {
-        self.start_turn_with_admission_recovering_not_found(id, req, Some(admission))
+    ) -> Result<SessionTurnExecutionOutcome, (SessionError, Option<RuntimeContextAdmissionGuard>)>
+    {
+        self.start_turn_execution_with_admission_recovering_not_found(id, req, Some(admission))
             .await
     }
 
@@ -2482,6 +2934,25 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         req: StartTurnRequest,
         mut reserved_admission: Option<RuntimeContextAdmissionGuard>,
     ) -> Result<RunResult, (SessionError, Option<RuntimeContextAdmissionGuard>)> {
+        let outcome = self
+            .start_turn_execution_with_admission_recovering_not_found(
+                id,
+                req,
+                reserved_admission.take(),
+            )
+            .await?;
+        outcome
+            .into_public_result()
+            .map_err(|error| (SessionError::Agent(error), None))
+    }
+
+    async fn start_turn_execution_with_admission_recovering_not_found(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        mut reserved_admission: Option<RuntimeContextAdmissionGuard>,
+    ) -> Result<SessionTurnExecutionOutcome, (SessionError, Option<RuntimeContextAdmissionGuard>)>
+    {
         let (result_tx, result_rx) = oneshot::channel();
 
         let prompt: meerkat_core::types::ContentInput = req.prompt.clone();
@@ -2596,7 +3067,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             )
         })?;
 
-        result.map_err(|error| (SessionError::Agent(error), None))
+        Ok(result)
     }
 
     /// Get the event injector for a session, if available.
@@ -2672,6 +3143,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub async fn shutdown(&self) {
         let mut sessions = self.sessions.write().await;
         for (id, handle) in sessions.drain(..) {
+            handle.actor_witness.revoke();
             // Clear the singular typed materialization record with the handle;
             // a staged session's registry-held permit drops with it.
             self.staged_registry.forget(&id);
@@ -2796,6 +3268,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         req: CreateSessionRequest,
         reserved_create_admission: Option<RuntimeContextAdmissionGuard>,
     ) -> Result<RunResult, SessionError> {
+        self.create_session_with_admission_and_witness(req, reserved_create_admission, None)
+            .await
+            .map(|(result, _witness)| result)
+    }
+
+    /// Create an actor and return its exact registry witness in the same
+    /// future completion as the public result.  The witness is minted before
+    /// registry insertion and no suspension occurs between successful
+    /// insertion and the deferred-create return, allowing an outer lifecycle
+    /// transaction to publish exact cleanup authority without a sampling gap.
+    #[doc(hidden)]
+    pub async fn create_session_with_admission_and_witness(
+        &self,
+        req: CreateSessionRequest,
+        reserved_create_admission: Option<RuntimeContextAdmissionGuard>,
+        actor_witness_slot: Option<&LiveSessionActorWitnessSlot>,
+    ) -> Result<(RunResult, LiveSessionActorWitness), SessionError> {
         let prompt = req.prompt.clone();
         let injected_context = req.injected_context.clone();
         let caller_event_tx = req.event_tx.clone();
@@ -2817,6 +3306,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .build
             .as_ref()
             .and_then(|build| build.resume_session.as_ref());
+        let resumed_session_id = resumed_session.map(|session| session.id().clone());
+        let runtime_binding_session_id =
+            req.build
+                .as_ref()
+                .and_then(|build| match &build.runtime_build_mode {
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
+                        Some(bindings.session_id().clone())
+                    }
+                    meerkat_core::RuntimeBuildMode::StandaloneEphemeral => None,
+                });
+        if let (Some(resumed_session_id), Some(runtime_binding_session_id)) =
+            (&resumed_session_id, &runtime_binding_session_id)
+            && resumed_session_id != runtime_binding_session_id
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "runtime binding session {runtime_binding_session_id} does not match resumed session {resumed_session_id}"
+                )),
+            ));
+        }
+        let expected_session_id = runtime_binding_session_id.or(resumed_session_id);
         let resumed_deferred_turn_state = resumed_session
             .map(meerkat_core::Session::try_deferred_turn_state)
             .transpose()
@@ -2877,7 +3387,19 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         self.validate_prompt_video_input(&prompt, &llm_identity)
             .await?;
         let session_id = agent.session_id();
+        if let Some(expected_session_id) = expected_session_id.as_ref()
+            && expected_session_id != &session_id
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "built agent session {session_id} does not match requested session {expected_session_id}"
+                )),
+            ));
+        }
         let created_at = SystemTime::now();
+        let system_context_state = agent.system_context_state();
+        let actor_witness =
+            LiveSessionActorWitness::new(session_id.clone(), system_context_state.clone());
         let turn_admission_slot = TurnAdmissionSlot::new();
         let initial_session_state = turn_admission_slot.projection();
         let turn_admission = Arc::new(std::sync::Mutex::new(turn_admission_slot));
@@ -2906,7 +3428,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let comms_runtime = agent.comms_runtime();
         let cancel_after_boundary_handle = agent.cancel_after_boundary_handle();
         let turn_state_handle = agent.turn_state_handle();
-        let system_context_state = agent.system_context_state();
         // W2-E: capture the session-context DSL handle so the session task
         // can fire `AdvanceSessionContext` on every summary-publish site.
         let session_context = agent.session_context_handle();
@@ -2932,6 +3453,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         #[cfg(not(target_arch = "wasm32"))]
         tokio::spawn(session_task(
             agent,
+            session_id.clone(),
             agent_event_tx,
             agent_event_rx,
             command_rx,
@@ -2950,6 +3472,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         #[cfg(target_arch = "wasm32")]
         tokio_with_wasm::alias::task::spawn(session_task(
             agent,
+            session_id.clone(),
             agent_event_tx,
             agent_event_rx,
             command_rx,
@@ -2968,6 +3491,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
         // Store the handle
         let handle = SessionHandle {
+            actor_witness: actor_witness.clone(),
             command_tx: command_tx.clone(),
             state_tx: state_tx_handle,
             state_rx,
@@ -3011,6 +3535,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if !inserted {
             // Duplicate IDs are unexpected but can happen if the builder returns a reused ID.
             // Stop the task so it does not leak in the background.
+            actor_witness.revoke();
             let _ = command_tx.send(SessionCommand::Shutdown).await;
             return Err(SessionError::Agent(
                 meerkat_core::error::AgentError::InternalError(format!(
@@ -3019,19 +3544,37 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             ));
         }
 
+        // Exact cleanup authority is published at the actor registry
+        // linearization point. In particular, eager create must not wait for
+        // its first turn before making the witness observable: that future can
+        // be cancelled while the actor remains registered.
+        if let Some(actor_witness_slot) = actor_witness_slot
+            && let Err(error) = actor_witness_slot.publish(actor_witness.clone())
+        {
+            // Slot reuse is a malformed transaction, but the just-minted
+            // actor is already visible. Compare-and-remove that exact
+            // incarnation before returning so the older witness retained
+            // by the slot cannot strand an unaddressable replacement.
+            let _ = self.discard_live_session_actor(&actor_witness).await;
+            return Err(error);
+        }
+
         if defer_initial_turn {
-            return Ok(RunResult {
-                text: String::new(),
-                session_id,
-                turns: 0,
-                tool_calls: 0,
-                usage: Usage::default(),
-                terminal_cause_kind: None,
-                structured_output: None,
-                extraction_error: None,
-                schema_warnings: None,
-                skill_diagnostics: None,
-            });
+            return Ok((
+                RunResult {
+                    text: String::new(),
+                    session_id,
+                    turns: 0,
+                    tool_calls: 0,
+                    usage: Usage::default(),
+                    terminal_cause_kind: None,
+                    structured_output: None,
+                    extraction_error: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+                actor_witness,
+            ));
         }
 
         // Claim the canonical turn slot for the eager first turn.
@@ -3093,7 +3636,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             }
             drop(sessions);
             let mut sessions = self.sessions.write().await;
-            sessions.swap_remove(&session_id);
+            if let Some(handle) = sessions.swap_remove(&session_id) {
+                handle.actor_witness.revoke();
+            }
             self.staged_registry.forget(&session_id);
             return Err(SessionError::Agent(
                 meerkat_core::error::AgentError::InternalError(
@@ -3106,7 +3651,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Ok(result) => result,
             Err(_) => {
                 let mut sessions = self.sessions.write().await;
-                sessions.swap_remove(&session_id);
+                if let Some(handle) = sessions.swap_remove(&session_id) {
+                    handle.actor_witness.revoke();
+                }
                 self.staged_registry.forget(&session_id);
                 return Err(SessionError::Agent(
                     meerkat_core::error::AgentError::InternalError(
@@ -3116,7 +3663,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             }
         };
 
-        result.map_err(SessionError::Agent)
+        result
+            .into_public_result()
+            .map(|result| (result, actor_witness))
+            .map_err(SessionError::Agent)
     }
 }
 
@@ -3266,29 +3816,30 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     }
 
     async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-
-        let Some(cancel_after_boundary_handle) = handle.cancel_after_boundary_handle.as_ref()
-        else {
-            return Err(SessionError::Unsupported(
-                "cancel_after_boundary".to_string(),
-            ));
+        // Preserve the ordinary SessionService API's "current active run"
+        // semantics by resolving the current witness once, then delegating to
+        // the exact run-scoped command path.
+        let expected_run_id = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            handle
+                .turn_state_handle
+                .as_deref()
+                .and_then(|turn_state| turn_state.snapshot().active_run_id)
+                .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?
         };
+        self.cancel_after_boundary_for_run(id, &expected_run_id)
+            .await
+    }
 
-        {
-            let mut slot = lock_turn_admission(&handle.turn_admission);
-            slot.authorize_cancel_after_boundary()
-                .map_err(|_| SessionError::NotRunning { id: id.clone() })?;
-            // The agent task owns the receiver. If the run already ended the
-            // receiver may be dropped; a send failure is a benign no-op (the
-            // staleness reset is core-owned at the next run-start flush).
-            let _ = cancel_after_boundary_handle.send(CancelAfterBoundaryCommand);
-        }
-        wake_interrupt_notify(&handle.interrupt_notify);
-        Ok(())
+    async fn cancel_after_boundary_for_run(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+    ) -> Result<(), SessionError> {
+        EphemeralSessionService::cancel_after_boundary_for_run(self, id, expected_run_id).await
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -3383,6 +3934,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let handle = sessions
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        handle.actor_witness.revoke();
         drop(sessions);
         // Clear the singular typed materialization record with the handle; a
         // staged session's registry-held permit drops with it, freeing the
@@ -3556,6 +4108,182 @@ fn stamp_event_envelope(
     EventEnvelope::new_with_source(source.clone(), *next_seq, None, event)
 }
 
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+async fn publish_interaction_terminal_batch(
+    session_id: &SessionId,
+    next_seq: &mut u64,
+    control: &SessionTaskControl,
+    event_store: &dyn crate::event_store::EventStore,
+    events: Vec<AgentEvent>,
+) -> Result<
+    Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+    SessionError,
+> {
+    if events.len() > crate::event_store::MAX_EXACT_INTERACTION_TERMINAL_BATCH {
+        return Err(SessionError::Store(Box::new(
+            crate::event_store::EventStoreError::InvalidExactInteractionTerminalBatch {
+                reason: format!(
+                    "batch contains {} terminals, exceeding the maximum of {}",
+                    events.len(),
+                    crate::event_store::MAX_EXACT_INTERACTION_TERMINAL_BATCH
+                ),
+            },
+        )));
+    }
+
+    let mut terminals = Vec::with_capacity(events.len());
+    for event in events {
+        let interaction_id = match &event {
+            AgentEvent::InteractionComplete { interaction_id, .. }
+            | AgentEvent::InteractionCallbackPending { interaction_id, .. }
+            | AgentEvent::InteractionFailed { interaction_id, .. } => *interaction_id,
+            _ => {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(
+                        "runtime terminal publication received a non-interaction event".to_string(),
+                    ),
+                ));
+            }
+        };
+        terminals.push((
+            interaction_id,
+            EventEnvelope::new_with_source(
+                EventSourceIdentity::interaction(interaction_id),
+                0,
+                None,
+                event,
+            ),
+        ));
+    }
+    crate::event_store::validate_exact_interaction_terminal_batch(&terminals)
+        .map_err(|error| SessionError::Store(Box::new(error)))?;
+    if terminals.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let stream_seq_floor = *next_seq;
+    let appends = event_store
+        .append_interaction_terminals_exact_batch(session_id, stream_seq_floor, &terminals)
+        .await
+        .map_err(|error| SessionError::Store(Box::new(error)))?;
+    if appends.len() != terminals.len() {
+        return Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(format!(
+                "exact interaction batch returned {} receipts for {} terminals",
+                appends.len(),
+                terminals.len()
+            )),
+        ));
+    }
+
+    // Validate the complete store result before mutating the live sequencer or
+    // broadcasting any row. A malformed custom EventStore therefore cannot
+    // create a half-published in-memory batch.
+    let mut receipts = Vec::with_capacity(terminals.len());
+    let mut inserted = Vec::new();
+    let mut saw_inserted = false;
+    let mut replay_tail: Option<u64> = None;
+    let mut expected_insert_stream_seq: Option<u64> = None;
+    let mut canonical_tail = stream_seq_floor;
+    for ((interaction_id, requested), append) in terminals.iter().zip(appends) {
+        let (was_inserted, stored) = match append {
+            crate::event_store::ExactInteractionAppend::Inserted(stored) => (true, stored),
+            crate::event_store::ExactInteractionAppend::Replayed(stored) => (false, stored),
+        };
+        let stored_envelope = stored.to_envelope();
+        crate::event_store::validate_exact_interaction_terminal(*interaction_id, &stored_envelope)
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        if stored.mob_id != requested.mob_id
+            || !crate::event_store::interaction_terminal_events_semantically_equal(
+                &stored.event,
+                &requested.payload,
+            )
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "exact interaction batch returned a non-canonical row for {interaction_id}"
+                )),
+            ));
+        }
+
+        if was_inserted {
+            saw_inserted = true;
+            let expected = match expected_insert_stream_seq {
+                Some(previous) => previous.checked_add(1),
+                None => stream_seq_floor
+                    .max(replay_tail.unwrap_or(0))
+                    .checked_add(1),
+            }
+            .ok_or_else(|| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "session event stream sequence overflow in exact terminal batch".to_string(),
+                ))
+            })?;
+            if stored.stream_seq != expected {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "exact interaction batch inserted stream seq {}, expected {expected}",
+                        stored.stream_seq
+                    )),
+                ));
+            }
+            expected_insert_stream_seq = Some(stored.stream_seq);
+            inserted.push((stored.stream_seq, stored.to_envelope()));
+        } else {
+            if saw_inserted {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(
+                        "exact interaction batch returned a replay after an inserted suffix row"
+                            .to_string(),
+                    ),
+                ));
+            }
+            if stored.stream_seq == 0 {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(
+                        "exact interaction replay returned zero stream sequence".to_string(),
+                    ),
+                ));
+            }
+            if let Some(previous) = replay_tail {
+                let expected = previous.checked_add(1).ok_or_else(|| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "exact interaction replay prefix sequence overflow".to_string(),
+                    ))
+                })?;
+                if stored.stream_seq != expected {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "exact interaction replay prefix stream seq {}, expected {expected}",
+                            stored.stream_seq
+                        )),
+                    ));
+                }
+            }
+            replay_tail = Some(stored.stream_seq);
+        }
+        canonical_tail = canonical_tail.max(stored.stream_seq);
+        receipts.push(
+            meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                &stored.event,
+                stored.seq,
+            )
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    error.to_string(),
+                ))
+            })?,
+        );
+    }
+
+    inserted.sort_unstable_by_key(|(stream_seq, _)| *stream_seq);
+    *next_seq = canonical_tail;
+    for (_, envelope) in inserted {
+        let _ = control.session_event_tx.send(envelope);
+    }
+    Ok(receipts)
+}
+
 /// Render a typed [`LiveAdapterErrorCode`] into the human-readable display
 /// projection carried by the `RunFailed` event's `error`/`message` fields.
 ///
@@ -3612,6 +4340,7 @@ fn render_runtime_system_context_event_prompt(
 fn apply_runtime_system_context_and_publish<A: SessionAgent>(
     agent: &mut A,
     appends: &[PendingSystemContextAppend],
+    session_id: &SessionId,
     control: &SessionTaskControl,
     next_seq: &mut u64,
     source: &EventSourceIdentity,
@@ -3626,7 +4355,6 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
         last_assistant_text: snap.last_assistant_text,
     });
     if let Some(prompt) = render_runtime_system_context_event_prompt(appends) {
-        let session_id = agent.session_id();
         let started = stamp_event_envelope(
             next_seq,
             source,
@@ -3643,7 +4371,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
             next_seq,
             source,
             AgentEvent::RunCompleted {
-                session_id,
+                session_id: session_id.clone(),
                 result: String::new(),
                 structured_output: None,
                 extraction_required: false,
@@ -3658,6 +4386,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
 fn publish_runtime_system_context_events<A: SessionAgent>(
     agent: &A,
     appends: &[PendingSystemContextAppend],
+    session_id: &SessionId,
     control: &SessionTaskControl,
     next_seq: &mut u64,
     source: &EventSourceIdentity,
@@ -3671,7 +4400,6 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
         last_assistant_text: snap.last_assistant_text,
     });
     if let Some(prompt) = render_runtime_system_context_event_prompt(appends) {
-        let session_id = agent.session_id();
         let started = stamp_event_envelope(
             next_seq,
             source,
@@ -3688,7 +4416,7 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
             next_seq,
             source,
             AgentEvent::RunCompleted {
-                session_id,
+                session_id: session_id.clone(),
                 result: String::new(),
                 structured_output: None,
                 extraction_required: false,
@@ -3845,6 +4573,7 @@ fn restore_deferred_turn_inputs(
 async fn drain_session_task_commands<A: SessionAgent>(
     commands: &mut mpsc::Receiver<SessionCommand>,
     agent: &mut A,
+    session_id: &SessionId,
     control: &SessionTaskControl,
     next_seq: &mut u64,
     source: &EventSourceIdentity,
@@ -3859,7 +4588,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
                 // Machine is in ShuttingDown; dispatch authorization resolves
                 // `Cancelled` for this phase. Reply directly without
                 // attempting a claim (the slot is already ShuttingDown).
-                let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(Err(
+                    meerkat_core::error::AgentError::Cancelled,
+                )));
             }
             SessionCommand::ApplyRuntimeSystemContext {
                 appends: _,
@@ -3890,6 +4621,18 @@ async fn drain_session_task_commands<A: SessionAgent>(
             } => {
                 // Publish is a no-op in ShuttingDown; resolve benignly.
                 let _ = reply_tx.send(());
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::PublishInteractionTerminalExact { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::Cancelled,
+                )));
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::PublishInteractionTerminalsExactBatch { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::Cancelled,
+                )));
             }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
@@ -3922,7 +4665,7 @@ async fn drain_session_task_commands<A: SessionAgent>(
                     next_seq,
                     source,
                     AgentEvent::RunFailed {
-                        session_id: agent.session_id(),
+                        session_id: session_id.clone(),
                         terminal_cause_kind: None,
                         error_report: meerkat_core::event::AgentErrorReport {
                             class: meerkat_core::event::AgentErrorClass::Terminal,
@@ -4019,6 +4762,7 @@ async fn drain_session_task_commands<A: SessionAgent>(
 
 async fn session_task<A: SessionAgent>(
     mut agent: A,
+    session_id: SessionId,
     agent_event_tx: mpsc::Sender<AgentEvent>,
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
     mut commands: mpsc::Receiver<SessionCommand>,
@@ -4026,7 +4770,10 @@ async fn session_task<A: SessionAgent>(
     control: SessionTaskControl,
 ) {
     let mut next_seq: u64 = 0;
-    let source = EventSourceIdentity::session(agent.session_id());
+    // The service captures this canonical identity immediately after agent
+    // construction and uses it as the registry key. Never re-read a custom
+    // SessionAgent's potentially mutable identity inside the task.
+    let source = EventSourceIdentity::session(session_id.clone());
 
     loop {
         let Some(cmd) = commands.recv().await else {
@@ -4166,14 +4913,19 @@ async fn session_task<A: SessionAgent>(
                 match dispatch_authorization {
                     Ok(StartTurnDispatchAuthorization::Authorized) => {}
                     Ok(StartTurnDispatchAuthorization::Cancelled) => {
-                        let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                        let _ =
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::Cancelled),
+                            ));
                         continue;
                     }
                     Err(error) => {
                         let _ =
-                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
-                                format!("generated turn authority rejected dispatch: {error}"),
-                            )));
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::InternalError(format!(
+                                    "generated turn authority rejected dispatch: {error}"
+                                ))),
+                            ));
                         continue;
                     }
                 }
@@ -4217,7 +4969,10 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                        let _ =
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::Cancelled),
+                            ));
                         continue;
                     }
                     Err(error) => {
@@ -4227,9 +4982,11 @@ async fn session_task<A: SessionAgent>(
                         );
                         abort_admitted_turn(&control);
                         let _ =
-                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
-                                format!("illegal start-turn disposition transition: {error}"),
-                            )));
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::InternalError(format!(
+                                    "illegal start-turn disposition transition: {error}"
+                                ))),
+                            ));
                         continue;
                     }
                 };
@@ -4246,18 +5003,21 @@ async fn session_task<A: SessionAgent>(
                                 .to_string(),
                         ))
                     };
-                    let _ = result_tx.send(result);
+                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                        result,
+                    ));
                     continue;
                 }
                 if let Some(terminal) = resolution.public_terminal {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
-                    let _ =
-                        result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
-                            format!(
+                    let _ = result_tx.send(
+                        SessionTurnExecutionOutcome::without_machine_terminal(Err(
+                            meerkat_core::error::AgentError::InternalError(format!(
                                 "generated turn authority emitted terminal {terminal:?} for runnable disposition {disposition:?}"
-                            ),
-                        )));
+                            )),
+                        )),
+                    );
                     continue;
                 }
                 if matches!(disposition, StartTurnDisposition::RunPending)
@@ -4269,10 +5029,12 @@ async fn session_task<A: SessionAgent>(
                     // context.
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::ConfigError(
-                        "injected_context is not supported on a pending continuation turn"
-                            .to_string(),
-                    )));
+                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                        Err(meerkat_core::error::AgentError::ConfigError(
+                            "injected_context is not supported on a pending continuation turn"
+                                .to_string(),
+                        )),
+                    ));
                     continue;
                 }
 
@@ -4289,7 +5051,10 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                        let _ =
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::Cancelled),
+                            ));
                         continue;
                     }
                     Err(error) => {
@@ -4298,11 +5063,12 @@ async fn session_task<A: SessionAgent>(
                             consumed_deferred_inputs,
                         );
                         abort_admitted_turn(&control);
-                        let _ = result_tx.send(Err(
-                            meerkat_core::error::AgentError::InternalError(format!(
-                                "generated turn authority rejected keep_alive intent: {error}"
-                            )),
-                        ));
+                        let _ =
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::InternalError(format!(
+                                    "generated turn authority rejected keep_alive intent: {error}"
+                                ))),
+                            ));
                         continue;
                     }
                 };
@@ -4322,9 +5088,11 @@ async fn session_task<A: SessionAgent>(
                             consumed_deferred_inputs,
                         );
                         abort_admitted_turn(&control);
-                        let _ = result_tx.send(Err(
-                            meerkat_core::error::AgentError::InternalError(error.to_string()),
-                        ));
+                        let _ = result_tx.send(
+                            SessionTurnExecutionOutcome::without_machine_terminal(Err(
+                                meerkat_core::error::AgentError::InternalError(error.to_string()),
+                            )),
+                        );
                         continue;
                     }
                 }
@@ -4333,7 +5101,9 @@ async fn session_task<A: SessionAgent>(
                 if let Err(error) = agent.set_turn_tool_overlay(turn_tool_overlay) {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(error));
+                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                        Err(error),
+                    ));
                     continue;
                 }
                 // The canonical SessionDocumentMachine owns the authorized
@@ -4346,7 +5116,7 @@ async fn session_task<A: SessionAgent>(
                     let mut authority = SessionDocumentMachineAuthority::new();
                     authority
                         .apply_pending_tool_results(
-                            SessionDocumentKey::new(agent.session_id().to_string()),
+                            SessionDocumentKey::new(session_id.to_string()),
                             pending_tool_results_count,
                         )
                         .map_err(|err| {
@@ -4393,7 +5163,9 @@ async fn session_task<A: SessionAgent>(
                     let _ = agent.set_turn_tool_overlay(None);
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
-                    let _ = result_tx.send(Err(error));
+                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                        Err(error),
+                    ));
                     continue;
                 }
                 match persist_runtime_keep_alive {
@@ -4430,7 +5202,10 @@ async fn session_task<A: SessionAgent>(
                             &deferred_turn_state,
                             consumed_deferred_inputs,
                         );
-                        let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+                        let _ =
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::Cancelled),
+                            ));
                         continue;
                     }
                     Err(error) => {
@@ -4440,9 +5215,11 @@ async fn session_task<A: SessionAgent>(
                             consumed_deferred_inputs,
                         );
                         let _ =
-                            result_tx.send(Err(meerkat_core::error::AgentError::InternalError(
-                                format!("illegal begin-run transition: {error}"),
-                            )));
+                            result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
+                                Err(meerkat_core::error::AgentError::InternalError(format!(
+                                    "illegal begin-run transition: {error}"
+                                ))),
+                            ));
                         continue;
                     }
                 }
@@ -4535,7 +5312,11 @@ async fn session_task<A: SessionAgent>(
                                 }
                             }
                             Some(event) = agent_event_rx.recv() => {
-                                let envelope = stamp_event_envelope(&mut next_seq, &source, event);
+                                let envelope = stamp_event_envelope(
+                                    &mut next_seq,
+                                    &source,
+                                    event,
+                                );
                                 let _ = control.session_event_tx.send(envelope.clone());
                                 if event_stream_open
                                     && let Some(ref tx) = event_tx
@@ -4570,20 +5351,24 @@ async fn session_task<A: SessionAgent>(
                     (r, resolved_projection, interrupted)
                 }; // run_fut dropped here
 
-                let result = match agent.settle_inflight_sticky_model_fallback().await {
-                    Ok(()) => result,
-                    Err(error) => Err(error),
-                };
+                let (result, mut post_run_cleanup_failed) =
+                    match agent.settle_inflight_sticky_model_fallback().await {
+                        Ok(()) => (result, false),
+                        Err(error) => (Err(error), true),
+                    };
                 let result = if interrupted {
                     match agent.abort_uncommitted_compaction_projections().await {
                         Ok(()) => result,
-                        Err(abort_error) => match result {
-                            Err(primary) => Err(primary.with_ancillary_failure(
-                                "failed to abort hard-interrupted compaction projection",
-                                abort_error,
-                            )),
-                            Ok(_) => Err(abort_error),
-                        },
+                        Err(abort_error) => {
+                            post_run_cleanup_failed = true;
+                            match result {
+                                Err(primary) => Err(primary.with_ancillary_failure(
+                                    "failed to abort hard-interrupted compaction projection",
+                                    abort_error,
+                                )),
+                                Ok(_) => Err(abort_error),
+                            }
+                        }
                     }
                 } else {
                     result
@@ -4592,6 +5377,17 @@ async fn session_task<A: SessionAgent>(
                     control.llm_identity_tx.send_replace(identity);
                 }
 
+                let (result, result_identity_failed) = match result {
+                    Ok(run_result) if run_result.session_id != session_id => (
+                        Err(meerkat_core::error::AgentError::InternalError(format!(
+                            "agent turn returned session {}, expected {session_id}",
+                            run_result.session_id
+                        ))),
+                        true,
+                    ),
+                    result => (result, false),
+                };
+                let machine_terminal_failure = agent.take_runtime_terminal_failure_witness();
                 let discard_active_context_error = match agent
                     .discard_unapplied_active_turn_system_context()
                 {
@@ -4627,23 +5423,25 @@ async fn session_task<A: SessionAgent>(
 
                 // Release the turn lock AFTER setting state to Idle and
                 // updating the summary, so the next caller sees consistent state.
-                let result = if let Err(error) = agent.set_turn_tool_overlay(None) {
+                let (result, cleanup_failed) = if let Err(error) = agent.set_turn_tool_overlay(None)
+                {
                     tracing::error!(
                         error = %error,
                         "failed to clear turn tool overlay; failing turn to avoid stale scope"
                     );
-                    match result {
+                    let result = match result {
                         Err(primary) if primary.requires_session_teardown() => Err(primary
                             .with_ancillary_failure("failed to clear turn tool overlay", &error)),
                         _ => Err(error),
-                    }
+                    };
+                    (result, true)
                 } else if let Some(error) = discard_active_context_error {
                     tracing::error!(
                         error = %error,
                         "failed to sync system-context state while discarding stale active-turn \
                          context; failing turn to avoid stale canonical metadata"
                     );
-                    match result {
+                    let result = match result {
                         Err(primary) if primary.requires_session_teardown() => Err(primary
                             .with_ancillary_failure(
                                 "failed to discard unapplied active-turn system context",
@@ -4652,9 +5450,10 @@ async fn session_task<A: SessionAgent>(
                         _ => Err(meerkat_core::error::AgentError::InternalError(
                             error.to_string(),
                         )),
-                    }
+                    };
+                    (result, true)
                 } else {
-                    result
+                    (result, result_identity_failed || post_run_cleanup_failed)
                 };
                 let finalize = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
@@ -4675,12 +5474,20 @@ async fn session_task<A: SessionAgent>(
                     }
                 };
                 drop(active_admission);
-                let _ = result_tx.send(result);
+                let _ = result_tx.send(SessionTurnExecutionOutcome {
+                    result,
+                    machine_terminal_failure: if cleanup_failed {
+                        Ok(None)
+                    } else {
+                        machine_terminal_failure
+                    },
+                });
                 if shutting_down {
                     // D1: drain queued admission work before exiting.
                     drain_session_task_commands(
                         &mut commands,
                         &mut agent,
+                        &session_id,
                         &control,
                         &mut next_seq,
                         &source,
@@ -4720,6 +5527,7 @@ async fn session_task<A: SessionAgent>(
                         apply_runtime_system_context_and_publish(
                             &mut agent,
                             &appends,
+                            &session_id,
                             &control,
                             &mut next_seq,
                             &source,
@@ -4744,11 +5552,89 @@ async fn session_task<A: SessionAgent>(
                 publish_runtime_system_context_events(
                     &agent,
                     &appends,
+                    &session_id,
                     &control,
                     &mut next_seq,
                     &source,
                 );
                 let _ = reply_tx.send(());
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::PublishInteractionTerminalExact {
+                interaction_id,
+                event,
+                event_store,
+                reply_tx,
+            } => {
+                let proposed_seq = match next_seq.checked_add(1) {
+                    Some(seq) => seq,
+                    None => {
+                        let _ = reply_tx.send(Err(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(
+                                "session event sequence overflow".to_string(),
+                            ),
+                        )));
+                        continue;
+                    }
+                };
+                let envelope = EventEnvelope::new_with_source(
+                    EventSourceIdentity::interaction(interaction_id),
+                    proposed_seq,
+                    None,
+                    event.clone(),
+                );
+                let append = event_store
+                    .append_interaction_terminal_exact(&session_id, interaction_id, &envelope)
+                    .await;
+                let result = match append {
+                    Ok(crate::event_store::ExactInteractionAppend::Inserted(stored)) => {
+                        if stored.stream_seq == proposed_seq {
+                            next_seq = proposed_seq;
+                            let _ = control.session_event_tx.send(stored.to_envelope());
+                            meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                                &stored.event,
+                                stored.seq,
+                            )
+                            .map_err(|error| SessionError::Agent(
+                                meerkat_core::error::AgentError::InternalError(error.to_string()),
+                            ))
+                        } else {
+                            Err(SessionError::Agent(
+                                meerkat_core::error::AgentError::InternalError(format!(
+                                    "exact interaction append returned stream seq {}, expected {proposed_seq}",
+                                    stored.stream_seq
+                                )),
+                            ))
+                        }
+                    }
+                    Ok(crate::event_store::ExactInteractionAppend::Replayed(stored)) => {
+                        meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                            &stored.event,
+                            stored.seq,
+                        )
+                        .map_err(|error| SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(error.to_string()),
+                        ))
+                    }
+                    Err(error) => Err(SessionError::Store(Box::new(error))),
+                };
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::PublishInteractionTerminalsExactBatch {
+                events,
+                event_store,
+                reply_tx,
+            } => {
+                let result = publish_interaction_terminal_batch(
+                    &session_id,
+                    &mut next_seq,
+                    &control,
+                    event_store.as_ref(),
+                    events,
+                )
+                .await;
+                let _ = reply_tx.send(result);
             }
             SessionCommand::RecordLiveTerminalError { cause, reply_tx } => {
                 let message = render_live_terminal_error_message(&cause);
@@ -4756,7 +5642,7 @@ async fn session_task<A: SessionAgent>(
                     &mut next_seq,
                     &source,
                     AgentEvent::RunFailed {
-                        session_id: agent.session_id(),
+                        session_id: session_id.clone(),
                         terminal_cause_kind: None,
                         error_report: meerkat_core::event::AgentErrorReport {
                             class: meerkat_core::event::AgentErrorClass::Terminal,
@@ -4935,6 +5821,7 @@ async fn session_task<A: SessionAgent>(
                 drain_session_task_commands(
                     &mut commands,
                     &mut agent,
+                    &session_id,
                     &control,
                     &mut next_seq,
                     &source,
@@ -4959,9 +5846,40 @@ mod runtime_turn_metadata_tests {
         DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
     };
     use meerkat_core::skills::{SkillKey, SkillName};
-    use meerkat_core::turn_execution_authority::{ContentShape, TurnPrimitiveKind};
     use meerkat_runtime::handles::RuntimeTurnStateHandle;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn success_with_machine_terminal_witness_is_rejected_for_every_session_backend() {
+        let outcome = SessionTurnExecutionOutcome {
+            result: Ok(RunResult {
+                text: "impossible success".to_string(),
+                session_id: SessionId::new(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            }),
+            machine_terminal_failure: Ok(Some(meerkat_core::TurnErrorMetadata::terminal(
+                meerkat_core::TurnTerminalCauseKind::ToolFailure,
+                meerkat_core::TurnTerminalOutcome::Failed,
+                "forged witness",
+            ))),
+        };
+
+        let error = outcome
+            .into_runtime_parts()
+            .expect_err("success plus a failure witness must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("success with a machine-terminal failure witness")
+        );
+    }
 
     fn test_llm_identity(model: &str) -> SessionLlmIdentity {
         SessionLlmIdentity {
@@ -5256,164 +6174,6 @@ mod runtime_turn_metadata_tests {
     }
 
     #[derive(Clone)]
-    struct BlockingBoundaryBuilder {
-        started: Arc<tokio::sync::Notify>,
-        release: Arc<tokio::sync::Notify>,
-        turn_state: Option<Arc<RuntimeTurnStateHandle>>,
-    }
-
-    struct BlockingBoundaryAgent {
-        session_id: SessionId,
-        identity: SessionLlmIdentity,
-        started: Arc<tokio::sync::Notify>,
-        release: Arc<tokio::sync::Notify>,
-        turn_state: Option<Arc<RuntimeTurnStateHandle>>,
-        system_context_state: meerkat_core::SystemContextStateHandle,
-    }
-
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    impl SessionAgentBuilder for BlockingBoundaryBuilder {
-        type Agent = BlockingBoundaryAgent;
-
-        async fn build_agent(
-            &self,
-            req: &CreateSessionRequest,
-            _event_tx: mpsc::Sender<AgentEvent>,
-        ) -> Result<Self::Agent, SessionError> {
-            Ok(BlockingBoundaryAgent {
-                session_id: SessionId::new(),
-                identity: test_llm_identity(&req.model),
-                started: Arc::clone(&self.started),
-                release: Arc::clone(&self.release),
-                turn_state: self.turn_state.clone(),
-                system_context_state: meerkat_core::SystemContextStateHandle::new(
-                    Default::default(),
-                )
-                .expect("default system-context state should restore"),
-            })
-        }
-    }
-
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    impl SessionAgent for BlockingBoundaryAgent {
-        async fn run_with_events(
-            &mut self,
-            _prompt: ContentInput,
-            _event_tx: mpsc::Sender<AgentEvent>,
-        ) -> Result<RunResult, AgentError> {
-            let run_id = RunId::new();
-            if let Some(turn_state) = self.turn_state.as_ref() {
-                turn_state
-                    .start_conversation_run(
-                        run_id.clone(),
-                        TurnPrimitiveKind::ConversationTurn,
-                        ContentShape::Conversation,
-                        false,
-                        false,
-                        0,
-                    )
-                    .map_err(|err| AgentError::InternalError(err.to_string()))?;
-            }
-            self.started.notify_waiters();
-            self.release.notified().await;
-            if let Some(turn_state) = self.turn_state.as_ref() {
-                turn_state
-                    .primitive_applied(run_id.clone())
-                    .map_err(|err| AgentError::InternalError(err.to_string()))?;
-                turn_state
-                    .llm_returned_terminal(run_id)
-                    .map_err(|err| AgentError::InternalError(err.to_string()))?;
-            }
-            Ok(RunResult {
-                text: "released".to_string(),
-                session_id: self.session_id.clone(),
-                usage: Usage::default(),
-                turns: 1,
-                tool_calls: 0,
-                terminal_cause_kind: None,
-                structured_output: None,
-                extraction_error: None,
-                schema_warnings: None,
-                skill_diagnostics: None,
-            })
-        }
-
-        fn cancel(&mut self) {}
-
-        fn set_skill_references(&mut self, _refs: Option<Vec<SkillKey>>) {}
-
-        fn set_turn_tool_overlay(
-            &mut self,
-            _overlay: Option<TurnToolOverlay>,
-        ) -> Result<(), AgentError> {
-            Ok(())
-        }
-
-        fn hot_swap_llm_identity(
-            &mut self,
-            _client: Arc<dyn meerkat_core::AgentLlmClient>,
-            _identity: SessionLlmIdentity,
-            _request_policy: meerkat_core::SessionLlmRequestPolicy,
-        ) -> Result<(), AgentError> {
-            Ok(())
-        }
-
-        fn session_id(&self) -> SessionId {
-            self.session_id.clone()
-        }
-
-        fn snapshot(&self) -> SessionSnapshot {
-            SessionSnapshot {
-                created_at: SystemTime::now(),
-                updated_at: SystemTime::now(),
-                message_count: 0,
-                total_tokens: 0,
-                usage: Usage::default(),
-                last_assistant_text: None,
-            }
-        }
-
-        fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
-            let mut session = meerkat_core::Session::new();
-            session
-                .set_system_context_state(self.system_context_state.snapshot())
-                .expect("test system context state should serialize");
-            Ok(session)
-        }
-
-        fn observed_session_tail(&self) -> ObservedSessionTailKind {
-            ObservedSessionTailKind::Empty
-        }
-
-        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
-            Some(self.identity.clone())
-        }
-
-        fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
-            let mut session = self
-                .session_clone()
-                .expect("test session clone should succeed");
-            session.append_system_context_blocks(appends);
-            let state = session.system_context_state().unwrap_or_default();
-            self.system_context_state
-                .replace_from_generated_restore(state)
-                .expect("test system context state should restore");
-        }
-
-        fn turn_state_handle(&self) -> Option<Arc<dyn TurnStateHandle>> {
-            self.turn_state
-                .as_ref()
-                .map(|turn_state| Arc::clone(turn_state) as Arc<dyn TurnStateHandle>)
-        }
-
-        fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-            self.system_context_state.clone()
-        }
-    }
-
-    #[derive(Clone)]
     struct BoundaryPhaseProbeBuilder {
         turn_state: Arc<RuntimeTurnStateHandle>,
     }
@@ -5543,97 +6303,6 @@ mod runtime_turn_metadata_tests {
         fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
             self.system_context_state.clone()
         }
-    }
-
-    #[tokio::test]
-    async fn active_turn_boundary_probe_uses_turn_phase_not_running_latch() {
-        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
-        let service = EphemeralSessionService::new(
-            BoundaryPhaseProbeBuilder {
-                turn_state: Arc::clone(&turn_state),
-            },
-            1,
-        );
-        let created = service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "phase-probe".to_string(),
-                prompt: ContentInput::Text("hello".to_string()),
-                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
-                max_tokens: None,
-                event_tx: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: None,
-                labels: None,
-            })
-            .await
-            .expect("create probe session");
-
-        assert_eq!(
-            service
-                .active_turn_system_context_boundary_available(&created.session_id)
-                .await
-                .expect("boundary probe should succeed"),
-            Some(false),
-            "no active run means no active-turn boundary"
-        );
-
-        let run_id = RunId::new();
-        turn_state
-            .start_conversation_run(
-                run_id.clone(),
-                TurnPrimitiveKind::ConversationTurn,
-                ContentShape::Conversation,
-                false,
-                false,
-                0,
-            )
-            .expect("start conversation run");
-        assert_eq!(
-            service
-                .active_turn_system_context_boundary_available(&created.session_id)
-                .await
-                .expect("boundary probe should succeed"),
-            Some(true),
-            "pre-LLM applying primitive can still consume staged context"
-        );
-
-        turn_state
-            .primitive_applied(run_id.clone())
-            .expect("enter calling LLM");
-        assert_eq!(
-            service
-                .active_turn_system_context_boundary_available(&created.session_id)
-                .await
-                .expect("boundary probe should succeed"),
-            Some(false),
-            "an in-flight model request has already built its context"
-        );
-
-        turn_state
-            .llm_returned_tool_calls(run_id.clone(), 1)
-            .expect("enter waiting for ops");
-        assert_eq!(
-            service
-                .active_turn_system_context_boundary_available(&created.session_id)
-                .await
-                .expect("boundary probe should succeed"),
-            Some(true),
-            "tool execution phase has a deterministic post-tool model boundary"
-        );
-
-        turn_state
-            .tool_calls_resolved(run_id.clone())
-            .expect("drain boundary");
-        assert_eq!(
-            service
-                .active_turn_system_context_boundary_available(&created.session_id)
-                .await
-                .expect("boundary probe should succeed"),
-            Some(false),
-            "draining boundary is not enough to prove another LLM request remains"
-        );
     }
 
     #[tokio::test]
@@ -6082,368 +6751,6 @@ mod runtime_turn_metadata_tests {
         assert!(
             ticks.last().copied().unwrap_or_default() > stale_runtime_context_ms,
             "post-commit runtime context tick must move past the current projection watermark"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_turn_context_staging_does_not_wait_for_session_task_mailbox() {
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
-        let service = Arc::new(EphemeralSessionService::new(
-            BlockingBoundaryBuilder {
-                started: Arc::clone(&started),
-                release: Arc::clone(&release),
-                turn_state: Some(Arc::clone(&turn_state)),
-            },
-            1,
-        ));
-
-        let result = service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "blocking-boundary-model".to_string(),
-                prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
-                max_tokens: None,
-                event_tx: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred blocking session should create");
-
-        let run_service = Arc::clone(&service);
-        let run_session_id = result.session_id.clone();
-        let run = tokio::spawn(async move {
-            run_service
-                .start_turn(
-                    &run_session_id,
-                    StartTurnRequest {
-                        injected_context: Vec::new(),
-                        prompt: ContentInput::Text("hold the turn open".to_string()),
-                        system_prompt: None,
-                        event_tx: None,
-                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                            meerkat_core::types::HandlingMode::Queue,
-                            None,
-                            Vec::new(),
-                            Some(RuntimeTurnMetadata {
-                                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                                ..Default::default()
-                            }),
-                        ),
-                    },
-                )
-                .await
-        });
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
-            .await
-            .expect("turn should enter the blocking agent");
-        let active_run_id = turn_state
-            .snapshot()
-            .active_run_id
-            .expect("blocking turn should expose active run id");
-
-        let appends = vec![PendingSystemContextAppend {
-            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                "active-turn steer context".to_string(),
-            ),
-            source: Some("console:steer:test".to_string()),
-            idempotency_key: Some("console:steer:test".to_string()),
-            source_kind: meerkat_core::session::SystemContextSource::Normal,
-            accepted_at: meerkat_core::time_compat::SystemTime::now(),
-            peer_response_terminal: None,
-        }];
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            service.stage_runtime_system_context_for_active_turn(
-                &result.session_id,
-                &active_run_id,
-                appends,
-            ),
-        )
-        .await
-        .expect("active-turn staging must not wait for the busy session task")
-        .expect("active-turn staging should succeed");
-
-        let state = service
-            .system_context_state(&result.session_id)
-            .await
-            .expect("session state should exist");
-        let pending = state.snapshot().pending().to_vec();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(
-            pending[0].content.render_text(),
-            "active-turn steer context"
-        );
-
-        release.notify_waiters();
-        run.await
-            .expect("start_turn task should join")
-            .expect("blocked turn should complete after release");
-
-        let after = state.snapshot();
-        assert!(
-            after.pending().is_empty(),
-            "active-turn context that missed the run boundary must not leak into the next run"
-        );
-        assert!(
-            after.applied().is_empty(),
-            "missed active-turn context was never applied at an LLM boundary"
-        );
-        assert!(
-            after.seen().is_empty(),
-            "discarded active-turn context should not reserve idempotency keys"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_turn_context_staging_revalidates_after_positive_probe() {
-        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
-        let service = EphemeralSessionService::new(
-            BoundaryPhaseProbeBuilder {
-                turn_state: Arc::clone(&turn_state),
-            },
-            1,
-        );
-
-        let result = service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "boundary-phase-probe".to_string(),
-                prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
-                max_tokens: None,
-                event_tx: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred boundary probe session should create");
-
-        let run_id = RunId::new();
-        turn_state
-            .start_conversation_run(
-                run_id.clone(),
-                TurnPrimitiveKind::ConversationTurn,
-                ContentShape::Conversation,
-                false,
-                false,
-                0,
-            )
-            .expect("start active run");
-
-        assert_eq!(
-            service
-                .active_turn_system_context_boundary_available(&result.session_id)
-                .await
-                .expect("boundary probe should succeed"),
-            Some(true)
-        );
-
-        turn_state
-            .primitive_applied(run_id.clone())
-            .expect("advance past boundary");
-
-        let err = service
-            .stage_runtime_system_context_for_active_turn(
-                &result.session_id,
-                &run_id,
-                vec![PendingSystemContextAppend {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "STALE_ACTIVE_STEER_SHOULD_NOT_STAGE".to_string(),
-                    ),
-                    source: Some("console:steer:stale".to_string()),
-                    idempotency_key: Some("console:steer:stale".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                    peer_response_terminal: None,
-                }],
-            )
-            .await
-            .expect_err("staging must revalidate the active turn phase");
-        assert!(
-            matches!(err, SessionError::NotRunning { .. }),
-            "unexpected error: {err}"
-        );
-
-        let state = service
-            .system_context_state(&result.session_id)
-            .await
-            .expect("session state should exist");
-        let guard = state.snapshot();
-        assert!(guard.pending().is_empty());
-        assert!(guard.applied().is_empty());
-        assert!(guard.active_turn_pending_keys().is_empty());
-        assert!(
-            guard.seen().is_empty(),
-            "discarded stale active-turn context should not reserve idempotency keys"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_turn_context_staging_rejects_wrong_run_token() {
-        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
-        let service = EphemeralSessionService::new(
-            BoundaryPhaseProbeBuilder {
-                turn_state: Arc::clone(&turn_state),
-            },
-            1,
-        );
-
-        let result = service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "boundary-phase-probe".to_string(),
-                prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
-                max_tokens: None,
-                event_tx: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred boundary probe session should create");
-
-        let run_id = RunId::new();
-        turn_state
-            .start_conversation_run(
-                run_id,
-                TurnPrimitiveKind::ConversationTurn,
-                ContentShape::Conversation,
-                false,
-                false,
-                0,
-            )
-            .expect("start active run");
-
-        let wrong_run_id = RunId::new();
-        let err = service
-            .stage_runtime_system_context_for_active_turn(
-                &result.session_id,
-                &wrong_run_id,
-                vec![PendingSystemContextAppend {
-                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                        "WRONG_RUN_STEER_SHOULD_NOT_STAGE".to_string(),
-                    ),
-                    source: Some("console:steer:wrong-run".to_string()),
-                    idempotency_key: Some("console:steer:wrong-run".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
-                    peer_response_terminal: None,
-                }],
-            )
-            .await
-            .expect_err("staging must be bound to the active run token");
-        assert!(
-            matches!(err, SessionError::NotRunning { .. }),
-            "unexpected error: {err}"
-        );
-
-        let state = service
-            .system_context_state(&result.session_id)
-            .await
-            .expect("session state should exist");
-        let guard = state.snapshot();
-        assert!(guard.pending().is_empty());
-        assert!(guard.active_turn_pending_keys().is_empty());
-        assert!(guard.seen().is_empty());
-    }
-
-    #[tokio::test]
-    async fn active_turn_context_staging_is_atomic_on_batch_conflict() {
-        let turn_state = Arc::new(RuntimeTurnStateHandle::ephemeral());
-        let service = EphemeralSessionService::new(
-            BoundaryPhaseProbeBuilder {
-                turn_state: Arc::clone(&turn_state),
-            },
-            1,
-        );
-
-        let result = service
-            .create_session(CreateSessionRequest {
-                injected_context: Vec::new(),
-                model: "blocking-boundary-model".to_string(),
-                prompt: ContentInput::Text("defer".to_string()),
-                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
-                max_tokens: None,
-                event_tx: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions::default()),
-                labels: None,
-            })
-            .await
-            .expect("deferred blocking session should create");
-
-        let run_id = RunId::new();
-        turn_state
-            .start_conversation_run(
-                run_id.clone(),
-                TurnPrimitiveKind::ConversationTurn,
-                ContentShape::Conversation,
-                false,
-                false,
-                0,
-            )
-            .expect("start active run");
-
-        let accepted_at = meerkat_core::time_compat::SystemTime::now();
-        let err = service
-            .stage_runtime_system_context_for_active_turn(
-                &result.session_id,
-                &run_id,
-                vec![
-                    PendingSystemContextAppend {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            "first staged context".to_string(),
-                        ),
-                        source: Some("console:steer:test".to_string()),
-                        idempotency_key: Some("console:steer:conflict".to_string()),
-                        source_kind: meerkat_core::session::SystemContextSource::Normal,
-                        accepted_at,
-                        peer_response_terminal: None,
-                    },
-                    PendingSystemContextAppend {
-                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                            "conflicting staged context".to_string(),
-                        ),
-                        source: Some("console:steer:test".to_string()),
-                        idempotency_key: Some("console:steer:conflict".to_string()),
-                        source_kind: meerkat_core::session::SystemContextSource::Normal,
-                        accepted_at,
-                        peer_response_terminal: None,
-                    },
-                ],
-            )
-            .await
-            .expect_err("conflicting batch should fail");
-        assert!(
-            err.to_string().contains("idempotency conflict"),
-            "unexpected error: {err}"
-        );
-
-        let state = service
-            .system_context_state(&result.session_id)
-            .await
-            .expect("session state should exist");
-        let guard = state.snapshot();
-        assert!(
-            guard.pending().is_empty(),
-            "failed active-turn staging batch must not leave partial pending context"
-        );
-        assert!(
-            guard.seen().is_empty(),
-            "failed active-turn staging batch must not reserve idempotency keys"
         );
     }
 
@@ -7221,7 +7528,11 @@ mod admission_window_tests {
             })
             .await
             .expect("send start turn");
-        result_rx.await.expect("receive start turn result")
+        let outcome = result_rx.await.expect("receive start turn result");
+        outcome
+            .machine_terminal_failure
+            .expect("test turn terminal witness should project");
+        outcome.result
     }
 
     #[tokio::test]
@@ -7284,10 +7595,7 @@ mod admission_window_tests {
         // The surface delivered exactly one typed command on the agent-owned
         // carrier; assert delivery on the test-held receiver rather than a
         // shared bool.
-        assert!(matches!(
-            cancel_after_boundary_rx.try_recv(),
-            Ok(CancelAfterBoundaryCommand)
-        ));
+        assert!(cancel_after_boundary_rx.try_recv().is_ok());
 
         let result = deliver_start_turn(command_tx)
             .await
@@ -7365,10 +7673,7 @@ mod admission_window_tests {
             .await
             .expect("admitted turn accepts boundary cancel");
         // The boundary-cancel delivered exactly one typed command.
-        assert!(matches!(
-            cancel_after_boundary_rx.try_recv(),
-            Ok(CancelAfterBoundaryCommand)
-        ));
+        assert!(cancel_after_boundary_rx.try_recv().is_ok());
         {
             let sessions = service.sessions.read().await;
             let handle = sessions.get(&session_id).expect("session handle");
@@ -7793,7 +8098,7 @@ mod archive_shutdown_drain_tests {
                  not a dropped result channel",
             );
         assert!(
-            matches!(pending, Err(AgentError::Cancelled)),
+            matches!(pending.result, Err(AgentError::Cancelled)),
             "pending start-turn must resolve with the typed cancellation, got {pending:?}"
         );
     }
@@ -7851,7 +8156,7 @@ mod archive_shutdown_drain_tests {
             .expect("start-turn waiter should settle")
             .expect("start-turn waiter must resolve");
         assert!(
-            matches!(pending, Err(AgentError::Cancelled)),
+            matches!(pending.result, Err(AgentError::Cancelled)),
             "start-turn dispatched into ShuttingDown must cancel cleanly, got {pending:?}"
         );
     }
@@ -8028,12 +8333,14 @@ mod inline_video_admission_tests {
         identity: Option<SessionLlmIdentity>,
         committed_identity_before_turn_failure: Option<SessionLlmIdentity>,
         validated_identities: Arc<Mutex<Vec<SessionLlmIdentity>>>,
+        run_result_session_id: Option<SessionId>,
     }
 
     struct BuilderIdentityAgent {
         session_id: SessionId,
         identity: Option<SessionLlmIdentity>,
         committed_identity_before_turn_failure: Option<SessionLlmIdentity>,
+        run_result_session_id: Option<SessionId>,
         system_context_state: meerkat_core::SystemContextStateHandle,
     }
 
@@ -8096,6 +8403,7 @@ mod inline_video_admission_tests {
                 committed_identity_before_turn_failure: self
                     .committed_identity_before_turn_failure
                     .clone(),
+                run_result_session_id: self.run_result_session_id.clone(),
                 system_context_state: meerkat_core::SystemContextStateHandle::new(
                     Default::default(),
                 )
@@ -8120,9 +8428,20 @@ mod inline_video_admission_tests {
                     "backup terminal failure",
                 ));
             }
+
+            // Deliberately mutate the identity reported by the agent whenever
+            // an alternate result identity is configured. The session task
+            // must compare against its pre-run canonical ID, not ask the agent
+            // for a potentially changed ID after the turn.
+            if let Some(run_result_session_id) = &self.run_result_session_id {
+                self.session_id = run_result_session_id.clone();
+            }
             Ok(RunResult {
                 text: "ok".to_string(),
-                session_id: self.session_id.clone(),
+                session_id: self
+                    .run_result_session_id
+                    .clone()
+                    .unwrap_or_else(|| self.session_id.clone()),
                 usage: Usage::default(),
                 turns: 1,
                 tool_calls: 0,
@@ -8249,6 +8568,79 @@ mod inline_video_admission_tests {
     }
 
     #[tokio::test]
+    async fn create_session_rejects_builder_session_identity_mismatch_before_spawn() {
+        let durable_identity = identity(Provider::Other, "identity-mismatch-test");
+        let service = EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: Some(durable_identity),
+                committed_identity_before_turn_failure: None,
+                validated_identities: Arc::new(Mutex::new(Vec::new())),
+                run_result_session_id: None,
+            },
+            1,
+        );
+        let expected_session = meerkat_core::Session::new();
+        let expected_session_id = expected_session.id().clone();
+        let mut request = create_request(
+            ContentInput::Text("defer".to_string()),
+            InitialTurnPolicy::Defer,
+        );
+        request
+            .build
+            .get_or_insert_with(Default::default)
+            .resume_session = Some(expected_session);
+
+        let error = service
+            .create_session(request)
+            .await
+            .expect_err("builder must not replace the requested session identity");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match requested session"),
+            "unexpected identity validation error: {error}"
+        );
+        assert!(
+            !service
+                .has_live_session(&expected_session_id)
+                .await
+                .expect("live-session lookup"),
+            "identity mismatch must fail before actor registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_turn_rejects_agent_result_identity_mismatch_before_reply() {
+        let durable_identity = identity(Provider::Other, "turn-identity-mismatch-test");
+        let returned_session_id = SessionId::new();
+        let service = EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: Some(durable_identity),
+                committed_identity_before_turn_failure: None,
+                validated_identities: Arc::new(Mutex::new(Vec::new())),
+                run_result_session_id: Some(returned_session_id.clone()),
+            },
+            1,
+        );
+
+        let error = service
+            .create_session(create_request(
+                ContentInput::Text("run".to_string()),
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect_err("turn result must not replace the actor session identity");
+        assert!(
+            error.to_string().contains("agent turn returned session"),
+            "unexpected turn identity validation error: {error}"
+        );
+        assert!(
+            error.to_string().contains(&returned_session_id.to_string()),
+            "identity error must identify the rejected result ID"
+        );
+    }
+
+    #[tokio::test]
     async fn create_session_validates_initial_video_against_builder_identity() {
         let durable_identity = identity(Provider::Gemini, "providerless-video-alias");
         let validated_identities = Arc::new(Mutex::new(Vec::new()));
@@ -8257,6 +8649,7 @@ mod inline_video_admission_tests {
                 identity: Some(durable_identity.clone()),
                 committed_identity_before_turn_failure: None,
                 validated_identities: Arc::clone(&validated_identities),
+                run_result_session_id: None,
             },
             1,
         );
@@ -8290,6 +8683,7 @@ mod inline_video_admission_tests {
                 identity: None,
                 committed_identity_before_turn_failure: None,
                 validated_identities: Arc::clone(&validated_identities),
+                run_result_session_id: None,
             },
             1,
         );
@@ -8327,6 +8721,7 @@ mod inline_video_admission_tests {
                 identity: Some(durable_identity.clone()),
                 committed_identity_before_turn_failure: None,
                 validated_identities: Arc::clone(&validated_identities),
+                run_result_session_id: None,
             },
             1,
         );
@@ -8368,6 +8763,7 @@ mod inline_video_admission_tests {
                 identity: Some(primary_identity.clone()),
                 committed_identity_before_turn_failure: Some(backup_identity.clone()),
                 validated_identities: Arc::new(Mutex::new(Vec::new())),
+                run_result_session_id: None,
             },
             1,
         );
@@ -8416,6 +8812,7 @@ mod inline_video_admission_tests {
                 identity: Some(durable_identity),
                 committed_identity_before_turn_failure: None,
                 validated_identities,
+                run_result_session_id: None,
             },
             1,
         );

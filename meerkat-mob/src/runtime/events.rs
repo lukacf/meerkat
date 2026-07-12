@@ -1,5 +1,5 @@
 use crate::error::MobError;
-use crate::event::{MobEvent, MobEventKind, NewMobEvent};
+use crate::event::{MobEvent, MobEventKind, NewMobEvent, RemoteTurnObligationEvent};
 use crate::ids::{AgentIdentity, AgentRuntimeId, FlowId, MobId, ProfileName, RunId, StepId};
 use crate::store::MobEventStore;
 use std::sync::Arc;
@@ -61,11 +61,30 @@ impl MobEventEmitter {
         step_id: StepId,
         agent_identity: AgentIdentity,
     ) -> Result<MobEvent, MobError> {
-        let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
+        self.step_target_completed_with_obligation(run_id, step_id, agent_identity, None, None)
+            .await
+    }
+
+    pub(crate) async fn step_target_completed_with_obligation(
+        &self,
+        run_id: RunId,
+        step_id: StepId,
+        agent_identity: AgentIdentity,
+        remote_turn_obligation: Option<RemoteTurnObligationEvent>,
+        output: Option<serde_json::Value>,
+    ) -> Result<MobEvent, MobError> {
+        let target = remote_turn_obligation.as_ref().map_or_else(
+            || AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str())),
+            |obligation| {
+                AgentRuntimeId::new(obligation.agent_identity.clone(), obligation.generation)
+            },
+        );
         self.append(MobEventKind::StepTargetCompleted {
             run_id,
             step_id,
             target,
+            output,
+            remote_turn_obligation,
         })
         .await
     }
@@ -77,12 +96,30 @@ impl MobEventEmitter {
         agent_identity: AgentIdentity,
         reason: String,
     ) -> Result<MobEvent, MobError> {
-        let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
+        self.step_target_failed_with_obligation(run_id, step_id, agent_identity, reason, None)
+            .await
+    }
+
+    pub(crate) async fn step_target_failed_with_obligation(
+        &self,
+        run_id: RunId,
+        step_id: StepId,
+        agent_identity: AgentIdentity,
+        reason: String,
+        remote_turn_obligation: Option<RemoteTurnObligationEvent>,
+    ) -> Result<MobEvent, MobError> {
+        let target = remote_turn_obligation.as_ref().map_or_else(
+            || AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str())),
+            |obligation| {
+                AgentRuntimeId::new(obligation.agent_identity.clone(), obligation.generation)
+            },
+        );
         self.append(MobEventKind::StepTargetFailed {
             run_id,
             step_id,
             target,
             reason,
+            remote_turn_obligation,
             error_report: None,
             error: None,
         })
@@ -110,6 +147,26 @@ impl MobEventEmitter {
             reason,
         })
         .await
+    }
+
+    pub(crate) async fn step_failed_if_absent(
+        &self,
+        run_id: RunId,
+        step_id: StepId,
+        reason: String,
+    ) -> Result<Option<MobEvent>, MobError> {
+        self.store
+            .append_step_failed_event_if_absent(NewMobEvent {
+                mob_id: self.mob_id.clone(),
+                timestamp: None,
+                kind: MobEventKind::StepFailed {
+                    run_id,
+                    step_id,
+                    reason,
+                },
+            })
+            .await
+            .map_err(MobError::from)
     }
 
     pub async fn step_skipped(

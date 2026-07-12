@@ -7,6 +7,8 @@ use crate::InboxSender;
 use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::io_task::handle_tcp_connection;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::trust::{TrustEntry, TrustStore};
@@ -47,7 +49,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
 use uuid::Uuid;
@@ -173,13 +175,18 @@ struct ResolvedPeer {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const PAIRING_VERSION: u32 = 1;
+pub(crate) const PAIRING_VERSION: u32 = 1;
 #[cfg(not(target_arch = "wasm32"))]
-const PAIRING_CHALLENGE_KIND: &str = "meerkat_pairing_challenge";
+pub(crate) const PAIRING_CHALLENGE_KIND: &str = "meerkat_pairing_challenge";
 #[cfg(not(target_arch = "wasm32"))]
-const PAIRING_COMPLETE_KIND: &str = "meerkat_pairing_complete";
+pub(crate) const PAIRING_COMPLETE_KIND: &str = "meerkat_pairing_complete";
 #[cfg(not(target_arch = "wasm32"))]
 const PAIRING_CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Maximum newline-delimited pairing frame size, including the trailing
+/// newline. Pairing is pre-authentication input, so the reader must enforce
+/// this bound before growing a caller-visible buffer.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const MAX_PAIRING_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Typed identity-kind for a pairing caller.
 ///
@@ -188,7 +195,7 @@ const PAIRING_CLASSIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// `== "ed25519_public_key"` equality check.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-enum PairingIdentityKind {
+pub(crate) enum PairingIdentityKind {
     #[serde(rename = "ed25519_public_key")]
     Ed25519PublicKey,
 }
@@ -201,9 +208,9 @@ enum PairingIdentityKind {
 /// the exact wire form supplied by the caller.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
-struct PairingPublicKey {
-    raw: String,
-    key: PubKey,
+pub(crate) struct PairingPublicKey {
+    pub(crate) raw: String,
+    pub(crate) key: PubKey,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -222,21 +229,21 @@ impl<'de> serde::Deserialize<'de> for PairingPublicKey {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(transparent)]
-struct PairingAddress(String);
+pub(crate) struct PairingAddress(pub(crate) String);
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, serde::Deserialize)]
-struct PairingPeerIdentity {
-    kind: PairingIdentityKind,
-    public_key: PairingPublicKey,
+pub(crate) struct PairingPeerIdentity {
+    pub(crate) kind: PairingIdentityKind,
+    pub(crate) public_key: PairingPublicKey,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, serde::Deserialize)]
-struct PairingPeer {
-    name: String,
-    address: PairingAddress,
-    identity: PairingPeerIdentity,
+pub(crate) struct PairingPeer {
+    pub(crate) name: String,
+    pub(crate) address: PairingAddress,
+    pub(crate) identity: PairingPeerIdentity,
 }
 
 /// Typed pairing-client wire messages, parsed once at ingress.
@@ -247,7 +254,7 @@ struct PairingPeer {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "kind")]
-enum PairingClientMessage {
+pub(crate) enum PairingClientMessage {
     #[serde(rename = "meerkat_pairing_hello")]
     Hello { version: u32 },
     #[serde(rename = "meerkat_pairing_proof")]
@@ -258,7 +265,7 @@ enum PairingClientMessage {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn comms_pairing_password_proof(
+pub(crate) fn comms_pairing_password_proof(
     password: &str,
     challenge: &str,
     caller_public_key: &str,
@@ -277,8 +284,13 @@ fn comms_pairing_password_proof(
     BASE64_STANDARD.encode(hasher.finalize())
 }
 
+/// Length-independent constant-time string comparison for bearer secrets
+/// (pairing passwords, one-time bootstrap tokens). Public so every secret
+/// gate in the workspace shares ONE comparison discipline instead of
+/// re-deriving it (a plain `==` short-circuits per byte — a timing oracle
+/// on long-lived listeners).
 #[cfg(not(target_arch = "wasm32"))]
-fn constant_time_str_eq(left: &str, right: &str) -> bool {
+pub fn constant_time_str_eq(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
     let mut diff = left.len() ^ right.len();
@@ -291,8 +303,11 @@ fn constant_time_str_eq(left: &str, right: &str) -> bool {
     diff == 0
 }
 
+/// Validate the minimum entropy-bearing length required by every comms pairing
+/// entry point. Callers should run this before any externally visible startup
+/// effects; listeners retain the same check as defense in depth.
 #[cfg(not(target_arch = "wasm32"))]
-fn validate_pairing_secret(secret: &str) -> Result<(), std::io::Error> {
+pub fn validate_pairing_secret(secret: &str) -> Result<(), std::io::Error> {
     if secret.len() < 32 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -321,7 +336,7 @@ fn peer_id_from_pubkey(pubkey: &crate::identity::PubKey) -> meerkat_core::comms:
 // Only the native TCP listener path and test helpers parse raw addresses;
 // the wasm build has no listener surface.
 #[cfg(any(not(target_arch = "wasm32"), test))]
-fn parse_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
+pub(crate) fn parse_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
     meerkat_core::comms::PeerAddress::parse(raw).map_err(|err| err.to_string())
 }
 
@@ -511,11 +526,23 @@ impl CoreCommsRuntime for CommsRuntime {
 
     async fn drain_messages(&self) -> Vec<String> {
         // Delegate through classified drain so messages from the classified
-        // inbox (the sole consumer since 0.4.10) are returned.
+        // inbox (the sole consumer since 0.4.10) are returned. The legacy
+        // string projection cannot validate member residency, so it must fail
+        // closed for incarnation-fenced messages. The structured drain below
+        // remains their only runtime admission path.
         self.drain_inbox_interactions()
             .await
             .into_iter()
-            .map(|i| i.rendered_text)
+            .filter_map(|interaction| {
+                if matches!(
+                    &interaction.content,
+                    meerkat_core::InteractionContent::IncarnationFencedMessage { .. }
+                ) {
+                    None
+                } else {
+                    Some(interaction.rendered_text)
+                }
+            })
             .collect()
     }
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
@@ -538,6 +565,17 @@ impl CoreCommsRuntime for CommsRuntime {
         Some(self.participant_name().to_string())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn host_acceptor_registration_payload(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        Some(Arc::new(
+            crate::host_acceptor::HostAcceptorRegistrationMaterial {
+                pubkey: self.public_key,
+                keypair: self.router.keypair_arc(),
+                inbox_sender: self.router.inbox_sender().clone(),
+            },
+        ))
+    }
+
     fn advertised_address(&self) -> Option<String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -551,6 +589,90 @@ impl CoreCommsRuntime for CommsRuntime {
 
     fn bridge_bootstrap_token(&self) -> Option<String> {
         Some(self.bridge_bootstrap_token.clone())
+    }
+
+    async fn stage_declared_reply_endpoint(
+        &self,
+        dest: PeerId,
+        signer_pubkey: [u8; 32],
+        declared_address: String,
+    ) -> Result<(), SendError> {
+        // Skip-if-routable: trust-store entries always win at send time, so
+        // staging for an already-routable peer would only leave a stale
+        // one-shot entry behind. The trust store (public + private union) is
+        // the same resolution authority `Router::send_with_id` consults.
+        if self.trusted_peers.read().get(&dest).is_some() {
+            return Ok(());
+        }
+        self.router.stage_reply_endpoint(
+            dest,
+            crate::router::DeclaredReplyEndpoint {
+                pubkey: PubKey::new(signer_pubkey),
+                address: declared_address,
+            },
+        );
+        Ok(())
+    }
+
+    async fn stage_correlated_reply_endpoint(
+        &self,
+        dest: PeerId,
+        in_reply_to: meerkat_core::interaction::InteractionId,
+        signer_pubkey: [u8; 32],
+        declared_endpoint: meerkat_core::comms::PeerAddress,
+    ) -> Result<(), SendError> {
+        let signer_pubkey = PubKey::new(signer_pubkey);
+        let signer_peer_id = signer_pubkey.to_peer_id();
+        if signer_peer_id != dest {
+            return Err(SendError::Validation(format!(
+                "correlated reply signer derives peer id {signer_peer_id}, not destination {dest}"
+            )));
+        }
+        if crate::classify::declared_tcp_port(&declared_endpoint).is_none() {
+            return Err(SendError::Validation(
+                "correlated reply endpoint must use tcp:// with a valid nonzero port".to_string(),
+            ));
+        }
+        self.router.stage_correlated_reply_endpoint(
+            dest,
+            in_reply_to.0,
+            crate::router::DeclaredReplyEndpoint {
+                pubkey: signer_pubkey,
+                address: declared_endpoint.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn unstage_correlated_reply_endpoint(
+        &self,
+        dest: PeerId,
+        in_reply_to: meerkat_core::interaction::InteractionId,
+    ) -> Result<(), SendError> {
+        self.router
+            .unstage_correlated_reply_endpoint(dest, in_reply_to.0);
+        Ok(())
+    }
+
+    fn take_bridge_reply_waiter(
+        &self,
+        in_reply_to: &meerkat_core::interaction::InteractionId,
+    ) -> Option<tokio::sync::oneshot::Sender<meerkat_core::interaction::PeerInputCandidate>> {
+        match self.bridge_reply_waiters.lock().remove(&in_reply_to.0) {
+            Some(BridgeReplyWaiterEntry::Waiting(sender)) => Some(sender),
+            // Tombstone consumed: the caller pairs this with
+            // `has_bridge_reply_waiter` to discard the late reply.
+            Some(BridgeReplyWaiterEntry::TimedOut(_)) | None => None,
+        }
+    }
+
+    fn has_bridge_reply_waiter(
+        &self,
+        in_reply_to: &meerkat_core::interaction::InteractionId,
+    ) -> bool {
+        self.bridge_reply_waiters
+            .lock()
+            .contains_key(&in_reply_to.0)
     }
 
     async fn apply_trust_mutation(
@@ -892,6 +1014,32 @@ impl CoreCommsRuntime for CommsRuntime {
                     envelope_id: outcome.envelope_id,
                     delivery: outcome.delivery,
                 }),
+            CommsCommand::IncarnationFencedPeerMessage {
+                to,
+                body,
+                blocks,
+                content_taint,
+                handling_mode,
+                objective_id,
+                expected_recipient,
+            } => self
+                .send_peer_command(
+                    &to,
+                    crate::types::MessageKind::IncarnationFencedMessage {
+                        body,
+                        blocks,
+                        content_taint: None,
+                        handling_mode: Some(handling_mode),
+                        objective_id,
+                        expected_recipient,
+                    },
+                    content_taint,
+                )
+                .await
+                .map(|outcome| SendReceipt::PeerMessageSent {
+                    envelope_id: outcome.envelope_id,
+                    delivery: outcome.delivery,
+                }),
             CommsCommand::PeerLifecycle { to, kind, params } => self
                 .send_peer_command(
                     &to,
@@ -912,79 +1060,19 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream,
                 objective_id,
             } => {
-                let interaction_id = Uuid::new_v4();
-                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
-                let stream_reserved = stream == InputStreamMode::ReserveInteraction;
-                let (peer_handle, stream_authority) =
-                    self.require_peer_request_response_authority("PeerRequest")?;
-                let stream_handle = if stream_reserved {
-                    Some(stream_authority)
-                } else {
-                    None
-                };
-
-                if let Err(err) = peer_handle.request_sent(corr_id) {
-                    tracing::warn!(
-                        error = %err,
-                        corr_id = %corr_id,
-                        "PeerInteractionHandle::request_sent rejected — refusing to send"
-                    );
-                    return Err(SendError::Validation(format!(
-                        "DSL rejected PeerRequestSent for corr_id {corr_id}: {err}"
-                    )));
-                }
-
-                if let Some(stream_handle) = stream_handle
-                    && let Err(err) = self.reserve_interaction_stream_channels(
-                        corr_id,
-                        interaction_id,
-                        InteractionStreamReservationAuthority::Machine(stream_handle),
-                    )
-                {
-                    let _ = peer_handle.request_send_failed(corr_id);
-                    return Err(err);
-                }
-
-                let envelope_id = match self
-                    .send_peer_command_with_id(
-                        &to,
-                        interaction_id,
-                        crate::types::MessageKind::Request {
-                            intent,
-                            params,
-                            blocks,
-                            content_taint: None,
-                            handling_mode: Some(handling_mode),
-                            objective_id,
-                        },
-                        content_taint,
-                    )
-                    .await
-                {
-                    Ok(outcome) => outcome.envelope_id,
-                    Err(e) => {
-                        if stream_reserved {
-                            self.abandon_interaction_stream(
-                                interaction_id,
-                                interaction_stream_abandon_reason_for_send_error(&e),
-                            );
-                        }
-                        // A send failure is NOT a timeout: the typed `SendError`
-                        // `e` is returned to the caller verbatim (peer offline /
-                        // transport / admission-drop), never laundered into a
-                        // timeout receipt. The DSL cleanup below removes the
-                        // pending entry; the authoritative send-failure
-                        // disposition is owned by the typed error returned here.
-                        let _ = peer_handle.request_send_failed(corr_id);
-                        return Err(e);
-                    }
-                };
-
-                Ok(SendReceipt::PeerRequestSent {
-                    envelope_id,
-                    interaction_id: meerkat_core::InteractionId(interaction_id),
-                    stream_reserved,
-                })
+                self.send_peer_request_with_id_lifecycle(
+                    Uuid::new_v4(),
+                    &to,
+                    intent,
+                    params,
+                    blocks,
+                    content_taint,
+                    handling_mode,
+                    stream == InputStreamMode::ReserveInteraction,
+                    objective_id,
+                    None,
+                )
+                .await
             }
             CommsCommand::PeerResponse {
                 to,
@@ -1147,68 +1235,21 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream: InputStreamMode::ReserveInteraction,
                 objective_id,
             } => {
-                // Reserve under the canonical request envelope id so the same
-                // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
-                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
-                let (peer_handle, stream_handle) =
-                    self.require_peer_request_response_authority("PeerRequest")?;
-
-                if let Err(err) = peer_handle.request_sent(corr_id) {
-                    tracing::warn!(
-                        error = %err,
-                        corr_id = %corr_id,
-                        "PeerInteractionHandle::request_sent rejected — refusing to send"
-                    );
-                    return Err(SendAndStreamError::Send(SendError::Validation(format!(
-                        "DSL rejected PeerRequestSent for corr_id {corr_id}: {err}"
-                    ))));
-                }
-
-                if let Err(err) = self.reserve_interaction_stream_channels(
-                    corr_id,
-                    interaction_id,
-                    InteractionStreamReservationAuthority::Machine(stream_handle),
-                ) {
-                    let _ = peer_handle.request_send_failed(corr_id);
-                    return Err(SendAndStreamError::Send(err));
-                }
-
-                let envelope_id = match self
-                    .send_peer_command_with_id(
-                        &to,
+                let receipt = self
+                    .send_peer_request_with_id_lifecycle(
                         interaction_id,
-                        crate::types::MessageKind::Request {
-                            intent,
-                            params,
-                            blocks,
-                            content_taint: None,
-                            handling_mode: Some(handling_mode),
-                            objective_id,
-                        },
+                        &to,
+                        intent,
+                        params,
+                        blocks,
                         content_taint,
+                        handling_mode,
+                        true,
+                        objective_id,
+                        None,
                     )
-                    .await
-                {
-                    Ok(outcome) => outcome.envelope_id,
-                    Err(e) => {
-                        self.abandon_interaction_stream(
-                            interaction_id,
-                            interaction_stream_abandon_reason_for_send_error(&e),
-                        );
-                        // Send failure returns the typed `SendError` verbatim;
-                        // it is never laundered into a timeout receipt. DSL
-                        // cleanup removes the pending entry.
-                        let _ = peer_handle.request_send_failed(corr_id);
-                        return Err(SendAndStreamError::Send(e));
-                    }
-                };
-
-                let receipt = SendReceipt::PeerRequestSent {
-                    envelope_id,
-                    interaction_id: meerkat_core::InteractionId(interaction_id),
-                    stream_reserved: true,
-                };
+                    .await?;
                 let event_stream = self
                     .stream(StreamScope::Interaction(meerkat_core::InteractionId(
                         interaction_id,
@@ -1326,6 +1367,10 @@ impl CoreCommsRuntime for CommsRuntime {
                                 handling_mode: Some(mode),
                                 ..
                             }
+                            | MessageKind::IncarnationFencedMessage {
+                                handling_mode: Some(mode),
+                                ..
+                            }
                             | MessageKind::Request {
                                 handling_mode: Some(mode),
                                 ..
@@ -1339,6 +1384,10 @@ impl CoreCommsRuntime for CommsRuntime {
                                 ..
                             }
                             | MessageKind::Message {
+                                handling_mode: None,
+                                ..
+                            }
+                            | MessageKind::IncarnationFencedMessage {
                                 handling_mode: None,
                                 ..
                             }
@@ -1362,10 +1411,23 @@ impl CoreCommsRuntime for CommsRuntime {
                                 handling_mode: _,
                                 objective_id: _,
                             } => meerkat_core::InteractionContent::Message { body, blocks },
+                            MessageKind::IncarnationFencedMessage {
+                                body,
+                                blocks,
+                                content_taint: _,
+                                handling_mode: _,
+                                objective_id: _,
+                                expected_recipient,
+                            } => meerkat_core::InteractionContent::IncarnationFencedMessage {
+                                body,
+                                blocks,
+                                expected_recipient,
+                            },
                             MessageKind::Request {
                                 intent,
                                 params,
                                 blocks,
+                                reply_endpoint: _,
                                 content_taint: _,
                                 handling_mode: _,
                                 objective_id: _,
@@ -1651,6 +1713,33 @@ impl CommsToolMaterial {
     }
 }
 
+/// Bounded size of the bridge-reply waiter registry. Registration beyond
+/// this cap is a typed error — an unbounded registry would let a stalled
+/// remote responder pin arbitrary memory.
+#[cfg(not(target_arch = "wasm32"))]
+const BRIDGE_REPLY_WAITER_CAPACITY: usize = 256;
+
+/// Lazy eviction horizon for timed-out waiter tombstones. A tombstone is
+/// removed on take (the drain consumed the late reply) or evicted at the
+/// next registry write once this horizon has passed.
+#[cfg(not(target_arch = "wasm32"))]
+const BRIDGE_REPLY_TOMBSTONE_TTL: meerkat_core::time_compat::Duration =
+    meerkat_core::time_compat::Duration::from_secs(300);
+
+/// One-fact-one-owner disposition for an outstanding bridge-reply envelope
+/// id: the comms drain always finds a typed disposition — deliver
+/// (`Waiting`), discard (`TimedOut` tombstone), or (never registered) the
+/// ordinary session path.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+enum BridgeReplyWaiterEntry {
+    /// A live waiter: the drain hands the terminal Response candidate to
+    /// this one-shot sender instead of injecting it into the session.
+    Waiting(tokio::sync::oneshot::Sender<meerkat_core::interaction::PeerInputCandidate>),
+    /// The requester timed out; a late reply is consumed and discarded so
+    /// bridge JSON never leaks into the member's transcript.
+    TimedOut(Instant),
+}
+
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct CommsRuntime {
     public_key: PubKey,
@@ -1710,6 +1799,13 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
+    /// One-shot bridge-reply waiters keyed by outbound envelope id (member
+    /// upcall lane). Shell-owned mechanics: the peer-interaction DSL keeps
+    /// the semantic request/response lifecycle; this registry only decides
+    /// whether a terminal Response candidate is delivered to an
+    /// agent-blocking waiter, discarded (tombstone), or takes the ordinary
+    /// session path.
+    bridge_reply_waiters: Mutex<HashMap<Uuid, BridgeReplyWaiterEntry>>,
 }
 
 impl CommsRuntime {
@@ -1836,6 +1932,7 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
+            bridge_reply_waiters: Mutex::new(HashMap::new()),
         };
         let namespace = config.inproc_namespace.clone().unwrap_or_default();
         let name = config.name.clone();
@@ -1952,6 +2049,7 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
+            bridge_reply_waiters: Mutex::new(HashMap::new()),
         };
         let namespace_ref = namespace.as_deref().unwrap_or("");
         let outcome = InprocRegistry::global().register_with_meta_in_namespace(
@@ -2071,6 +2169,7 @@ impl CommsRuntime {
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
             interaction_stream_handle: parking_lot::RwLock::new(None),
+            bridge_reply_waiters: Mutex::new(HashMap::new()),
         };
         let namespace_ref = namespace.as_deref().unwrap_or("");
         let outcome = InprocRegistry::global().register_with_meta_in_namespace(
@@ -2274,10 +2373,30 @@ impl CommsRuntime {
                     objective_id,
                 })
             }
+            crate::types::MessageKind::IncarnationFencedMessage {
+                body,
+                blocks: Some(mut blocks),
+                content_taint,
+                handling_mode,
+                objective_id,
+                expected_recipient,
+            } => {
+                self.hydrate_blocks_for_transport(&mut blocks, "incarnation-fenced comms message")
+                    .await?;
+                Ok(crate::types::MessageKind::IncarnationFencedMessage {
+                    body,
+                    blocks: Some(blocks),
+                    content_taint,
+                    handling_mode,
+                    objective_id,
+                    expected_recipient,
+                })
+            }
             crate::types::MessageKind::Request {
                 intent,
                 params,
                 blocks: Some(mut blocks),
+                reply_endpoint,
                 content_taint,
                 handling_mode,
                 objective_id,
@@ -2288,6 +2407,7 @@ impl CommsRuntime {
                     intent,
                     params,
                     blocks: Some(blocks),
+                    reply_endpoint,
                     content_taint,
                     handling_mode,
                     objective_id,
@@ -2365,6 +2485,22 @@ impl CommsRuntime {
             return format!("tcp://{tcp}");
         }
         format!("inproc://{}", self.config.name)
+    }
+
+    /// Actual TCP socket address bound by the signed peer listener.
+    ///
+    /// This is intentionally distinct from [`Self::advertised_address`]: an
+    /// explicit advertised address may name a public/NAT route while this
+    /// accessor reports the local kernel-selected socket (including the real
+    /// ephemeral port after binding `:0`). Returns `None` before listener
+    /// start, when no signed TCP listener is configured, or after its handle
+    /// has been removed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn bound_tcp_listener_address(&self) -> Option<std::net::SocketAddr> {
+        self.listener_handles
+            .lock()
+            .iter()
+            .find_map(|handle| handle.local_addr)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2710,9 +2846,9 @@ impl CommsRuntime {
 
     /// Send a peer command and return the typed delivery outcome.
     ///
-    /// The returned [`crate::router::SendOutcome`] carries the verified ACK
-    /// truth (`acked`) so public receipts reflect whether the peer actually
-    /// acknowledged the envelope rather than hardcoding `false`.
+    /// The returned [`crate::router::SendOutcome`] carries the strongest typed
+    /// delivery fact proved by the selected transport, so public receipts do
+    /// not collapse ACK, direct handoff, and queued-write authority.
     ///
     /// `content_taint` is the per-send tri-state taint override, resolved
     /// against the runtime-level declaration at the router's single outbound
@@ -2751,7 +2887,278 @@ impl CommsRuntime {
         }
     }
 
-    /// Drop the peer-response subscriber projection for a correlation id.
+    /// Register a `Waiting` bridge-reply waiter for `envelope_id`.
+    ///
+    /// Evicts expired tombstones first (lazy eviction at registry writes),
+    /// then enforces the bounded capacity with a typed error.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn insert_bridge_reply_waiter(
+        &self,
+        envelope_id: Uuid,
+        sender: tokio::sync::oneshot::Sender<meerkat_core::interaction::PeerInputCandidate>,
+    ) -> Result<(), SendError> {
+        let mut waiters = self.bridge_reply_waiters.lock();
+        let now = Instant::now();
+        waiters.retain(|_, entry| match entry {
+            BridgeReplyWaiterEntry::Waiting(_) => true,
+            BridgeReplyWaiterEntry::TimedOut(at) => {
+                now.duration_since(*at) < BRIDGE_REPLY_TOMBSTONE_TTL
+            }
+        });
+        if waiters.len() >= BRIDGE_REPLY_WAITER_CAPACITY {
+            return Err(SendError::Validation(format!(
+                "bridge reply waiter registry at capacity ({BRIDGE_REPLY_WAITER_CAPACITY})"
+            )));
+        }
+        waiters.insert(envelope_id, BridgeReplyWaiterEntry::Waiting(sender));
+        Ok(())
+    }
+
+    /// Remove a waiter entry outright (send failure: the envelope never left,
+    /// so no late reply can arrive and no tombstone is needed).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remove_bridge_reply_waiter(&self, envelope_id: Uuid) {
+        self.bridge_reply_waiters.lock().remove(&envelope_id);
+    }
+
+    /// Replace a `Waiting` waiter with a `TimedOut` tombstone after the
+    /// requester's attempt budget expired. The tombstone keeps a typed
+    /// disposition for the late reply — the drain consumes and discards it
+    /// instead of injecting bridge JSON into the session. Tombstones are
+    /// removed on take or lazily evicted after
+    /// [`BRIDGE_REPLY_TOMBSTONE_TTL`] at the next registry write.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tombstone_bridge_reply_waiter(&self, envelope_id: Uuid) {
+        if let Some(entry) = self.bridge_reply_waiters.lock().get_mut(&envelope_id) {
+            *entry = BridgeReplyWaiterEntry::TimedOut(Instant::now());
+        }
+    }
+
+    /// Canonical peer-Request lifecycle shared by the public command path,
+    /// send-and-stream, and the explicit reply-endpoint helpers.
+    ///
+    /// The caller supplies the interaction id so it can reserve a waiter
+    /// before dispatch. This owner performs the machine `request_sent`
+    /// transition, optional stream reservation, signed envelope construction,
+    /// transport send, and failure cleanup exactly once for every peer Request.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_peer_request_with_id_lifecycle(
+        &self,
+        interaction_id: Uuid,
+        to: &PeerRoute,
+        intent: String,
+        params: serde_json::Value,
+        blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+        content_taint: Option<meerkat_core::comms::SendTaintOverride>,
+        handling_mode: meerkat_core::types::HandlingMode,
+        stream_reserved: bool,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+        reply_endpoint: Option<meerkat_core::comms::PeerAddress>,
+    ) -> Result<SendReceipt, SendError> {
+        if reply_endpoint
+            .as_ref()
+            .is_some_and(|endpoint| crate::classify::declared_tcp_port(endpoint).is_none())
+        {
+            return Err(SendError::Validation(
+                "peer Request reply endpoint must use tcp:// with a valid nonzero port".to_string(),
+            ));
+        }
+
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+        let (peer_handle, stream_authority) =
+            self.require_peer_request_response_authority("PeerRequest")?;
+        let stream_handle = stream_reserved.then_some(stream_authority);
+
+        if let Err(err) = peer_handle.request_sent(corr_id) {
+            tracing::warn!(
+                error = %err,
+                corr_id = %corr_id,
+                "PeerInteractionHandle::request_sent rejected — refusing to send"
+            );
+            return Err(SendError::Validation(format!(
+                "DSL rejected PeerRequestSent for corr_id {corr_id}: {err}"
+            )));
+        }
+
+        if let Some(stream_handle) = stream_handle
+            && let Err(err) = self.reserve_interaction_stream_channels(
+                corr_id,
+                interaction_id,
+                InteractionStreamReservationAuthority::Machine(stream_handle),
+            )
+        {
+            let _ = peer_handle.request_send_failed(corr_id);
+            return Err(err);
+        }
+
+        let envelope_id = match self
+            .send_peer_command_with_id(
+                to,
+                interaction_id,
+                crate::types::MessageKind::Request {
+                    intent,
+                    params,
+                    blocks,
+                    reply_endpoint,
+                    content_taint: None,
+                    handling_mode: Some(handling_mode),
+                    objective_id,
+                },
+                content_taint,
+            )
+            .await
+        {
+            Ok(outcome) => outcome.envelope_id,
+            Err(error) => {
+                if stream_reserved {
+                    self.abandon_interaction_stream(
+                        interaction_id,
+                        interaction_stream_abandon_reason_for_send_error(&error),
+                    );
+                }
+                // A failed transport send is not a timeout. Preserve the typed
+                // error and drive the canonical machine send-failure edge.
+                let _ = peer_handle.request_send_failed(corr_id);
+                return Err(error);
+            }
+        };
+
+        Ok(SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id: meerkat_core::InteractionId(interaction_id),
+            stream_reserved,
+        })
+    }
+
+    /// Send a standard peer Request whose exact Response should return to the
+    /// supplied signed socket endpoint. No session-drain waiter is registered;
+    /// callers that own their own drain/wait loop use the returned correlation
+    /// id from [`SendReceipt::PeerRequestSent`].
+    pub async fn send_peer_request_at_endpoint(
+        &self,
+        to: PeerRoute,
+        intent: &str,
+        params: serde_json::Value,
+        reply_endpoint: meerkat_core::comms::PeerAddress,
+    ) -> Result<SendReceipt, SendError> {
+        self.send_peer_request_with_id_lifecycle(
+            Uuid::new_v4(),
+            &to,
+            intent.to_string(),
+            params,
+            None,
+            None,
+            meerkat_core::types::HandlingMode::Queue,
+            false,
+            None,
+            Some(reply_endpoint),
+        )
+        .await
+    }
+
+    /// Send a peer Request and register a one-shot reply waiter for its
+    /// terminal Response BEFORE dispatch (member upcall lane).
+    ///
+    /// The waiter is registered before the envelope goes out so a response
+    /// racing the send return still finds it; the comms drain delivers the
+    /// terminal Response candidate to the returned receiver instead of
+    /// injecting it into the session. The peer-interaction DSL lifecycle is
+    /// identical to the `CommsCommand::PeerRequest` arm (`request_sent`
+    /// before dispatch, `request_send_failed` + waiter removal on a failed
+    /// send). Returns the receiver and the envelope id (also the
+    /// `in_reply_to` correlation key and the tombstone key for
+    /// [`Self::tombstone_bridge_reply_waiter`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_peer_request_with_reply_waiter(
+        &self,
+        to: PeerRoute,
+        intent: &str,
+        params: serde_json::Value,
+    ) -> Result<
+        (
+            tokio::sync::oneshot::Receiver<meerkat_core::interaction::PeerInputCandidate>,
+            Uuid,
+        ),
+        SendError,
+    > {
+        self.send_peer_request_with_reply_waiter_inner(to, intent, params, None)
+            .await
+    }
+
+    /// Waiter-registering variant of [`Self::send_peer_request_at_endpoint`].
+    /// The signed endpoint is carried on the Request while the terminal
+    /// Response is intercepted by the runtime's bridge waiter registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_peer_request_with_reply_waiter_at_endpoint(
+        &self,
+        to: PeerRoute,
+        intent: &str,
+        params: serde_json::Value,
+        reply_endpoint: meerkat_core::comms::PeerAddress,
+    ) -> Result<
+        (
+            tokio::sync::oneshot::Receiver<meerkat_core::interaction::PeerInputCandidate>,
+            Uuid,
+        ),
+        SendError,
+    > {
+        self.send_peer_request_with_reply_waiter_inner(to, intent, params, Some(reply_endpoint))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn send_peer_request_with_reply_waiter_inner(
+        &self,
+        to: PeerRoute,
+        intent: &str,
+        params: serde_json::Value,
+        reply_endpoint: Option<meerkat_core::comms::PeerAddress>,
+    ) -> Result<
+        (
+            tokio::sync::oneshot::Receiver<meerkat_core::interaction::PeerInputCandidate>,
+            Uuid,
+        ),
+        SendError,
+    > {
+        let interaction_id = Uuid::new_v4();
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.insert_bridge_reply_waiter(interaction_id, reply_tx)?;
+
+        match self
+            .send_peer_request_with_id_lifecycle(
+                interaction_id,
+                &to,
+                intent.to_string(),
+                params,
+                None,
+                None,
+                meerkat_core::types::HandlingMode::Queue,
+                false,
+                None,
+                reply_endpoint,
+            )
+            .await
+        {
+            Ok(SendReceipt::PeerRequestSent { envelope_id, .. }) => Ok((reply_rx, envelope_id)),
+            Ok(other) => {
+                self.remove_bridge_reply_waiter(interaction_id);
+                Err(SendError::Internal(format!(
+                    "peer Request lifecycle returned unexpected receipt {other:?}"
+                )))
+            }
+            Err(error) => {
+                // A send failure is NOT a timeout: remove (not tombstone) the
+                // waiter — the envelope never left, so no late reply exists —
+                // and return the typed error verbatim.
+                self.remove_bridge_reply_waiter(interaction_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Drop the peer-response subscriber and correlated callback projections
+    /// for a correlation id.
     ///
     /// Invoked from the `PeerInteractionCleanup` DSL effect observer
     /// (W1-A): the DSL has already decided the peer-interaction lifecycle
@@ -2759,10 +3166,14 @@ impl CommsRuntime {
     /// deliberately untouched: it terminates only through an
     /// `InteractionStream*` transition and its cleanup effect.
     fn drop_peer_interaction_projection(&self, interaction_id: Uuid) {
+        let removed_callbacks = self
+            .router
+            .unstage_correlated_reply_endpoints_for_interaction(interaction_id);
         let removed_sender = self.subscriber_registry.lock().remove(&interaction_id);
-        if removed_sender.is_some() {
+        if removed_sender.is_some() || removed_callbacks != 0 {
             tracing::debug!(
                 interaction_id = %interaction_id,
+                removed_callbacks,
                 "peer interaction projection dropped via DSL cleanup effect"
             );
         }
@@ -3329,7 +3740,7 @@ async fn spawn_tcp_listener(config: TcpListenerConfig) -> Result<ListenerHandle,
         format!("tcp://{local_addr}")
     };
     let handle = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        while let Ok((stream, source)) = listener.accept().await {
             let (keypair, router, trusted, inbox_sender) = (
                 keypair.clone(),
                 router.clone(),
@@ -3347,6 +3758,7 @@ async fn spawn_tcp_listener(config: TcpListenerConfig) -> Result<ListenerHandle,
                 // same live state the inbox admission gate consults.
                 let _ = handle_tcp_connection_or_pairing(
                     stream,
+                    source,
                     require_peer_auth,
                     &keypair,
                     &router,
@@ -3372,6 +3784,7 @@ async fn spawn_tcp_listener(config: TcpListenerConfig) -> Result<ListenerHandle,
 #[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection_or_pairing(
     stream: TcpStream,
+    observed_source: std::net::SocketAddr,
     require_peer_auth: bool,
     keypair: &Keypair,
     router: &Router,
@@ -3392,9 +3805,15 @@ async fn handle_tcp_connection_or_pairing(
         && first[0] == b'{';
     if is_pairing {
         let Some(pairing_password) = pairing_password else {
-            return handle_connection(stream, require_peer_auth, keypair, inbox_sender)
-                .await
-                .map_err(|err| std::io::Error::other(err.to_string()));
+            return handle_tcp_connection(
+                stream,
+                observed_source,
+                require_peer_auth,
+                keypair,
+                inbox_sender,
+            )
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()));
         };
         return handle_pairing_connection(
             stream,
@@ -3410,28 +3829,88 @@ async fn handle_tcp_connection_or_pairing(
         .await;
     }
 
-    handle_connection(stream, require_peer_auth, keypair, inbox_sender)
-        .await
-        .map_err(|err| std::io::Error::other(err.to_string()))
+    handle_tcp_connection(
+        stream,
+        observed_source,
+        require_peer_auth,
+        keypair,
+        inbox_sender,
+    )
+    .await
+    .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn read_pairing_message(
+async fn read_bounded_pairing_line<R>(
+    reader: &mut R,
+    buf: &mut String,
+) -> Result<usize, std::io::Error>
+where
+    R: AsyncBufRead + Unpin,
+{
+    buf.clear();
+    let mut bytes = Vec::new();
+    loop {
+        let (consumed, terminated) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                let (kind, message) = if bytes.is_empty() {
+                    (
+                        std::io::ErrorKind::UnexpectedEof,
+                        "pairing peer closed connection",
+                    )
+                } else {
+                    (
+                        std::io::ErrorKind::InvalidData,
+                        "pairing message is missing its newline delimiter",
+                    )
+                };
+                return Err(std::io::Error::new(kind, message));
+            }
+
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let next_len = bytes.len().checked_add(consumed).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pairing message exceeds the maximum frame size",
+                )
+            })?;
+            if next_len > MAX_PAIRING_MESSAGE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pairing message exceeds the maximum frame size",
+                ));
+            }
+            bytes.extend_from_slice(&available[..consumed]);
+            (consumed, newline.is_some())
+        };
+        reader.consume(consumed);
+        if terminated {
+            break;
+        }
+    }
+
+    *buf = String::from_utf8(bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pairing message is not valid UTF-8",
+        )
+    })?;
+    Ok(buf.len())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn read_pairing_message(
     reader: &mut BufReader<TcpStream>,
     buf: &mut String,
 ) -> Result<PairingClientMessage, std::io::Error> {
-    buf.clear();
-    let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), reader.read_line(buf))
-        .await
-        .map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "pairing read timed out")
-        })??;
-    if bytes == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "pairing peer closed connection",
-        ));
-    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        read_bounded_pairing_line(reader, buf),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "pairing read timed out"))??;
     serde_json::from_str(buf).map_err(|err| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -3441,7 +3920,7 @@ async fn read_pairing_message(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn write_pairing_json(
+pub(crate) async fn write_pairing_json(
     writer: &mut TcpStream,
     value: serde_json::Value,
 ) -> Result<(), std::io::Error> {
@@ -3680,6 +4159,89 @@ async fn spawn_plain_uds_listener(
 mod tests {
     use super::*;
     use crate::classify::test_support;
+
+    #[tokio::test]
+    async fn pairing_frame_reader_accepts_the_exact_size_boundary() {
+        let mut wire = vec![b' '; MAX_PAIRING_MESSAGE_BYTES];
+        wire[MAX_PAIRING_MESSAGE_BYTES - 1] = b'\n';
+        let (mut writer, stream) = tokio::io::duplex(127);
+        let write = tokio::spawn(async move {
+            writer.write_all(&wire).await?;
+            writer.shutdown().await
+        });
+        let mut reader = BufReader::with_capacity(113, stream);
+        let mut line = "stale caller data".to_string();
+
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            read_bounded_pairing_line(&mut reader, &mut line),
+        )
+        .await
+        .expect("bounded reader must complete")
+        .expect("an exact-boundary frame must be accepted");
+
+        assert_eq!(bytes, MAX_PAIRING_MESSAGE_BYTES);
+        assert_eq!(line.len(), MAX_PAIRING_MESSAGE_BYTES);
+        assert!(line.ends_with('\n'));
+        write
+            .await
+            .expect("boundary writer task must join")
+            .expect("boundary writer must finish");
+    }
+
+    #[tokio::test]
+    async fn pairing_frame_reader_rejects_streaming_input_over_the_limit() {
+        let wire = vec![b'{'; MAX_PAIRING_MESSAGE_BYTES + 1];
+        let (mut writer, stream) = tokio::io::duplex(61);
+        let write = tokio::spawn(async move {
+            writer.write_all(&wire).await?;
+            writer.shutdown().await
+        });
+        let mut reader = BufReader::with_capacity(47, stream);
+        let mut line = String::new();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            read_bounded_pairing_line(&mut reader, &mut line),
+        )
+        .await
+        .expect("oversize streaming input must be rejected promptly")
+        .expect_err("an over-limit frame must fail closed");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("maximum frame size"));
+        assert!(
+            line.is_empty(),
+            "partial pre-auth input must not be published"
+        );
+        write.abort();
+        let _ = write.await;
+    }
+
+    #[tokio::test]
+    async fn pairing_frame_reader_rejects_an_unterminated_frame() {
+        let (mut writer, stream) = tokio::io::duplex(64);
+        let write = tokio::spawn(async move {
+            writer
+                .write_all(br#"{"kind":"meerkat_pairing_hello","version":1}"#)
+                .await?;
+            writer.shutdown().await
+        });
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+
+        let error = read_bounded_pairing_line(&mut reader, &mut line)
+            .await
+            .expect_err("pairing frames must be newline-delimited");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("newline delimiter"));
+        assert!(line.is_empty(), "unterminated input must not be published");
+        write
+            .await
+            .expect("unterminated writer task must join")
+            .expect("unterminated writer must finish");
+    }
 
     /// The dyn core-trait surface is how mob/runtime layers holding
     /// `Arc<dyn CoreCommsRuntime>` install the host's declaration per member;
@@ -4628,6 +5190,76 @@ mod tests {
         )
     }
 
+    async fn trusted_inproc_pair(prefix: &str) -> (CommsRuntime, CommsRuntime, String) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("{prefix}-sender-{suffix}");
+        let receiver_name = format!("{prefix}-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).expect("sender runtime");
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
+
+        add_trusted_peer_with_generated_authority(
+            &sender,
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            &receiver,
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+
+        (sender, receiver, receiver_name)
+    }
+
+    async fn enqueue_fenced_then_plain(
+        sender: &CommsRuntime,
+        receiver: &CommsRuntime,
+        receiver_name: &str,
+    ) {
+        let to = peer_route(receiver_name, receiver.public_key());
+        let fenced = CommsCommand::IncarnationFencedPeerMessage {
+            to: to.clone(),
+            body: "authority-bearing fenced message".to_string(),
+            blocks: None,
+            content_taint: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            objective_id: None,
+            expected_recipient: meerkat_core::comms::PeerRecipientIncarnation {
+                mob_id: "mob".to_string(),
+                agent_identity: "worker".to_string(),
+                host_id: "host".to_string(),
+                binding_generation: 2,
+                member_session_id: "session".to_string(),
+                generation: 3,
+                fence_token: 5,
+            },
+        };
+        CoreCommsRuntime::send(sender, fenced)
+            .await
+            .expect("fenced send");
+        CoreCommsRuntime::send(
+            sender,
+            CommsCommand::PeerMessage {
+                to,
+                body: "ordinary message".to_string(),
+                blocks: None,
+                content_taint: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                objective_id: None,
+            },
+        )
+        .await
+        .expect("ordinary send");
+    }
+
     fn missing_peer_route(name: &str) -> PeerRoute {
         PeerRoute::with_display_name(
             meerkat_core::comms::PeerId::new(),
@@ -5186,8 +5818,18 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(
+            runtime.bound_tcp_listener_address(),
+            None,
+            "bound address is unavailable before listener start"
+        );
         runtime.start_listeners().await.unwrap();
         assert_eq!(runtime.advertised_address(), "tcp://203.0.113.10:4200");
+        let bound = runtime
+            .bound_tcp_listener_address()
+            .expect("actual signed TCP listener address after start");
+        assert_eq!(bound.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+        assert_ne!(bound.port(), 0, "kernel must resolve the ephemeral port");
     }
 
     #[tokio::test]
@@ -5405,6 +6047,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 19}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -5516,6 +6159,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 7}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: Some(SenderContentTaint::Clean),
                 handling_mode: None,
             },
@@ -6747,6 +7391,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -6865,6 +7510,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"scope": "peer"}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -6915,6 +7561,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"scope": "peer"}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -7067,6 +7714,7 @@ mod tests {
                 intent: "status".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -7477,6 +8125,122 @@ mod tests {
             }
             other => panic!("expected message interaction, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_incarnation_fenced_send_hydrates_blob_and_preserves_objective() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-fenced-blob-{suffix}");
+        let receiver_name = format!("receiver-fenced-blob-{suffix}");
+        let mut sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = inproc_only_with_test_peer_authority(&receiver_name);
+        let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob_ref = blob_store
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+        sender.set_blob_store(blob_store);
+
+        add_trusted_peer_with_generated_authority(
+            &sender,
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            &receiver,
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+
+        let objective_id = meerkat_core::interaction::ObjectiveId::new();
+        let cmd = CommsCommand::IncarnationFencedPeerMessage {
+            to: peer_route(&receiver_name, receiver.public_key()),
+            body: "fenced blob-backed image".to_string(),
+            blocks: Some(vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_ref.blob_id,
+                },
+            }]),
+            content_taint: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            objective_id: Some(objective_id),
+            expected_recipient: meerkat_core::comms::PeerRecipientIncarnation {
+                mob_id: "mob".to_string(),
+                agent_identity: "worker".to_string(),
+                host_id: "host".to_string(),
+                binding_generation: 1,
+                member_session_id: "session".to_string(),
+                generation: 1,
+                fence_token: 7,
+            },
+        };
+
+        let receipt = CoreCommsRuntime::send(&sender, cmd).await;
+        assert!(matches!(receipt, Ok(SendReceipt::PeerMessageSent { .. })));
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].objective_id, Some(objective_id));
+        match &interactions[0].content {
+            meerkat_core::InteractionContent::IncarnationFencedMessage { blocks, .. } => {
+                let blocks = blocks.as_ref().expect("received blocks");
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Image {
+                        data: ImageData::Inline { data },
+                        ..
+                    } if data == "aGVsbG8="
+                ));
+            }
+            other => panic!("expected incarnation-fenced interaction, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inherent_message_drain_excludes_fenced_but_keeps_ordinary_message() {
+        let (sender, receiver, receiver_name) = trusted_inproc_pair("legacy-drain-fence").await;
+        enqueue_fenced_then_plain(&sender, &receiver, &receiver_name).await;
+
+        let messages = CommsRuntime::drain_messages(&receiver).await;
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            &messages[0].content,
+            crate::agent::CommsContent::Message { body, .. } if body == "ordinary message"
+        ));
+    }
+
+    #[tokio::test]
+    async fn inherent_message_recv_skips_fenced_queue_head() {
+        let (sender, receiver, receiver_name) = trusted_inproc_pair("legacy-recv-fence").await;
+        enqueue_fenced_then_plain(&sender, &receiver, &receiver_name).await;
+
+        let message = CommsRuntime::recv_message(&receiver)
+            .await
+            .expect("ordinary message behind fenced queue head");
+        assert!(matches!(
+            message.content,
+            crate::agent::CommsContent::Message { body, .. } if body == "ordinary message"
+        ));
+    }
+
+    #[tokio::test]
+    async fn core_string_drain_excludes_fenced_but_keeps_ordinary_message() {
+        let (sender, receiver, receiver_name) = trusted_inproc_pair("core-string-fence").await;
+        enqueue_fenced_then_plain(&sender, &receiver, &receiver_name).await;
+
+        let messages = CoreCommsRuntime::drain_messages(&receiver).await;
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("ordinary message"));
+        assert!(!messages[0].contains("authority-bearing fenced message"));
     }
 
     #[tokio::test]
@@ -9084,6 +9848,520 @@ mod tests {
         assert!(
             matches!(result, Err(SendError::Validation(_))),
             "remove_trusted_peer should validate its argument as PeerId, got: {result:?}"
+        );
+    }
+
+    /// T-13: `stage_declared_reply_endpoint` forwards to
+    /// `Router::stage_reply_endpoint` — staged entry visible (routes a
+    /// Response to an untrusted peer), one-shot (second send misses), and
+    /// Response-only (a Message kind never consults the staged entry).
+    #[tokio::test]
+    async fn stage_declared_reply_endpoint_forwards_to_router_one_shot_response_only() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("declared-reply-sender-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        // Declared reply endpoints are SOCKET addresses by construction
+        // (inproc is typed-rejected at the router): the "receiver" is a raw
+        // loopback listener draining frames — the sender does NOT trust it,
+        // so only the staged endpoint can route the reply.
+        let receiver_keypair = Keypair::generate();
+        let receiver_pubkey = receiver_keypair.public_key();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind declared-reply listener");
+        let receiver_address = format!("tcp://{}", listener.local_addr().expect("listener addr"));
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncReadExt as _;
+                let mut sink = Vec::new();
+                let _ = stream.read_to_end(&mut sink).await;
+            }
+        });
+
+        let dest = receiver_pubkey.to_peer_id();
+        CoreCommsRuntime::stage_declared_reply_endpoint(
+            &sender,
+            dest,
+            *receiver_pubkey.as_bytes(),
+            receiver_address.clone(),
+        )
+        .await
+        .expect("staging a declared reply endpoint must succeed");
+
+        let response_kind = || MessageKind::Response {
+            in_reply_to: Uuid::new_v4(),
+            status: Status::Completed,
+            result: serde_json::json!({"ok": true}),
+            blocks: None,
+            content_taint: None,
+            handling_mode: None,
+            objective_id: None,
+        };
+        sender
+            .router()
+            .send_with_id(dest, Uuid::new_v4(), response_kind(), None)
+            .await
+            .expect("staged endpoint must route the first Response");
+        let second = sender
+            .router()
+            .send_with_id(dest, Uuid::new_v4(), response_kind(), None)
+            .await;
+        assert!(
+            matches!(second, Err(crate::router::SendError::PeerNotFound(_))),
+            "staged endpoint is one-shot; second Response must miss, got {second:?}"
+        );
+
+        // Response-only: a staged entry is never consulted for Message kinds.
+        CoreCommsRuntime::stage_declared_reply_endpoint(
+            &sender,
+            dest,
+            *receiver_pubkey.as_bytes(),
+            receiver_address,
+        )
+        .await
+        .expect("restaging must succeed");
+        let message = sender
+            .router()
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                MessageKind::Message {
+                    body: "hi".to_string(),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: None,
+                    objective_id: None,
+                },
+                None,
+            )
+            .await;
+        assert!(
+            matches!(message, Err(crate::router::SendError::PeerNotFound(_))),
+            "staged endpoint must not grant Message sendability, got {message:?}"
+        );
+    }
+
+    /// T-13: skip-if-routable — staging for a peer the trust store already
+    /// resolves is a no-op (trust-store-wins), so no one-shot entry is left
+    /// behind to go stale.
+    #[tokio::test]
+    async fn stage_declared_reply_endpoint_skips_already_routable_peer() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("declared-skip-sender-{suffix}");
+        let receiver_name = format!("declared-skip-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        add_trusted_peer_with_generated_authority(
+            &sender,
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            &receiver,
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+
+        let dest = receiver.public_key().to_peer_id();
+        // Deliberately stage a BROKEN address: if the impl staged despite the
+        // trust row, nothing changes (trust wins at send time), and the
+        // Response below must still deliver over the trusted route.
+        CoreCommsRuntime::stage_declared_reply_endpoint(
+            &sender,
+            dest,
+            *receiver.public_key().as_bytes(),
+            "inproc://nonexistent-declared-target".to_string(),
+        )
+        .await
+        .expect("staging for a routable peer must be an Ok no-op");
+
+        sender
+            .router()
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                MessageKind::Response {
+                    in_reply_to: Uuid::new_v4(),
+                    status: Status::Completed,
+                    result: serde_json::json!({"ok": true}),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: None,
+                    objective_id: None,
+                },
+                None,
+            )
+            .await
+            .expect("trusted route must serve the Response");
+    }
+
+    #[tokio::test]
+    async fn correlated_reply_endpoint_trait_staging_validates_identity_and_cleans_idempotently() {
+        let runtime = CommsRuntime::inproc_only("correlated-stage-runtime").unwrap();
+        let peer = Keypair::generate().public_key();
+        let dest = peer.to_peer_id();
+        let correlation = InteractionId(Uuid::new_v4());
+        let endpoint = meerkat_core::comms::PeerAddress::parse("tcp://127.0.0.1:4311")
+            .expect("valid endpoint");
+
+        let mismatch = CoreCommsRuntime::stage_correlated_reply_endpoint(
+            &runtime,
+            PeerId::new(),
+            correlation,
+            *peer.as_bytes(),
+            endpoint.clone(),
+        )
+        .await;
+        assert!(matches!(mismatch, Err(SendError::Validation(_))));
+
+        let uds = CoreCommsRuntime::stage_correlated_reply_endpoint(
+            &runtime,
+            dest,
+            correlation,
+            *peer.as_bytes(),
+            meerkat_core::comms::PeerAddress::parse("uds:///tmp/reply.sock")
+                .expect("scheme-level UDS endpoint parses"),
+        )
+        .await;
+        assert!(
+            matches!(uds, Err(SendError::Validation(_))),
+            "correlated callback staging is TCP-only"
+        );
+
+        CoreCommsRuntime::stage_correlated_reply_endpoint(
+            &runtime,
+            dest,
+            correlation,
+            *peer.as_bytes(),
+            endpoint,
+        )
+        .await
+        .expect("authenticated correlated endpoint must stage");
+        CoreCommsRuntime::unstage_correlated_reply_endpoint(&runtime, dest, correlation)
+            .await
+            .expect("first cleanup must succeed");
+        CoreCommsRuntime::unstage_correlated_reply_endpoint(&runtime, dest, correlation)
+            .await
+            .expect("cleanup is idempotent");
+
+        let result = runtime
+            .router()
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                MessageKind::Response {
+                    in_reply_to: correlation.0,
+                    status: Status::Failed,
+                    result: serde_json::json!({"error": "not sent"}),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: None,
+                    objective_id: None,
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::router::SendError::PeerNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn peer_interaction_cleanup_removes_staged_correlated_reply_endpoint() {
+        let runtime = CommsRuntime::inproc_only("correlated-cleanup-runtime").unwrap();
+        let peer = Keypair::generate().public_key();
+        let dest = peer.to_peer_id();
+        let correlation = InteractionId(Uuid::new_v4());
+        CoreCommsRuntime::stage_correlated_reply_endpoint(
+            &runtime,
+            dest,
+            correlation,
+            *peer.as_bytes(),
+            meerkat_core::comms::PeerAddress::parse("tcp://127.0.0.1:4311")
+                .expect("valid endpoint"),
+        )
+        .await
+        .expect("correlated endpoint must stage");
+
+        meerkat_core::handles::PeerInteractionCleanupObserver::on_peer_interaction_cleanup(
+            &runtime,
+            meerkat_core::PeerCorrelationId::from_uuid(correlation.0),
+        );
+
+        let result = runtime
+            .router()
+            .send_with_id(
+                dest,
+                Uuid::new_v4(),
+                MessageKind::Response {
+                    in_reply_to: correlation.0,
+                    status: Status::Failed,
+                    result: serde_json::json!({"error": "must not dial"}),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: None,
+                    objective_id: None,
+                },
+                None,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::router::SendError::PeerNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_peer_request_at_endpoint_uses_standard_lifecycle_without_inproc_callback_route() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("endpoint-sender-{suffix}");
+        let receiver_name = format!("endpoint-receiver-{suffix}");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).unwrap());
+        let receiver = Arc::new(CommsRuntime::inproc_only(&receiver_name).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+        install_test_peer_comms_handle(receiver.as_ref());
+        add_trusted_peer_with_generated_authority(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            receiver.as_ref(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+        let endpoint = meerkat_core::comms::PeerAddress::parse("tcp://127.0.0.1:4311")
+            .expect("valid reply endpoint");
+
+        let receipt = sender
+            .send_peer_request_at_endpoint(
+                peer_route(&receiver_name, receiver.public_key()),
+                "test.probe",
+                serde_json::json!({"seq": 1}),
+                endpoint.clone(),
+            )
+            .await
+            .expect("endpoint-bearing peer Request must dispatch");
+        let SendReceipt::PeerRequestSent { interaction_id, .. } = receipt else {
+            panic!("expected PeerRequestSent receipt");
+        };
+        assert_eq!(
+            meerkat_core::handles::PeerInteractionHandle::outbound_state(
+                peer_handle.as_ref(),
+                meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0),
+            ),
+            Some(meerkat_core::OutboundPeerRequestState::Sent)
+        );
+        assert!(
+            !CoreCommsRuntime::has_bridge_reply_waiter(sender.as_ref(), &interaction_id),
+            "no-waiter helper must not mutate the session-drain waiter registry"
+        );
+
+        let candidates = CoreCommsRuntime::drain_peer_input_candidates(receiver.as_ref()).await;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].ingress.declared_reply_endpoint, None,
+            "serialized endpoint data is not promoted without observed TCP source evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_peer_request_at_endpoint_rejects_non_tcp_endpoint() {
+        let runtime = CommsRuntime::inproc_only("endpoint-transport-validation").unwrap();
+        let result = runtime
+            .send_peer_request_at_endpoint(
+                peer_route("unused", Keypair::generate().public_key()),
+                "test.probe",
+                serde_json::json!({}),
+                meerkat_core::comms::PeerAddress::parse("uds:///tmp/reply.sock")
+                    .expect("scheme-level UDS endpoint parses"),
+            )
+            .await;
+        assert!(matches!(result, Err(SendError::Validation(_))));
+    }
+
+    /// T-13: `send_peer_request_with_reply_waiter` registers the waiter
+    /// BEFORE dispatch (a response racing the send return still finds it)
+    /// and records the outbound DSL lifecycle exactly like the
+    /// `CommsCommand::PeerRequest` arm.
+    #[tokio::test]
+    async fn send_peer_request_with_reply_waiter_registers_waiter_and_dsl_lifecycle() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("waiter-sender-{suffix}");
+        let receiver_name = format!("waiter-receiver-{suffix}");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).unwrap());
+        let receiver = Arc::new(CommsRuntime::inproc_only(&receiver_name).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+        install_test_peer_comms_handle(receiver.as_ref());
+        add_trusted_peer_with_generated_authority(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            receiver.as_ref(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+
+        let (reply_rx, envelope_id) = sender
+            .send_peer_request_with_reply_waiter(
+                peer_route(&receiver_name, receiver.public_key()),
+                "test.bridge.upcall",
+                serde_json::json!({"op": "ping"}),
+            )
+            .await
+            .expect("waiter-registered request must dispatch");
+        drop(reply_rx);
+
+        let interaction_id = InteractionId(envelope_id);
+        assert!(
+            CoreCommsRuntime::has_bridge_reply_waiter(sender.as_ref(), &interaction_id),
+            "the waiter must be registered under the returned envelope id"
+        );
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(envelope_id);
+        assert_eq!(
+            meerkat_core::handles::PeerInteractionHandle::outbound_state(
+                peer_handle.as_ref(),
+                corr_id
+            ),
+            Some(meerkat_core::OutboundPeerRequestState::Sent),
+            "request_sent must be recorded exactly like the PeerRequest arm"
+        );
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(receiver.as_ref()).await;
+        assert_eq!(interactions.len(), 1, "receiver must see the Request");
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Request { intent, .. }
+                if intent == "test.bridge.upcall"
+        ));
+
+        // take is one-shot and consumes the live waiter.
+        assert!(
+            CoreCommsRuntime::take_bridge_reply_waiter(sender.as_ref(), &interaction_id).is_some()
+        );
+        assert!(
+            !CoreCommsRuntime::has_bridge_reply_waiter(sender.as_ref(), &interaction_id),
+            "take must consume the waiter entry"
+        );
+    }
+
+    /// T-13: a failed send removes the waiter (no stale registration) and
+    /// fires `request_send_failed` — the typed error is returned verbatim.
+    #[tokio::test]
+    async fn send_peer_request_with_reply_waiter_removes_waiter_on_send_failure() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender = Arc::new(CommsRuntime::inproc_only(&format!("waiter-fail-{suffix}")).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+
+        let result = sender
+            .send_peer_request_with_reply_waiter(
+                missing_peer_route(&format!("waiter-missing-{suffix}")),
+                "test.bridge.upcall",
+                serde_json::json!({"op": "ping"}),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(SendError::PeerNotFound(_))),
+            "route failure must surface the typed send error, got {result:?}"
+        );
+    }
+
+    /// T-13/§5.3: tombstoning replaces a live waiter; the entry still
+    /// answers `has_bridge_reply_waiter` (so the drain discards the late
+    /// reply) but `take` yields no sender and consumes the tombstone.
+    #[tokio::test]
+    async fn tombstoned_bridge_reply_waiter_discards_instead_of_delivering() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("waiter-tomb-sender-{suffix}");
+        let receiver_name = format!("waiter-tomb-receiver-{suffix}");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).unwrap());
+        let receiver = Arc::new(CommsRuntime::inproc_only(&receiver_name).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+        install_test_peer_comms_handle(receiver.as_ref());
+        add_trusted_peer_with_generated_authority(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            receiver.as_ref(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+
+        let (_reply_rx, envelope_id) = sender
+            .send_peer_request_with_reply_waiter(
+                peer_route(&receiver_name, receiver.public_key()),
+                "test.bridge.upcall",
+                serde_json::json!({"op": "ping"}),
+            )
+            .await
+            .expect("waiter-registered request must dispatch");
+
+        sender.tombstone_bridge_reply_waiter(envelope_id);
+        let interaction_id = InteractionId(envelope_id);
+        assert!(
+            CoreCommsRuntime::has_bridge_reply_waiter(sender.as_ref(), &interaction_id),
+            "tombstone must keep answering has_bridge_reply_waiter so late replies are discarded"
+        );
+        assert!(
+            CoreCommsRuntime::take_bridge_reply_waiter(sender.as_ref(), &interaction_id).is_none(),
+            "a tombstoned entry must not yield a live sender"
+        );
+        assert!(
+            !CoreCommsRuntime::has_bridge_reply_waiter(sender.as_ref(), &interaction_id),
+            "take must consume the tombstone"
         );
     }
 }

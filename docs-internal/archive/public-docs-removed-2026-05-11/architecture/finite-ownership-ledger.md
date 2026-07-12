@@ -20,7 +20,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | runtime | 7 | 20 | 4 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
-| mob | 6 | 37 | 3 | 0 | 0 | 0 |
+| mob | 8 | 37 | 3 | 0 | 0 | 0 |
 | auth | 1 | 8 | 0 | 0 | 0 | 0 |
 
 ## Boundary Manifest
@@ -150,8 +150,10 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | `meerkat-mob/src/runtime/actor.rs` | `MobActor.pending_spawns` | `derived-projection` | `closed` | `PendingSpawnLineage + MobMachine pending_spawn_count tracking` | src: `staged spawn receipts + reply obligations + provision task handles`; trigger: `enqueue_spawn, spawn completion, respawn cancellation, lifecycle drain`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/pending_spawn_lineage.rs` | `PendingSpawnLineage.tasks` | `capability-index` | `closed` | `PendingSpawnLineage metadata + MobMachine pending_spawn_count tracking` | src: `machine-owned pending spawn set`; trigger: `spawn begin/complete/rollback transitions`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/provisioner.rs` | `SessionBackend.runtime_sessions` | `capability-index` | `closed` | `MeerkatMachine registered sessions` | src: `runtime adapter registration truth + runtime bridge sidecar handles`; trigger: `runtime session ensure/reattach + retire/unregister + interrupt stale-bridge cleanup`; stale: `forbidden` |
-| `meerkat-mob/src/runtime/provisioner.rs` | `RuntimeSessionState.queued_turns` | `transport-buffer` | `closed` | `InputLifecycle canonical input identity + runtime primitive contributing ids` | src: `event transport handles keyed by canonical input ids`; trigger: `accept/dedup rekey + primitive contributing-id consumption + retire/unregister clear`; stale: `forbidden` |
+| `meerkat-mob/src/runtime/provisioner.rs` | `RuntimeSessionState.queued_turn_owner` | `transport-buffer` | `closed` | `InputLifecycle canonical input identity + runtime primitive contributing ids` | src: `event transport handles keyed by canonical input ids`; trigger: `accept/dedup rekey + primitive contributing-id consumption + retire/unregister clear`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/ops_adapter.rs` | `MobOpsAdapter.member_bindings` | `capability-handle` | `closed` | `RuntimeOpsLifecycleRegistry` | - |
+| `meerkat-mob/src/runtime/host_actor.rs` | `MobHostActor.binding_authority` | `machine-owned` | `closed` | `MobHostBindingAuthority mob-keyed regions: supervisor-binding tuple (peer, signing key, epoch, phase); materialized-member rows per (mob, identity) (generation, fence, session, spec digest — successes only, §14 R7); release-dedup rows (released generation, fence, typed disposal); turn-outcome journal per (mob, identity, generation, input_id) (terminal_seq pinned to StoredEvent.seq, §18 O2)` | src: `per-mob binding tuple recorded by ResolveHostBind/ResolveHostRebind and cleared by RevokeHostBinding; materialize dedup replays at the recorded tuple+digest (StaleFence below, SpecDigestMismatch on digest divergence); release replay returns the recorded MemberSessionDisposal; turn-outcome rows are idempotent, generation-scoped, pruned at member release, and mob-cleared at revoke (DEC-5)`; trigger: `bind accept/replay, strictly-monotonic rebind (+ idempotent rebind replay ack), revoke clear, host-command admission reads, ResolveMaterializeAdmission/Preflight arms, RecordMaterializedMember, ResolveReleaseAdmission/RecordMemberRelease, RecordTurnOutcome fresh/replay`; stale: `forbidden` |
+| `meerkat-mob/src/store/mod.rs` | `MobMemberOperatorRequestRecord.state` | `machine-owned` | `closed` | `durable member-operator request/reply protocol after exact-generation/fence MobMachine admission` | src: `Pending/Terminal rows keyed by (mob_id, agent_identity, requester_generation, requester_fence_token, request_id), carrying the typed-operation digest; Terminal is immutable and replayed verbatim, while a recovered Pending terminalizes indeterminate without re-execution`; trigger: `atomic begin-if-absent before effect; exact Pending-to-Terminal compare-and-put; digest conflict leaves the original untouched; no capacity eviction; mob-destroy scrub with rollback restore`; stale: `forbidden` |
 
 ## Mob Semantic Operations
 
@@ -200,7 +202,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
 | `mob_pending_spawn_alignment` | `MobActor.pending_spawns`, `PendingSpawnLineage.tasks`, `MobMachine pending_spawn_count tracking` | `closed` | `pending spawn lineage helpers + MobMachine pending_spawn_count tracking` |
-| `mob_runtime_bridge_alignment` | `SessionBackend.runtime_sessions`, `RuntimeSessionState.queued_turns`, `MobOpsAdapter.member_bindings` | `closed` | `SessionBackend runtime session sidecar contract + MeerkatMachine registration truth + RuntimeOpsLifecycleRegistry` |
+| `mob_runtime_bridge_alignment` | `SessionBackend.runtime_sessions`, `RuntimeSessionState.queued_turn_owner`, `MobOpsAdapter.member_bindings` | `closed` | `SessionBackend runtime session sidecar contract + MeerkatMachine registration truth + RuntimeOpsLifecycleRegistry` |
 | `mob_wiring_alignment` | `Roster.wired_to`, `trust edges`, `edge locks` | `closed` | `Roster wiring projection contract + do_wire/handle_unwire edge-lock discipline` |
 
 ## Auth State Cells

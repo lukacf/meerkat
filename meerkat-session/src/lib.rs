@@ -32,7 +32,8 @@ pub mod persistent;
 pub mod projector;
 
 pub use ephemeral::{
-    EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
+    EphemeralSessionService, LiveSessionActorRegistry, LiveSessionActorWitness,
+    LiveSessionActorWitnessSlot, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
     SessionSnapshot,
 };
 pub use staged_registry::{AdmissionOutcome, MaterializationStatus, StagedSessionRegistry};
@@ -54,7 +55,8 @@ pub use compactor::DefaultCompactor;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::{
-    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
+    LiveSessionActorTurnBoundaryLease, MachineServiceTurnCommitProtocol,
+    MachineSessionArchiveProtocol, PersistentSessionService,
 };
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)

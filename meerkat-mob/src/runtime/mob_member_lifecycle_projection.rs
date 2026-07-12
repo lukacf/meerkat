@@ -57,6 +57,13 @@ impl CanonicalMemberSnapshotMaterial {
             external_member: None,
             resolved_capabilities: None,
             progress: self.progress.clone(),
+            placement: None,
+            control_reachability: None,
+            comms_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            lifecycle_capabilities: None,
+            non_portable_disabled: None,
         }
         .with_current_bridge_session_id(self.current_bridge_session_id.clone())
     }

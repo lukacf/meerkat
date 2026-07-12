@@ -380,10 +380,19 @@ impl SessionRuntimeBindings {
     pub fn __runtime_authority(&self) -> &(dyn Any + Send + Sync) {
         self.runtime_authority.as_ref()
     }
-}
 
-impl Clone for SessionRuntimeBindings {
-    fn clone(&self) -> Self {
+    /// Clone the epoch-local mechanical handle bundle while replacing only
+    /// the runtime-private materialization authority.
+    ///
+    /// Runtime owners use this to reconstruct a service actor for the same
+    /// exact epoch/attachment without minting competing handle identities.
+    /// Public callers still cannot manufacture an authority accepted by the
+    /// runtime-backed factory.
+    #[doc(hidden)]
+    pub fn __clone_with_runtime_authority(
+        &self,
+        runtime_authority: Arc<dyn Any + Send + Sync>,
+    ) -> Self {
         Self {
             session_id: self.session_id.clone(),
             epoch_id: self.epoch_id.clone(),
@@ -406,8 +415,14 @@ impl Clone for SessionRuntimeBindings {
             session_claim_handle: Arc::clone(&self.session_claim_handle),
             interaction_stream: Arc::clone(&self.interaction_stream),
             compaction_commit_coordinator: Arc::clone(&self.compaction_commit_coordinator),
-            runtime_authority: Arc::clone(&self.runtime_authority),
+            runtime_authority,
         }
+    }
+}
+
+impl Clone for SessionRuntimeBindings {
+    fn clone(&self) -> Self {
+        self.__clone_with_runtime_authority(Arc::clone(&self.runtime_authority))
     }
 }
 

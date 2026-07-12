@@ -34,9 +34,7 @@ MobBuilder::new(definition, storage)
 
 ## Spawn Policies
 
-`SpawnMemberSpec` carries: `launch_mode`, `tool_access_policy` (inherit/allow-list/deny-list), `budget_split_policy` (Equal/Proportional/Remaining/Fixed), `auto_wire_parent` (bool).
-
-Budget splitting: orchestrator reads remaining budget, computes share per policy, decrements own budget, seeds child `BudgetLimits`.
+`SpawnMemberSpec` carries: `launch_mode`, `tool_access_policy` (inherit/allow-list/deny-list), `auto_wire_parent` (bool), `budget_limits` (hard per-member caps).
 
 ## Helper Convenience
 
@@ -120,7 +118,7 @@ Remaining `*_authority.rs` files under `meerkat-mob/src/runtime/` (roster, loop_
 
 - `meerkat-mob/src/definition.rs` — `MobDefinition`, `FrameSpec`, `RepeatUntilSpec`, `owner_bridge_session_id`, `is_implicit`
 - `meerkat-mob/src/build.rs` — mob profile → `AgentBuildConfig`, operator capability gating
-- `meerkat-mob/src/launch.rs` — `MemberLaunchMode`, `ForkContext`, `BudgetSplitPolicy`
+- `meerkat-mob/src/launch.rs` — `MemberLaunchMode`, `ForkContext`
 - `meerkat-mob/src/storage.rs` — `MobStorage`, SQLite/custom storage seams
 - `meerkat-mob/src/backend.rs` — `MobBackendKind`, `RuntimeBinding`
 - `meerkat-mob/src/runtime/handle.rs` — `MobHandle`, `SpawnMemberSpec`, `MobMemberSnapshot`

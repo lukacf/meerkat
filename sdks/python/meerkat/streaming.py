@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
-from .errors import MeerkatError
+from .errors import MeerkatError, meerkat_error_from_jsonrpc_code
 from .events import Event, TextDelta, UnknownEvent, parse_event
 
 if TYPE_CHECKING:
@@ -146,19 +146,22 @@ class _StdoutDispatcher:
                         # presentation text only — it is never parsed as JSON
                         # to recover typed fields, so SDK error semantics
                         # cannot depend on message-string folklore.
-                        nested_code = None
+                        nested_code: str | None = None
                         nested_message = None
                         nested_details = err.get("data")
                         if isinstance(nested_details, dict):
-                            nested_code = nested_details.get("code")
+                            raw_nested_code = nested_details.get("code")
+                            if isinstance(raw_nested_code, str):
+                                nested_code = raw_nested_code
                             nested_message = nested_details.get("message")
                             nested_details = nested_details.get(
                                 "details",
                                 nested_details.get("reason", nested_details),
                             )
                         future.set_exception(
-                            MeerkatError(
-                                str(nested_code or err.get("code", "UNKNOWN")),
+                            meerkat_error_from_jsonrpc_code(
+                                err.get("code", "UNKNOWN"),
+                                nested_code,
                                 str(nested_message or raw_message),
                                 nested_details,
                             )

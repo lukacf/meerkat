@@ -2948,12 +2948,15 @@ pub enum LiveOpenAdmissionRejection {
     AlreadyBound,
     #[serde(rename = "ChannelAlreadyBound")]
     ChannelAlreadyBound,
+    #[serde(rename = "LifecycleClosed")]
+    LifecycleClosed,
 }
 impl LiveOpenAdmissionRejection {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AlreadyBound => "AlreadyBound",
             Self::ChannelAlreadyBound => "ChannelAlreadyBound",
+            Self::LifecycleClosed => "LifecycleClosed",
         }
     }
 }
@@ -2963,6 +2966,7 @@ impl std::convert::TryFrom<&str> for LiveOpenAdmissionRejection {
         match value {
             "AlreadyBound" => Ok(Self::AlreadyBound),
             "ChannelAlreadyBound" => Ok(Self::ChannelAlreadyBound),
+            "LifecycleClosed" => Ok(Self::LifecycleClosed),
             other => Err(format!(
                 "invalid LiveOpenAdmissionRejection value `{other}`"
             )),
@@ -10661,6 +10665,8 @@ pub struct State {
     pub boundary_count: u64,
     pub cancel_after_boundary: bool,
     pub boundary_cancel_dispatch_pending: bool,
+    pub boundary_cancel_dispatch_generation: u64,
+    pub turn_terminal_run_id: Option<RunId>,
     pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub last_runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
@@ -10994,6 +11000,14 @@ pub mod inputs {
         pub runtime_epoch_id: Option<RuntimeEpochId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginUnregisterUnservedAttachment {
+        pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeLoopStoppedForUnregister {
         pub session_id: SessionId,
         pub forced_abort: bool,
@@ -11118,6 +11132,10 @@ pub mod inputs {
         pub reason: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortCancelAfterBoundaryDispatch {
+        pub dispatch_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StagePersistentFilter {
         pub filter: ToolFilter,
         pub witnesses: std::collections::BTreeMap<ToolName, ToolVisibilityWitness>,
@@ -11239,6 +11257,10 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeExecutorExited {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRuntimeCompletionResultCorrelation {
+        pub run_id: RunId,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeCompletionResult {
         pub run_id: Option<RunId>,
@@ -11669,6 +11691,10 @@ pub mod inputs {
     pub struct LlmReturnedToolCalls {
         pub run_id: RunId,
         pub tool_count: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CallbackPending {
+        pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LlmReturnedTerminal {
@@ -12613,6 +12639,16 @@ pub mod inputs {
         pub epoch: u64,
         pub endpoints: std::collections::BTreeSet<PeerEndpoint>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeInteractionTerminalOutboxAdoption {
+        pub batch_key: String,
+        pub candidate_digest: String,
+        pub session_id: SessionId,
+        pub previous_agent_runtime_id: AgentRuntimeId,
+        pub previous_fence_token: FenceToken,
+        pub previous_runtime_generation: Generation,
+        pub previous_runtime_epoch_id: Option<RuntimeEpochId>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12620,6 +12656,7 @@ pub enum Input {
     RegisterSession(inputs::RegisterSession),
     PrepareTerminalSupervisorCleanupBindings(inputs::PrepareTerminalSupervisorCleanupBindings),
     BeginUnregisterSession(inputs::BeginUnregisterSession),
+    BeginUnregisterUnservedAttachment(inputs::BeginUnregisterUnservedAttachment),
     RuntimeLoopStoppedForUnregister(inputs::RuntimeLoopStoppedForUnregister),
     CommsDrainExitedForUnregister(inputs::CommsDrainExitedForUnregister),
     CompletionWaitersResolvedForUnregister(inputs::CompletionWaitersResolvedForUnregister),
@@ -12637,6 +12674,7 @@ pub enum Input {
     InterruptCurrentRun(inputs::InterruptCurrentRun),
     ResolveUserInterruptPublicResult(inputs::ResolveUserInterruptPublicResult),
     CancelAfterBoundary(inputs::CancelAfterBoundary),
+    AbortCancelAfterBoundaryDispatch(inputs::AbortCancelAfterBoundaryDispatch),
     StagePersistentFilter(inputs::StagePersistentFilter),
     PublishCommittedVisibleSet(inputs::PublishCommittedVisibleSet),
     Recover(inputs::Recover),
@@ -12666,6 +12704,7 @@ pub enum Input {
     Reset(inputs::Reset),
     StopRuntimeExecutor(inputs::StopRuntimeExecutor),
     RuntimeExecutorExited(inputs::RuntimeExecutorExited),
+    RecoverRuntimeCompletionResultCorrelation(inputs::RecoverRuntimeCompletionResultCorrelation),
     ResolveRuntimeCompletionResult(inputs::ResolveRuntimeCompletionResult),
     ResolveRuntimeCompletionCleanup(inputs::ResolveRuntimeCompletionCleanup),
     ResolveRuntimeCompletionWaitFailure(inputs::ResolveRuntimeCompletionWaitFailure),
@@ -12737,6 +12776,7 @@ pub enum Input {
     StartImmediateContext(inputs::StartImmediateContext),
     PrimitiveApplied(inputs::PrimitiveApplied),
     LlmReturnedToolCalls(inputs::LlmReturnedToolCalls),
+    CallbackPending(inputs::CallbackPending),
     LlmReturnedTerminal(inputs::LlmReturnedTerminal),
     RegisterPendingOps(inputs::RegisterPendingOps),
     ToolCallsResolved(inputs::ToolCallsResolved),
@@ -12914,6 +12954,7 @@ pub enum Input {
     ResolveSupervisorCleanupCommandAdmission(inputs::ResolveSupervisorCleanupCommandAdmission),
     AuthorizeSupervisorMobPeerOverlay(inputs::AuthorizeSupervisorMobPeerOverlay),
     ApplyMobPeerOverlay(inputs::ApplyMobPeerOverlay),
+    AuthorizeInteractionTerminalOutboxAdoption(inputs::AuthorizeInteractionTerminalOutboxAdoption),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12923,6 +12964,9 @@ impl Input {
                 InputKind::PrepareTerminalSupervisorCleanupBindings
             }
             Self::BeginUnregisterSession(_) => InputKind::BeginUnregisterSession,
+            Self::BeginUnregisterUnservedAttachment(_) => {
+                InputKind::BeginUnregisterUnservedAttachment
+            }
             Self::RuntimeLoopStoppedForUnregister(_) => InputKind::RuntimeLoopStoppedForUnregister,
             Self::CommsDrainExitedForUnregister(_) => InputKind::CommsDrainExitedForUnregister,
             Self::CompletionWaitersResolvedForUnregister(_) => {
@@ -12946,6 +12990,9 @@ impl Input {
                 InputKind::ResolveUserInterruptPublicResult
             }
             Self::CancelAfterBoundary(_) => InputKind::CancelAfterBoundary,
+            Self::AbortCancelAfterBoundaryDispatch(_) => {
+                InputKind::AbortCancelAfterBoundaryDispatch
+            }
             Self::StagePersistentFilter(_) => InputKind::StagePersistentFilter,
             Self::PublishCommittedVisibleSet(_) => InputKind::PublishCommittedVisibleSet,
             Self::Recover(_) => InputKind::Recover,
@@ -12981,6 +13028,9 @@ impl Input {
             Self::Reset(_) => InputKind::Reset,
             Self::StopRuntimeExecutor(_) => InputKind::StopRuntimeExecutor,
             Self::RuntimeExecutorExited(_) => InputKind::RuntimeExecutorExited,
+            Self::RecoverRuntimeCompletionResultCorrelation(_) => {
+                InputKind::RecoverRuntimeCompletionResultCorrelation
+            }
             Self::ResolveRuntimeCompletionResult(_) => InputKind::ResolveRuntimeCompletionResult,
             Self::ResolveRuntimeCompletionCleanup(_) => InputKind::ResolveRuntimeCompletionCleanup,
             Self::ResolveRuntimeCompletionWaitFailure(_) => {
@@ -13074,6 +13124,7 @@ impl Input {
             Self::StartImmediateContext(_) => InputKind::StartImmediateContext,
             Self::PrimitiveApplied(_) => InputKind::PrimitiveApplied,
             Self::LlmReturnedToolCalls(_) => InputKind::LlmReturnedToolCalls,
+            Self::CallbackPending(_) => InputKind::CallbackPending,
             Self::LlmReturnedTerminal(_) => InputKind::LlmReturnedTerminal,
             Self::RegisterPendingOps(_) => InputKind::RegisterPendingOps,
             Self::ToolCallsResolved(_) => InputKind::ToolCallsResolved,
@@ -13289,6 +13340,9 @@ impl Input {
                 InputKind::AuthorizeSupervisorMobPeerOverlay
             }
             Self::ApplyMobPeerOverlay(_) => InputKind::ApplyMobPeerOverlay,
+            Self::AuthorizeInteractionTerminalOutboxAdoption(_) => {
+                InputKind::AuthorizeInteractionTerminalOutboxAdoption
+            }
         }
     }
 }
@@ -13297,6 +13351,7 @@ pub enum InputKind {
     RegisterSession,
     PrepareTerminalSupervisorCleanupBindings,
     BeginUnregisterSession,
+    BeginUnregisterUnservedAttachment,
     RuntimeLoopStoppedForUnregister,
     CommsDrainExitedForUnregister,
     CompletionWaitersResolvedForUnregister,
@@ -13314,6 +13369,7 @@ pub enum InputKind {
     InterruptCurrentRun,
     ResolveUserInterruptPublicResult,
     CancelAfterBoundary,
+    AbortCancelAfterBoundaryDispatch,
     StagePersistentFilter,
     PublishCommittedVisibleSet,
     Recover,
@@ -13339,6 +13395,7 @@ pub enum InputKind {
     Reset,
     StopRuntimeExecutor,
     RuntimeExecutorExited,
+    RecoverRuntimeCompletionResultCorrelation,
     ResolveRuntimeCompletionResult,
     ResolveRuntimeCompletionCleanup,
     ResolveRuntimeCompletionWaitFailure,
@@ -13410,6 +13467,7 @@ pub enum InputKind {
     StartImmediateContext,
     PrimitiveApplied,
     LlmReturnedToolCalls,
+    CallbackPending,
     LlmReturnedTerminal,
     RegisterPendingOps,
     ToolCallsResolved,
@@ -13587,6 +13645,7 @@ pub enum InputKind {
     ResolveSupervisorCleanupCommandAdmission,
     AuthorizeSupervisorMobPeerOverlay,
     ApplyMobPeerOverlay,
+    AuthorizeInteractionTerminalOutboxAdoption,
 }
 
 pub mod signals {
@@ -14517,6 +14576,20 @@ pub mod effects {
     pub struct RequestCompletionWaiterResolutionForUnregister {
         pub session_id: SessionId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InteractionTerminalOutboxAdoptionAuthorized {
+        pub batch_key: String,
+        pub candidate_digest: String,
+        pub session_id: SessionId,
+        pub previous_agent_runtime_id: AgentRuntimeId,
+        pub previous_fence_token: FenceToken,
+        pub previous_runtime_generation: Generation,
+        pub previous_runtime_epoch_id: Option<RuntimeEpochId>,
+        pub next_agent_runtime_id: AgentRuntimeId,
+        pub next_fence_token: FenceToken,
+        pub next_runtime_generation: Generation,
+        pub next_runtime_epoch_id: Option<RuntimeEpochId>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14683,6 +14756,9 @@ pub enum Effect {
     RequestCompletionWaiterResolutionForUnregister(
         effects::RequestCompletionWaiterResolutionForUnregister,
     ),
+    InteractionTerminalOutboxAdoptionAuthorized(
+        effects::InteractionTerminalOutboxAdoptionAuthorized,
+    ),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -14844,6 +14920,7 @@ pub enum EffectKind {
     RequestRuntimeLoopStopForUnregister,
     RequestCommsDrainExitForUnregister,
     RequestCompletionWaiterResolutionForUnregister,
+    InteractionTerminalOutboxAdoptionAuthorized,
 }
 
 pub mod command_capabilities {
@@ -14858,6 +14935,7 @@ pub mod command_capabilities {
         AuthorizeRuntimeLoopBatch,
         AuthorizedStageForRun,
         AuthorizedRuntimeLoopRunCommit,
+        AuthorizedInteractionTerminalOutboxAdoption,
         AuthorizedRuntimeCompletionResultClosure,
     }
 
@@ -14871,6 +14949,9 @@ pub mod command_capabilities {
                 Self::AuthorizeRuntimeLoopBatch => "AuthorizeRuntimeLoopBatch",
                 Self::AuthorizedStageForRun => "AuthorizedStageForRun",
                 Self::AuthorizedRuntimeLoopRunCommit => "AuthorizedRuntimeLoopRunCommit",
+                Self::AuthorizedInteractionTerminalOutboxAdoption => {
+                    "AuthorizedInteractionTerminalOutboxAdoption"
+                }
                 Self::AuthorizedRuntimeCompletionResultClosure => {
                     "AuthorizedRuntimeCompletionResultClosure"
                 }
@@ -15019,6 +15100,27 @@ pub mod command_capabilities {
         #[must_use]
         pub const fn plan(&self) -> CommandPlanKind {
             CommandPlanKind::AuthorizedRuntimeLoopRunCommit
+        }
+    }
+
+    #[must_use = "generated command capability `AuthorizedInteractionTerminalOutboxAdoption` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct AuthorizedInteractionTerminalOutboxAdoption {
+        _sealed: private::Sealed,
+    }
+
+    impl AuthorizedInteractionTerminalOutboxAdoption {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizedInteractionTerminalOutboxAdoption
         }
     }
 
@@ -15265,6 +15367,9 @@ pub enum TransitionId {
     BeginUnregisterSessionRunning,
     BeginUnregisterSessionRetainsSnapshotRetired,
     BeginUnregisterSessionRetainsSnapshotStopped,
+    BeginUnregisterUnservedAttachmentIdle,
+    BeginUnregisterUnservedAttachmentAttached,
+    BeginUnregisterUnservedAttachmentRunning,
     RuntimeLoopStoppedForUnregisterIdle,
     RuntimeLoopStoppedForUnregisterAttached,
     RuntimeLoopStoppedForUnregisterRunning,
@@ -15493,6 +15598,7 @@ pub enum TransitionId {
     ResolveUserInterruptPublicResultAcceptedRunning,
     ResolveUserInterruptPublicResultAcceptedRetired,
     ResolveUserInterruptPublicResultAcceptedStopped,
+    ResolveUserInterruptPublicResultAcceptedDestroyed,
     ResolveUserInterruptPublicResultNoopInitializing,
     ResolveUserInterruptPublicResultNoopIdle,
     ResolveUserInterruptPublicResultNoopAttached,
@@ -15533,6 +15639,13 @@ pub enum TransitionId {
     CancelAfterBoundary,
     CancelAfterBoundaryAttachedAlreadyPending,
     CancelAfterBoundaryAlreadyPending,
+    AbortCancelAfterBoundaryDispatchInitializing,
+    AbortCancelAfterBoundaryDispatchIdle,
+    AbortCancelAfterBoundaryDispatchAttached,
+    AbortCancelAfterBoundaryDispatchRunning,
+    AbortCancelAfterBoundaryDispatchRetired,
+    AbortCancelAfterBoundaryDispatchStopped,
+    AbortCancelAfterBoundaryDispatchDestroyed,
     BoundaryAppliedPublish,
     PublishCommittedVisibleSetIdle,
     PublishCommittedVisibleSetAttached,
@@ -15553,6 +15666,18 @@ pub enum TransitionId {
     RuntimeExecutorExitedFromIdle,
     RuntimeExecutorExitedFromRetired,
     RuntimeExecutorExitedFromStopped,
+    AuthorizeInteractionTerminalOutboxAdoptionInitializing,
+    AuthorizeInteractionTerminalOutboxAdoptionIdle,
+    AuthorizeInteractionTerminalOutboxAdoptionAttached,
+    AuthorizeInteractionTerminalOutboxAdoptionRunning,
+    AuthorizeInteractionTerminalOutboxAdoptionRetired,
+    AuthorizeInteractionTerminalOutboxAdoptionStopped,
+    RecoverRuntimeCompletionResultCorrelationInitializing,
+    RecoverRuntimeCompletionResultCorrelationIdle,
+    RecoverRuntimeCompletionResultCorrelationAttached,
+    RecoverRuntimeCompletionResultCorrelationRunning,
+    RecoverRuntimeCompletionResultCorrelationRetired,
+    RecoverRuntimeCompletionResultCorrelationStopped,
     ResolveRuntimeCompletionResultCompletedInitializing,
     ResolveRuntimeCompletionResultCompletedIdle,
     ResolveRuntimeCompletionResultCompletedAttached,
@@ -15746,10 +15871,12 @@ pub enum TransitionId {
     PublishEventRunning,
     PublishEventRetired,
     PublishEventStopped,
-    AcceptWithCompletionIdleQueued,
+    AcceptWithCompletionIdleQueuedPassive,
+    AcceptWithCompletionIdleQueuedWakeIfIdle,
     AcceptWithCompletionIdleImmediate,
     AcceptWithCompletionAttachedImmediate,
-    AcceptWithCompletionAttachedQueued,
+    AcceptWithCompletionAttachedQueuedPassive,
+    AcceptWithCompletionAttachedQueuedWakeIfIdle,
     AcceptWithCompletionRunningQueuedPassive,
     AcceptWithCompletionRunningQueuedWakeIfIdle,
     AcceptWithCompletionRunningInterruptYielding,
@@ -16008,6 +16135,7 @@ pub enum TransitionId {
     PrimitiveAppliedImmediateCancelled,
     LlmReturnedToolCallsPositive,
     LlmReturnedToolCallsZero,
+    CallbackPendingCompleted,
     LlmReturnedTerminal,
     RegisterPendingOps,
     ToolCallsResolvedToCalling,
@@ -16386,21 +16514,23 @@ pub enum TransitionId {
     FinishSurfaceRequestUnpublishedPendingInitializing,
     FinishSurfaceRequestUnpublishedCancelledInitializing,
     FinishSurfaceRequestUnpublishedTerminalInitializing,
+    ResolveLiveOpenAdmissionUnregisteredIdle,
     ResolveLiveOpenAdmissionAcceptedIdle,
     ResolveLiveOpenAdmissionAcceptedAttached,
     ResolveLiveOpenAdmissionAcceptedRunning,
-    ResolveLiveOpenAdmissionAcceptedRetired,
-    ResolveLiveOpenAdmissionAcceptedStopped,
     ResolveLiveOpenAdmissionSessionAlreadyBoundIdle,
     ResolveLiveOpenAdmissionSessionAlreadyBoundAttached,
     ResolveLiveOpenAdmissionSessionAlreadyBoundRunning,
-    ResolveLiveOpenAdmissionSessionAlreadyBoundRetired,
-    ResolveLiveOpenAdmissionSessionAlreadyBoundStopped,
     ResolveLiveOpenAdmissionChannelAlreadyBoundIdle,
     ResolveLiveOpenAdmissionChannelAlreadyBoundAttached,
     ResolveLiveOpenAdmissionChannelAlreadyBoundRunning,
-    ResolveLiveOpenAdmissionChannelAlreadyBoundRetired,
-    ResolveLiveOpenAdmissionChannelAlreadyBoundStopped,
+    ResolveLiveOpenAdmissionDrainingIdle,
+    ResolveLiveOpenAdmissionDrainingAttached,
+    ResolveLiveOpenAdmissionDrainingRunning,
+    ResolveLiveOpenAdmissionStopDeferredAttached,
+    ResolveLiveOpenAdmissionStopDeferredRunning,
+    ResolveLiveOpenAdmissionRetiredRetired,
+    ResolveLiveOpenAdmissionStoppedStopped,
     AbandonLiveOpenAdmissionIdle,
     AbandonLiveOpenAdmissionAttached,
     AbandonLiveOpenAdmissionRunning,
@@ -17242,6 +17372,8 @@ pub fn initial_state() -> State {
         boundary_count: 0,
         cancel_after_boundary: false,
         boundary_cancel_dispatch_pending: false,
+        boundary_cancel_dispatch_generation: 0,
+        turn_terminal_run_id: None,
         terminal_outcome: None,
         terminal_cause_kind: None,
         last_runtime_apply_failure_cause: None,

@@ -5,7 +5,15 @@ import json
 
 import pytest
 
-from meerkat.errors import MeerkatError
+from meerkat.errors import (
+    HostUnavailableError,
+    MeerkatError,
+    ScopeDeniedError,
+    StaleCursorError,
+    StaleFenceError,
+    meerkat_error_from_jsonrpc_code,
+    meerkat_error_from_semantic_code,
+)
 from meerkat.events import (
     Event,
     TextDelta,
@@ -61,6 +69,37 @@ RUN_RESULT = {
     "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
 }
 
+MULTI_HOST_ERROR_CASES = [
+    (
+        -32025,
+        "SCOPE_DENIED",
+        ScopeDeniedError,
+        {"required": "live", "presented": ["list", "read_history"]},
+        {"required": "live"},
+    ),
+    (
+        -32026,
+        "HOST_UNAVAILABLE",
+        HostUnavailableError,
+        {"host": "host:remote-1", "timeout_ms": 5000},
+        {"timeout_ms": -1},
+    ),
+    (
+        -32027,
+        "STALE_CURSOR",
+        StaleCursorError,
+        {"watermark": 42, "generation": 3, "requested": 7},
+        {"generation": 3},
+    ),
+    (
+        -32028,
+        "STALE_FENCE",
+        StaleFenceError,
+        {"runtime_id": "runtime-1", "expected": 9, "actual": 8},
+        {"runtime_id": 7},
+    ),
+]
+
 
 def _parse_run_result(data: dict) -> RunResult:
     """Minimal RunResult parser for tests."""
@@ -82,6 +121,97 @@ def _parse_run_result(data: dict) -> RunResult:
 # ===========================================================================
 
 class TestStdoutDispatcher:
+
+    @pytest.mark.parametrize(
+        "rpc_code,semantic_code,error_class,details,_malformed",
+        MULTI_HOST_ERROR_CASES,
+    )
+    def test_multi_host_error_factories_map_numeric_and_semantic_codes(
+        self, rpc_code, semantic_code, error_class, details, _malformed
+    ):
+        semantic = meerkat_error_from_semantic_code(
+            semantic_code, "typed message", details
+        )
+        assert isinstance(semantic, error_class)
+        assert semantic.details == details
+
+        numeric = meerkat_error_from_jsonrpc_code(
+            rpc_code, None, "numeric message", details
+        )
+        assert isinstance(numeric, error_class)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "rpc_code,semantic_code,error_class,details,_malformed",
+        MULTI_HOST_ERROR_CASES,
+    )
+    async def test_dispatcher_raises_typed_multi_host_errors(
+        self, rpc_code, semantic_code, error_class, details, _malformed
+    ):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": rpc_code,
+                "message": "presentation text",
+                "data": {
+                    "code": semantic_code,
+                    "message": "typed message",
+                    "details": details,
+                },
+            },
+        }
+        reader = make_reader([jline(payload)])
+        dispatcher = _StdoutDispatcher(reader)
+        dispatcher.start()
+        future = dispatcher.expect_response(1)
+        with pytest.raises(error_class) as exc_info:
+            await asyncio.wait_for(future, timeout=1.0)
+        assert exc_info.value.code == semantic_code
+        assert exc_info.value.message == "typed message"
+        assert exc_info.value.details == details
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "rpc_code,semantic_code,_error_class,_details,malformed",
+        MULTI_HOST_ERROR_CASES,
+    )
+    async def test_dispatcher_keeps_malformed_multi_host_details_generic(
+        self, rpc_code, semantic_code, _error_class, _details, malformed
+    ):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": rpc_code,
+                "message": "presentation text",
+                "data": {
+                    "code": semantic_code,
+                    "message": "typed message",
+                    "details": malformed,
+                },
+            },
+        }
+        reader = make_reader([jline(payload)])
+        dispatcher = _StdoutDispatcher(reader)
+        dispatcher.start()
+        future = dispatcher.expect_response(1)
+        with pytest.raises(MeerkatError) as exc_info:
+            await asyncio.wait_for(future, timeout=1.0)
+        assert type(exc_info.value) is MeerkatError
+        assert exc_info.value.code == semantic_code
+        assert exc_info.value.details == malformed
+        await dispatcher.stop()
+
+    def test_jsonrpc_factory_rejects_numeric_semantic_mismatch(self):
+        mismatch = meerkat_error_from_jsonrpc_code(
+            -32025,
+            "HOST_UNAVAILABLE",
+            "mismatched envelope",
+            {"host": "host:remote-1"},
+        )
+        assert type(mismatch) is MeerkatError
 
     @pytest.mark.asyncio
     async def test_response_dispatched_to_correct_future(self):

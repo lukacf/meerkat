@@ -43,8 +43,168 @@ pub fn create_flow_step_input(
         },
         step_id: step_id.into(),
         content: instructions,
+        directed_interaction_id: None,
         turn_metadata,
     })
+}
+
+/// Create the member-side tracked-turn input for a directive-bearing
+/// `DeliverMemberInput` (multi-host mobs §18 O1, DEC-P6F-9 step 3): the
+/// local flow-step mechanics relocated to the host that runs the loop.
+///
+/// `idempotency_key` is the delivery `input_id`, preserved EXACTLY so
+/// redelivery deduplicates (`AcceptOutcome::Deduplicated`), matching the
+/// plain-delivery path's `peer_input_from_delivery_payload` discipline.
+pub fn create_tracked_flow_step_input(
+    step_id: &str,
+    instructions: ContentInput,
+    flow_id: &str,
+    turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    stable_input_id: &str,
+) -> Result<Input, String> {
+    let stable_uuid = uuid::Uuid::parse_str(stable_input_id).map_err(|error| {
+        format!("tracked flow-step payload input_id '{stable_input_id}' is not a UUID: {error}")
+    })?;
+    if stable_uuid.is_nil() {
+        return Err("tracked flow-step payload input_id must not be the nil UUID".to_string());
+    }
+    if stable_uuid.to_string() != stable_input_id {
+        return Err(format!(
+            "tracked flow-step payload input_id '{stable_input_id}' is not a canonical UUID"
+        ));
+    }
+    Ok(Input::FlowStep(FlowStepInput {
+        header: InputHeader {
+            id: InputId::from_uuid(stable_uuid),
+            timestamp: chrono::Utc::now(),
+            source: InputOrigin::Flow {
+                flow_id: flow_id.into(),
+                // Remote steps carry no member-side step ordinal; the
+                // controlling host owns flow sequencing (§18.1 — frame
+                // engine stays controlling-host-local).
+                step_index: 0,
+            },
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: Some(crate::identifiers::IdempotencyKey::new(stable_input_id)),
+            supersession_key: None,
+            correlation_id: Some(crate::identifiers::CorrelationId::from_uuid(stable_uuid)),
+        },
+        step_id: step_id.into(),
+        content: instructions,
+        directed_interaction_id: Some(meerkat_core::interaction::InteractionId(stable_uuid)),
+        turn_metadata,
+    }))
+}
+
+#[cfg(test)]
+mod tracked_flow_step_tests {
+    use super::*;
+
+    #[test]
+    fn payload_uuid_owns_input_id_correlation_and_idempotency() {
+        let stable = uuid::Uuid::new_v4();
+        let input = create_tracked_flow_step_input(
+            "step-1",
+            ContentInput::Text("work".to_string()),
+            "run-1",
+            None,
+            &stable.to_string(),
+        )
+        .expect("UUID lowers to tracked input");
+        assert_eq!(input.id().0, stable);
+        assert_eq!(
+            input.header().correlation_id.as_ref().map(|id| id.0),
+            Some(stable)
+        );
+        assert_eq!(
+            input
+                .header()
+                .idempotency_key
+                .as_ref()
+                .map(ToString::to_string),
+            Some(stable.to_string())
+        );
+        crate::input::validate_directed_flow_step_correlation(&input)
+            .expect("constructor must mint a valid directed correlation");
+    }
+
+    #[test]
+    fn forged_directed_correlation_is_rejected() {
+        let stable = uuid::Uuid::new_v4();
+        let mut input = create_tracked_flow_step_input(
+            "step-1",
+            ContentInput::Text("work".to_string()),
+            "run-1",
+            None,
+            &stable.to_string(),
+        )
+        .expect("tracked input");
+        let Input::FlowStep(flow_step) = &mut input else {
+            panic!("flow step");
+        };
+        flow_step.directed_interaction_id = Some(meerkat_core::interaction::InteractionId(
+            uuid::Uuid::new_v4(),
+        ));
+
+        assert!(crate::input::validate_directed_flow_step_correlation(&input).is_err());
+    }
+
+    #[test]
+    fn caller_metadata_cannot_smuggle_directed_interaction_ids() {
+        let stable = uuid::Uuid::new_v4();
+        let forged = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+        let mut caller_metadata =
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::default();
+        caller_metadata.directed_interaction_ids.push(forged);
+        let input = create_tracked_flow_step_input(
+            "step-1",
+            ContentInput::Text("work".to_string()),
+            "run-1",
+            Some(caller_metadata),
+            &stable.to_string(),
+        )
+        .expect("tracked input");
+        let semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+                .expect("flow step admission");
+        let projected = crate::runtime_loop::for_input(&input, semantics);
+
+        assert_eq!(
+            projected.directed_interaction_ids,
+            vec![meerkat_core::interaction::InteractionId(stable)],
+            "runtime must overwrite caller-supplied directed identities"
+        );
+    }
+
+    #[test]
+    fn non_uuid_payload_id_is_rejected_before_admission() {
+        assert!(
+            create_tracked_flow_step_input(
+                "step-1",
+                ContentInput::Text("work".to_string()),
+                "run-1",
+                None,
+                "alias-not-uuid",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn nil_uuid_payload_id_is_rejected_before_admission() {
+        assert!(
+            create_tracked_flow_step_input(
+                "step-1",
+                ContentInput::Text("work".to_string()),
+                "run-1",
+                None,
+                &uuid::Uuid::nil().to_string(),
+            )
+            .expect_err("nil cannot own tracked-turn custody")
+            .contains("nil UUID")
+        );
+    }
 }
 
 /// Register a mob member's session with the runtime adapter.

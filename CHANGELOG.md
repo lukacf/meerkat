@@ -103,6 +103,14 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- Transcript revision history no longer retains a complete mechanical head
+  snapshot after every ordinary append once any audited rewrite exists.
+  Snapshots preserve genuine rewrite endpoints plus the live head, typed
+  synthetic-notice maintenance stays off the audited undo path, and legacy
+  parentless revision chains compact on read/save with strict digest, lineage,
+  recurrence, cycle, and persisted-MCP integrity checks intact. Long-lived
+  sessions therefore stop growing quadratically with turn count while real
+  transcript revisions remain listable and restorable.
 - Python and TypeScript now validate canonical `comms/send` result variants and
   member-progress snapshots before returning them, rejecting missing, legacy,
   malformed, or unknown fields instead of casting them to generated types.

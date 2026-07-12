@@ -1503,6 +1503,17 @@ pub enum SystemNoticeKind {
 }
 
 impl SystemNoticeKind {
+    /// Whether notices of this kind are ephemeral runtime projections whose
+    /// replacement is mechanical bookkeeping, not an operator transcript
+    /// rewrite.
+    #[must_use]
+    pub const fn is_synthetic_refresh_projection(self) -> bool {
+        matches!(
+            self,
+            Self::McpPending | Self::BackgroundJob | Self::AuthReauthRequired
+        )
+    }
+
     pub const fn render_class(self) -> RenderClass {
         match self {
             Self::Generic | Self::McpPending | Self::AuthReauthRequired => {
@@ -2144,6 +2155,28 @@ impl SystemNoticeMessage {
         block: SystemNoticeBlock,
     ) -> Self {
         Self::with_blocks(kind, body, vec![block])
+    }
+
+    /// Whether this exact notice is an ephemeral refresh projection.
+    ///
+    /// `McpPending` blocks with `persisted: true` are durable facts despite
+    /// sharing the pending kind, so kind alone is not sufficient authority
+    /// for mechanical transcript removal.
+    #[must_use]
+    pub fn is_synthetic_refresh_projection(&self) -> bool {
+        match self.kind {
+            SystemNoticeKind::McpPending => self.blocks.iter().all(|block| {
+                matches!(
+                    block,
+                    SystemNoticeBlock::Mcp {
+                        persisted: false,
+                        ..
+                    }
+                )
+            }),
+            SystemNoticeKind::BackgroundJob | SystemNoticeKind::AuthReauthRequired => true,
+            _ => false,
+        }
     }
 
     /// Internal model-facing projection for typed runtime facts.

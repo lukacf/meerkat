@@ -221,7 +221,7 @@ pub fn append_only_save_guard(
         )?;
         return Ok(());
     }
-    if incoming_preserves_prefix_after_transient_notice_cleanup(incoming, previous)? {
+    if incoming_preserves_prefix_after_synthetic_notice_refresh(incoming, previous)? {
         validate_plain_save_transcript_history_preservation(
             incoming,
             Some(previous),
@@ -288,23 +288,12 @@ fn validate_plain_save_transcript_history_preservation(
                 .to_string(),
         });
     }
-    let retained_revisions_preserved =
-        transcript_revision_bodies_preserved(previous_state, incoming_state)?;
-    if retained_revisions_preserved
-        && incoming_state.revisions.len() == previous_state.revisions.len()
-        && incoming_state.head == previous_state.head
-    {
-        return Ok(());
-    }
-    if incoming_state.revisions.len() != previous_state.revisions.len() + 1
-        || !retained_revisions_preserved
-    {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
+    incoming
+        .validate_transcript_history_state()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
-            reason: "incoming append-only save would change retained transcript revision graph"
-                .to_string(),
-        });
-    }
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        })?;
     let incoming_revision =
         transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
     let previous_revision =
@@ -316,45 +305,76 @@ fn validate_plain_save_transcript_history_preservation(
                 .to_string(),
         });
     }
-    let added = &incoming_state.revisions[previous_state.revisions.len()];
-    if incoming_state.head != incoming_revision
-        || added.revision != incoming_revision
-        || added.parent_revision.as_deref() != Some(previous_state.head.as_str())
-        || transcript_messages_digest(&added.messages).map_err(SessionStoreError::from)?
-            != incoming_revision
-    {
+    if incoming_state.head != incoming_revision {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
-            reason: "incoming append-only save would add a transcript revision body that is not the current append"
+            reason: "incoming append-only save history head does not match the current transcript"
                 .to_string(),
         });
     }
-    Ok(())
+
+    let mut canonical_revisions = std::collections::BTreeSet::from([incoming_state.head.clone()]);
+    for commit in &incoming_state.commits {
+        canonical_revisions.insert(commit.parent_revision.clone());
+        canonical_revisions.insert(commit.revision.clone());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if incoming_state.revisions.iter().any(|body| {
+        !canonical_revisions.contains(&body.revision) || !seen.insert(body.revision.clone())
+    }) {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: "incoming append-only save carries non-canonical mechanical revision bodies"
+                .to_string(),
+        });
+    }
+
+    validate_audited_revision_bodies_preserved(incoming, previous_state, incoming_state)
 }
 
-fn transcript_revision_bodies_preserved(
+fn validate_audited_revision_bodies_preserved(
+    incoming: &Session,
     previous_state: &TranscriptHistoryState,
     incoming_state: &TranscriptHistoryState,
-) -> Result<bool, SessionStoreError> {
-    if incoming_state.revisions.len() < previous_state.revisions.len() {
-        return Ok(false);
+) -> Result<(), SessionStoreError> {
+    let mut audited_revisions = std::collections::BTreeSet::new();
+    for commit in &previous_state.commits {
+        audited_revisions.insert(commit.parent_revision.as_str());
+        audited_revisions.insert(commit.revision.as_str());
     }
-    previous_state
-        .revisions
-        .iter()
-        .zip(incoming_state.revisions.iter())
-        .map(|(previous, incoming)| {
-            Ok(previous.revision == incoming.revision
-                && previous.parent_revision == incoming.parent_revision
-                && previous.created_at == incoming.created_at
-                && transcript_messages_digest(&previous.messages)
+    for revision in audited_revisions {
+        let previous_body = previous_state
+            .revisions
+            .iter()
+            .find(|body| body.revision == revision)
+            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("previous transcript history omits audited body {revision}"),
+            })?;
+        let incoming_body = incoming_state
+            .revisions
+            .iter()
+            .find(|body| body.revision == revision)
+            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!("incoming append-only save drops audited body {revision}"),
+            })?;
+        if previous_body.parent_revision != incoming_body.parent_revision
+            || previous_body.created_at != incoming_body.created_at
+            || transcript_messages_digest(&previous_body.messages)
+                .map_err(SessionStoreError::from)?
+                != transcript_messages_digest(&incoming_body.messages)
                     .map_err(SessionStoreError::from)?
-                    == transcript_messages_digest(&incoming.messages)
-                        .map_err(SessionStoreError::from)?)
-        })
-        .try_fold(true, |acc, preserved| {
-            preserved.map(|preserved| acc && preserved)
-        })
+        {
+            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                id: incoming.id().clone(),
+                reason: format!(
+                    "incoming append-only save changes audited transcript body {revision}"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_rewrite_save_retains_previous_commits(
@@ -380,7 +400,7 @@ fn validate_rewrite_save_retains_previous_commits(
                 .to_string(),
         });
     }
-    Ok(())
+    validate_audited_revision_bodies_preserved(incoming, previous_state, incoming_state)
 }
 
 /// Validate that an authoritative projection write still targets the row that
@@ -511,43 +531,41 @@ fn system_context_is_append(
         })
 }
 
-fn incoming_preserves_prefix_after_transient_notice_cleanup(
+fn incoming_preserves_prefix_after_synthetic_notice_refresh(
     incoming: &Session,
     previous: &Session,
 ) -> Result<bool, SessionStoreError> {
-    let previous_without_transient = previous
+    let previous_without_synthetic = previous
         .messages()
         .iter()
-        .filter(|message| !is_transient_system_notice(message))
+        .filter(|message| !is_synthetic_refresh_projection(message))
         .cloned()
         .collect::<Vec<_>>();
-    if previous_without_transient.len() == previous.messages().len()
-        || incoming.messages().len() < previous_without_transient.len()
-    {
+    if previous_without_synthetic.len() == previous.messages().len() {
+        return Ok(false);
+    }
+    let incoming_without_synthetic = incoming
+        .messages()
+        .iter()
+        .filter(|message| !is_synthetic_refresh_projection(message))
+        .cloned()
+        .collect::<Vec<_>>();
+    if incoming_without_synthetic.len() < previous_without_synthetic.len() {
         return Ok(false);
     }
     let previous_revision =
-        transcript_messages_digest(&previous_without_transient).map_err(SessionStoreError::from)?;
+        transcript_messages_digest(&previous_without_synthetic).map_err(SessionStoreError::from)?;
     let incoming_prefix_revision =
-        transcript_messages_digest(&incoming.messages()[..previous_without_transient.len()])
+        transcript_messages_digest(&incoming_without_synthetic[..previous_without_synthetic.len()])
             .map_err(SessionStoreError::from)?;
     Ok(previous_revision == incoming_prefix_revision)
 }
 
-fn is_transient_system_notice(message: &Message) -> bool {
+fn is_synthetic_refresh_projection(message: &Message) -> bool {
     let Message::SystemNotice(notice) = message else {
         return false;
     };
-    notice.kind == crate::types::SystemNoticeKind::McpPending
-        && notice.blocks.iter().all(|block| {
-            matches!(
-                block,
-                crate::types::SystemNoticeBlock::Mcp {
-                    persisted: false,
-                    ..
-                }
-            )
-        })
+    notice.is_synthetic_refresh_projection()
 }
 
 /// Validate a runtime run-boundary snapshot.
@@ -795,6 +813,9 @@ pub fn find_transcript_rewrite_commit_chain_extending<'a>(
     previous_revision: &str,
     incoming_revision: &str,
 ) -> Option<Vec<&'a TranscriptRewriteCommit>> {
+    if crate::session::validate_transcript_history_state(state).is_err() {
+        return None;
+    }
     let mut chain = Vec::new();
     let mut cursor = previous_revision;
     let mut visited = std::collections::BTreeSet::new();
@@ -832,6 +853,12 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
     previous: &Session,
     incoming_revision: &str,
 ) -> Result<Option<Vec<&'a TranscriptRewriteCommit>>, SessionStoreError> {
+    crate::session::validate_transcript_history_state(state).map_err(|error| {
+        SessionStoreError::InvalidTranscriptRewrite {
+            id: previous.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {error}"),
+        }
+    })?;
     let previous_revision =
         transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
     let mut chain = Vec::new();
@@ -1839,7 +1866,7 @@ pub fn head_canonical_plain_save_guard(
     if incoming_preserves_conversation_tail_with_system_context_append(incoming, previous_slim)? {
         return Ok(());
     }
-    if incoming_preserves_prefix_after_transient_notice_cleanup(incoming, previous_slim)? {
+    if incoming_preserves_prefix_after_synthetic_notice_refresh(incoming, previous_slim)? {
         return Ok(());
     }
     if new_len < prev_len {
@@ -3402,6 +3429,117 @@ mod tests {
         assert!(matches!(
             append_only_save_guard(&incoming, Some(&previous)),
             Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_accepts_mechanical_background_notice_refresh_after_history()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("before".to_string())));
+        previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text("after".to_string()))],
+            crate::TranscriptRewriteReason::new("unit-test-edit"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        previous.replace_synthetic_notices(
+            SystemNoticeKind::BackgroundJob,
+            vec![Message::SystemNotice(SystemNoticeMessage::new(
+                SystemNoticeKind::BackgroundJob,
+                "job complete",
+            ))],
+        )?;
+
+        let mut incoming = previous.clone();
+        incoming.replace_synthetic_notices(SystemNoticeKind::BackgroundJob, Vec::new())?;
+        incoming.push(Message::User(UserMessage::text("next turn".to_string())));
+
+        append_only_save_guard(&incoming, Some(&previous))?;
+        assert_eq!(incoming.transcript_rewrite_generation()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn append_only_guard_rejects_removing_persisted_mcp_pending_notice()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("before".to_string())));
+        previous.push(Message::SystemNotice(SystemNoticeMessage::with_block(
+            SystemNoticeKind::McpPending,
+            Some("persisted pending fact".to_string()),
+            SystemNoticeBlock::Mcp {
+                server_id: Some("server".to_string()),
+                operation: None,
+                phase: None,
+                persisted: true,
+                detail: None,
+                pending_sources: Vec::new(),
+            },
+        )));
+
+        let mut incoming = previous.clone();
+        incoming.messages = std::sync::Arc::new(
+            previous
+                .messages()
+                .iter()
+                .filter(|message| !matches!(message, Message::SystemNotice(_)))
+                .cloned()
+                .collect(),
+        );
+        incoming.push(Message::User(UserMessage::text("after".to_string())));
+
+        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn run_boundary_guard_rejects_mutated_prior_audited_body_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut previous = Session::new();
+        previous.push(Message::User(UserMessage::text("A".to_string())));
+        previous.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text("B".to_string()))],
+            crate::TranscriptRewriteReason::new("first"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+
+        let mut incoming = previous.clone();
+        incoming.push(Message::User(UserMessage::text(
+            "ordinary append".to_string(),
+        )));
+        incoming.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "rewritten append".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("second"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let mut state = incoming
+            .transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("incoming history missing"))?;
+        let old_parent = state.commits[0].parent_revision.clone();
+        state
+            .revisions
+            .iter_mut()
+            .find(|body| body.revision == old_parent)
+            .ok_or_else(|| std::io::Error::other("old audited parent missing"))?
+            .parent_revision = Some("sha256:forged-lineage-parent".to_string());
+        incoming.set_metadata_unchecked_for_test(
+            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state)?,
+        );
+
+        assert!(matches!(
+            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
+                if reason.contains("changes audited transcript body")
         ));
         Ok(())
     }

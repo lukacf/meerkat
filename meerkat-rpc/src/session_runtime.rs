@@ -15202,7 +15202,22 @@ mod tests {
     #[tokio::test]
     async fn interrupt_on_cold_persisted_stopped_projection_is_noop_when_session_exists() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(
+                Arc::clone(&store),
+                Arc::clone(&runtime_store),
+                Arc::clone(&blob_store),
+            ),
+            crate::router::NotificationSink::noop(),
+        ));
         let build_config = mock_build_config();
 
         let created = runtime
@@ -15231,11 +15246,33 @@ mod tests {
             .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await
             .expect("runtime state should persist");
-        runtime
-            .runtime_adapter
-            .unregister_session(&created.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        assert_eq!(
+            runtime
+                .service
+                .persisted_runtime_state(&created.session_id)
+                .await
+                .expect("runtime-state projection load should succeed"),
+            Some(meerkat_runtime::RuntimeState::Stopped)
+        );
+
+        // Rebuild the surface with fresh process-local runtime authority while
+        // retaining both durable stores. Unregister would finalize Stopped to
+        // Idle and would not represent a crash/restart boundary.
+        drop(runtime);
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            crate::router::NotificationSink::noop(),
+        ));
+        assert!(
+            !runtime
+                .runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "cold RPC runtime must not inherit process-local registration"
+        );
 
         runtime
             .interrupt(&created.session_id)

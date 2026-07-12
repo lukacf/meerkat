@@ -13914,11 +13914,29 @@ mod tests {
                 .stop_runtime_executor(&created.session_id, "seed stopped projection")
                 .await
                 .expect("runtime state should persist");
-            state
-                .runtime_adapter
-                .unregister_session(&created.session_id)
-                .await
-                .expect("runtime session should unregister cleanly");
+            assert_eq!(
+                state
+                    .session_service
+                    .persisted_runtime_state(&created.session_id)
+                    .await
+                    .expect("runtime-state projection load should succeed"),
+                Some(meerkat_runtime::RuntimeState::Stopped)
+            );
+
+            // Replace process-local machine authority while preserving the
+            // durable stores. Graceful unregister would finalize Stopped to
+            // Idle and make this cold-restart regression test vacuous.
+            state.runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
+                state.session_service.runtime_store(),
+                state.session_service.blob_store(),
+            ));
+            assert!(
+                !state
+                    .runtime_adapter
+                    .contains_session(&created.session_id)
+                    .await,
+                "cold REST runtime must not inherit process-local registration"
+            );
             let app = router(state);
 
             let response = app

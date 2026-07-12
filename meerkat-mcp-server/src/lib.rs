@@ -7792,9 +7792,11 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        let state =
-            MeerkatMcpState::new_with_store_and_runtime_store(store, Arc::clone(&runtime_store))
-                .await;
+        let state = MeerkatMcpState::new_with_store_and_runtime_store(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+        )
+        .await;
         let created = state
             .service
             .create_session(CreateSessionRequest {
@@ -7829,11 +7831,35 @@ mod tests {
             .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await
             .expect("runtime state should persist");
-        state
-            .runtime_adapter
-            .unregister_session(&created.session_id)
-            .await
-            .expect("runtime session should unregister cleanly");
+        assert_eq!(
+            state
+                .service
+                .persisted_runtime_state(&created.session_id)
+                .await
+                .expect("runtime-state projection load should succeed"),
+            Some(meerkat_runtime::RuntimeState::Stopped)
+        );
+
+        // Reconstruct the surface against the same stores to model a process
+        // restart. Graceful unregister would finalize this projection to Idle
+        // and would not exercise the cold-Stopped compatibility path.
+        drop(state);
+        let state = MeerkatMcpState::new_with_store_and_runtime_store(store, runtime_store).await;
+        assert!(
+            !state
+                .runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "cold MCP runtime must not inherit process-local registration"
+        );
+        assert_eq!(
+            state
+                .service
+                .persisted_runtime_state(&created.session_id)
+                .await
+                .expect("cold runtime-state projection load should succeed"),
+            Some(meerkat_runtime::RuntimeState::Stopped)
+        );
 
         let payload = Box::pin(handle_tools_call(
             &state,

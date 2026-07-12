@@ -21444,10 +21444,12 @@ capabilities = ["rpc"]
         let session_store = sqlite_session_store(&temp);
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::default());
         let persistence = PersistenceBundle::new(
             Arc::clone(&session_store),
             Arc::clone(&runtime_store),
-            Arc::new(meerkat_store::MemoryBlobStore::default()),
+            Arc::clone(&blob_store),
         );
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .session_store(session_store)
@@ -21497,10 +21499,6 @@ capabilities = ["rpc"]
             .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await
             .expect("runtime state should persist");
-        runtime_adapter
-            .unregister_session(&created.session_id)
-            .await
-            .expect("session should unregister cleanly");
 
         assert_eq!(
             service
@@ -21508,6 +21506,38 @@ capabilities = ["rpc"]
                 .await
                 .expect("runtime-state projection load should succeed"),
             Some(meerkat_runtime::RuntimeState::Stopped)
+        );
+
+        // Model a process restart, not a graceful unregister. Unregister owns
+        // finalization and correctly projects an ordinary stopped runtime back
+        // to Idle; a cold restart is the case where the durable Stopped
+        // snapshot remains while the new machine has no live registration.
+        let cold_runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
+            runtime_store,
+            blob_store,
+        ));
+        assert!(
+            !cold_runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "cold runtime adapter must not inherit process-local registration"
+        );
+        let observation = match cold_runtime_adapter
+            .hard_cancel_current_run(&created.session_id, "cold CLI interrupt probe")
+            .await
+        {
+            Err(
+                meerkat_runtime::RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Destroyed,
+                }
+                | meerkat_runtime::RuntimeDriverError::Destroyed,
+            ) => meerkat_runtime::UserInterruptObservation::Destroyed,
+            result => panic!("cold interrupt should observe destroyed live authority: {result:?}"),
+        };
+        assert_eq!(
+            meerkat_runtime::resolve_user_interrupt_public_result(observation, true, false)
+                .expect("cold interrupt result should classify"),
+            meerkat_runtime::UserInterruptPublicResult::Interrupted
         );
     }
 

@@ -29,12 +29,12 @@ fn read_workflow(path: &Path) -> serde_yaml::Value {
         .unwrap_or_else(|error| panic!("cannot parse {} as YAML: {error}", path.display()))
 }
 
-fn step_script<'a>(
+fn workflow_step<'a>(
     workflow: &'a serde_yaml::Value,
     path: &Path,
     job_name: &str,
     step_name: &str,
-) -> &'a str {
+) -> &'a serde_yaml::Value {
     workflow
         .get("jobs")
         .and_then(|jobs| jobs.get(job_name))
@@ -45,7 +45,22 @@ fn step_script<'a>(
                 step.get("name").and_then(serde_yaml::Value::as_str) == Some(step_name)
             })
         })
-        .and_then(|step| step.get("run"))
+        .unwrap_or_else(|| {
+            panic!(
+                "{} must define {job_name:?} step {step_name:?}",
+                path.display()
+            )
+        })
+}
+
+fn step_script<'a>(
+    workflow: &'a serde_yaml::Value,
+    path: &Path,
+    job_name: &str,
+    step_name: &str,
+) -> &'a str {
+    workflow_step(workflow, path, job_name, step_name)
+        .get("run")
         .and_then(serde_yaml::Value::as_str)
         .unwrap_or_else(|| {
             panic!(
@@ -53,6 +68,81 @@ fn step_script<'a>(
                 path.display()
             )
         })
+}
+
+#[test]
+fn published_assets_are_manifest_authority_on_reruns() {
+    let path = workflow_yml_path();
+    let workflow = read_workflow(&path);
+
+    let early_download = step_script(
+        &workflow,
+        &path,
+        "publish_unix_release_and_homebrew",
+        "Download published macOS/Linux release assets",
+    );
+    for contract in [
+        "gh release download",
+        "--pattern '*.tar.gz'",
+        "scripts/release-build-asset-manifest published-release-artifacts",
+    ] {
+        assert!(
+            early_download.contains(contract),
+            "early release path must preserve `{contract}`; script:\n{early_download}"
+        );
+    }
+
+    let early_homebrew = workflow_step(
+        &workflow,
+        &path,
+        "publish_unix_release_and_homebrew",
+        "Update Homebrew tap from published macOS/Linux assets",
+    );
+    assert_eq!(
+        early_homebrew
+            .get("with")
+            .and_then(|inputs| inputs.get("checksums_path"))
+            .and_then(serde_yaml::Value::as_str),
+        Some("published-release-artifacts/checksums.sha256"),
+        "Homebrew must use checksums derived from live release assets"
+    );
+
+    let final_download = step_script(
+        &workflow,
+        &path,
+        "publish_github_release",
+        "Download published release archives",
+    );
+    for contract in [
+        "gh release download",
+        "--pattern '*.tar.gz'",
+        "--pattern '*.zip'",
+        "scripts/release-build-asset-manifest published-release-artifacts",
+    ] {
+        assert!(
+            final_download.contains(contract),
+            "final release path must preserve `{contract}`; script:\n{final_download}"
+        );
+    }
+
+    let manifest_files = workflow_step(
+        &workflow,
+        &path,
+        "publish_github_release",
+        "Publish complete release manifest",
+    )
+    .get("with")
+    .and_then(|inputs| inputs.get("files"))
+    .and_then(serde_yaml::Value::as_str)
+    .expect("manifest publisher must declare files");
+    assert_eq!(
+        manifest_files.lines().collect::<Vec<_>>(),
+        [
+            "published-release-artifacts/checksums.sha256",
+            "published-release-artifacts/index.json",
+        ],
+        "the complete manifest must come from downloaded live assets"
+    );
 }
 
 fn run_manifest(root: &Path) -> Output {

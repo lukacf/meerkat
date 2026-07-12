@@ -767,6 +767,23 @@ jobs:
           overwrite_files: false
           tag_name: ${{ github.ref_name }}
 
+      # `overwrite_files: false` can preserve an archive from an earlier run.
+      # Re-read the live assets so Homebrew always receives hashes for the
+      # bytes users will actually download, not for a fresh local rebuild.
+      - name: Download published macOS/Linux release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          rm -rf published-release-artifacts
+          mkdir -p published-release-artifacts
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.tar.gz' \
+            --dir published-release-artifacts
+          scripts/release-build-asset-manifest published-release-artifacts "${RELEASE_TAG}"
+
       - name: Update Homebrew tap from published macOS/Linux assets
         continue-on-error: true
         uses: ./.github/actions/update-homebrew
@@ -774,7 +791,7 @@ jobs:
           release_tag: ${{ github.ref_name }}
           github_token: ${{ github.token }}
           tap_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          checksums_path: release-artifacts/checksums.sha256
+          checksums_path: published-release-artifacts/checksums.sha256
 
   build_web_sdk_package:
     name: Build Web SDK package
@@ -941,14 +958,32 @@ jobs:
           overwrite_files: false
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
 
+      # A recovery run can reuse existing archives whose compressed bytes do
+      # not match a fresh rebuild. Build the public manifest from the release
+      # assets themselves after all missing archives have been uploaded.
+      - name: Download published release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          rm -rf published-release-artifacts
+          mkdir -p published-release-artifacts
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.tar.gz' \
+            --pattern '*.zip' \
+            --dir published-release-artifacts
+          scripts/release-build-asset-manifest published-release-artifacts "${RELEASE_TAG}"
+
       # Publish checksums and index.json only after every platform archive is
       # present, keeping the public manifest a complete release authority.
       - name: Publish complete release manifest
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release-artifacts/checksums.sha256
-            release-artifacts/index.json
+            published-release-artifacts/checksums.sha256
+            published-release-artifacts/index.json
           draft: false
           fail_on_unmatched_files: true
           overwrite_files: true

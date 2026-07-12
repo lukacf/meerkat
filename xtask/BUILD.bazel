@@ -667,6 +667,7 @@ rust_test(
     data = [
         ":package_runfiles",
         "//:github_workflows",
+        "//:repo_governance_files",
         "tests/rustfmt_host.sh",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",

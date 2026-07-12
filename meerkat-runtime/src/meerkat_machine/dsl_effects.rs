@@ -87,6 +87,41 @@ impl MeerkatMachine {
         )
     }
 
+    /// Stage a fieldless transition on behalf of the runtime owner itself.
+    /// Runtime-owner observations are intentionally excluded from the generic
+    /// typed-internal stager so only the attachment owner can publish them.
+    pub(super) fn stage_runtime_owner_dsl_transition_on_authority(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        input: MeerkatMachineFieldlessRuntimeInternalInput,
+    ) -> Result<StagedSessionDslInput, String> {
+        let variant = input.input_variant();
+        if !canonical_meerkat_machine_runtime_internal_input_variant_manifest().contains(&variant) {
+            return Err(format!(
+                "runtime-owner input {variant:?} is absent from the typed production manifest"
+            ));
+        }
+        if !canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+            .contains(&variant)
+        {
+            return Err(format!(
+                "runtime-owner input {variant:?} is absent from the typed fieldless manifest"
+            ));
+        }
+        if input.authority()
+            != crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalAuthority::RuntimeOwner
+        {
+            return Err(format!(
+                "fieldless runtime-internal input {variant:?} is owned by {:?}, not RuntimeOwner",
+                input.authority()
+            ));
+        }
+        Self::stage_dsl_transition_on_authority_after_typed_gate(
+            authority,
+            input.dsl_input(),
+            variant.as_str(),
+        )
+    }
+
     pub(super) async fn stage_session_dsl_input(
         &self,
         session_id: &SessionId,
@@ -104,8 +139,17 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<StagedSessionDslInput, String> {
-        let authority = self.session_dsl_authority(session_id).await?;
-        Self::stage_dsl_transition_on_authority(&authority, input, context)
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            }
+            .to_string()
+        })?;
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+            return Err(error.to_string());
+        }
+        Self::stage_dsl_transition_on_authority(&entry.dsl_authority, input, context)
     }
 
     pub(super) fn stage_dsl_transition_on_authority(
@@ -166,9 +210,19 @@ impl MeerkatMachine {
         dispatch_failure: CommittedEffectDispatchFailure,
     ) -> Result<(dsl::MeerkatMachineAuthoritySnapshot, DslTransitionEffects), String> {
         Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
-        let authority = self.session_dsl_authority(session_id).await?;
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            }
+            .to_string()
+        })?;
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+            return Err(error.to_string());
+        }
         let (previous_snapshot, effects) = {
-            let mut authority = authority
+            let mut authority = entry
+                .dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let previous_snapshot = authority.snapshot();
@@ -177,6 +231,7 @@ impl MeerkatMachine {
                 .map_err(|err| dsl_authority::map_error(err, context))?;
             (previous_snapshot, effects)
         };
+        drop(sessions);
         if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
             let CommittedEffectDispatchFailure::PreserveCommittedDslState = dispatch_failure;
             return Err(format!(
@@ -206,14 +261,25 @@ impl MeerkatMachine {
                 reason,
             ));
         }
-        let authority = self
-            .session_dsl_authority(session_id)
-            .await
-            .map_err(|reason| {
-                dsl_authority::DslTransitionRefusal::other("session_authority_unavailable", reason)
-            })?;
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            dsl_authority::DslTransitionRefusal::other(
+                "session_authority_unavailable",
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                }
+                .to_string(),
+            )
+        })?;
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+            return Err(dsl_authority::DslTransitionRefusal::other(
+                "unregister_finalization_pending",
+                error.to_string(),
+            ));
+        }
         let (previous_snapshot, effects) = {
-            let mut authority = authority
+            let mut authority = entry
+                .dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let previous_snapshot = authority.snapshot();
@@ -222,6 +288,7 @@ impl MeerkatMachine {
                 .map_err(|err| dsl_authority::refusal(err, context))?;
             (previous_snapshot, effects)
         };
+        drop(sessions);
         if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
             // CommittedEffectDispatchFailure::PreserveCommittedDslState
             // semantics: the committed DSL state is preserved; only the

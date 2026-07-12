@@ -466,6 +466,10 @@ impl FailingOpsLifecycleStore {
 
 #[async_trait::async_trait]
 impl RuntimeStore for FailingOpsLifecycleStore {
+    fn supports_compaction_projection_outbox(&self) -> bool {
+        self.inner.supports_compaction_projection_outbox()
+    }
+
     async fn commit_session_snapshot(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -524,6 +528,26 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
         self.inner.load_session_snapshot(runtime_id).await
+    }
+
+    async fn load_pending_compaction_projections(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .load_pending_compaction_projections(runtime_id)
+            .await
+    }
+
+    async fn mark_compaction_projection_finalized(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .mark_compaction_projection_finalized(runtime_id, projection)
+            .await
     }
 
     async fn clear_session_snapshot(
@@ -588,6 +612,17 @@ impl RuntimeStore for FailingOpsLifecycleStore {
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
+            .await
+    }
+
+    async fn commit_unregister_finalization(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        commit: meerkat_runtime::store::MachineLifecycleCommit,
+        input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .commit_unregister_finalization(runtime_id, commit, input_states)
             .await
     }
 

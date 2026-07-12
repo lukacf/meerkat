@@ -76,6 +76,7 @@ impl ReservedMetadataKey {
                 | crate::session::SESSION_LIFECYCLE_TERMINAL_KEY
                 | crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY
                 | crate::session::SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY
+                | crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY
                 | crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY
         )
     }
@@ -319,6 +320,10 @@ mod tests {
         );
         assert_eq!(
             ReservedMetadataKey::classify(crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+            Some(ReservedMetadataKey::SessionAuthority)
+        );
+        assert_eq!(
+            ReservedMetadataKey::classify(crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY),
             Some(ReservedMetadataKey::SessionAuthority)
         );
         assert_eq!(ReservedMetadataKey::classify("client.thread_id"), None);

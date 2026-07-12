@@ -48,8 +48,109 @@ pub struct CompactionContext {
 pub struct CompactionResult {
     /// The rebuilt message history (summary + retained recent turns).
     pub messages: Vec<Message>,
-    /// Messages that were removed from history (for future memory indexing).
-    pub discarded: Vec<Message>,
+    /// The one runtime-validated summary inserted into the rebuilt transcript.
+    ///
+    /// This mapping is explicit so validation never infers the summary from an
+    /// otherwise-unowned rebuilt slot. Public compactors must identify the
+    /// exact typed summary message and its rebuilt offset.
+    pub summary: CompactionSummary,
+    /// Source messages retained in `messages`, paired with exact source and
+    /// rebuilt offsets.
+    ///
+    /// Retained provenance is explicit rather than inferred by value. Message
+    /// values are not unique, so a value-only diff cannot prove which copy of
+    /// a duplicate was removed and which copy remains authoritative.
+    pub retained: Vec<CompactionRetained>,
+    /// Messages removed from history, paired with their canonical offsets in
+    /// the pre-compaction transcript.
+    ///
+    /// A compactor must not return a discard-slice-local index: provenance is
+    /// interpreted against the full [`CompactionWindow::messages`] history and
+    /// validated before any memory projection is written.
+    pub discarded: Vec<CompactionDiscard>,
+}
+
+/// A compactor-proposed summary and its exact rebuilt-transcript slot.
+///
+/// The core runtime validates this mapping, the typed role, canonical content,
+/// and chronology before any transcript or memory projection is committed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionSummary {
+    /// Offset of `message` in the rebuilt transcript.
+    pub rebuilt_offset: u64,
+    /// Typed compaction-summary message inserted by the rebuild.
+    pub message: Message,
+}
+
+impl CompactionSummary {
+    /// Bind the inserted summary to its rebuilt-transcript slot.
+    pub fn new(rebuilt_offset: u64, message: Message) -> Self {
+        Self {
+            rebuilt_offset,
+            message,
+        }
+    }
+}
+
+/// Canonical rendered prefix for the typed compaction-summary boundary.
+///
+/// Keeping this in the core contract lets the validator prove that the one
+/// inserted message contains the exact summary produced for this attempt.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "\
+[Context compacted] A previous context produced the following summary of work so far. \
+The current tool and session state is preserved. Use this summary to continue without \
+duplicating work:\n\n";
+
+/// One message removed by compaction plus its source transcript offset.
+///
+/// The source offset is part of the compactor contract because reconstructing
+/// it from the returned discard slice loses leading retained messages (most
+/// commonly the system prompt) and cannot represent non-contiguous custom
+/// compaction strategies without guessing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionDiscard {
+    /// Offset of `message` in the full pre-compaction transcript.
+    pub source_offset: u64,
+    /// Message removed from the active transcript.
+    pub message: Message,
+}
+
+impl CompactionDiscard {
+    /// Bind a discarded message to its canonical pre-compaction offset.
+    pub fn new(source_offset: u64, message: Message) -> Self {
+        Self {
+            source_offset,
+            message,
+        }
+    }
+}
+
+/// One source message retained by compaction and its rebuilt-transcript slot.
+///
+/// Together, [`CompactionResult::retained`] and
+/// [`CompactionResult::discarded`] must partition the full source transcript.
+/// Retained rebuilt offsets must identify the same message in
+/// [`CompactionResult::messages`]. This explicit mapping makes removal
+/// provenance exact even when multiple source messages have identical values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionRetained {
+    /// Offset of `message` in the full pre-compaction transcript.
+    pub source_offset: u64,
+    /// Offset of `message` in the rebuilt transcript.
+    pub rebuilt_offset: u64,
+    /// Message retained from the source transcript.
+    pub message: Message,
+}
+
+impl CompactionRetained {
+    /// Bind one retained source message to its rebuilt-transcript slot.
+    pub fn new(source_offset: u64, rebuilt_offset: u64, message: Message) -> Self {
+        Self {
+            source_offset,
+            rebuilt_offset,
+            message,
+        }
+    }
 }
 
 /// Configuration for the default compactor implementation.
@@ -109,7 +210,17 @@ pub trait Compactor: Send + Sync {
     /// 1. Preserve any `Message::System` verbatim.
     /// 2. Inject a summary message.
     /// 3. Retain recent complete turns per `recent_turn_budget`.
-    /// 4. Return everything else as `discarded`.
+    /// 4. Return retained source messages as `retained`, with their offsets in
+    ///    both the full source slice and rebuilt history.
+    /// 5. Return everything else as `discarded`, with each message's offset in
+    ///    the full `messages` slice.
+    ///
+    /// `retained` and `discarded` must partition the source transcript. The
+    /// `summary` must identify the one injected message, at offset zero or
+    /// immediately after the preserved leading system message. Its typed role
+    /// and text must match the exact summary supplied to this method. At least
+    /// one source message must be discarded, and the rebuild must not grow the
+    /// transcript.
     fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult;
 }
 

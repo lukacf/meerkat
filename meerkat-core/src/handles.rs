@@ -106,6 +106,409 @@ pub trait ModelRoutingHandle: Send + Sync {
         profile: Option<&crate::model_profile::ModelProfile>,
         capability_base_filter: &crate::ToolFilter,
     ) -> Result<(), DslTransitionError>;
+
+    /// Stage a machine-authorized sticky model fallback.
+    ///
+    /// The generated machine revalidates the accepted recovery attempt and
+    /// previous session identity, then atomically updates current identity,
+    /// capability truth, and the model-routing baseline. Runtime-backed agent
+    /// loops use this as the canonical commit inside their compensated
+    /// client/auth/machine transaction. `activation` is a one-shot, opaque
+    /// capability minted inside core only after generated recovery acceptance
+    /// and exact effective-registry validation. Public handle holders cannot
+    /// fabricate one from a raw or foreign registry witness.
+    fn stage_sticky_model_fallback(
+        &self,
+        activation: crate::StickyModelFallbackActivationProof,
+        visibility_plan: &StickyModelFallbackVisibilityPlan,
+    ) -> Result<Box<dyn StickyModelFallbackMachineCommit>, DslTransitionError>;
+}
+
+/// One-shot generated-authority commit staged for an exact sticky fallback.
+///
+/// Staging previews the generated transition against an exact authority
+/// snapshot without publishing it. Consuming this token commits only if that
+/// snapshot is still current, so a durable coordinator can place its session
+/// compare-and-swap between generated preauthorization and synchronous machine
+/// publication without allowing a caller to replay the transition.
+pub trait StickyModelFallbackMachineCommit: Send + Sync {
+    fn commit(self: Box<Self>) -> Result<(), DslTransitionError>;
+}
+
+/// Fully-derived visibility witness carried by a sticky model fallback.
+///
+/// This is the same contract used by live LLM reconfiguration: generated
+/// authority validates the previous state, target capability filter, visible
+/// `view_image` delta, and monotonic revision before it commits either the LLM
+/// identity or the canonical visibility state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyModelFallbackVisibilityPlan {
+    pub previous_state: crate::SessionToolVisibilityState,
+    pub next_state: crate::SessionToolVisibilityState,
+    pub view_image_tool_available: bool,
+    pub previous_view_image_visible: bool,
+    pub next_view_image_visible: bool,
+    pub committed_visible_set_changed: bool,
+    pub revision_bumped: bool,
+}
+
+/// Opaque durable-session control delta for one sticky fallback.
+///
+/// Only the core agent loop can construct this value. The runtime may validate
+/// and apply it to an exact persisted [`crate::Session`] snapshot, but cannot
+/// fabricate a different identity or visibility transition. Applying the delta
+/// changes only canonical control metadata; transcript messages are untouched.
+#[derive(Debug, Clone)]
+pub struct StickyModelFallbackControlDelta {
+    previous_identity: crate::SessionLlmIdentity,
+    target_identity: crate::SessionLlmIdentity,
+    persisted_visibility_parent: crate::SessionToolVisibilityState,
+    target_visibility_state: crate::SessionToolVisibilityState,
+}
+
+impl StickyModelFallbackControlDelta {
+    pub(crate) fn new(
+        previous_identity: crate::SessionLlmIdentity,
+        target_identity: crate::SessionLlmIdentity,
+        visibility_plan: &StickyModelFallbackVisibilityPlan,
+        persisted_visibility_parent: crate::SessionToolVisibilityState,
+    ) -> Self {
+        Self {
+            previous_identity,
+            target_identity,
+            persisted_visibility_parent,
+            target_visibility_state: visibility_plan.next_state.clone(),
+        }
+    }
+
+    pub fn previous_identity(&self) -> &crate::SessionLlmIdentity {
+        &self.previous_identity
+    }
+
+    pub fn target_identity(&self) -> &crate::SessionLlmIdentity {
+        &self.target_identity
+    }
+
+    pub fn previous_visibility_state(&self) -> &crate::SessionToolVisibilityState {
+        &self.persisted_visibility_parent
+    }
+
+    pub fn target_visibility_state(&self) -> &crate::SessionToolVisibilityState {
+        &self.target_visibility_state
+    }
+
+    /// Validate the exact persisted control parent and apply its target.
+    pub fn validate_and_apply(
+        &self,
+        session: &mut crate::Session,
+    ) -> Result<(), StickyModelFallbackControlDeltaError> {
+        let mut metadata = session
+            .try_session_metadata()
+            .map_err(|error| {
+                StickyModelFallbackControlDeltaError::InvalidSessionMetadata(error.to_string())
+            })?
+            .ok_or(StickyModelFallbackControlDeltaError::MissingSessionMetadata)?;
+        let current_identity = metadata.llm_identity();
+        if current_identity != self.previous_identity {
+            return Err(
+                StickyModelFallbackControlDeltaError::IdentityParentMismatch {
+                    expected: Box::new(self.previous_identity.clone()),
+                    actual: Box::new(current_identity),
+                },
+            );
+        }
+        let current_visibility = session
+            .try_tool_visibility_state()
+            .map_err(|error| {
+                StickyModelFallbackControlDeltaError::InvalidVisibilityMetadata(error.to_string())
+            })?
+            .ok_or(StickyModelFallbackControlDeltaError::MissingVisibilityMetadata)?;
+        if current_visibility != self.persisted_visibility_parent {
+            return Err(StickyModelFallbackControlDeltaError::VisibilityParentMismatch);
+        }
+
+        metadata.apply_llm_identity(&self.target_identity);
+        session.set_session_metadata(metadata).map_err(|error| {
+            StickyModelFallbackControlDeltaError::InvalidSessionMetadata(error.to_string())
+        })?;
+        session
+            .set_tool_visibility_state(
+                crate::AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    self.target_visibility_state.clone(),
+                ),
+            )
+            .map_err(|error| {
+                StickyModelFallbackControlDeltaError::InvalidVisibilityMetadata(error.to_string())
+            })?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum StickyModelFallbackControlDeltaError {
+    #[error("persisted session has no canonical LLM identity metadata")]
+    MissingSessionMetadata,
+    #[error("persisted session has no canonical tool visibility metadata")]
+    MissingVisibilityMetadata,
+    #[error("persisted session LLM identity parent does not match the staged fallback")]
+    IdentityParentMismatch {
+        expected: Box<crate::SessionLlmIdentity>,
+        actual: Box<crate::SessionLlmIdentity>,
+    },
+    #[error("persisted session tool visibility parent does not match the staged fallback")]
+    VisibilityParentMismatch,
+    #[error("persisted session LLM identity metadata is invalid: {0}")]
+    InvalidSessionMetadata(String),
+    #[error("persisted session tool visibility metadata is invalid: {0}")]
+    InvalidVisibilityMetadata(String),
+}
+
+/// Resultful, cancellation-safe durable sticky-fallback handoff.
+pub trait StickyModelFallbackCommitCoordinator: Send + Sync {
+    fn begin(
+        &self,
+        machine_commit: Box<dyn StickyModelFallbackMachineCommit>,
+        control_delta: StickyModelFallbackControlDelta,
+    ) -> Result<Arc<dyn StickyModelFallbackCommitOperation>, StickyModelFallbackCommitError>;
+}
+
+/// Join handle for one supervised sticky-fallback transaction.
+///
+/// Dropping a `wait` future does not cancel the transaction. Callers may wait
+/// again through the retained operation and observe the same terminal result.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait StickyModelFallbackCommitOperation: Send + Sync {
+    async fn wait(&self) -> Result<(), StickyModelFallbackCommitError>;
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum StickyModelFallbackCommitError {
+    #[error("durable sticky fallback is unavailable without a RuntimeStore")]
+    StoreUnavailable,
+    #[error("durable sticky fallback session snapshot is missing for {session_id}")]
+    SnapshotMissing { session_id: crate::SessionId },
+    #[error("durable sticky fallback session snapshot is invalid: {0}")]
+    SnapshotInvalid(String),
+    #[error("durable sticky fallback snapshot belongs to {actual}, expected {expected}")]
+    SessionMismatch {
+        expected: crate::SessionId,
+        actual: crate::SessionId,
+    },
+    #[error(transparent)]
+    InvalidControlDelta(StickyModelFallbackControlDeltaError),
+    #[error("durable sticky fallback store operation failed before commit: {0}")]
+    Store(String),
+    #[error("durable sticky fallback compare-and-swap observed a competing snapshot")]
+    SnapshotConflict,
+    #[error("durable sticky fallback compare-and-swap outcome is unknown: {0}")]
+    SnapshotOutcomeUnknown(String),
+    #[error("generated authority rejected the staged sticky fallback: {0}")]
+    MachineRejected(DslTransitionError),
+    #[error(
+        "generated authority rejected the staged sticky fallback and durable compensation failed: {0}"
+    )]
+    CompensationFailed(String),
+    #[error("durable sticky fallback supervisor ended without a retained result")]
+    SupervisorLost,
+}
+
+impl StickyModelFallbackCommitError {
+    /// Whether the coordinator could not prove a single authoritative parent
+    /// or compensation result. These outcomes require canonical executor
+    /// teardown instead of ordinary failed-batch retry.
+    pub fn requires_teardown(&self) -> bool {
+        matches!(
+            self,
+            Self::SnapshotConflict
+                | Self::SnapshotOutcomeUnknown(_)
+                | Self::CompensationFailed(_)
+                | Self::SupervisorLost
+        )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod sticky_model_fallback_control_delta_tests {
+    use super::*;
+    use crate::{
+        Message, Provider, SESSION_METADATA_SCHEMA_VERSION, Session, SessionMetadata,
+        SessionTooling, ToolFilter, UserMessage,
+    };
+
+    fn identity(model: &str) -> crate::SessionLlmIdentity {
+        crate::SessionLlmIdentity {
+            model: model.to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
+    fn session_with_control_state(
+        identity: &crate::SessionLlmIdentity,
+        visibility: &crate::SessionToolVisibilityState,
+    ) -> Session {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: SESSION_METADATA_SCHEMA_VERSION,
+                model: identity.model.clone(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: identity.provider,
+                self_hosted_server_id: identity.self_hosted_server_id.clone(),
+                provider_params: identity.provider_params.clone(),
+                tooling: SessionTooling::default(),
+                keep_alive: true,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: Some(7),
+                auth_binding: identity.auth_binding.clone(),
+                mob_member_binding: None,
+            })
+            .unwrap();
+        session
+            .set_tool_visibility_state(
+                crate::AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    visibility.clone(),
+                ),
+            )
+            .unwrap();
+        session.push(Message::User(UserMessage::text(
+            "uncommitted turn must not appear",
+        )));
+        session
+    }
+
+    #[test]
+    fn control_delta_changes_only_identity_and_typed_visibility() {
+        let previous = identity("primary");
+        let target = identity("backup");
+        let previous_visibility = crate::SessionToolVisibilityState::default();
+        let mut target_visibility = previous_visibility.clone();
+        target_visibility.capability_base_filter = ToolFilter::Deny(
+            [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
+                .into_iter()
+                .collect(),
+        );
+        target_visibility.active_revision = 1;
+        target_visibility.staged_revision = 1;
+        let plan = StickyModelFallbackVisibilityPlan {
+            previous_state: previous_visibility.clone(),
+            next_state: target_visibility.clone(),
+            view_image_tool_available: true,
+            previous_view_image_visible: true,
+            next_view_image_visible: false,
+            committed_visible_set_changed: true,
+            revision_bumped: true,
+        };
+        let delta = StickyModelFallbackControlDelta::new(
+            previous,
+            target.clone(),
+            &plan,
+            previous_visibility,
+        );
+        let mut session = session_with_control_state(
+            delta.previous_identity(),
+            delta.previous_visibility_state(),
+        );
+        let messages_before = session.messages().to_vec();
+        let total_tokens_before = session.total_tokens();
+        let unrelated_generation = session
+            .session_metadata()
+            .and_then(|metadata| metadata.config_generation);
+
+        delta.validate_and_apply(&mut session).unwrap();
+
+        assert_eq!(session.messages(), messages_before);
+        assert_eq!(session.total_tokens(), total_tokens_before);
+        let metadata = session.session_metadata().unwrap();
+        assert_eq!(metadata.llm_identity(), target);
+        assert_eq!(metadata.config_generation, unrelated_generation);
+        assert_eq!(
+            session.tool_visibility_state().unwrap(),
+            Some(target_visibility)
+        );
+    }
+
+    #[test]
+    fn control_delta_rejects_a_non_parent_without_mutation() {
+        let previous = identity("primary");
+        let target = identity("backup");
+        let visibility = crate::SessionToolVisibilityState::default();
+        let plan = StickyModelFallbackVisibilityPlan {
+            previous_state: visibility.clone(),
+            next_state: visibility.clone(),
+            view_image_tool_available: false,
+            previous_view_image_visible: false,
+            next_view_image_visible: false,
+            committed_visible_set_changed: false,
+            revision_bumped: false,
+        };
+        let delta =
+            StickyModelFallbackControlDelta::new(previous, target, &plan, visibility.clone());
+        let mut session = session_with_control_state(&identity("different"), &visibility);
+        let bytes_before = serde_json::to_vec(&session).unwrap();
+
+        assert!(matches!(
+            delta.validate_and_apply(&mut session),
+            Err(StickyModelFallbackControlDeltaError::IdentityParentMismatch { .. })
+        ));
+        assert_eq!(serde_json::to_vec(&session).unwrap(), bytes_before);
+    }
+
+    #[test]
+    fn control_delta_accepts_exact_persisted_pre_boundary_visibility_parent() {
+        let previous = identity("primary");
+        let target = identity("backup");
+        let mut persisted_visibility = crate::SessionToolVisibilityState {
+            staged_filter: ToolFilter::Deny(["shell".to_string()].into_iter().collect()),
+            staged_revision: 1,
+            ..Default::default()
+        };
+        persisted_visibility.staged_requested_deferred_names =
+            [crate::ToolName::from("deferred")].into_iter().collect();
+        let promoted_visibility = persisted_visibility.projected_boundary_applied();
+        let mut target_visibility = promoted_visibility.clone();
+        target_visibility.capability_base_filter = ToolFilter::Deny(
+            [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
+                .into_iter()
+                .collect(),
+        );
+        target_visibility.active_revision = 2;
+        target_visibility.staged_revision = 2;
+        let plan = StickyModelFallbackVisibilityPlan {
+            previous_state: promoted_visibility,
+            next_state: target_visibility.clone(),
+            view_image_tool_available: true,
+            previous_view_image_visible: true,
+            next_view_image_visible: false,
+            committed_visible_set_changed: true,
+            revision_bumped: true,
+        };
+        let delta = StickyModelFallbackControlDelta::new(
+            previous,
+            target.clone(),
+            &plan,
+            persisted_visibility.clone(),
+        );
+        let mut session =
+            session_with_control_state(delta.previous_identity(), &persisted_visibility);
+
+        delta.validate_and_apply(&mut session).unwrap();
+
+        assert_eq!(session.session_metadata().unwrap().llm_identity(), target);
+        assert_eq!(
+            session.tool_visibility_state().unwrap(),
+            Some(target_visibility)
+        );
+    }
 }
 
 impl DrainExitReason {

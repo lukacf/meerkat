@@ -1998,7 +1998,7 @@ describe("Comms methods", () => {
       if (method === "comms/peers") {
         return { peers: [{ name: "agent-a" }] };
       }
-      return { kind: "peer_message_sent", acked: true };
+      return { kind: "peer_message_sent", envelope_id: "env-1", delivery: "acked" };
     };
 
     const sendReceipt = await client.send("s1", {
@@ -2013,12 +2013,43 @@ describe("Comms methods", () => {
     const peers = await client.peers("s1");
 
     assert.equal(sendReceipt.kind, "peer_message_sent");
+    assert.equal(sendReceipt.envelope_id, "env-1");
     assert.deepEqual(peers.peers, [{ name: "agent-a" }]);
     assert.deepEqual(calls.map((call) => call.method), ["comms/send", "comms/peers"]);
     assert.deepEqual(calls[0].params.blocks, [
       { type: "text", text: "hello" },
       { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
     ]);
+  });
+
+  it("rejects malformed and legacy comms/send receipts", async () => {
+    const malformed = [
+      { kind: "peer_message_sent", delivery: "acked" },
+      { kind: "peer_message_sent", envelope_id: "env-1", acked: true },
+      {
+        kind: "peer_message_sent",
+        envelope_id: "env-1",
+        delivery: "acked",
+        acked: true,
+      },
+      {
+        kind: "peer_request_sent",
+        envelope_id: "env-1",
+        interaction_id: "interaction-1",
+        stream_reserved: false,
+      },
+      { kind: "input_accepted", interaction_id: "interaction-1" },
+      { kind: "legacy_sent", envelope_id: "env-1" },
+    ];
+
+    for (const response of malformed) {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      await assert.rejects(
+        () => client.send("s1", { kind: "peer_message", to: "agent-a", body: "hello" }),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
   });
 
   it("readSessionHistory routes through session/history and parses typed messages", async () => {
@@ -3280,14 +3311,22 @@ describe("Parity wrappers", () => {
       };
     };
 
-    const spawnByRole = await client.spawnMobHelper("mob-1", "help", { roleName: "worker" });
+    const spawnByRole = await client.spawnMobHelper("mob-1", "help", {
+      roleName: "worker",
+      modelOverride: "gpt-5.6-sol",
+    });
     const spawnByProfile = await client.spawnMobHelper("mob-1", "help", { profileName: "legacy-worker" });
-    const forkByRole = await client.forkMobHelper("mob-1", "a", "help", { roleName: "worker" });
+    const forkByRole = await client.forkMobHelper("mob-1", "a", "help", {
+      roleName: "worker",
+      modelOverride: "claude-opus-4-8",
+    });
     const forkByProfile = await client.forkMobHelper("mob-1", "a", "help", { profileName: "legacy-worker" });
 
     assert.equal(calls[0].params.role_name, "worker");
+    assert.equal(calls[0].params.model_override, "gpt-5.6-sol");
     assert.equal(calls[1].params.role_name, "legacy-worker");
     assert.equal(calls[2].params.role_name, "worker");
+    assert.equal(calls[2].params.model_override, "claude-opus-4-8");
     assert.equal(calls[3].params.role_name, "legacy-worker");
     // App-facing helper receipts expose only `member_ref`; binding-era
     // `agent_runtime_id` / `fence_token` are retired per dogma #10.
@@ -3437,6 +3476,56 @@ describe("Mob kickoff wait wrappers", () => {
 });
 
 describe("Mob decoder strictness", () => {
+  it("rejects malformed canonical member progress snapshots", async () => {
+    const malformed = [
+      { run_state: "idle" },
+      {
+        run_state: "running",
+        in_flight_work: 0,
+        last_progress_at_ms: 1,
+        last_progress_event: "unchanged",
+        health: "healthy",
+      },
+      {
+        run_state: "idle",
+        in_flight_work: -1,
+        last_progress_at_ms: 1,
+        last_progress_event: "unchanged",
+        health: "healthy",
+      },
+      {
+        run_state: "idle",
+        in_flight_work: 0,
+        last_progress_at_ms: 1,
+        last_progress_event: "legacy",
+        health: "healthy",
+      },
+      {
+        run_state: "idle",
+        in_flight_work: 0,
+        last_progress_at_ms: 1,
+        last_progress_event: "unchanged",
+        health: "healthy",
+        legacy_health_state: "green",
+      },
+    ];
+
+    for (const progress of malformed) {
+      const client = new MeerkatClient();
+      client.request = async () => ({
+        status: "active",
+        member_ref: makeMemberRef("mob-1", "worker-1"),
+        tokens_used: 0,
+        is_final: false,
+        progress,
+      });
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
+  });
+
   it("rejects missing mob status instead of fabricating unknown", async () => {
     const client = new MeerkatClient();
     client.request = async () => ({ mob_id: "mob-1" });

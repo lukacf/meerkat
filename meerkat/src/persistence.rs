@@ -5,22 +5,14 @@ use std::path::{Path, PathBuf};
 
 use crate::SessionStore;
 use meerkat_core::{ArtifactStore, BlobStore};
-#[cfg(all(
-    feature = "session-store",
-    feature = "memory-store",
-    not(target_arch = "wasm32")
-))]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_schedule::MemoryScheduleStore;
 use meerkat_schedule::{DisabledScheduleStore, ScheduleStore};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::event_store::{EventStore, FileEventStore};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::projector::SessionProjector;
-#[cfg(all(
-    feature = "session-store",
-    feature = "memory-store",
-    not(target_arch = "wasm32")
-))]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_workgraph::MemoryWorkGraphStore;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_workgraph::SqliteWorkGraphStore;
@@ -43,11 +35,7 @@ use meerkat_store::{
     FsArtifactStore, FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, SqliteScheduleStore,
     StoreError, ensure_realm_manifest_in, realm_paths_in,
 };
-#[cfg(all(
-    feature = "session-store",
-    feature = "memory-store",
-    not(target_arch = "wasm32")
-))]
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{MemoryBlobStore, MemoryStore};
 
 #[cfg(feature = "session-store")]
@@ -294,7 +282,6 @@ pub async fn open_realm_persistence_in(
     let store_path = match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir.clone(),
-        #[cfg(feature = "memory-store")]
         RealmBackend::Memory => paths.root.clone(),
         RealmBackend::Sqlite => paths.root.clone(),
     };
@@ -330,7 +317,6 @@ pub async fn open_realm_persistence_in(
             bundle.artifact_store = artifact_store;
             bundle
         }
-        #[cfg(feature = "memory-store")]
         RealmBackend::Memory => {
             let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
             let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
@@ -396,7 +382,6 @@ mod tests {
     use meerkat_core::event::AgentEvent;
     use meerkat_core::{Session, SessionId, SessionMeta};
     use meerkat_runtime::store::RuntimeStoreError;
-    #[cfg(feature = "memory-store")]
     use meerkat_store::MemoryStore;
     use meerkat_store::{MemoryBlobStore, SessionFilter, SessionStoreError};
     use tempfile::TempDir;
@@ -588,7 +573,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "memory-store")]
     #[tokio::test]
     async fn open_realm_persistence_memory_has_no_durable_companions()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -617,6 +601,50 @@ mod tests {
             bundle.event_projection().is_none(),
             "memory realms must not persist conversation events through the file projection bridge"
         );
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        bundle.session_store().save(&session).await?;
+        bundle
+            .runtime_store()
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session)?,
+                },
+            )
+            .await?;
+        assert!(bundle.session_store().load(&session_id).await?.is_some());
+        assert!(
+            bundle
+                .runtime_store()
+                .load_session_snapshot(&runtime_id)
+                .await?
+                .is_some()
+        );
+
+        drop(bundle);
+        let (reopened_manifest, reopened) = open_realm_persistence_in(
+            temp.path(),
+            "memory-realm",
+            Some(RealmBackend::Memory),
+            Some(RealmOrigin::Explicit),
+        )
+        .await?;
+        assert_eq!(reopened_manifest.backend, RealmBackend::Memory);
+        assert!(
+            reopened.session_store().load(&session_id).await?.is_none(),
+            "a new memory-realm bundle must not recover prior process-local sessions"
+        );
+        assert!(
+            reopened
+                .runtime_store()
+                .load_session_snapshot(&runtime_id)
+                .await?
+                .is_none(),
+            "a new memory-realm bundle must not recover prior process-local runtime authority"
+        );
         Ok(())
     }
 
@@ -641,7 +669,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "memory-store")]
     #[test]
     fn memory_bundle_keeps_existing_session_store_behavior_with_in_memory_runtime_companion()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -6,6 +6,7 @@
 
 import type {
   CommsChecksumTokenParams as WireCommsChecksumTokenParams,
+  CommsSendResult,
   CustomModelConfig,
   MobBackendConfigInput,
   MobEventRouterConfigInput,
@@ -682,12 +683,8 @@ export interface Capability {
 // longer owns a camelCase projection of it.
 export type { ConfigEnvelope, ConfigWriteResult } from "./generated/types.js";
 
-export interface CommsSendReceipt extends Record<string, unknown> {
-  readonly kind?: string;
-  readonly requestId?: string;
-  readonly interactionId?: string;
-  readonly inputId?: string;
-}
+/** Canonical generated result union returned by `comms/send`. */
+export type CommsSendReceipt = CommsSendResult;
 
 // ---------------------------------------------------------------------------
 // comms/send typed command surface.

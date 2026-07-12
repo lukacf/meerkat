@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::TranscriptRewriteSelection;
 use crate::session::{
     SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SYSTEM_CONTEXT_SEPARATOR, SessionMeta,
     TranscriptRevisionBody,
@@ -30,7 +32,7 @@ use crate::time_compat::SystemTime;
 use crate::types::{Message, SessionId, SystemMessage, Usage};
 use crate::{
     Session, TranscriptHistoryState, TranscriptRewriteCommit, TranscriptRewriteRecord,
-    TranscriptRewriteSelection, transcript_messages_digest,
+    transcript_messages_digest,
 };
 
 /// Filter for listing sessions.
@@ -1251,9 +1253,7 @@ fn validate_transcript_rewrite_commit_bodies(
             ),
         });
     }
-    let (start, end) = match &commit.selection {
-        TranscriptRewriteSelection::MessageRange { start, end } => (*start, *end),
-    };
+    let (start, end) = commit.selection.bounds();
     if start > end || end > parent_body.messages.len() {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),

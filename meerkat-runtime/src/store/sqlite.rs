@@ -3,6 +3,8 @@
 #[cfg(feature = "sqlite-store")]
 mod inner {
     use std::path::{Path, PathBuf};
+    #[cfg(test)]
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
     use meerkat_store::json_column::JsonColumnBytes;
@@ -42,12 +44,27 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
     runtime_id TEXT PRIMARY KEY,
     state_json BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runtime_retired_ops_epochs (
+    runtime_id TEXT NOT NULL,
+    epoch_id TEXT NOT NULL,
+    PRIMARY KEY (runtime_id, epoch_id)
+);
 CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
     id TEXT PRIMARY KEY,
     state_json BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
     runtime_id TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
+    runtime_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    parent_revision TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    commit_fingerprint TEXT NOT NULL,
+    intent_json BLOB NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'finalized')),
+    PRIMARY KEY (runtime_id, session_id, parent_revision, revision, commit_fingerprint)
 )";
 
     fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
@@ -174,6 +191,154 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
         Ok(())
     }
 
+    fn insert_compaction_projection_outbox_intents(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), RuntimeStoreError> {
+        for intent in intents {
+            let encoded = serde_json::to_vec(intent)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            tx.execute(
+                r"
+                INSERT OR IGNORE INTO runtime_compaction_projection_outbox
+                    (runtime_id, session_id, parent_revision, revision, commit_fingerprint, intent_json, state)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    intent.projection.session_id().to_string(),
+                    intent.projection.parent_revision(),
+                    intent.projection.revision(),
+                    intent.projection.commit_fingerprint(),
+                    encoded,
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let existing = tx
+                .query_row(
+                    r"
+                    SELECT intent_json
+                    FROM runtime_compaction_projection_outbox
+                    WHERE runtime_id = ?1 AND session_id = ?2
+                      AND parent_revision = ?3 AND revision = ?4
+                      AND commit_fingerprint = ?5
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        intent.projection.session_id().to_string(),
+                        intent.projection.parent_revision(),
+                        intent.projection.revision(),
+                        intent.projection.commit_fingerprint(),
+                    ],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let existing: meerkat_core::CompactionProjectionIntent =
+                serde_json::from_slice(&existing)
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if existing != *intent {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "conflicting compaction outbox intent for rewrite {}",
+                    intent.projection.revision()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_compaction_intents_already_outboxed(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        session: &meerkat_core::Session,
+    ) -> Result<(), RuntimeStoreError> {
+        for intent in crate::store::validated_compaction_projection_intents(session)? {
+            let (encoded, state) = tx
+                .query_row(
+                    r"
+                    SELECT intent_json, state
+                    FROM runtime_compaction_projection_outbox
+                    WHERE runtime_id = ?1 AND session_id = ?2
+                      AND parent_revision = ?3 AND revision = ?4
+                      AND commit_fingerprint = ?5
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        intent.projection.session_id().to_string(),
+                        intent.projection.parent_revision(),
+                        intent.projection.revision(),
+                        intent.projection.commit_fingerprint(),
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, JsonColumnBytes>(0)?.into_bytes(),
+                            row.get::<_, String>(1)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                .ok_or_else(|| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "non-boundary snapshot introduces compaction intent {} without atomic outbox authority",
+                        intent.projection.revision()
+                    ))
+                })?;
+            if state == "finalized" {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "non-boundary snapshot replays finalized compaction intent {}",
+                    intent.projection.revision()
+                )));
+            }
+            let existing: meerkat_core::CompactionProjectionIntent =
+                serde_json::from_slice(&encoded)
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if existing != intent {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "non-boundary snapshot conflicts with compaction outbox rewrite {}",
+                    intent.projection.revision()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_finalized_compaction_projection_replays(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), RuntimeStoreError> {
+        for intent in intents {
+            let state = tx
+                .query_row(
+                    r"
+                    SELECT state
+                    FROM runtime_compaction_projection_outbox
+                    WHERE runtime_id = ?1 AND session_id = ?2
+                      AND parent_revision = ?3 AND revision = ?4
+                      AND commit_fingerprint = ?5
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        intent.projection.session_id().to_string(),
+                        intent.projection.parent_revision(),
+                        intent.projection.revision(),
+                        intent.projection.commit_fingerprint(),
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if state.as_deref() == Some("finalized") {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "atomic session snapshot replays finalized compaction intent {}",
+                    intent.projection.revision()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn insert_receipt(
         tx: &Transaction<'_>,
         runtime_id: &LogicalRuntimeId,
@@ -240,9 +405,79 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
         Ok(())
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct UnregisterFinalizationObservation {
+        lifecycle_record: Option<Vec<u8>>,
+        input_state_records: Vec<(String, Option<Vec<u8>>)>,
+        ops_record: Option<Vec<u8>>,
+        retired_ops_epoch_present: bool,
+    }
+
+    fn observe_unregister_finalization(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+        input_ids: &[String],
+        retired_ops_epoch: &meerkat_core::RuntimeEpochId,
+    ) -> Result<UnregisterFinalizationObservation, RuntimeStoreError> {
+        let lifecycle_record = conn
+            .query_row(
+                "SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1",
+                params![runtime_id_text(runtime_id)],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+        let input_state_records = input_ids
+            .iter()
+            .map(|input_id| {
+                conn.query_row(
+                    r"
+                    SELECT state_json
+                    FROM runtime_input_states
+                    WHERE runtime_id = ?1 AND input_id = ?2
+                    ",
+                    params![runtime_id_text(runtime_id), input_id],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map(|record| (input_id.clone(), record))
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ops_record = conn
+            .query_row(
+                "SELECT state_json FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                params![runtime_id_text(runtime_id)],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+        let retired_ops_epoch_present = conn
+            .query_row(
+                r"
+                SELECT 1
+                FROM runtime_retired_ops_epochs
+                WHERE runtime_id = ?1 AND epoch_id = ?2
+                ",
+                params![runtime_id_text(runtime_id), retired_ops_epoch.to_string()],
+                |_row| Ok(()),
+            )
+            .optional()
+            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+            .is_some();
+        Ok(UnregisterFinalizationObservation {
+            lifecycle_record,
+            input_state_records,
+            ops_record,
+            retired_ops_epoch_present,
+        })
+    }
+
     /// SQLite-backed runtime store sharing the same sqlite file as `SqliteSessionStore`.
     pub struct SqliteRuntimeStore {
         path: PathBuf,
+        #[cfg(test)]
+        unregister_finalization_fault: AtomicU8,
     }
 
     impl SqliteRuntimeStore {
@@ -250,16 +485,30 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
             let path = path.into();
             let conn = open_runtime_connection(&path)?;
             drop(conn);
-            Ok(Self { path })
+            Ok(Self {
+                path,
+                #[cfg(test)]
+                unregister_finalization_fault: AtomicU8::new(0),
+            })
         }
 
         pub fn path(&self) -> &Path {
             &self.path
         }
+
+        #[cfg(test)]
+        fn inject_unregister_finalization_fault(&self, fault: u8) {
+            self.unregister_finalization_fault
+                .store(fault, Ordering::SeqCst);
+        }
     }
 
     #[async_trait::async_trait]
     impl RuntimeStore for SqliteRuntimeStore {
+        fn supports_compaction_projection_outbox(&self) -> bool {
+            true
+        }
+
         fn auth_authority_key(&self) -> Option<String> {
             let path = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
             Some(format!("sqlite:{}", path.display()))
@@ -346,6 +595,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                ensure_compaction_intents_already_outboxed(&tx, &runtime_id, &incoming)?;
                 let previous = tx
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
@@ -386,6 +636,7 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                ensure_compaction_intents_already_outboxed(&tx, &runtime_id, &incoming)?;
                 let previous = tx
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
@@ -438,6 +689,11 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
                     })
                     .transpose()?;
+                let compaction_intents = session_snapshot
+                    .as_ref()
+                    .map(crate::store::validated_compaction_projection_intents)
+                    .transpose()?
+                    .unwrap_or_default();
                 if let (Some(session), Some(session_store_key)) =
                     (session_snapshot.as_ref(), session_store_key.as_ref())
                     && session.id() != session_store_key
@@ -450,6 +706,11 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
 
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                reject_finalized_compaction_projection_replays(
+                    &tx,
+                    &runtime_id,
+                    &compaction_intents,
+                )?;
 
                 // The supersession verdict keys the entire commit: if the
                 // incoming session snapshot is classified as superseded (the
@@ -508,6 +769,11 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     return Ok(());
                 }
 
+                insert_compaction_projection_outbox_intents(
+                    &tx,
+                    &runtime_id,
+                    &compaction_intents,
+                )?;
                 insert_receipt(&tx, &runtime_id, &receipt)?;
                 upsert_input_states(&tx, &runtime_id, &input_updates)?;
                 tx.commit()
@@ -516,6 +782,121 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn load_pending_compaction_projections(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                let mut statement = conn
+                    .prepare(
+                        r"
+                        SELECT intent_json
+                        FROM runtime_compaction_projection_outbox
+                        WHERE runtime_id = ?1 AND state = 'pending'
+                        ORDER BY session_id, parent_revision, revision, commit_fingerprint
+                        ",
+                    )
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let rows = statement
+                    .query_map(params![runtime_id_text(&runtime_id)], |row| {
+                        Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes())
+                    })
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                rows.map(|row| {
+                    let encoded =
+                        row.map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    serde_json::from_slice(&encoded)
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+                })
+                .collect()
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn mark_compaction_projection_finalized(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            projection: &meerkat_core::CompactionProjectionId,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let projection = projection.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let exists = tx
+                    .query_row(
+                        r"
+                        SELECT 1 FROM runtime_compaction_projection_outbox
+                        WHERE runtime_id = ?1 AND session_id = ?2
+                          AND parent_revision = ?3 AND revision = ?4
+                          AND commit_fingerprint = ?5
+                        ",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            projection.session_id().to_string(),
+                            projection.parent_revision(),
+                            projection.revision(),
+                            projection.commit_fingerprint(),
+                        ],
+                        |_row| Ok(()),
+                    )
+                    .optional()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                    .is_some();
+                if !exists {
+                    return Err(RuntimeStoreError::NotFound(format!(
+                        "compaction outbox rewrite {}",
+                        projection.revision()
+                    )));
+                }
+                if let Some(snapshot) = tx
+                    .query_row(
+                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                {
+                    let mut session = deserialize_persisted_session(&snapshot)?;
+                    session
+                        .complete_compaction_projection_intent(&projection)
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    let cleaned = serde_json::to_vec(&session)
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    upsert_runtime_snapshot(&tx, &runtime_id, &cleaned)?;
+                }
+                tx
+                    .execute(
+                        r"
+                        UPDATE runtime_compaction_projection_outbox
+                        SET state = 'finalized'
+                        WHERE runtime_id = ?1 AND session_id = ?2
+                          AND parent_revision = ?3 AND revision = ?4
+                          AND commit_fingerprint = ?5
+                        ",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            projection.session_id().to_string(),
+                            projection.parent_revision(),
+                            projection.revision(),
+                            projection.commit_fingerprint(),
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
         async fn load_input_states(
@@ -637,8 +1018,9 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
             expected_current: &[u8],
             replacement: Vec<u8>,
         ) -> Result<bool, RuntimeStoreError> {
-            let _: meerkat_core::Session = serde_json::from_slice(&replacement)
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            let replacement_session: meerkat_core::Session =
+                serde_json::from_slice(&replacement)
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let expected_current = expected_current.to_vec();
@@ -656,6 +1038,11 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                 if current.as_deref() != Some(expected_current.as_slice()) {
                     return Ok(false);
                 }
+                ensure_compaction_intents_already_outboxed(
+                    &tx,
+                    &runtime_id,
+                    &replacement_session,
+                )?;
                 upsert_runtime_snapshot(&tx, &runtime_id, &replacement)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
@@ -817,6 +1204,147 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        async fn commit_unregister_finalization(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            commit: MachineLifecycleCommit,
+            input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let retired_ops_epoch = commit.retired_ops_epoch().cloned().ok_or_else(|| {
+                RuntimeStoreError::WriteFailed(
+                    "unregister finalization missing exact retired ops epoch".into(),
+                )
+            })?;
+            let snapshot = commit.into_snapshot();
+            let input_states = input_states
+                .iter()
+                .map(InputStatePersistenceRecord::clone_stored)
+                .collect::<Vec<_>>();
+            #[cfg(test)]
+            let fault = self.unregister_finalization_fault.swap(0, Ordering::SeqCst);
+            #[cfg(not(test))]
+            let fault = 0_u8;
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let final_lifecycle_record =
+                    MachineLifecycleStoreRecord::from_snapshot(&snapshot).encode()?;
+                let final_input_state_records = input_states
+                    .iter()
+                    .map(|state| {
+                        serde_json::to_vec(state)
+                            .map(|record| {
+                                (state.state.input_id.0.to_string(), Some(record))
+                            })
+                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let input_ids = final_input_state_records
+                    .iter()
+                    .map(|(input_id, _)| input_id.clone())
+                    .collect::<Vec<_>>();
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let before_observation = observe_unregister_finalization(
+                        &tx,
+                        &runtime_id,
+                        &input_ids,
+                        &retired_ops_epoch,
+                    )?;
+                let final_ops_record = match before_observation.ops_record.as_ref() {
+                    Some(bytes) => {
+                        let persisted: crate::ops_lifecycle::PersistedOpsSnapshot =
+                            serde_json::from_slice(bytes).map_err(|error| {
+                                RuntimeStoreError::ReadFailed(format!(
+                                    "failed to decode ops epoch before unregister finalization: {error}"
+                                ))
+                            })?;
+                        if persisted.epoch_id == retired_ops_epoch {
+                            None
+                        } else {
+                            Some(bytes.clone())
+                        }
+                    }
+                    None => None,
+                };
+                let final_observation = UnregisterFinalizationObservation {
+                    lifecycle_record: Some(final_lifecycle_record),
+                    input_state_records: final_input_state_records,
+                    ops_record: final_ops_record.clone(),
+                    retired_ops_epoch_present: true,
+                };
+                upsert_machine_lifecycle_snapshot(&tx, &runtime_id, &snapshot)?;
+                upsert_input_states(&tx, &runtime_id, &input_states)?;
+                if fault == 1 {
+                    return Err(RuntimeStoreError::WriteFailed(
+                        "synthetic power cut after unregister lifecycle write".to_string(),
+                    ));
+                }
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_retired_ops_epochs (runtime_id, epoch_id)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(runtime_id, epoch_id) DO NOTHING
+                    ",
+                    params![runtime_id_text(&runtime_id), retired_ops_epoch.to_string()],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                if before_observation.ops_record.is_some() && final_ops_record.is_none() {
+                    tx.execute(
+                        "DELETE FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                }
+                if fault == 2 {
+                    return Err(RuntimeStoreError::WriteFailed(
+                        "synthetic power cut after unregister ops deletion".to_string(),
+                    ));
+                }
+                let commit_error = match tx.commit() {
+                    Ok(()) if fault != 3 => return Ok(()),
+                    Ok(()) => {
+                        "synthetic lost acknowledgement after unregister commit".to_string()
+                    }
+                    Err(err) => err.to_string(),
+                };
+
+                // COMMIT acknowledgement can be uncertain on some I/O
+                // failures. Reopen the database and classify exact durable
+                // bytes before returning: final is success, exact pre-state
+                // is a safe ordinary error, and no other state may trigger a
+                // compensating lifecycle rollback.
+                drop(conn);
+                let observed = open_runtime_connection(&path)
+                    .and_then(|conn| {
+                        observe_unregister_finalization(
+                            &conn,
+                            &runtime_id,
+                            &input_ids,
+                            &retired_ops_epoch,
+                        )
+                    })
+                    .map_err(|observation_error| {
+                        RuntimeStoreError::UnregisterFinalizationOutcomeUnknown(format!(
+                            "commit acknowledgement failed ({commit_error}); durable outcome read failed: {observation_error}"
+                        ))
+                    })?;
+                if observed == final_observation {
+                    return Ok(());
+                }
+                if observed == before_observation {
+                    return Err(RuntimeStoreError::WriteFailed(commit_error));
+                }
+                Err(RuntimeStoreError::UnregisterFinalizationOutcomeUnknown(
+                    format!(
+                        "commit acknowledgement failed ({commit_error}); reopened lifecycle/input/ops bytes match neither final nor pre-transaction authority"
+                    ),
+                ))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
         async fn persist_ops_lifecycle(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -830,6 +1358,25 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                let retired = tx
+                    .query_row(
+                        r"
+                        SELECT 1
+                        FROM runtime_retired_ops_epochs
+                        WHERE runtime_id = ?1 AND epoch_id = ?2
+                        ",
+                        params![runtime_id_text(&runtime_id), snapshot.epoch_id.to_string()],
+                        |_row| Ok(()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .is_some();
+                if retired {
+                    return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
+                        runtime_id: runtime_id.0.clone(),
+                        epoch_id: snapshot.epoch_id,
+                    });
+                }
                 tx.execute(
                     r"
                     INSERT INTO runtime_ops_lifecycle (runtime_id, state_json)
@@ -949,6 +1496,531 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
             let mut session = Session::new();
             session.push(Message::User(UserMessage::text(content.to_string())));
             session
+        }
+
+        fn session_with_compaction_intent() -> (Session, meerkat_core::CompactionProjectionIntent) {
+            let mut session = session_with_user("verbose context one");
+            session.push(Message::User(UserMessage::text("verbose context two")));
+            let parent = session.transcript_revision().unwrap();
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                    vec![Message::User(UserMessage::compaction_summary(
+                        "compacted context",
+                    ))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("sqlite-outbox-test".to_string()),
+                    Some(parent),
+                )
+                .unwrap();
+            let mut encoded = serde_json::to_value(&session).unwrap();
+            encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["commits"][0]
+                ["selection"] = serde_json::json!({
+                "type": "compaction_message_range",
+                "range": { "start": 0, "end": 2 }
+            });
+            let mut session: Session = serde_json::from_value(encoded).unwrap();
+            let commit = session
+                .transcript_history_state()
+                .unwrap()
+                .unwrap()
+                .commits
+                .last()
+                .unwrap()
+                .clone();
+            let intent = meerkat_core::CompactionProjectionIntent {
+                projection: serde_json::from_value(serde_json::json!({
+                    "session_id": session.id(),
+                    "parent_revision": &commit.parent_revision,
+                    "revision": &commit.revision,
+                    "commit_fingerprint": "sha256:aee1fea2386a630969f33a58068390400ed9c0e5964a1838269ae2eeab2761da",
+                }))
+                .unwrap(),
+                summary_tokens: 5,
+                messages_before: 2,
+                messages_after: 1,
+            };
+            session
+                .add_compaction_projection_intent(intent.clone())
+                .unwrap();
+            (session, intent)
+        }
+
+        fn snapshot_with_raw_intents(
+            session: &Session,
+            intents: &[meerkat_core::CompactionProjectionIntent],
+        ) -> Vec<u8> {
+            let mut value = serde_json::to_value(session).unwrap();
+            value["metadata"][meerkat_core::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY] =
+                serde_json::to_value(intents).unwrap();
+            serde_json::to_vec(&value).unwrap()
+        }
+
+        fn unbacked_intent(
+            session_id: &meerkat_core::types::SessionId,
+        ) -> meerkat_core::CompactionProjectionIntent {
+            meerkat_core::CompactionProjectionIntent {
+                projection: serde_json::from_value(serde_json::json!({
+                    "session_id": session_id,
+                    "parent_revision": "missing-parent",
+                    "revision": "missing-revision",
+                    "commit_fingerprint": "sha256:unbacked-persisted-fixture",
+                }))
+                .unwrap(),
+                summary_tokens: 1,
+                messages_before: 2,
+                messages_after: 1,
+            }
+        }
+
+        #[tokio::test]
+        async fn compaction_outbox_is_atomic_durable_and_finalize_ack_is_idempotent() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("runtime.sqlite3");
+            let runtime_id = runtime_id();
+            let (session, intent) = session_with_compaction_intent();
+            let snapshot = serde_json::to_vec(&session).unwrap();
+            {
+                let store = SqliteRuntimeStore::new(&path).unwrap();
+                store
+                    .atomic_apply(
+                        &runtime_id,
+                        Some(SessionDelta {
+                            session_snapshot: snapshot.clone(),
+                        }),
+                        RunBoundaryReceipt {
+                            run_id: RunId::new(),
+                            boundary: RunApplyBoundary::RunStart,
+                            contributing_input_ids: vec![],
+                            conversation_digest: None,
+                            message_count: 1,
+                            sequence: 41,
+                        },
+                        vec![],
+                        Some(session.id().clone()),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store.load_session_snapshot(&runtime_id).await.unwrap(),
+                    Some(snapshot)
+                );
+            }
+
+            let reopened = SqliteRuntimeStore::new(&path).unwrap();
+            assert_eq!(
+                reopened
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap(),
+                vec![intent.clone()]
+            );
+            reopened
+                .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+                .await
+                .unwrap();
+            reopened
+                .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+                .await
+                .unwrap();
+            assert!(
+                reopened
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(reopened);
+            let after_ack_reopen = SqliteRuntimeStore::new(&path).unwrap();
+            let persisted: Session = serde_json::from_slice(
+                &after_ack_reopen
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                persisted
+                    .compaction_projection_intents()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                after_ack_reopen
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn finalized_sqlite_outbox_tombstone_rejects_all_snapshot_replay_paths() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let (session, intent) = session_with_compaction_intent();
+            let replay_snapshot = serde_json::to_vec(&session).unwrap();
+            let commit = session
+                .transcript_history_state()
+                .unwrap()
+                .unwrap()
+                .commits
+                .last()
+                .unwrap()
+                .clone();
+            let receipt = |run_id, sequence| RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: None,
+                message_count: 1,
+                sequence,
+            };
+            store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: replay_snapshot.clone(),
+                    }),
+                    receipt(RunId::new(), 80),
+                    vec![],
+                    Some(session.id().clone()),
+                )
+                .await
+                .unwrap();
+            store
+                .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+                .await
+                .unwrap();
+            let cleaned_snapshot = store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let replay_run_id = RunId::new();
+            let error = store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: replay_snapshot.clone(),
+                    }),
+                    receipt(replay_run_id.clone(), 81),
+                    vec![],
+                    Some(session.id().clone()),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("finalized compaction intent"));
+            assert!(
+                store
+                    .load_boundary_receipt(&runtime_id, &replay_run_id, 81)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "finalized replay rejection must roll back the whole SQLite transaction"
+            );
+
+            let error = store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: replay_snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("finalized compaction intent"));
+            let error = store
+                .commit_session_transcript_rewrite_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: replay_snapshot.clone(),
+                    },
+                    &commit,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("finalized compaction intent"));
+            let error = store
+                .replace_session_snapshot_if_current(
+                    &runtime_id,
+                    &cleaned_snapshot,
+                    replay_snapshot,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("finalized compaction intent"));
+
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(cleaned_snapshot)
+            );
+            assert!(
+                store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "a finalized SQLite tombstone must never be silently revived or left untracked"
+            );
+        }
+
+        #[tokio::test]
+        async fn invalid_compaction_outbox_intent_rolls_back_snapshot_and_outbox() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let (session, mut conflicting) = session_with_compaction_intent();
+            let original = session.compaction_projection_intents().unwrap()[0].clone();
+            conflicting.summary_tokens += 1;
+            let error = store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: snapshot_with_raw_intents(
+                            &session,
+                            &[original, conflicting],
+                        ),
+                    }),
+                    RunBoundaryReceipt {
+                        run_id: RunId::new(),
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: vec![],
+                        conversation_digest: None,
+                        message_count: 1,
+                        sequence: 42,
+                    },
+                    vec![],
+                    Some(session.id().clone()),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                None
+            );
+            assert!(
+                store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let foreign = session_with_compaction_intent().1;
+            for (sequence, invalid) in [foreign, unbacked_intent(session.id())]
+                .into_iter()
+                .enumerate()
+            {
+                let error = store
+                    .atomic_apply(
+                        &runtime_id,
+                        Some(SessionDelta {
+                            session_snapshot: snapshot_with_raw_intents(&session, &[invalid]),
+                        }),
+                        RunBoundaryReceipt {
+                            run_id: RunId::new(),
+                            boundary: RunApplyBoundary::RunStart,
+                            contributing_input_ids: vec![],
+                            conversation_digest: None,
+                            message_count: 1,
+                            sequence: 50 + sequence as u64,
+                        },
+                        vec![],
+                        Some(session.id().clone()),
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+                assert_eq!(
+                    store.load_session_snapshot(&runtime_id).await.unwrap(),
+                    None
+                );
+                assert!(
+                    store
+                        .load_pending_compaction_projections(&runtime_id)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn superseded_snapshot_does_not_advance_sqlite_compaction_outbox() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let (incoming, intent) = session_with_compaction_intent();
+            let mut current = incoming.clone();
+            current
+                .complete_compaction_projection_intent(&intent.projection)
+                .unwrap();
+            current.push(Message::User(UserMessage::text("already advanced")));
+            let current_snapshot = serde_json::to_vec(&current).unwrap();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: current_snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    }),
+                    RunBoundaryReceipt {
+                        run_id: RunId::new(),
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: vec![],
+                        conversation_digest: None,
+                        message_count: 1,
+                        sequence: 43,
+                    },
+                    vec![],
+                    Some(incoming.id().clone()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(current_snapshot)
+            );
+            assert!(
+                store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn existing_sqlite_outbox_rejects_changed_intent_without_advancing_snapshot() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let (session, intent) = session_with_compaction_intent();
+            let original_snapshot = serde_json::to_vec(&session).unwrap();
+            let receipt = |sequence| RunBoundaryReceipt {
+                run_id: RunId::new(),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: None,
+                message_count: 1,
+                sequence,
+            };
+            store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: original_snapshot.clone(),
+                    }),
+                    receipt(70),
+                    vec![],
+                    Some(session.id().clone()),
+                )
+                .await
+                .unwrap();
+            let mut advanced = session.clone();
+            advanced.push(Message::User(UserMessage::text("later turn")));
+            let mut conflicting = intent.clone();
+            conflicting.summary_tokens += 1;
+            let error = store
+                .atomic_apply(
+                    &runtime_id,
+                    Some(SessionDelta {
+                        session_snapshot: snapshot_with_raw_intents(&advanced, &[conflicting]),
+                    }),
+                    receipt(71),
+                    vec![],
+                    Some(session.id().clone()),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(original_snapshot)
+            );
+            assert_eq!(
+                store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap(),
+                vec![intent]
+            );
+        }
+
+        #[tokio::test]
+        async fn sqlite_non_boundary_snapshot_apis_cannot_bypass_compaction_outbox() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let (session, _intent) = session_with_compaction_intent();
+            let snapshot = serde_json::to_vec(&session).unwrap();
+            let commit = session
+                .transcript_history_state()
+                .unwrap()
+                .unwrap()
+                .commits
+                .last()
+                .unwrap()
+                .clone();
+            assert!(
+                store
+                    .commit_session_snapshot(
+                        &runtime_id,
+                        SessionDelta {
+                            session_snapshot: snapshot.clone(),
+                        },
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .commit_session_transcript_rewrite_snapshot(
+                        &runtime_id,
+                        SessionDelta {
+                            session_snapshot: snapshot.clone(),
+                        },
+                        &commit,
+                    )
+                    .await
+                    .is_err()
+            );
+            let clean = Session::with_id(session.id().clone());
+            let clean_snapshot = serde_json::to_vec(&clean).unwrap();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: clean_snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .replace_session_snapshot_if_current(&runtime_id, &clean_snapshot, snapshot,)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(clean_snapshot)
+            );
+            assert!(
+                store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         fn receipt_row_count(store: &SqliteRuntimeStore) -> usize {
@@ -1549,6 +2621,203 @@ CREATE TABLE IF NOT EXISTS runtime_projection_quarantine (
             assert_eq!(lifecycle.runtime_state(), runtime_state);
             assert_eq!(lifecycle.binding(), &binding);
             assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn unregister_finalization_power_cuts_reopen_without_split_epoch_truth() {
+            for (fault, commit_was_durable) in [(1_u8, false), (2_u8, false), (3_u8, true)] {
+                let dir = TempDir::new().unwrap();
+                let path = dir.path().join(format!("unregister-fault-{fault}.sqlite3"));
+                let runtime_id = LogicalRuntimeId::new(format!("runtime-fault-{fault}"));
+                let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+
+                store
+                    .commit_machine_lifecycle(
+                        &runtime_id,
+                        MachineLifecycleCommit::new_with_binding(
+                            RuntimeState::Idle,
+                            crate::store::MachineLifecycleBindingFacts::new(
+                                Some(format!("rt:session:fault-{fault}")),
+                                Some(1),
+                                Some(1),
+                                Some(format!("epoch-{fault}")),
+                            ),
+                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                        ),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                let stale_ops = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+                    .capture_persistence_snapshot(
+                        meerkat_core::RuntimeEpochId::new(),
+                        &meerkat_core::EpochCursorState::new(),
+                    )
+                    .unwrap();
+                store
+                    .persist_ops_lifecycle(&runtime_id, &stale_ops)
+                    .await
+                    .unwrap();
+                let retired_ops_epoch = stale_ops.epoch_id.clone();
+
+                store.inject_unregister_finalization_fault(fault);
+                let result = store
+                    .commit_unregister_finalization(
+                        &runtime_id,
+                        MachineLifecycleCommit::new_with_binding(
+                            RuntimeState::Stopped,
+                            crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
+                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                        )
+                        .for_unregister_finalization(retired_ops_epoch.clone()),
+                        &[],
+                    )
+                    .await;
+                if commit_was_durable {
+                    // The final former kill window is after COMMIT and before
+                    // the caller acts on the acknowledgement. Discarding the
+                    // successful result and reopening models that process
+                    // death: no shell rollback gets to run.
+                    result.expect("post-commit kill window has durable finalization");
+                } else {
+                    let error = result
+                        .expect_err("pre-commit unregister finalization interruption must surface");
+                    assert!(error.to_string().contains("synthetic"));
+                }
+                drop(store);
+
+                let reopened = SqliteRuntimeStore::new(path.clone()).unwrap();
+                let recovered_state = crate::store::load_runtime_state(&reopened, &runtime_id)
+                    .await
+                    .unwrap();
+                let recovered_ops = reopened.load_ops_lifecycle(&runtime_id).await.unwrap();
+                if commit_was_durable {
+                    assert_eq!(recovered_state, Some(RuntimeState::Stopped));
+                    assert!(recovered_ops.is_none());
+                } else {
+                    assert_eq!(recovered_state, Some(RuntimeState::Idle));
+                    assert!(recovered_ops.is_some());
+                }
+                assert!(
+                    recovered_state != Some(RuntimeState::Stopped) || recovered_ops.is_none(),
+                    "reopen must never expose terminal lifecycle with the stale ops epoch"
+                );
+
+                // Both rollback-before-commit and crash-after-commit reopen
+                // states converge under the same idempotent retry.
+                reopened
+                    .commit_unregister_finalization(
+                        &runtime_id,
+                        MachineLifecycleCommit::new_with_binding(
+                            RuntimeState::Stopped,
+                            crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
+                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                        )
+                        .for_unregister_finalization(retired_ops_epoch.clone()),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                drop(reopened);
+
+                let reopened_after_retry = SqliteRuntimeStore::new(path).unwrap();
+                assert_eq!(
+                    crate::store::load_runtime_state(&reopened_after_retry, &runtime_id)
+                        .await
+                        .unwrap(),
+                    Some(RuntimeState::Stopped)
+                );
+                assert!(
+                    reopened_after_retry
+                        .load_ops_lifecycle(&runtime_id)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let late_error = reopened_after_retry
+                    .persist_ops_lifecycle(&runtime_id, &stale_ops)
+                    .await
+                    .expect_err("reopen must retain the exact retired-epoch fence");
+                assert!(matches!(
+                    late_error,
+                    RuntimeStoreError::OpsLifecycleEpochRetired { epoch_id, .. }
+                        if epoch_id == retired_ops_epoch
+                ));
+                assert!(
+                    reopened_after_retry
+                        .load_ops_lifecycle(&runtime_id)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn delayed_old_epoch_finalizer_preserves_new_epoch_across_reopen() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("old-finalizer-new-epoch.sqlite3");
+            let runtime_id = LogicalRuntimeId::new("runtime-old-finalizer-new-epoch");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+            let old_ops = registry
+                .capture_persistence_snapshot(
+                    meerkat_core::RuntimeEpochId::new(),
+                    &meerkat_core::EpochCursorState::new(),
+                )
+                .unwrap();
+            let new_ops = registry
+                .capture_persistence_snapshot(
+                    meerkat_core::RuntimeEpochId::new(),
+                    &meerkat_core::EpochCursorState::new(),
+                )
+                .unwrap();
+            store
+                .persist_ops_lifecycle(&runtime_id, &old_ops)
+                .await
+                .unwrap();
+            store
+                .persist_ops_lifecycle(&runtime_id, &new_ops)
+                .await
+                .unwrap();
+
+            store.inject_unregister_finalization_fault(3);
+            store
+                .commit_unregister_finalization(
+                    &runtime_id,
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Stopped,
+                        crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    )
+                    .for_unregister_finalization(old_ops.epoch_id.clone()),
+                    &[],
+                )
+                .await
+                .unwrap();
+            drop(store);
+
+            let reopened = SqliteRuntimeStore::new(path).unwrap();
+            assert_eq!(
+                reopened
+                    .load_ops_lifecycle(&runtime_id)
+                    .await
+                    .unwrap()
+                    .expect("new epoch row must survive delayed old finalization")
+                    .epoch_id,
+                new_ops.epoch_id
+            );
+            assert!(matches!(
+                reopened
+                    .persist_ops_lifecycle(&runtime_id, &old_ops)
+                    .await
+                    .expect_err("old epoch tombstone must survive reopen"),
+                RuntimeStoreError::OpsLifecycleEpochRetired { .. }
+            ));
+            reopened
+                .persist_ops_lifecycle(&runtime_id, &new_ops)
+                .await
+                .unwrap();
         }
 
         #[tokio::test]

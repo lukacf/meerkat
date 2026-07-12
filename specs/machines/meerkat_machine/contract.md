@@ -367,6 +367,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CompletionWaitersResolvedForUnregister`(session_id: SessionId)
 - `ResolveRuntimeOpsLifecycleDurability`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `HydrateSessionLlmState`(current_identity: SessionLlmIdentity, current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter)
+- `CommitStickyModelFallback`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, target_identity: SessionLlmIdentity, target_model: String, target_profile_provider: Option<Provider>, target_profile_model: Option<String>, target_capability_surface: Option<SessionLlmCapabilitySurface>, target_capability_surface_status: SessionLlmCapabilitySurfaceStatus, target_capability_base_filter: ToolFilter, target_realtime_capable: Bool, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_visibility_state: SessionToolVisibilityState, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta, retry_attempt: u64)
 - `ClearSessionLlmState`
 - `ResolvePeerIngressReceive`(kind: PeerIngressAdmittedKind, auth_required: Bool, auth_exempt: Bool, trusted: Bool, queued_work_present: Bool, queue_closed: Bool, queue_capacity_available: Bool)
 - `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
@@ -801,10 +802,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat_session_llm_filter_has_view_image_only`(filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_capability_base_filter_matches`(target_capability_surface: SessionLlmCapabilitySurface, next_capability_base_filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_hydrated_capability_base_filter_matches`(current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter) -> `Bool`
+- `meerkat_session_llm_profile_provenance_matches`(target_identity: SessionLlmIdentity, target_profile_provider: Option<Provider>, target_profile_model: Option<String>, target_capability_surface_status: SessionLlmCapabilitySurfaceStatus) -> `Bool`
 - `meerkat_session_llm_capability_base_filter_replacement_matches`(current_capability_surface: Option<SessionLlmCapabilitySurface>, current_capability_surface_status: SessionLlmCapabilitySurfaceStatus, current_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_filter_allows_view_image`(filter: ToolFilter) -> `Bool`
 - `meerkat_session_llm_visibility_state_allows_view_image`(view_image_tool_available: Bool, visibility_state: SessionToolVisibilityState) -> `Bool`
 - `meerkat_session_llm_expected_next_visibility_revision`(committed_visible_set_changed: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64) -> `u64`
+- `meerkat_session_llm_expected_next_staged_visibility_revision`(committed_visible_set_changed: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_active_visibility_revision: u64) -> `u64`
 - `meerkat_session_llm_visibility_shape_matches`(previous_visibility_state: SessionToolVisibilityState, next_visibility_state: SessionToolVisibilityState, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_active_visibility_revision: u64) -> `Bool`
 - `meerkat_session_llm_visibility_delta_matches`(tool_visibility_delta: SessionToolVisibilityDelta, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, committed_visible_set_changed: Bool) -> `Bool`
 - `meerkat_session_llm_visibility_reconfigure_plan_matches`(previous_visibility_state: SessionToolVisibilityState, next_visibility_state: SessionToolVisibilityState, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta) -> `Bool`
@@ -1528,7 +1531,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_loop_drained`
   - `comms_drain_exited`
   - `completion_waiters_drained`
-- To: `Idle`
+- To: `Retired`
 
 ### `UnregisterSessionStopped`
 - From: `Stopped`
@@ -1638,6 +1641,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `capability_base_filter_matches_surface`
 - To: `Retired`
+
+### `CommitStickyModelFallbackRunning`
+- From: `Running`
+- On: `CommitStickyModelFallback`(previous_identity, previous_visibility_state, target_identity, target_model, target_profile_provider, target_profile_model, target_capability_surface, target_capability_surface_status, target_capability_base_filter, target_realtime_capable, view_image_tool_available, previous_view_image_visible, next_view_image_visible, previous_active_visibility_revision, previous_staged_visibility_revision, next_visibility_state, next_active_visibility_revision, tool_visibility_delta, retry_attempt)
+- Guards:
+  - `session_registered`
+  - `turn_error_recovery`
+  - `retry_attempt_matches`
+  - `previous_identity_matches_current`
+  - `previous_visibility_matches_current`
+  - `target_model_matches_identity`
+  - `target_profile_provenance_matches_identity`
+  - `target_capability_base_filter_matches_surface`
+  - `visibility_fallback_plan_matches`
+- To: `Running`
 
 ### `ReconfigureSessionLlmIdentityAttached`
 - From: `Attached`
@@ -14394,6 +14412,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `filter_matches_machine_staged_filter`
   - `revision_matches_machine_staged_revision`
+  - `active_visibility_revision_never_decreases`
   - `staged_filter_witnesses_match_machine_catalog`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Idle`
@@ -14404,6 +14423,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `filter_matches_machine_staged_filter`
   - `revision_matches_machine_staged_revision`
+  - `active_visibility_revision_never_decreases`
   - `staged_filter_witnesses_match_machine_catalog`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Attached`
@@ -14414,6 +14434,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `filter_matches_machine_staged_filter`
   - `revision_matches_machine_staged_revision`
+  - `active_visibility_revision_never_decreases`
   - `staged_filter_witnesses_match_machine_catalog`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Running`
@@ -14424,6 +14445,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `filter_matches_machine_staged_filter`
   - `revision_matches_machine_staged_revision`
+  - `active_visibility_revision_never_decreases`
   - `staged_filter_witnesses_match_machine_catalog`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Retired`
@@ -14434,6 +14456,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `filter_matches_machine_staged_filter`
   - `revision_matches_machine_staged_revision`
+  - `active_visibility_revision_never_decreases`
   - `staged_filter_witnesses_match_machine_catalog`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Stopped`

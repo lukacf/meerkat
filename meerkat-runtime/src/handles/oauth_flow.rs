@@ -2030,6 +2030,17 @@ mod tests {
                 "commit_machine_lifecycle".to_string(),
             ))
         }
+
+        async fn commit_unregister_finalization(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _commit: crate::store::MachineLifecycleCommit,
+            _input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "commit_unregister_finalization".to_string(),
+            ))
+        }
     }
 
     fn snapshot_phase(

@@ -341,6 +341,13 @@ pub enum AgentError {
     #[error("Internal error: {0}")]
     InternalError(String),
 
+    /// A supervised sticky-fallback durability saga could not prove whether
+    /// runtime session authority and generated routing authority converged.
+    /// The live executor must be handed to canonical teardown; ordinary
+    /// failed-batch retry could continue against split model identity.
+    #[error("Sticky model fallback authority outcome is unknown: {message}")]
+    StickyModelFallbackAuthorityUnknown { message: String },
+
     /// Agent construction failed (e.g. missing API key, unknown provider).
     #[error("Build error: {0}")]
     BuildError(String),
@@ -507,6 +514,26 @@ impl AgentError {
             _ => false,
         }
     }
+
+    /// Whether this error must survive surface/cleanup wrappers so the runtime
+    /// can hand the live executor to canonical teardown.
+    pub fn requires_session_teardown(&self) -> bool {
+        matches!(self, Self::StickyModelFallbackAuthorityUnknown { .. })
+    }
+
+    /// Attach an ancillary cleanup failure without erasing a teardown-required
+    /// primary cause. Non-teardown errors retain the historical combined
+    /// internal-error shape.
+    pub fn with_ancillary_failure(self, context: &str, failure: impl std::fmt::Display) -> Self {
+        match self {
+            Self::StickyModelFallbackAuthorityUnknown { message } => {
+                Self::StickyModelFallbackAuthorityUnknown {
+                    message: format!("{message}; additionally {context}: {failure}"),
+                }
+            }
+            other => Self::InternalError(format!("{other}; additionally {context}: {failure}")),
+        }
+    }
 }
 
 pub fn store_error(err: impl std::fmt::Display) -> AgentError {
@@ -535,6 +562,22 @@ mod tests {
             "network timeout after 30s",
         );
         assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn ancillary_failure_preserves_teardown_required_variant() {
+        let combined = AgentError::StickyModelFallbackAuthorityUnknown {
+            message: "fallback CAS outcome unknown".to_string(),
+        }
+        .with_ancillary_failure("failed to clear overlay", "synthetic cleanup fault");
+
+        assert!(combined.requires_session_teardown());
+        assert!(matches!(
+            combined,
+            AgentError::StickyModelFallbackAuthorityUnknown { ref message }
+                if message.contains("fallback CAS outcome unknown")
+                    && message.contains("synthetic cleanup fault")
+        ));
     }
 
     #[test]

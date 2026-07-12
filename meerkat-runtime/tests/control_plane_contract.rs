@@ -74,37 +74,55 @@ fn make_run_result(text: &str) -> RunResult {
 }
 
 #[test]
-fn control_plane_contract_async_stop_terminalization_has_one_call_site() {
+fn control_plane_contract_only_runtime_loop_handoff_can_terminalize_stop() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = fs::read_to_string(crate_root.join("src/control_plane.rs"))
         .expect("control_plane.rs should be readable");
-    let start = source
+    let direct_start = source
         .find("pub(crate) async fn apply_executor_effect")
         .expect("apply_executor_effect should exist");
-    let end = source[start..]
+    let direct_end = source[direct_start..]
+        .find("/// Typed handoff produced")
+        .expect("runtime-loop effect handoff should follow apply_executor_effect");
+    let loop_start = source
+        .find("pub(crate) async fn apply_runtime_loop_executor_effect")
+        .expect("apply_runtime_loop_executor_effect should exist");
+    let loop_end = source[loop_start..]
         .find("/// Drain any ready executor effects")
-        .expect("drain_ready_executor_effects should follow apply_executor_effect");
-    let apply_body = &source[start..start + end];
+        .expect("drain_ready_executor_effects should follow runtime-loop effect application");
 
     let split_terminalizers = [
         "notify_runtime_executor_exited",
         "finalize_runtime_stopped",
         "resolve_all_terminated",
     ];
+    let direct_body = &source[direct_start..direct_start + direct_end];
+    assert!(
+        direct_body.contains("requires the runtime-loop terminal handoff path"),
+        "direct executor effect helper must reject stop effects"
+    );
+    assert_eq!(
+        direct_body.matches("terminalize_async_stop(").count(),
+        0,
+        "direct executor effect helper must have no stop terminalizer"
+    );
+
+    let path = "runtime-loop executor effect";
+    let body = &source[loop_start..loop_start + loop_end];
     let offenders = split_terminalizers
         .iter()
         .copied()
-        .filter(|needle| apply_body.contains(needle))
+        .filter(|needle| body.contains(needle))
         .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
-        "async stop terminalization must be a single canonical call from \
-         apply_executor_effect; found split terminalizers: {offenders:?}"
+        "{path} must use canonical async stop terminalization; found split terminalizers: \
+         {offenders:?}"
     );
     assert_eq!(
-        apply_body.matches("terminalize_async_stop(").count(),
+        body.matches("terminalize_async_stop(").count(),
         1,
-        "apply_executor_effect should call terminalize_async_stop exactly once"
+        "{path} should call terminalize_async_stop exactly once"
     );
 }
 

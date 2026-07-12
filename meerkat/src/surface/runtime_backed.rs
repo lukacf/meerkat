@@ -183,6 +183,18 @@ async fn materialize_error_preserves_runtime_session<B: SessionAgentBuilder + 's
     }
 }
 
+async fn unregister_materialization_compensation(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    primary_error: &SurfaceRuntimeMaterializeError,
+) -> Result<(), SurfaceRuntimeMaterializeError> {
+    adapter.unregister_session(session_id).await.map_err(|cleanup_error| {
+        SurfaceRuntimeMaterializeError::RuntimeDriver(RuntimeDriverError::Internal(format!(
+            "{primary_error}; additionally failed to unregister newly materialized runtime session {session_id}: {cleanup_error}"
+        )))
+    })
+}
+
 pub async fn run_runtime_backed_initial_turn_with_machine<B: SessionAgentBuilder + 'static>(
     service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
@@ -218,19 +230,27 @@ where
     let bindings = match adapter.prepare_bindings(prepared_session_id.clone()).await {
         Ok(bindings) => bindings,
         Err(error) => {
+            let error = SurfaceRuntimeMaterializeError::RuntimeBindings(error);
             if !runtime_was_registered {
-                adapter.unregister_session(&prepared_session_id).await;
+                unregister_materialization_compensation(
+                    adapter.as_ref(),
+                    &prepared_session_id,
+                    &error,
+                )
+                .await?;
             }
-            return Err(SurfaceRuntimeMaterializeError::RuntimeBindings(error));
+            return Err(error);
         }
     };
     if let Err(error) =
         install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await
     {
+        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
-        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+        return Err(error);
     }
 
     let mut build = request.build.unwrap_or_default();
@@ -245,10 +265,16 @@ where
     {
         Ok(result) => result,
         Err(error) => {
+            let error = SurfaceRuntimeMaterializeError::Session(error);
             if !runtime_was_registered {
-                adapter.unregister_session(&prepared_session_id).await;
+                unregister_materialization_compensation(
+                    adapter.as_ref(),
+                    &prepared_session_id,
+                    &error,
+                )
+                .await?;
             }
-            return Err(SurfaceRuntimeMaterializeError::Session(error));
+            return Err(error);
         }
     };
 
@@ -256,7 +282,8 @@ where
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
         return Err(error);
     }
@@ -281,7 +308,12 @@ where
                         )
                         .await
                     {
-                        adapter.unregister_session(&prepared_session_id).await;
+                        unregister_materialization_compensation(
+                            adapter.as_ref(),
+                            &prepared_session_id,
+                            &error,
+                        )
+                        .await?;
                     }
                     return Err(error);
                 }
@@ -294,7 +326,8 @@ where
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
         return Err(error);
     }
@@ -306,10 +339,12 @@ where
         )
         .await
     {
+        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
-        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+        return Err(error);
     }
 
     Ok(result)
@@ -331,19 +366,27 @@ where
     let bindings = match adapter.prepare_bindings(prepared_session_id.clone()).await {
         Ok(bindings) => bindings,
         Err(error) => {
+            let error = SurfaceRuntimeMaterializeError::RuntimeBindings(error);
             if !runtime_was_registered {
-                adapter.unregister_session(&prepared_session_id).await;
+                unregister_materialization_compensation(
+                    adapter.as_ref(),
+                    &prepared_session_id,
+                    &error,
+                )
+                .await?;
             }
-            return Err(SurfaceRuntimeMaterializeError::RuntimeBindings(error));
+            return Err(error);
         }
     };
     if let Err(error) =
         install_prepared_runtime_interrupt_handle(service, adapter, &prepared_session_id).await
     {
+        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
-        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+        return Err(error);
     }
 
     let mut build = request.build.unwrap_or_default();
@@ -358,10 +401,16 @@ where
     {
         Ok(result) => result,
         Err(error) => {
+            let error = SurfaceRuntimeMaterializeError::Session(error);
             if !runtime_was_registered {
-                adapter.unregister_session(&prepared_session_id).await;
+                unregister_materialization_compensation(
+                    adapter.as_ref(),
+                    &prepared_session_id,
+                    &error,
+                )
+                .await?;
             }
-            return Err(SurfaceRuntimeMaterializeError::Session(error));
+            return Err(error);
         }
     };
 
@@ -369,7 +418,8 @@ where
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
         return Err(error);
     }
@@ -394,7 +444,12 @@ where
                         )
                         .await
                     {
-                        adapter.unregister_session(&prepared_session_id).await;
+                        unregister_materialization_compensation(
+                            adapter.as_ref(),
+                            &prepared_session_id,
+                            &error,
+                        )
+                        .await?;
                     }
                     return Err(error);
                 }
@@ -407,7 +462,8 @@ where
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
         return Err(error);
     }
@@ -419,10 +475,12 @@ where
         )
         .await
     {
+        let error = SurfaceRuntimeMaterializeError::RuntimeDriver(error);
         if !runtime_was_registered {
-            adapter.unregister_session(&prepared_session_id).await;
+            unregister_materialization_compensation(adapter.as_ref(), &prepared_session_id, &error)
+                .await?;
         }
-        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+        return Err(error);
     }
 
     Ok(result)
@@ -622,6 +680,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentRuntimeExecutor<B> {
             workgraph_service: Some(workgraph_service),
         }
     }
+
+    async fn authoritative_non_archived_session_after_not_found<F>(
+        &self,
+        not_found: &SessionError,
+        authority_failure: F,
+    ) -> Result<Session, CoreExecutorError>
+    where
+        F: Fn(String) -> CoreExecutorError,
+    {
+        let Some(session) = self
+            .service
+            .load_authoritative_session(&self.session_id)
+            .await
+            .map_err(|error| authority_failure(error.to_string()))?
+        else {
+            return Err(CoreExecutorError::session_unavailable_requires_teardown(
+                not_found.to_string(),
+            ));
+        };
+        if self
+            .service
+            .session_archived_by_authority(&self.session_id, &session)
+            .await
+            .map_err(|error| authority_failure(error.to_string()))?
+        {
+            return Err(CoreExecutorError::archived_session_requires_teardown(
+                not_found.to_string(),
+            ));
+        }
+        Ok(session)
+    }
 }
 
 async fn validate_workgraph_attention_primitive(
@@ -742,34 +831,13 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                 .await
             {
                 Ok(output) => return Ok(output),
-                Err(SessionError::NotFound { .. }) => {
+                Err(error @ SessionError::NotFound { .. }) => {
                     let session = self
-                        .service
-                        .load_authoritative_session(&self.session_id)
-                        .await
-                        .map_err(|error| {
-                            CoreExecutorError::apply_failed_runtime_context(error.to_string())
-                        })?
-                        .ok_or_else(|| {
-                            CoreExecutorError::apply_failed_runtime_context(format!(
-                                "session not found: {}",
-                                self.session_id
-                            ))
-                        })?;
-                    if self
-                        .service
-                        .session_archived_by_authority(&self.session_id, &session)
-                        .await
-                        .map_err(|error| {
-                            CoreExecutorError::apply_failed_runtime_context(error.to_string())
-                        })?
-                    {
-                        self.adapter.unregister_session(&self.session_id).await;
-                        return Err(CoreExecutorError::apply_failed_runtime_context(format!(
-                            "session not found: {}",
-                            self.session_id
-                        )));
-                    }
+                        .authoritative_non_archived_session_after_not_found(
+                            &error,
+                            CoreExecutorError::apply_failed_runtime_context,
+                        )
+                        .await?;
                     let recovered = build_recovered_session(
                         session.clone(),
                         &SurfaceSessionRecoveryOverrides::default(),
@@ -781,7 +849,7 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                     let service = Arc::clone(&self.service);
                     let adapter = Arc::clone(&self.adapter);
                     let workgraph_service = self.workgraph_service.clone();
-                    Box::pin(materialize_session(
+                    match Box::pin(materialize_session(
                         &self.service,
                         &self.adapter,
                         session,
@@ -803,10 +871,35 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                         },
                     ))
                     .await
-                    .map_err(|error| {
-                        CoreExecutorError::apply_failed_runtime_context(error.to_string())
-                    })?;
-                    return self
+                    {
+                        Ok(_) => {}
+                        Err(SurfaceRuntimeMaterializeError::Session(
+                            error @ SessionError::NotFound { .. },
+                        )) => {
+                            return Err(
+                                match self
+                                    .authoritative_non_archived_session_after_not_found(
+                                        &error,
+                                        CoreExecutorError::apply_failed_runtime_context,
+                                    )
+                                    .await
+                                {
+                                    Err(teardown) => teardown,
+                                    Ok(_) => {
+                                        CoreExecutorError::session_unavailable_requires_teardown(
+                                            error.to_string(),
+                                        )
+                                    }
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            return Err(CoreExecutorError::apply_failed_runtime_context(
+                                error.to_string(),
+                            ));
+                        }
+                    }
+                    return match self
                         .service
                         .apply_runtime_context_appends_with_boundary(
                             &self.session_id,
@@ -816,9 +909,28 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                             contributing_input_ids,
                         )
                         .await
-                        .map_err(|error| {
-                            CoreExecutorError::apply_failed_runtime_context(error.to_string())
-                        });
+                    {
+                        Ok(output) => Ok(output),
+                        Err(error @ SessionError::NotFound { .. }) => {
+                            match self
+                                .authoritative_non_archived_session_after_not_found(
+                                    &error,
+                                    CoreExecutorError::apply_failed_runtime_context,
+                                )
+                                .await
+                            {
+                                Err(teardown) => Err(teardown),
+                                Ok(_) => {
+                                    Err(CoreExecutorError::session_unavailable_requires_teardown(
+                                        error.to_string(),
+                                    ))
+                                }
+                            }
+                        }
+                        Err(error) => Err(CoreExecutorError::apply_failed_runtime_context(
+                            error.to_string(),
+                        )),
+                    };
                 }
                 Err(error) => {
                     return Err(CoreExecutorError::apply_failed_runtime_context(
@@ -839,7 +951,8 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         )
         .await
         .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))?;
-        self.service
+        match self
+            .service
             .apply_runtime_turn(
                 &self.session_id,
                 run_id,
@@ -848,7 +961,51 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                 contributing_input_ids,
             )
             .await
+        {
+            Ok(output) => Ok(output),
+            Err(error @ SessionError::NotFound { .. }) => {
+                match self
+                    .authoritative_non_archived_session_after_not_found(
+                        &error,
+                        CoreExecutorError::apply_failed_runtime_turn,
+                    )
+                    .await
+                {
+                    Err(teardown) => Err(teardown),
+                    Ok(_) => Err(CoreExecutorError::session_unavailable_requires_teardown(
+                        error.to_string(),
+                    )),
+                }
+            }
+            Err(error) => Err(CoreExecutorError::apply_failed_from_session_error(error)),
+        }
+    }
+
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .checkpoint_committed_runtime_session_snapshot(&self.session_id, session_snapshot)
+            .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn reconcile_committed_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.service
+            .abort_uncommitted_compaction_projections(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -866,9 +1023,7 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        let discard_result = self.service.discard_live_session(&self.session_id).await;
-        self.adapter.unregister_session(&self.session_id).await;
-        match discard_result {
+        match self.service.discard_live_session(&self.session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
             Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
@@ -1477,7 +1632,10 @@ mod tests {
             adapter.contains_session(&session_id).await,
             "failed materialization must not unregister pre-existing runtime registration"
         );
-        adapter.unregister_session(&session_id).await;
+        adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1519,7 +1677,10 @@ mod tests {
             .discard_live_session(&existing.session_id)
             .await
             .expect("cleanup capacity filler");
-        adapter.unregister_session(&existing.session_id).await;
+        adapter
+            .unregister_session(&existing.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1551,7 +1712,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1628,7 +1792,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1657,7 +1824,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1724,7 +1894,10 @@ mod tests {
             .discard_live_session(&session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&session_id).await;
+        adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1759,7 +1932,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1829,7 +2005,10 @@ mod tests {
 
         release.notify_waiters();
         let _ = service.discard_live_session(&session_id).await;
-        adapter.unregister_session(&session_id).await;
+        adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1862,7 +2041,10 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
-        adapter.unregister_session(&session_id).await;
+        adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[test]
@@ -1880,6 +2062,73 @@ mod tests {
                 actual: ref actual_actual,
             } if *actual_expected == expected && *actual_actual == actual
         ));
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_projects_committed_snapshot_to_session_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_path = temp.path().join("sessions");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+
+        let mut committed = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("load runtime-authoritative session")
+            .expect("runtime session exists");
+        committed.set_metadata(
+            "committed_checkpoint_probe",
+            serde_json::json!({ "state": "finalized" }),
+        );
+        let committed_snapshot =
+            serde_json::to_vec(&committed).expect("serialize committed runtime snapshot");
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+
+        executor
+            .checkpoint_committed_session_snapshot(&committed_snapshot)
+            .await
+            .expect("committed snapshot must reach the compatibility projection");
+
+        let projected_store = JsonlStore::new(session_path);
+        projected_store
+            .init()
+            .await
+            .expect("open projected session store");
+        let projected = projected_store
+            .load(&result.session_id)
+            .await
+            .expect("load compatibility projection")
+            .expect("compatibility projection exists");
+        assert_eq!(
+            projected.metadata().get("committed_checkpoint_probe"),
+            Some(&serde_json::json!({ "state": "finalized" })),
+            "CoreExecutor checkpoint hook must delegate instead of silently taking the default no-op"
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live test session");
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("unregister test runtime");
     }
 
     #[tokio::test]
@@ -1917,6 +2166,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_persistent_stop_acks_after_discard_and_retains_stopped_registration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize production persistent executor");
+        assert!(
+            service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("query live session before stop")
+        );
+
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            adapter.stop_runtime_executor(
+                &result.session_id,
+                "production persistent cleanup acknowledgement",
+            ),
+        )
+        .await
+        .expect("production cleanup must not hit the old two-second self-join timeout")
+        .expect("production persistent stop should acknowledge cleanup");
+
+        assert!(
+            !service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("query live session after stop"),
+            "stop success must follow PersistentRuntimeExecutor live-session discard"
+        );
+        assert!(
+            adapter.contains_session(&result.session_id).await,
+            "ordinary stop must preserve the registered session"
+        );
+        assert_eq!(
+            adapter
+                .meerkat_machine_spine_snapshot(&result.session_id)
+                .await
+                .expect("stopped runtime snapshot")
+                .control
+                .phase,
+            RuntimeState::Stopped
+        );
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("explicit unregister should remove the stopped runtime");
+        assert!(!adapter.contains_session(&result.session_id).await);
+    }
+
+    #[tokio::test]
     async fn persistent_runtime_executor_interrupt_noops_without_active_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
@@ -1950,7 +2261,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -1987,7 +2301,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -2098,7 +2415,10 @@ mod tests {
             Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => panic!("discard live session failed: {error}"),
         }
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[cfg(feature = "comms")]
@@ -2135,7 +2455,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[cfg(feature = "comms")]
@@ -2182,7 +2505,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -2274,7 +2600,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -2305,7 +2634,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
 
         let mut executor = PersistentRuntimeExecutor::new(
             Arc::clone(&service),
@@ -2356,11 +2688,15 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
-    async fn persistent_runtime_executor_archived_context_only_apply_unregisters_runtime() {
+    async fn persistent_runtime_executor_archived_context_only_apply_requests_post_handoff_teardown()
+     {
         use meerkat_core::lifecycle::InputId;
         use meerkat_core::lifecycle::RunId;
         use meerkat_core::lifecycle::run_primitive::{
@@ -2422,13 +2758,140 @@ mod tests {
             )
             .await;
 
+        assert!(matches!(
+            rejected,
+            Err(CoreExecutorError::TeardownRequired {
+                reason: meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::ArchivedSession,
+                ..
+            })
+        ));
         assert!(
-            rejected.is_err(),
-            "archived context-only apply should reject: {rejected:?}"
+            adapter.contains_session(&result.session_id).await,
+            "CoreExecutor::apply must retain runtime authority until the loop hands the exact executor to the canonical unregister saga"
         );
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_archived_normal_turn_requests_post_handoff_teardown() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, RunApplyBoundary, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
+        };
+        use meerkat_core::lifecycle::{InputId, RunId};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+        service
+            .archive_with_machine_protocol(
+                &result.session_id,
+                MachineSessionArchiveProtocol::from_machine(adapter.as_ref()),
+            )
+            .await
+            .expect("archive session through machine authority");
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let rejected = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: RunApplyBoundary::RunStart,
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "normal turn after archive".to_string(),
+                        },
+                    }],
+                    context_appends: Vec::new(),
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await;
+
+        assert!(matches!(
+            rejected,
+            Err(CoreExecutorError::TeardownRequired {
+                reason: meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::ArchivedSession,
+                ..
+            })
+        ));
         assert!(
-            !adapter.contains_session(&result.session_id).await,
-            "archived context-only rejection should unregister stale runtime state"
+            adapter.contains_session(&result.session_id).await,
+            "archived normal-turn apply must retain runtime authority until exact executor handoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_missing_normal_turn_requests_unavailable_teardown() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole, RunApplyBoundary, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
+        };
+        use meerkat_core::lifecycle::{InputId, RunId};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register prepared-only runtime authority");
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            session_id.clone(),
+        );
+        let rejected = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: RunApplyBoundary::RunStart,
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        content: CoreRenderable::Text {
+                            text: "normal turn for missing session".to_string(),
+                        },
+                    }],
+                    context_appends: Vec::new(),
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await;
+
+        assert!(matches!(
+            rejected,
+            Err(CoreExecutorError::TeardownRequired {
+                reason: meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable,
+                ..
+            })
+        ));
+        assert!(
+            adapter.contains_session(&session_id).await,
+            "missing normal-turn apply must retain prepared registration until exact executor handoff"
         );
     }
 
@@ -2511,7 +2974,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[tokio::test]
@@ -2581,7 +3047,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        adapter.unregister_session(&result.session_id).await;
+        adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("runtime session should unregister cleanly");
     }
 
     #[cfg(all(

@@ -13,8 +13,11 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreApplyOutput, CoreExecutor,
     CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
+    CoreExecutorTeardownReason,
 };
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
+#[cfg(test)]
+use meerkat_core::lifecycle::run_primitive::CoreRenderable;
+use meerkat_core::lifecycle::run_primitive::RunPrimitive;
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
@@ -235,6 +238,55 @@ mod typed_context_append_tests {
             .model_projection_text()
         );
     }
+
+    #[test]
+    fn rpc_teardown_marker_maps_through_closed_reason_enum() {
+        let error = core_executor_error_from_rpc(RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: "archived session requires teardown".to_string(),
+            data: Some(serde_json::json!({
+                "core_executor_teardown_reason": CoreExecutorTeardownReason::ArchivedSession.as_str(),
+            })),
+        });
+
+        assert!(matches!(
+            error,
+            CoreExecutorError::TeardownRequired {
+                reason: CoreExecutorTeardownReason::ArchivedSession,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_rpc_teardown_marker_fails_closed_without_teardown() {
+        let error = core_executor_error_from_rpc(RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: "malformed teardown marker".to_string(),
+            data: Some(serde_json::json!({
+                "core_executor_teardown_reason": "future-unrecognized-reason",
+            })),
+        });
+
+        assert!(matches!(error, CoreExecutorError::ApplyFailed { .. }));
+    }
+
+    #[test]
+    fn unmarked_owned_session_not_found_requests_unavailable_teardown() {
+        let error = core_executor_error_from_rpc(RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: "owned session vanished".to_string(),
+            data: None,
+        });
+
+        assert!(matches!(
+            error,
+            CoreExecutorError::TeardownRequired {
+                reason: CoreExecutorTeardownReason::SessionUnavailable,
+                ..
+            }
+        ));
+    }
 }
 
 fn pending_system_context_appends_from_primitive(
@@ -254,9 +306,28 @@ fn pending_system_context_appends_from_primitive(
         .collect()
 }
 
-fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
+pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
     if err.code == error::REQUEST_CANCELLED {
         return CoreExecutorError::cancelled();
+    }
+
+    let teardown_marker = err
+        .data
+        .as_ref()
+        .and_then(|data| data.get("core_executor_teardown_reason"));
+    if let Some(marker) = teardown_marker {
+        let Some(reason) = marker
+            .as_str()
+            .and_then(CoreExecutorTeardownReason::from_wire_str)
+        else {
+            return CoreExecutorError::apply_failed_runtime_turn(format!(
+                "invalid core executor teardown reason in RPC error: {marker}"
+            ));
+        };
+        return CoreExecutorError::teardown_required(reason, err.message);
+    }
+    if err.code == error::SESSION_NOT_FOUND {
+        return CoreExecutorError::session_unavailable_requires_teardown(err.message);
     }
 
     let kind = err
@@ -299,6 +370,19 @@ impl CoreExecutor for SessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        if self
+            .runtime
+            .archived_persisted_session_without_live_by_authority(&self.session_id)
+            .await
+            .map_err(core_executor_error_from_rpc)?
+        {
+            return Err(CoreExecutorError::archived_session_requires_teardown(
+                format!(
+                    "archived session {} requires canonical runtime teardown",
+                    self.session_id
+                ),
+            ));
+        }
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(
                 reason.to_string(),
@@ -338,8 +422,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     staged.contributing_input_ids.clone(),
                     pre_admission,
                 )
-                .await
-                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
+                .await;
         }
 
         #[cfg(test)]
@@ -392,6 +475,25 @@ impl CoreExecutor for SessionRuntimeExecutor {
         }
     }
 
+    async fn reconcile_committed_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .core_session_service()
+            .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .core_session_service()
+            .abort_uncommitted_compaction_projections(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.runtime
             .cancel_after_boundary_live_with_machine_authority(&self.session_id)
@@ -408,14 +510,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        let discard_result = self.runtime.discard_live_session(&self.session_id).await;
-        self.runtime
-            .runtime_adapter()
-            .unregister_session(&self.session_id)
-            .await;
-        match discard_result {
+        match self.runtime.discard_live_session(&self.session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
+            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
     }
 }
@@ -444,6 +541,19 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        if let Some(runtime) = self.runtime.as_ref()
+            && runtime
+                .archived_persisted_session_without_live_by_authority(&self.session_id)
+                .await
+                .map_err(core_executor_error_from_rpc)?
+        {
+            return Err(CoreExecutorError::archived_session_requires_teardown(
+                format!(
+                    "archived session {} requires canonical runtime teardown",
+                    self.session_id
+                ),
+            ));
+        }
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(
                 reason.to_string(),
@@ -467,33 +577,15 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         staged.contributing_input_ids.clone(),
                         pre_admission,
                     )
-                    .await
-                    .map_err(|err| {
-                        CoreExecutorError::apply_failed_runtime_context(err.to_string())
-                    });
+                    .await;
             }
-            return self
-                .session_service
-                .apply_runtime_context_appends_with_boundary(
-                    &self.session_id,
-                    run_id,
-                    pending_system_context_appends_from_primitive(&staged.context_appends),
-                    primitive.apply_boundary(),
-                    staged.contributing_input_ids.clone(),
-                )
-                .await
-                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
+            return Err(CoreExecutorError::apply_failed_runtime_context(format!(
+                "mob RPC executor for {} has no SessionRuntime post-handoff authority",
+                self.session_id
+            )));
         }
 
         let prompt = primitive.extract_content_input();
-        let pre_turn_context_appends = match &primitive {
-            RunPrimitive::StagedInput(staged)
-                if primitive.is_peer_response_terminal_context_and_run() =>
-            {
-                pending_system_context_appends_from_primitive(&staged.context_appends)
-            }
-            _ => Vec::new(),
-        };
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();
         let sid = self.session_id.clone();
@@ -503,15 +595,14 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             }
         });
 
-        let turn_metadata = primitive.turn_metadata().cloned();
-        let turn_tool_overlay = turn_metadata
-            .as_ref()
+        let turn_tool_overlay = primitive
+            .turn_metadata()
             .and_then(|meta| meta.turn_tool_overlay.clone());
         let pre_admission = self.runtime.as_ref().and_then(|runtime| {
             runtime.take_runtime_pre_admission(&self.session_id, primitive.contributing_input_ids())
         });
-        let result = match (self.runtime.as_ref(), pre_admission) {
-            (Some(runtime), Some(pre_admission)) => {
+        let result = match self.runtime.as_ref() {
+            Some(runtime) => {
                 let turn_overrides =
                     crate::session_runtime::SessionRuntime::turn_overrides_from_metadata(
                         primitive.turn_metadata(),
@@ -525,41 +616,40 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         event_tx,
                         turn_tool_overlay,
                         turn_overrides,
-                        Some(pre_admission),
+                        pre_admission,
                     )
                     .await
                     .map_err(core_executor_error_from_rpc)
             }
-            (_, pre_admission) => {
+            None => {
                 drop(pre_admission);
-                let req = meerkat_core::service::StartTurnRequest {
-                    injected_context: Vec::new(),
-                    prompt,
-                    system_prompt: None,
-                    event_tx: Some(event_tx),
-                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                        meerkat_core::types::HandlingMode::Queue,
-                        turn_tool_overlay,
-                        pre_turn_context_appends,
-                        turn_metadata,
-                    )
-                    .with_typed_turn_appends(primitive.typed_turn_appends()),
-                };
-                self.session_service
-                    .apply_runtime_turn(
-                        &self.session_id,
-                        run_id,
-                        req,
-                        primitive.apply_boundary(),
-                        primitive.contributing_input_ids().to_vec(),
-                    )
-                    .await
-                    .map_err(CoreExecutorError::apply_failed_from_session_error)
+                drop(event_tx);
+                Err(CoreExecutorError::apply_failed_runtime_turn(format!(
+                    "mob RPC executor for {} has no SessionRuntime post-handoff authority",
+                    self.session_id
+                )))
             }
         };
 
         let _ = forwarder.await;
         result
+    }
+
+    async fn reconcile_committed_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .abort_uncommitted_compaction_projections(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
@@ -598,16 +688,13 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        let discard_result = self
+        match self
             .session_service
             .discard_live_session(&self.session_id)
-            .await;
-        if let Some(adapter) = self.session_service.runtime_adapter() {
-            adapter.unregister_session(&self.session_id).await;
-        }
-        match discard_result {
+            .await
+        {
             Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
+            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
     }
 }
@@ -623,6 +710,7 @@ mod tests {
         SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
         SessionView, StartTurnRequest,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     enum BoundaryCancelOutcome {
         Unsupported,
@@ -631,18 +719,24 @@ mod tests {
 
     struct BoundaryCancelSessionService {
         outcome: BoundaryCancelOutcome,
+        reconcile_calls: Arc<AtomicUsize>,
+        abort_calls: Arc<AtomicUsize>,
     }
 
     impl BoundaryCancelSessionService {
         fn unsupported() -> Self {
             Self {
                 outcome: BoundaryCancelOutcome::Unsupported,
+                reconcile_calls: Arc::new(AtomicUsize::new(0)),
+                abort_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
 
         fn not_running() -> Self {
             Self {
                 outcome: BoundaryCancelOutcome::NotRunning,
+                reconcile_calls: Arc::new(AtomicUsize::new(0)),
+                abort_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -663,6 +757,23 @@ mod tests {
             _req: StartTurnRequest,
         ) -> Result<RunResult, SessionError> {
             unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+
+        async fn reconcile_runtime_compaction_projections(
+            &self,
+            _id: &SessionId,
+            _intents: Vec<meerkat_core::CompactionProjectionIntent>,
+        ) -> Result<(), SessionError> {
+            self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn abort_uncommitted_compaction_projections(
+            &self,
+            _id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.abort_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
@@ -724,6 +835,27 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     impl MobSessionService for BoundaryCancelSessionService {}
+
+    #[tokio::test]
+    async fn mob_rpc_executor_forwards_both_compaction_lifecycle_paths() {
+        let session_id = SessionId::new();
+        let service = BoundaryCancelSessionService::unsupported();
+        let reconcile_calls = Arc::clone(&service.reconcile_calls);
+        let abort_calls = Arc::clone(&service.abort_calls);
+        let session_service: Arc<dyn MobSessionService> = Arc::new(service);
+        let mut executor =
+            MobRpcRuntimeExecutor::new(session_service, None, session_id, NotificationSink::noop());
+
+        CoreExecutor::reconcile_committed_compaction_projections(&mut executor, &[])
+            .await
+            .expect("mob RPC committed reconciliation must reach its session service");
+        CoreExecutor::abort_uncommitted_compaction_projections(&mut executor)
+            .await
+            .expect("mob RPC uncommitted abort must reach its session service");
+
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(abort_calls.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn mob_rpc_boundary_handle_propagates_unsupported_boundary_cancel() {

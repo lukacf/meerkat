@@ -203,11 +203,17 @@ impl RestScheduleContext {
         {
             Ok(result) => result,
             Err(error) => {
-                self.runtime
+                let cleanup_result = self
+                    .runtime
                     .runtime_adapter
                     .unregister_session(&session_id)
                     .await;
-                return Err(ScheduleDomainError::Internal(error.to_string()));
+                return Err(ScheduleDomainError::Internal(match cleanup_result {
+                    Ok(()) => error.to_string(),
+                    Err(cleanup_error) => format!(
+                        "{error}; additionally failed to unregister prepared runtime session: {cleanup_error}"
+                    ),
+                }));
             }
         };
         if let Err(error) = update_peer_ingress_context(self, &result.session_id).await {
@@ -226,10 +232,16 @@ impl RestScheduleContext {
                     "schedule create peer ingress update failed ({error}); machine archive cleanup failed: {archive_error}"
                 )));
             }
-            self.runtime
+            if let Err(cleanup_error) = self
+                .runtime
                 .runtime_adapter
                 .unregister_session(&result.session_id)
-                .await;
+                .await
+            {
+                return Err(ScheduleDomainError::Internal(format!(
+                    "{error}; additionally failed to unregister archived runtime session: {cleanup_error}"
+                )));
+            }
             return Err(error);
         }
         Ok(result.session_id)

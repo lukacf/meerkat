@@ -45,6 +45,14 @@ impl Default for SimpleMemoryStore {
 
 #[async_trait]
 impl MemoryStore for SimpleMemoryStore {
+    fn compaction_projection_persistence(
+        &self,
+    ) -> meerkat_core::memory::CompactionProjectionPersistence {
+        // This implementation is process-local and has no durable crash
+        // window, so in-memory rewrite-then-index publication is safe.
+        meerkat_core::memory::CompactionProjectionPersistence::EphemeralImmediate
+    }
+
     async fn index_scoped_batch(
         &self,
         batch: MemoryIndexBatch,

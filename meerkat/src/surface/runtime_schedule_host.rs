@@ -861,7 +861,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        runtime_adapter.unregister_session(&result.session_id).await;
+        runtime_adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("unregister runtime session");
     }
 
     #[cfg(all(
@@ -955,7 +958,10 @@ mod tests {
             .discard_live_session(&result.session_id)
             .await
             .expect("discard live session");
-        runtime_adapter.unregister_session(&result.session_id).await;
+        runtime_adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("unregister runtime session");
     }
 
     #[test]

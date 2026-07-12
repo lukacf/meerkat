@@ -50,6 +50,7 @@ import {
   type ConfigPatchParams,
   type ConfigSetParams,
   type ConfigWriteResult,
+  type CommsSendResult,
   type InterruptResult,
   type ServerCapabilities,
   type SkillEntry,
@@ -189,7 +190,6 @@ import type {
   BlobPayload,
   Capability,
   CommsCommand,
-  CommsSendReceipt,
   ConfigEnvelope,
   ContentInput,
   ContentBlock,
@@ -2015,7 +2015,10 @@ export class MeerkatClient {
       snapshot.externalMember = result.external_member;
     }
     if (result.progress !== undefined && result.progress !== null) {
-      snapshot.progress = result.progress as WireMemberProgressSnapshot;
+      snapshot.progress = MeerkatClient.parseMemberProgressSnapshot(
+        result.progress,
+        "Invalid mob/member_status response",
+      );
     }
     return snapshot;
   }
@@ -2333,6 +2336,7 @@ export class MeerkatClient {
       agentIdentity?: string;
       roleName?: string;
       profileName?: string;
+      modelOverride?: string;
       authBinding?: WireAuthBindingRef;
       runtimeMode?: string;
       backend?: string;
@@ -2344,6 +2348,7 @@ export class MeerkatClient {
       prompt,
       agent_identity: options?.agentIdentity,
       role_name: roleName,
+      model_override: options?.modelOverride,
       auth_binding: options?.authBinding,
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
@@ -2382,6 +2387,7 @@ export class MeerkatClient {
       agentIdentity?: string;
       roleName?: string;
       profileName?: string;
+      modelOverride?: string;
       authBinding?: WireAuthBindingRef;
       forkContext?: Record<string, unknown>;
       runtimeMode?: string;
@@ -2395,6 +2401,7 @@ export class MeerkatClient {
       prompt,
       agent_identity: options?.agentIdentity,
       role_name: roleName,
+      model_override: options?.modelOverride,
       auth_binding: options?.authBinding,
       fork_context: options?.forkContext,
       runtime_mode: options?.runtimeMode,
@@ -2929,7 +2936,7 @@ export class MeerkatClient {
   }
 
   /** @internal */
-  async _send(sessionId: string, command: CommsCommand): Promise<CommsSendReceipt> {
+  async _send(sessionId: string, command: CommsCommand): Promise<CommsSendResult> {
     return this.send(sessionId, command);
   }
 
@@ -2945,7 +2952,7 @@ export class MeerkatClient {
    * `handling_mode`, `status`) are rejected at the server's typed-serde
    * boundary.
    */
-  async send(sessionId: string, command: CommsCommand): Promise<CommsSendReceipt> {
+  async send(sessionId: string, command: CommsCommand): Promise<CommsSendResult> {
     const result = await this.request("comms/send", { session_id: sessionId, ...command });
     return MeerkatClient.parseCommsSendReceipt(result);
   }
@@ -4060,13 +4067,112 @@ export class MeerkatClient {
   }
 
 
-  static parseCommsSendReceipt(data: Record<string, unknown>): CommsSendReceipt {
-    return {
-      ...data,
-      requestId: data.request_id != null ? String(data.request_id) : undefined,
-      interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
-      inputId: data.input_id != null ? String(data.input_id) : undefined,
-    };
+  static parseCommsSendReceipt(data: Record<string, unknown>): CommsSendResult {
+    const context = "Invalid comms/send response";
+    const kind = MeerkatClient.requireStringField(data, "kind", context);
+    let allowed: ReadonlySet<string>;
+    switch (kind) {
+      case "input_accepted":
+        allowed = new Set(["kind", "interaction_id", "stream_reserved"]);
+        MeerkatClient.requireStringField(data, "interaction_id", context);
+        MeerkatClient.requireBooleanField(data, "stream_reserved", context);
+        break;
+      case "peer_message_sent": {
+        allowed = new Set(["kind", "envelope_id", "delivery"]);
+        MeerkatClient.requireStringField(data, "envelope_id", context);
+        const delivery = MeerkatClient.requireStringField(data, "delivery", context);
+        if (delivery !== "acked" && delivery !== "handed_off" && delivery !== "queued") {
+          throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid delivery`);
+        }
+        break;
+      }
+      case "peer_lifecycle_sent":
+        allowed = new Set(["kind", "envelope_id"]);
+        MeerkatClient.requireStringField(data, "envelope_id", context);
+        break;
+      case "peer_request_sent":
+        allowed = new Set([
+          "kind",
+          "envelope_id",
+          "interaction_id",
+          "request_id",
+          "stream_reserved",
+        ]);
+        MeerkatClient.requireStringField(data, "envelope_id", context);
+        MeerkatClient.requireStringField(data, "interaction_id", context);
+        MeerkatClient.requireStringField(data, "request_id", context);
+        MeerkatClient.requireBooleanField(data, "stream_reserved", context);
+        break;
+      case "peer_response_sent":
+        allowed = new Set(["kind", "envelope_id", "in_reply_to"]);
+        MeerkatClient.requireStringField(data, "envelope_id", context);
+        MeerkatClient.requireStringField(data, "in_reply_to", context);
+        break;
+      default:
+        throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid kind`);
+    }
+    const unknown = Object.keys(data).find((field) => !allowed.has(field));
+    if (unknown !== undefined) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: unknown field ${unknown}`);
+    }
+    return data as unknown as CommsSendResult;
+  }
+
+  private static parseMemberProgressSnapshot(
+    raw: unknown,
+    context: string,
+  ): WireMemberProgressSnapshot {
+    const progress = MeerkatClient.requireRecord(raw, "progress", context);
+    const runState = MeerkatClient.requireStringField(progress, "run_state", context);
+    if (runState !== "idle" && runState !== "run_open" && runState !== "unknown") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid progress.run_state`);
+    }
+    const lastProgressEvent = MeerkatClient.requireStringField(
+      progress,
+      "last_progress_event",
+      context,
+    );
+    if (
+      lastProgressEvent !== "execution_advanced" &&
+      lastProgressEvent !== "became_idle" &&
+      lastProgressEvent !== "unchanged"
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: invalid progress.last_progress_event`,
+      );
+    }
+    const health = MeerkatClient.requireStringField(progress, "health", context);
+    if (health !== "healthy" && health !== "degraded" && health !== "wedged" && health !== "unknown") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid progress.health`);
+    }
+    MeerkatClient.requireNonNegativeIntegerField(
+      progress,
+      "in_flight_work",
+      context,
+      "progress.in_flight_work",
+    );
+    MeerkatClient.requireNonNegativeIntegerField(
+      progress,
+      "last_progress_at_ms",
+      context,
+      "progress.last_progress_at_ms",
+    );
+    const allowed = new Set([
+      "run_state",
+      "in_flight_work",
+      "last_progress_at_ms",
+      "last_progress_event",
+      "health",
+    ]);
+    const unknown = Object.keys(progress).find((field) => !allowed.has(field));
+    if (unknown !== undefined) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unknown progress field ${unknown}`,
+      );
+    }
+    return progress as unknown as WireMemberProgressSnapshot;
   }
 
   static parseModelsCatalog(data: Record<string, unknown>): ModelsCatalog {

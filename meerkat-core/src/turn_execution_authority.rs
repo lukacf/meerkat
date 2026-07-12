@@ -213,6 +213,10 @@ impl TurnFailureSourceKind {
             AgentError::InvalidToolAccess { .. } => Self::InvalidToolAccess,
             AgentError::SkillResolutionFailed { .. } => Self::SkillResolutionFailed,
             AgentError::InternalError(_) => Self::InternalError,
+            // This variant normally bypasses ordinary turn terminalization and
+            // becomes CoreExecutor teardown. Keep this total classifier
+            // fail-closed if a diagnostic caller asks for a turn source.
+            AgentError::StickyModelFallbackAuthorityUnknown { .. } => Self::InternalError,
             AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::BuildError,
             AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
             AgentError::CallbackPending { .. } => Self::CallbackPending,

@@ -119,8 +119,12 @@ impl HandleTeardownGate {
         self.closed.store(true, Ordering::Release);
     }
 
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     fn ensure_open(&self, context: &'static str) -> Result<(), DslTransitionError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.is_closed() {
             Err(DslTransitionError::no_matching(
                 context,
                 "session-owned runtime handle authority is closed by teardown",
@@ -270,6 +274,59 @@ impl HandleDslAuthority {
         Ok(sample(&effects))
     }
 
+    /// Preview an input against an isolated copy of the exact current
+    /// generated authority and return the parent snapshot it was accepted
+    /// against. The canonical authority is never mutated by this operation.
+    pub(crate) fn preview_input(
+        &self,
+        input: &mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<mm_dsl::MeerkatMachineAuthoritySnapshot, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.teardown_gate.ensure_open(context)?;
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.teardown_gate.ensure_open(context)?;
+        let expected = guard.snapshot();
+        let mut preview = mm_dsl::MeerkatMachineAuthority::new();
+        preview.restore_snapshot(expected.clone());
+        mm_dsl::MeerkatMachineMutator::apply(&mut preview, input.clone())
+            .map_err(|error| map_kernel_error(error, context))?;
+        Ok(expected)
+    }
+
+    /// Commit a previously previewed input only while its exact generated
+    /// parent state remains current, then sample the committed state under the
+    /// same authority lock.
+    pub(crate) fn apply_previewed_input_and_sample_state<S>(
+        &self,
+        expected: &mm_dsl::MeerkatMachineAuthoritySnapshot,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+        sample: impl FnOnce(&mm_dsl::MeerkatMachineState) -> S,
+    ) -> Result<S, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.teardown_gate.ensure_open(context)?;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.teardown_gate.ensure_open(context)?;
+        if guard.snapshot().state() != expected.state() {
+            return Err(DslTransitionError::guard_rejected(
+                context,
+                "generated model-routing authority changed after sticky-fallback staging",
+            ));
+        }
+        mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+            .map_err(|error| map_kernel_error(error, context))?;
+        Ok(sample(guard.state()))
+    }
+
     /// Apply a DSL signal under the shared authority's mutex.
     pub fn apply_signal(
         &self,
@@ -323,6 +380,59 @@ impl HandleDslAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.state().clone()
+    }
+
+    /// Verify that a resultful cross-store handoff still belongs to the exact
+    /// live session/runtime epoch that minted it.
+    ///
+    /// The teardown gate is checked on both sides of the authority lock so an
+    /// old cloned handle cannot authorize new durable work after unregister or
+    /// epoch rotation. The generated binding fields are the semantic identity
+    /// authority; this method only samples them without mutating machine state.
+    pub(crate) fn current_runtime_binding(
+        &self,
+        expected_session_id: &mm_dsl::SessionId,
+        expected_runtime_epoch_id: &mm_dsl::RuntimeEpochId,
+        context: &'static str,
+    ) -> Result<
+        (
+            mm_dsl::AgentRuntimeId,
+            Option<mm_dsl::FenceToken>,
+            Option<mm_dsl::Generation>,
+        ),
+        String,
+    > {
+        self.teardown_gate
+            .ensure_open(context)
+            .map_err(|error| error.to_string())?;
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.teardown_gate
+            .ensure_open(context)
+            .map_err(|error| error.to_string())?;
+        let state = guard.state();
+        if state.session_id.as_ref() != Some(expected_session_id) {
+            return Err(format!(
+                "session binding changed (expected {expected_session_id:?}, current {:?})",
+                state.session_id
+            ));
+        }
+        if state.active_runtime_epoch_id.as_ref() != Some(expected_runtime_epoch_id) {
+            return Err(format!(
+                "runtime epoch changed (expected {expected_runtime_epoch_id:?}, current {:?})",
+                state.active_runtime_epoch_id
+            ));
+        }
+        let runtime_id = state.active_runtime_id.clone().ok_or_else(|| {
+            "session has no authoritative runtime binding for compaction commit".to_string()
+        })?;
+        Ok((
+            runtime_id,
+            state.active_fence_token,
+            state.active_runtime_generation,
+        ))
     }
 
     /// Generated comms-trust freshness authority for peer-projection

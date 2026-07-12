@@ -96,24 +96,57 @@ pub trait AgentLlmClient: Send + Sync {
         None
     }
 
-    /// Commit a prepared fallback after the agent loop has applied the paired
-    /// request policy, identity, and tool-visibility state.
-    fn commit_model_fallback(&self, _identity: &crate::SessionLlmIdentity) {}
-
-    /// Capability base filter for the current active model.
+    /// Move the client-local active candidate from `previous_identity` to the
+    /// exact `target_identity` as one reversible transaction step.
     ///
-    /// The agent loop composes this with the already-authorized tool set before
-    /// every provider call so sticky fallback models keep their downgraded tool
-    /// surface on later turns too.
-    fn active_capability_base_filter(&self) -> crate::ToolFilter {
-        crate::ToolFilter::All
+    /// The core loop invokes this only after every target-dependent operation
+    /// (including target-provider schema compilation) has been prevalidated,
+    /// but before auth/session/machine state is committed. Implementations must
+    /// either perform the exact switch or return an error. The default fails
+    /// closed so a custom client cannot propose a fallback while silently
+    /// continuing to issue requests through its old provider client.
+    ///
+    /// Core verifies [`AgentLlmClient::active_model_fallback_identity`] after
+    /// the call and invokes this method in reverse if a later transaction step
+    /// fails.
+    fn commit_model_fallback(
+        &self,
+        _previous_identity: &crate::SessionLlmIdentity,
+        target_identity: &crate::SessionLlmIdentity,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::ConfigError(format!(
+            "LLM client proposed fallback target '{}:{}' without an activation implementation",
+            target_identity.provider.as_str(),
+            target_identity.model
+        )))
     }
 
-    /// Output-token ceiling for the current active model, if the catalog knows
-    /// one. Used on every provider call so a sticky fallback keeps respecting
-    /// the backup model's smaller output limit after the failover turn.
-    fn active_max_output_tokens(&self) -> Option<u32> {
+    /// Exact identity of the client-local active fallback candidate.
+    ///
+    /// Fallback-capable clients must expose the full session identity,
+    /// including auth binding and provider parameters. The default is absent,
+    /// which makes fallback activation fail closed before canonical state is
+    /// mutated.
+    fn active_model_fallback_identity(&self) -> Option<crate::SessionLlmIdentity> {
         None
+    }
+
+    /// Compile an extraction schema against an inactive fallback target.
+    ///
+    /// This must delegate to the exact prebuilt target client without changing
+    /// which client is active. Core calls it before auth, machine, visibility,
+    /// session, or client activation state is mutated, then injects the
+    /// compiled representation into the target provider request.
+    fn compile_model_fallback_schema(
+        &self,
+        target_identity: &crate::SessionLlmIdentity,
+        _output_schema: &OutputSchema,
+    ) -> Result<CompiledSchema, AgentError> {
+        Err(AgentError::ConfigError(format!(
+            "LLM client cannot compile structured output for fallback target '{}:{}'",
+            target_identity.provider.as_str(),
+            target_identity.model
+        )))
     }
 
     /// Reset per-call observation of user-visible streaming output.
@@ -173,10 +206,80 @@ pub struct AgentLlmFallbackSwitch {
     pub previous_identity: crate::SessionLlmIdentity,
     pub new_identity: crate::SessionLlmIdentity,
     pub request_policy: crate::SessionLlmRequestPolicy,
-    pub capability_base_filter: crate::ToolFilter,
-    pub context_window: Option<u32>,
-    pub max_output_tokens: Option<u32>,
+    /// Proposed effective-registry witness for the exact target provider/model.
+    /// Core rejects foreign authority and freshly resolves all capability and
+    /// token-limit facts through the agent's captured registry. The witness is
+    /// required: unresolved fallback targets fail closed.
+    pub target_profile: crate::ModelProfileWitness,
     pub skipped_targets: Vec<AgentLlmFallbackSkippedTarget>,
+}
+
+/// One-shot authorization for an exact sticky model-fallback activation.
+///
+/// There is deliberately no public constructor and the fields are private.
+/// The constructor is owned by the `agent` module, so only the core agent loop
+/// can mint this value after generated recovery acceptance and exact
+/// effective-registry validation. A public
+/// [`crate::handles::ModelRoutingHandle`] therefore cannot be driven directly
+/// with a caller-minted or foreign-registry profile.
+///
+/// ```compile_fail
+/// use meerkat_core::StickyModelFallbackActivationProof;
+///
+/// // Routing callers cannot fabricate an activation proof.
+/// let _proof = StickyModelFallbackActivationProof::new();
+/// ```
+pub struct StickyModelFallbackActivationProof {
+    previous_identity: crate::SessionLlmIdentity,
+    target_identity: crate::SessionLlmIdentity,
+    target_profile: crate::ModelProfileWitness,
+    target_capability_base_filter: crate::ToolFilter,
+    retry_attempt: u32,
+}
+
+impl StickyModelFallbackActivationProof {
+    fn new(
+        previous_identity: crate::SessionLlmIdentity,
+        target_identity: crate::SessionLlmIdentity,
+        target_profile: crate::ModelProfileWitness,
+        retry_attempt: u32,
+    ) -> Self {
+        let target_capability_base_filter = crate::capability_base_filter_for_image_tool_results(
+            target_profile.profile().image_tool_results,
+        );
+        Self {
+            previous_identity,
+            target_identity,
+            target_profile,
+            target_capability_base_filter,
+            retry_attempt,
+        }
+    }
+
+    /// Exact identity the generated recovery transition must still own.
+    pub fn previous_identity(&self) -> &crate::SessionLlmIdentity {
+        &self.previous_identity
+    }
+
+    /// Exact registry-resolved identity being activated.
+    pub fn target_identity(&self) -> &crate::SessionLlmIdentity {
+        &self.target_identity
+    }
+
+    /// Registry-owned target profile carried by this authorization.
+    pub fn target_profile(&self) -> &crate::ModelProfileWitness {
+        &self.target_profile
+    }
+
+    /// Registry-derived capability filter for the target model.
+    pub fn target_capability_base_filter(&self) -> &crate::ToolFilter {
+        &self.target_capability_base_filter
+    }
+
+    /// Machine-accepted retry attempt bound into this authorization.
+    pub fn retry_attempt(&self) -> u32 {
+        self.retry_attempt
+    }
 }
 
 /// Result of streaming from the LLM
@@ -1297,6 +1400,20 @@ where
     pub(crate) compaction_cadence: SessionCompactionCadence,
     /// Optional memory store for indexing compaction discards.
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
+    /// Runtime-owned resultful handoff for durable transcript+memory
+    /// compaction pairs. Absent on standalone paths.
+    pub(crate) compaction_commit_coordinator:
+        Option<Arc<dyn crate::memory::CompactionCommitCoordinator>>,
+    /// Typed lifecycle for the current transcript-rewrite + staged-memory
+    /// transaction. Runtime reconciliation advances this to commit-only before
+    /// touching the memory store; abort is legal only while runtime commit is
+    /// still pending.
+    pub(crate) compaction_transaction: Option<CompactionTransaction>,
+    /// Deterministic projection identity installed immediately before the
+    /// durable stage await. A hard interrupt can drop that await before a
+    /// receipt reaches the transaction owner, so cleanup must retain the exact
+    /// identity rather than infer empty RuntimeStore authority.
+    pub(crate) in_flight_compaction_stage: Option<crate::memory::CompactionProjectionId>,
     /// Optional skill engine for per-turn `/skill-ref` activation.
     pub(crate) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     /// Skill references to resolve and inject for the next turn.
@@ -1350,6 +1467,25 @@ where
         Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
     /// Runtime-backed turn-state handle, provided by the session runtime bindings.
     pub(crate) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
+    /// Runtime-backed model-routing authority. Sticky fallback commits route
+    /// through this handle in the compensated client/auth/machine transaction.
+    pub(crate) model_routing_handle: Option<Arc<dyn crate::handles::ModelRoutingHandle>>,
+    /// Runtime-owned durable sticky-fallback transaction coordinator.
+    /// Standalone agents leave this absent and consume staged machine commits
+    /// synchronously in-process.
+    pub(crate) sticky_model_fallback_commit_coordinator:
+        Option<Arc<dyn crate::handles::StickyModelFallbackCommitCoordinator>>,
+    /// Saga state retained across cancellation while the supervised durable
+    /// sticky-fallback transaction is in flight.
+    pub(crate) pending_sticky_model_fallback_activation:
+        Option<state::PendingStickyModelFallbackActivation>,
+    /// Effective model registry captured by the construction pipeline.
+    /// Fallback profile and limit truth is freshly resolved through this exact
+    /// registry before it can reach the routing machine.
+    pub(crate) effective_model_registry: Option<Arc<crate::ModelRegistry>>,
+    /// Registry-minted facts for the active model. This replaces client-local
+    /// capability/limit projections as the durable source used by later turns.
+    pub(crate) active_model_profile: Option<crate::ModelProfileWitness>,
     /// True when the runtime control plane must stamp execution kind metadata.
     pub(crate) runtime_execution_kind_required: bool,
     /// Typed execution intent for the current run, when this turn is owned by
@@ -1405,6 +1541,24 @@ where
     /// composition seam via `AgentBuilder::with_tools_config`; defaults to
     /// `ToolsConfig::default()` for standalone/test construction.
     pub(crate) tools_config: crate::config::ToolsConfig,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompactionRollbackState {
+    pub(crate) rollback_session: Session,
+    pub(crate) rollback_last_input_tokens: u64,
+    pub(crate) rollback_compaction_cadence: SessionCompactionCadence,
+}
+
+pub(crate) enum CompactionTransactionPhase {
+    AwaitingRuntimeCommit(Box<CompactionRollbackState>),
+    RuntimeCommitted { bookkeeping_complete: bool },
+    AbortPending { cadence_persist_pending: bool },
+}
+
+pub(crate) struct CompactionTransaction {
+    pub(crate) phase: CompactionTransactionPhase,
+    pub(crate) projections: Vec<crate::memory::CompactionProjectionId>,
 }
 
 #[cfg(test)]

@@ -189,6 +189,12 @@ pub struct ArchiveRuntimeCleanup {
 }
 
 impl ArchiveRuntimeCleanup {
+    fn runtime_cleanup_error(error: impl std::fmt::Display) -> meerkat_core::service::SessionError {
+        meerkat_core::service::SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            error.to_string(),
+        ))
+    }
+
     /// Run the durable-store archive step. Surfaces that already
     /// archived through the service skip this and call [`run`]
     /// directly.
@@ -216,7 +222,45 @@ impl ArchiveRuntimeCleanup {
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
-        self.runtime_adapter.unregister_session(session_id).await;
+        self.runtime_adapter
+            .unregister_session(session_id)
+            .await
+            .map_err(Self::runtime_cleanup_error)?;
+        self.run_after_runtime_unregistered(session_id).await
+    }
+
+    /// Run terminal cleanup when generated completion authority proves that
+    /// the runtime was terminated.
+    ///
+    /// Only the machine-owned saga removes runtime registration. This entry
+    /// point covers the saga-won ordering after the executor's external-only
+    /// cleanup: both the typed, session-bound observation and an already-absent
+    /// registration are required, so the completion relay never treats bare
+    /// registry absence as terminal proof.
+    pub async fn run_after_runtime_termination(
+        &self,
+        session_id: &SessionId,
+        cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        if !cleanup_observation.proves_runtime_termination_for(session_id) {
+            return Err(Self::runtime_cleanup_error(format!(
+                "runtime termination cleanup for session {session_id} lacks machine-owned termination proof"
+            )));
+        }
+
+        if self.runtime_adapter.contains_session(session_id).await {
+            return Err(Self::runtime_cleanup_error(format!(
+                "runtime termination cleanup for session {session_id} expected an already-absent registration"
+            )));
+        }
+
+        self.run_after_runtime_unregistered(session_id).await
+    }
+
+    async fn run_after_runtime_unregistered(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
         if let Some(streams) = self.pending_session_event_streams.as_ref() {
             streams.lock().await.remove(session_id);
         }
@@ -254,10 +298,9 @@ impl ArchiveRuntimeCleanup {
 /// [`discard_stale_live_session`], [`live_session_is_stale`]). Surfaces
 /// build one per call from their own SessionRuntime borrows.
 ///
-/// `archived_persisted_session_without_live` and `try_recover_persisted_session`
-/// stay in `meerkat-rpc` until W3-A: the former depends on the RPC-private
-/// `ArchiveRuntimeCleanup`; the latter is a `#[cfg(test)]` helper that
-/// composes RPC-private `TurnOverrides` and `RpcError`.
+/// RPC-facing archived-session rejection and `try_recover_persisted_session`
+/// remain in `meerkat-rpc`: they compose RPC-private `TurnOverrides`,
+/// `RpcError`, and surface policy around these shared state operations.
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 mod ops {
     use std::sync::Arc;
@@ -303,9 +346,31 @@ mod ops {
 
         /// Discard a stale live session and unregister it from the
         /// runtime adapter.
-        pub async fn discard_stale_live_session(&self, session_id: &SessionId) {
-            let _ = self.discard_live_session(session_id).await;
-            self.runtime_adapter.unregister_session(session_id).await;
+        pub async fn discard_stale_live_session(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            let discard_error = match self.discard_live_session(session_id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => None,
+                Err(error) => Some(error),
+            };
+            let unregister_error = self
+                .runtime_adapter
+                .unregister_session(session_id)
+                .await
+                .err();
+            match (discard_error, unregister_error) {
+                (None, None) => Ok(()),
+                (Some(error), None) => Err(error),
+                (None, Some(error)) => Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(error.to_string()),
+                )),
+                (Some(primary), Some(cleanup)) => Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "{primary}; additionally failed to unregister stale runtime session {session_id}: {cleanup}"
+                    )),
+                )),
+            }
         }
 
         /// Determine whether the live projection for `session_id` has

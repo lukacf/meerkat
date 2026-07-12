@@ -18,7 +18,6 @@ use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
 use crate::lifecycle::run_primitive::{ProviderParamsCarrier, ProviderParamsOverride};
 use crate::ops_lifecycle::OperationCompletionWakeClass;
-use crate::session::TranscriptRewriteReason;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
@@ -64,6 +63,7 @@ struct LlmRetryRequest<'a> {
     provider_params: Option<&'a ProviderParamsOverride>,
     extraction_output_schema: Option<crate::types::OutputSchema>,
     allow_empty_success: bool,
+    durable_visibility_parent: &'a mut Option<crate::SessionToolVisibilityState>,
 }
 
 type AppliedModelFallbackSwitch = (
@@ -71,18 +71,34 @@ type AppliedModelFallbackSwitch = (
     Option<ProviderParamsOverride>,
     u32,
     Message,
+    crate::SessionToolVisibilityState,
 );
+
+/// Live publication retained while the runtime-owned durability coordinator
+/// settles the preauthorized sticky-fallback transaction. The operation is
+/// cancellation-safe; keeping the rest of the saga on `Agent` lets the
+/// session task settle it after a hard interrupt drops the run future.
+pub(crate) struct PendingStickyModelFallbackActivation {
+    operation: Arc<dyn crate::handles::StickyModelFallbackCommitOperation>,
+    previous_identity: crate::SessionLlmIdentity,
+    target_identity: crate::SessionLlmIdentity,
+    auth_rotation: super::runner::StagedAuthLeaseRotation,
+    request_policy: crate::SessionLlmRequestPolicy,
+    target_profile: crate::ModelProfileWitness,
+    next_session: crate::Session,
+}
 
 struct MachineAcceptedModelFallbackActivation {
     switch: AgentLlmFallbackSwitch,
-    retry_attempt: u32,
+    proof: crate::StickyModelFallbackActivationProof,
 }
 
 impl MachineAcceptedModelFallbackActivation {
     fn authorize(
-        switch: AgentLlmFallbackSwitch,
+        mut switch: AgentLlmFallbackSwitch,
         recovery_transition: &TurnExecutionTransition,
         retry_schedule: &crate::retry::LlmRetrySchedule,
+        effective_registry: Option<&crate::ModelRegistry>,
     ) -> Result<Self, AgentError> {
         if recovery_transition.prev_phase != TurnPhase::CallingLlm {
             return Err(AgentError::InternalError(format!(
@@ -97,10 +113,47 @@ impl MachineAcceptedModelFallbackActivation {
                 switch.new_identity.model, switch.request_policy.model
             )));
         }
-        Ok(Self {
-            switch,
-            retry_attempt: retry_schedule.plan.attempt,
-        })
+        if !switch.target_profile.matches_identity(&switch.new_identity) {
+            return Err(AgentError::ConfigError(format!(
+                "model fallback profile witness targets '{}:{}' but activation targets '{}:{}'",
+                switch.target_profile.provider().as_str(),
+                switch.target_profile.model(),
+                switch.new_identity.provider.as_str(),
+                switch.new_identity.model
+            )));
+        }
+        let registry = effective_registry.ok_or_else(|| {
+            AgentError::ConfigError(
+                "model fallback requires a captured effective model registry".to_string(),
+            )
+        })?;
+        let authoritative = registry
+            .profile_witness_for_provider(
+                switch.new_identity.provider,
+                &switch.new_identity.model,
+            )
+            .ok_or_else(|| {
+                AgentError::ConfigError(format!(
+                    "model fallback target '{}:{}' is absent from the agent's effective model registry",
+                    switch.new_identity.provider.as_str(),
+                    switch.new_identity.model
+                ))
+            })?;
+        if !switch.target_profile.was_minted_by(registry.authority()) {
+            return Err(AgentError::ConfigError(format!(
+                "model fallback profile witness for '{}:{}' was not minted by the agent's effective model registry",
+                switch.new_identity.provider.as_str(),
+                switch.new_identity.model
+            )));
+        }
+        switch.target_profile = authoritative;
+        let proof = crate::StickyModelFallbackActivationProof::new(
+            switch.previous_identity.clone(),
+            switch.new_identity.clone(),
+            switch.target_profile.clone(),
+            retry_schedule.plan.attempt,
+        );
+        Ok(Self { switch, proof })
     }
 }
 
@@ -299,35 +352,171 @@ where
         }
     }
 
-    fn apply_model_fallback_switch(
+    fn publish_pending_sticky_model_fallback(&mut self) -> Result<(), AgentError> {
+        let pending = self
+            .pending_sticky_model_fallback_activation
+            .take()
+            .ok_or_else(|| {
+                AgentError::InternalError(
+                    "sticky fallback supervisor completed without a pending live publication"
+                        .to_string(),
+                )
+            })?;
+        self.apply_llm_request_policy(pending.request_policy);
+        self.active_model_profile = Some(pending.target_profile);
+        self.session = pending.next_session;
+        Ok(())
+    }
+
+    fn reject_pending_sticky_model_fallback(
+        &mut self,
+        commit_error: crate::handles::StickyModelFallbackCommitError,
+    ) -> AgentError {
+        let Some(pending) = self.pending_sticky_model_fallback_activation.take() else {
+            return AgentError::StickyModelFallbackAuthorityUnknown {
+                message: format!("{commit_error}; live fallback compensation state was missing"),
+            };
+        };
+        let requires_teardown = commit_error.requires_teardown();
+        let auth_rollback = pending.auth_rotation.rollback();
+        let client_rollback = self
+            .restore_model_fallback_client(&pending.previous_identity, &pending.target_identity);
+        let mut failures = Vec::new();
+        if let Err(error) = auth_rollback {
+            failures.push(format!(
+                "failed to restore the previous auth lease: {error}"
+            ));
+        }
+        if let Err(error) = client_rollback {
+            failures.push(format!(
+                "failed to restore the previous fallback client: {error}"
+            ));
+        }
+        if requires_teardown || !failures.is_empty() {
+            let suffix = if failures.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", failures.join("; "))
+            };
+            AgentError::StickyModelFallbackAuthorityUnknown {
+                message: format!("{commit_error}{suffix}"),
+            }
+        } else {
+            AgentError::ConfigError(format!(
+                "durable sticky fallback commit rejected before publication: {commit_error}"
+            ))
+        }
+    }
+
+    /// Settle a supervised sticky-fallback transaction whose await was
+    /// interrupted when the session task dropped the run future. The durable
+    /// operation continues independently; this method publishes its confirmed
+    /// target or compensates client/auth state before the task reports the
+    /// interruption.
+    pub async fn settle_inflight_sticky_model_fallback(&mut self) -> Result<(), AgentError> {
+        let Some(operation) = self
+            .pending_sticky_model_fallback_activation
+            .as_ref()
+            .map(|pending| Arc::clone(&pending.operation))
+        else {
+            return Ok(());
+        };
+        match operation.wait().await {
+            Ok(()) => self.publish_pending_sticky_model_fallback(),
+            Err(error) => Err(self.reject_pending_sticky_model_fallback(error)),
+        }
+    }
+
+    async fn apply_model_fallback_switch(
         &mut self,
         activation: MachineAcceptedModelFallbackActivation,
         failure: &AgentError,
         previous_tools: &[Arc<ToolDef>],
+        extraction_output_schema: Option<&crate::types::OutputSchema>,
+        durable_visibility_parent: Option<&crate::SessionToolVisibilityState>,
     ) -> Result<AppliedModelFallbackSwitch, AgentError> {
-        let switch = activation.switch;
-        self.rotate_auth_lease_auth_binding(
-            switch.previous_identity.auth_binding.as_ref(),
-            switch.new_identity.auth_binding.as_ref(),
-        )?;
-        self.apply_llm_request_policy(switch.request_policy.clone());
-
-        if let Some(mut metadata) = self.session.session_metadata() {
-            metadata.apply_llm_identity(&switch.new_identity);
-            self.session.set_session_metadata(metadata).map_err(|err| {
-                AgentError::ConfigError(format!("failed to persist fallback LLM identity: {err}"))
+        let MachineAcceptedModelFallbackActivation { switch, proof } = activation;
+        let retry_attempt = proof.retry_attempt();
+        let capability_base_filter = crate::capability_base_filter_for_image_tool_results(
+            switch.target_profile.profile().image_tool_results,
+        );
+        let context_window = switch.target_profile.context_window();
+        let max_output_tokens = switch.target_profile.max_output_tokens();
+        // Structured extraction must be lowered by the exact TARGET client,
+        // not by the still-active primary client and not by merely copying the
+        // raw Meerkat schema into another provider's request shape. This is a
+        // prevalidation step: it happens before client activation, auth lease
+        // rotation, generated-machine commit, visibility mutation, or session
+        // publication.
+        let compiled_extraction_output_schema = extraction_output_schema
+            .map(|output_schema| {
+                let compiled = self
+                    .client
+                    .compile_model_fallback_schema(&switch.new_identity, output_schema)
+                    .map_err(|error| {
+                        AgentError::ConfigError(format!(
+                            "failed to compile structured output for fallback target '{}:{}': {error}",
+                            switch.new_identity.provider.as_str(),
+                            switch.new_identity.model
+                        ))
+                    })?;
+                let mut lowered = output_schema.clone();
+                lowered.schema = crate::schema::MeerkatSchema::new(compiled.schema).map_err(
+                    |error| {
+                        AgentError::ConfigError(format!(
+                            "fallback target returned an invalid compiled schema: {error}"
+                        ))
+                    },
+                )?;
+                Ok(lowered)
+            })
+            .transpose()?;
+        let (visibility_plan, next_tools) = self
+            .tool_scope
+            .propose_sticky_model_fallback_visibility(capability_base_filter)
+            .map_err(|err| {
+                AgentError::ConfigError(format!(
+                    "failed to derive sticky-fallback visibility plan: {err}"
+                ))
             })?;
+        let mut next_session = self.session.clone();
+        let mut metadata = next_session
+            .try_session_metadata()
+            .map_err(|err| {
+                AgentError::ConfigError(format!(
+                    "failed to read the durable fallback identity parent: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                AgentError::ConfigError(
+                    "sticky model fallback requires durable session metadata".to_string(),
+                )
+            })?;
+        let durable_parent = metadata.llm_identity();
+        if durable_parent != switch.previous_identity {
+            return Err(AgentError::ConfigError(format!(
+                "sticky model fallback durable identity parent '{}:{}' does not match the machine-authorized parent '{}:{}'",
+                durable_parent.provider.as_str(),
+                durable_parent.model,
+                switch.previous_identity.provider.as_str(),
+                switch.previous_identity.model,
+            )));
         }
-
-        let capability_filter = crate::tool_scope::ToolScope::compose(std::slice::from_ref(
-            &switch.capability_base_filter,
-        ));
-        let next_tools: Arc<[Arc<ToolDef>]> = previous_tools
-            .iter()
-            .filter(|tool| capability_filter.allows(tool.name.as_str()))
-            .cloned()
-            .collect::<Vec<_>>()
-            .into();
+        metadata.apply_llm_identity(&switch.new_identity);
+        next_session.set_session_metadata(metadata).map_err(|err| {
+            AgentError::ConfigError(format!("failed to persist fallback LLM identity: {err}"))
+        })?;
+        next_session
+            .set_tool_visibility_state(
+                crate::session::AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    visibility_plan.next_state.clone(),
+                ),
+            )
+            .map_err(|err| {
+                AgentError::ConfigError(format!(
+                    "failed to pre-serialize fallback tool visibility state: {err}"
+                ))
+            })?;
         let next_names = next_tools
             .iter()
             .map(|tool| tool.name.clone())
@@ -350,9 +539,17 @@ where
             .effective_params()
             .map_err(|err| AgentError::ConfigError(err.to_string()))?;
         let provider_params = (!provider_params.is_empty()).then_some(provider_params);
+        let provider_params = Self::apply_extraction_request_overrides(
+            switch.new_identity.provider,
+            provider_params,
+            compiled_extraction_output_schema.as_ref(),
+        )?;
+        Self::validate_provider_params_for_identity(
+            switch.new_identity.provider,
+            provider_params.as_ref(),
+        )?;
         let configured_max_tokens = self.config.resolved_max_tokens_per_turn();
-        let max_tokens = switch
-            .max_output_tokens
+        let max_tokens = max_output_tokens
             .map(|limit| configured_max_tokens.min(limit))
             .unwrap_or(configured_max_tokens);
 
@@ -382,13 +579,13 @@ where
             switch.new_identity.model,
             switch.new_identity.provider.as_str(),
             failure,
-            switch.context_window,
-            switch.max_output_tokens,
+            context_window,
+            max_output_tokens,
             hidden_detail,
         );
         let payload = serde_json::json!({
             "event": "model_fallback",
-            "retry_attempt": activation.retry_attempt,
+            "retry_attempt": retry_attempt,
             "from": {
                 "model": switch.previous_identity.model,
                 "provider": switch.previous_identity.provider.as_str(),
@@ -396,8 +593,8 @@ where
             "to": {
                 "model": switch.new_identity.model,
                 "provider": switch.new_identity.provider.as_str(),
-                "context_window": switch.context_window,
-                "max_output_tokens": switch.max_output_tokens,
+                "context_window": context_window,
+                "max_output_tokens": max_output_tokens,
             },
             "hidden_tools": hidden_tools,
             "skipped_targets": skipped_targets,
@@ -414,9 +611,303 @@ where
                 payload: Some(payload),
             },
         ));
-        self.session.push(notice.clone());
+        next_session.push(notice.clone());
 
-        Ok((next_tools, provider_params, max_tokens, notice))
+        if self.pending_sticky_model_fallback_activation.is_some() {
+            return Err(AgentError::StickyModelFallbackAuthorityUnknown {
+                message: "a second sticky fallback was proposed while the prior durable transaction was still pending".to_string(),
+            });
+        }
+        let coordinator = self.sticky_model_fallback_commit_coordinator.clone();
+        if self.runtime_execution_kind_required && coordinator.is_none() {
+            return Err(AgentError::ConfigError(
+                "runtime-backed sticky fallback requires a durable commit coordinator".to_string(),
+            ));
+        }
+        let persisted_visibility_parent = match coordinator.as_ref() {
+            Some(_) => durable_visibility_parent.cloned().ok_or_else(|| {
+                AgentError::ConfigError(
+                    "runtime-backed sticky fallback is missing its sealed pre-turn visibility parent"
+                        .to_string(),
+                )
+            })?,
+            None => visibility_plan.previous_state.clone(),
+        };
+
+        // Generated authority preauthorizes the exact identity/capability/
+        // visibility transition before any client, lease, or durable-session
+        // mutation. The returned one-shot token can realize only against that
+        // same authority snapshot.
+        let machine_commit = match self.model_routing_handle.as_deref() {
+            Some(handle) => handle.stage_sticky_model_fallback(proof, &visibility_plan),
+            None => Err(crate::handles::DslTransitionError::no_matching(
+                "ModelRoutingHandle::stage_sticky_model_fallback",
+                "sticky fallback requires a generated model-routing authority handle",
+            )),
+        }
+        .map_err(|machine_error| {
+            AgentError::ConfigError(format!(
+                "generated model-routing authority rejected sticky fallback preauthorization: {machine_error}"
+            ))
+        })?;
+        let control_delta = crate::handles::StickyModelFallbackControlDelta::new(
+            switch.previous_identity.clone(),
+            switch.new_identity.clone(),
+            &visibility_plan,
+            persisted_visibility_parent,
+        );
+
+        // All target-dependent preparation and generated preauthorization are
+        // complete. Client/auth steps remain reversible until the supervised
+        // coordinator confirms the control-only RuntimeStore CAS plus the
+        // synchronous generated-machine realization.
+        self.activate_model_fallback_client(&switch.previous_identity, &switch.new_identity)?;
+        let auth_rotation = match self.stage_auth_lease_auth_binding(
+            switch.previous_identity.auth_binding.as_ref(),
+            switch.new_identity.auth_binding.as_ref(),
+        ) {
+            Ok(rotation) => rotation,
+            Err(auth_error) => {
+                let client_rollback = self
+                    .restore_model_fallback_client(&switch.previous_identity, &switch.new_identity);
+                return Err(match client_rollback {
+                    Ok(()) => auth_error,
+                    Err(rollback_error) => AgentError::ConfigError(format!(
+                        "{auth_error}; additionally failed to restore the previous fallback client: {rollback_error}"
+                    )),
+                });
+            }
+        };
+
+        if let Some(coordinator) = coordinator {
+            let operation = match coordinator.begin(machine_commit, control_delta) {
+                Ok(operation) => operation,
+                Err(commit_error) => {
+                    let requires_teardown = commit_error.requires_teardown();
+                    let auth_rollback = auth_rotation.rollback();
+                    let client_rollback = self.restore_model_fallback_client(
+                        &switch.previous_identity,
+                        &switch.new_identity,
+                    );
+                    let mut failures = Vec::new();
+                    if let Err(error) = auth_rollback {
+                        failures.push(format!(
+                            "failed to restore the previous auth lease: {error}"
+                        ));
+                    }
+                    if let Err(error) = client_rollback {
+                        failures.push(format!(
+                            "failed to restore the previous fallback client: {error}"
+                        ));
+                    }
+                    if requires_teardown || !failures.is_empty() {
+                        let suffix = if failures.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; {}", failures.join("; "))
+                        };
+                        return Err(AgentError::StickyModelFallbackAuthorityUnknown {
+                            message: format!("{commit_error}{suffix}"),
+                        });
+                    }
+                    return Err(AgentError::ConfigError(format!(
+                        "durable sticky fallback could not start: {commit_error}"
+                    )));
+                }
+            };
+            self.pending_sticky_model_fallback_activation =
+                Some(PendingStickyModelFallbackActivation {
+                    operation: Arc::clone(&operation),
+                    previous_identity: switch.previous_identity.clone(),
+                    target_identity: switch.new_identity.clone(),
+                    auth_rotation,
+                    request_policy: switch.request_policy.clone(),
+                    target_profile: switch.target_profile.clone(),
+                    next_session,
+                });
+            match operation.wait().await {
+                Ok(()) => self.publish_pending_sticky_model_fallback()?,
+                Err(error) => return Err(self.reject_pending_sticky_model_fallback(error)),
+            }
+        } else {
+            if let Err(machine_error) = machine_commit.commit() {
+                let auth_rollback = auth_rotation.rollback();
+                let client_rollback = self
+                    .restore_model_fallback_client(&switch.previous_identity, &switch.new_identity);
+                let mut failures = vec![format!(
+                    "generated model-routing authority rejected sticky fallback: {machine_error}"
+                )];
+                if let Err(error) = auth_rollback {
+                    failures.push(format!(
+                        "failed to restore the previous auth lease: {error}"
+                    ));
+                }
+                if let Err(error) = client_rollback {
+                    failures.push(format!(
+                        "failed to restore the previous fallback client: {error}"
+                    ));
+                }
+                return Err(AgentError::ConfigError(failures.join("; ")));
+            }
+            self.apply_llm_request_policy(switch.request_policy);
+            self.active_model_profile = Some(switch.target_profile);
+            self.session = next_session;
+        }
+
+        Ok((
+            next_tools,
+            provider_params,
+            max_tokens,
+            notice,
+            visibility_plan.next_state,
+        ))
+    }
+
+    fn active_model_fallback_identity(
+        &self,
+        context: &'static str,
+    ) -> Result<crate::SessionLlmIdentity, AgentError> {
+        self.client.active_model_fallback_identity().ok_or_else(|| {
+            AgentError::ConfigError(format!(
+                "{context}: fallback-capable LLM client did not expose its exact active identity"
+            ))
+        })
+    }
+
+    fn restore_model_fallback_client(
+        &self,
+        previous_identity: &crate::SessionLlmIdentity,
+        target_identity: &crate::SessionLlmIdentity,
+    ) -> Result<(), AgentError> {
+        let active = self.active_model_fallback_identity("fallback client rollback")?;
+        if active == *previous_identity {
+            return Ok(());
+        }
+        if active != *target_identity {
+            return Err(AgentError::ConfigError(format!(
+                "fallback client rollback found divergent active identity '{}:{}' instead of target '{}:{}'",
+                active.provider.as_str(),
+                active.model,
+                target_identity.provider.as_str(),
+                target_identity.model
+            )));
+        }
+        self.rollback_committed_model_fallback_client(previous_identity, target_identity)
+    }
+
+    fn rollback_committed_model_fallback_client(
+        &self,
+        previous_identity: &crate::SessionLlmIdentity,
+        target_identity: &crate::SessionLlmIdentity,
+    ) -> Result<(), AgentError> {
+        self.client
+            .commit_model_fallback(target_identity, previous_identity)
+            .map_err(|error| {
+                AgentError::ConfigError(format!(
+                    "fallback client target-to-previous rollback failed: {error}"
+                ))
+            })?;
+        let restored = self
+            .active_model_fallback_identity("fallback client rollback verification")
+            .map_err(|error| {
+                AgentError::ConfigError(format!(
+                    "fallback client target-to-previous rollback could not be verified: {error}"
+                ))
+            })?;
+        if restored == *previous_identity {
+            Ok(())
+        } else {
+            Err(AgentError::ConfigError(format!(
+                "fallback client rollback reported success but remained on '{}:{}'",
+                restored.provider.as_str(),
+                restored.model
+            )))
+        }
+    }
+
+    fn activate_model_fallback_client(
+        &self,
+        previous_identity: &crate::SessionLlmIdentity,
+        target_identity: &crate::SessionLlmIdentity,
+    ) -> Result<(), AgentError> {
+        let active = self.active_model_fallback_identity("fallback client activation")?;
+        if active != *previous_identity {
+            return Err(AgentError::ConfigError(format!(
+                "fallback client activation expected previous identity '{}:{}' but client reports '{}:{}'",
+                previous_identity.provider.as_str(),
+                previous_identity.model,
+                active.provider.as_str(),
+                active.model
+            )));
+        }
+        if let Err(activation_error) = self
+            .client
+            .commit_model_fallback(previous_identity, target_identity)
+        {
+            let rollback = self.restore_model_fallback_client(previous_identity, target_identity);
+            return Err(match rollback {
+                Ok(()) => activation_error,
+                Err(rollback_error) => AgentError::ConfigError(format!(
+                    "fallback client activation failed: {activation_error}; additionally failed to restore its previous identity: {rollback_error}"
+                )),
+            });
+        }
+        let verification_error = match self
+            .active_model_fallback_identity("fallback client activation verification")
+        {
+            Ok(committed) if committed == *target_identity => return Ok(()),
+            Ok(committed) => AgentError::ConfigError(format!(
+                "fallback client activation reported success but active identity is '{}:{}', not '{}:{}'",
+                committed.provider.as_str(),
+                committed.model,
+                target_identity.provider.as_str(),
+                target_identity.model
+            )),
+            Err(error) => error,
+        };
+        // A successful activation commit transfers the client to the target.
+        // Even when the subsequent identity read fails (or reports a divergent
+        // identity), compensation must still ATTEMPT the exact target→previous
+        // transition. The read-based restore helper cannot own this path because
+        // the very observation it relies on is the failed operation.
+        let rollback =
+            self.rollback_committed_model_fallback_client(previous_identity, target_identity);
+        Err(match rollback {
+            Ok(()) => verification_error,
+            Err(rollback_error) => AgentError::ConfigError(format!(
+                "{verification_error}; additionally failed to restore the previous identity: {rollback_error}"
+            )),
+        })
+    }
+
+    fn validate_provider_params_for_identity(
+        provider: crate::Provider,
+        provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<(), AgentError> {
+        use crate::lifecycle::run_primitive::ProviderTag;
+
+        let Some(tag) = provider_params.and_then(|params| params.provider_tag.as_ref()) else {
+            return Ok(());
+        };
+        let matches = matches!(
+            (provider, tag),
+            (crate::Provider::Anthropic, ProviderTag::Anthropic(_))
+                | (
+                    crate::Provider::OpenAI | crate::Provider::SelfHosted,
+                    ProviderTag::OpenAi(_)
+                )
+                | (crate::Provider::Gemini, ProviderTag::Gemini(_))
+                | (_, ProviderTag::Unknown { .. })
+        );
+        if matches {
+            Ok(())
+        } else {
+            Err(AgentError::ConfigError(format!(
+                "provider params carry a `{}` provider tag but fallback identity targets `{}`",
+                tag.provider_label(),
+                provider.as_str()
+            )))
+        }
     }
 
     fn apply_extraction_request_overrides(
@@ -593,6 +1084,7 @@ where
             provider_params,
             extraction_output_schema,
             allow_empty_success,
+            durable_visibility_parent,
         } = request;
 
         let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
@@ -620,19 +1112,10 @@ where
             None
         };
         let mut current_messages = hydrated_messages.unwrap_or_else(|| messages.to_vec());
-        let active_capability_filter =
-            crate::tool_scope::ToolScope::compose(&[self.client.active_capability_base_filter()]);
-        let mut current_tools: Arc<[Arc<ToolDef>]> = tools
-            .iter()
-            .filter(|tool| active_capability_filter.allows(tool.name.as_str()))
-            .cloned()
-            .collect::<Vec<_>>()
-            .into();
-        let mut current_max_tokens = self
-            .client
-            .active_max_output_tokens()
-            .map(|limit| max_tokens.min(limit))
-            .unwrap_or(max_tokens);
+        // `tools` is already the ToolScope authority's boundary projection;
+        // the client cannot narrow or widen it with a private semantic view.
+        let mut current_tools: Arc<[Arc<ToolDef>]> = tools.to_vec().into();
+        let mut current_max_tokens = max_tokens;
         let mut current_provider_params = provider_params.cloned();
         let mut attempt = 0u32;
 
@@ -796,24 +1279,28 @@ where
                                     switch,
                                     &recover,
                                     &retry_schedule,
+                                    self.effective_model_registry.as_deref(),
                                 )?;
-                                let new_identity = activation.switch.new_identity.clone();
-                                let (next_tools, next_params, next_max_tokens, notice) = self
+                                let (
+                                    next_tools,
+                                    next_params,
+                                    next_max_tokens,
+                                    notice,
+                                    next_durable_visibility_parent,
+                                ) = self
                                     .apply_model_fallback_switch(
                                         activation,
                                         &error,
                                         current_tools.as_ref(),
-                                    )?;
-                                let next_params = Self::apply_extraction_request_overrides(
-                                    new_identity.provider,
-                                    next_params,
-                                    extraction_output_schema.as_ref(),
-                                )?;
-                                self.client.commit_model_fallback(&new_identity);
+                                        extraction_output_schema.as_ref(),
+                                        durable_visibility_parent.as_ref(),
+                                    )
+                                    .await?;
                                 current_tools = next_tools;
                                 current_provider_params = next_params;
                                 current_max_tokens = next_max_tokens;
                                 current_messages.push(notice);
+                                *durable_visibility_parent = Some(next_durable_visibility_parent);
                             }
                             self.execute_turn_effects(&recover, turn_count, event_tx)
                                 .await?;
@@ -897,24 +1384,28 @@ where
                                 switch,
                                 &recover,
                                 &retry_schedule,
+                                self.effective_model_registry.as_deref(),
                             )?;
-                            let new_identity = activation.switch.new_identity.clone();
-                            let (next_tools, next_params, next_max_tokens, notice) = self
+                            let (
+                                next_tools,
+                                next_params,
+                                next_max_tokens,
+                                notice,
+                                next_durable_visibility_parent,
+                            ) = self
                                 .apply_model_fallback_switch(
                                     activation,
                                     &e,
                                     current_tools.as_ref(),
-                                )?;
-                            let next_params = Self::apply_extraction_request_overrides(
-                                new_identity.provider,
-                                next_params,
-                                extraction_output_schema.as_ref(),
-                            )?;
-                            self.client.commit_model_fallback(&new_identity);
+                                    extraction_output_schema.as_ref(),
+                                    durable_visibility_parent.as_ref(),
+                                )
+                                .await?;
                             current_tools = next_tools;
                             current_provider_params = next_params;
                             current_max_tokens = next_max_tokens;
                             current_messages.push(notice);
+                            *durable_visibility_parent = Some(next_durable_visibility_parent);
                         }
                         self.execute_turn_effects(&recover, turn_count, event_tx)
                             .await?;
@@ -1248,6 +1739,11 @@ where
                         current_boundary_index,
                     );
                     if compactor.should_compact(&ctx) {
+                        let rollback_state = crate::agent::CompactionRollbackState {
+                            rollback_session: self.session.clone(),
+                            rollback_last_input_tokens: self.last_input_tokens,
+                            rollback_compaction_cadence: self.compaction_cadence.clone(),
+                        };
                         self.compaction_cadence
                             .last_compaction_attempt_boundary_index = Some(current_boundary_index);
                         let outcome = crate::agent::compact::run_compaction(
@@ -1265,23 +1761,36 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
-                            match self.index_compaction_discards(&outcome.discarded).await {
-                                crate::memory::MemoryIndexDelivery::Rejected {
-                                    error,
-                                    attempted_entries,
-                                    ..
-                                } => {
-                                    tracing::warn!(
-                                        error = %error,
-                                        attempted_entries,
-                                        "memory store rejected compaction discard indexing; preserving original session history"
-                                    );
+                            // A successful summary call is real provider work
+                            // even when the rebuilt transcript or its memory
+                            // projection is later rejected. Charge it before
+                            // any rewrite/projection branch so no failure path
+                            // can silently refund usage.
+                            self.session.record_usage(outcome.summary_usage.clone());
+                            self.budget.record_usage(&outcome.summary_usage);
+                            // Prepare the transcript rewrite on an isolated
+                            // session value. Its exact TranscriptRewriteCommit
+                            // becomes the identity of any paired memory stage.
+                            let mut compacted_session = self.session.clone();
+                            let prepared_rewrite = compacted_session
+                                .replace_messages_for_compaction_internal(
+                                    outcome.new_messages,
+                                    &outcome.rewrite_authority,
+                                );
+                            let compacted_session = match prepared_rewrite {
+                                Ok(Some(commit)) => Some((compacted_session, commit)),
+                                Ok(None) => {
+                                    let error =
+                                        crate::agent::compact::CompactionError::InvalidRebuild(
+                                            "compactor produced a no-op transcript rewrite"
+                                                .to_string(),
+                                        );
+                                    tracing::warn!(error = %error, "rejected no-op compaction transcript rewrite");
                                     if !crate::event_tap::tap_emit(
                                         &self.event_tap,
                                         event_tx.as_ref(),
                                         AgentEvent::CompactionFailed {
-                                            reason: crate::event::CompactionFailureReason::memory_indexing_failed(
-                                                attempted_entries,
+                                            reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
                                                 error.to_string(),
                                             ),
                                         },
@@ -1289,25 +1798,207 @@ where
                                     .await
                                     {
                                         tracing::warn!(
-                                            "compaction event stream receiver dropped before memory-indexing CompactionFailed"
+                                            "compaction event stream receiver dropped before no-op rewrite CompactionFailed"
                                         );
                                     }
-                                    continue;
+                                    None
                                 }
-                                crate::memory::MemoryIndexDelivery::NoStore { .. }
-                                | crate::memory::MemoryIndexDelivery::Delivered(_) => {}
-                            }
+                                Err(error) => {
+                                    tracing::warn!(error = %error, "failed to prepare compaction transcript rewrite");
+                                    if !crate::event_tap::tap_emit(
+                                        &self.event_tap,
+                                        event_tx.as_ref(),
+                                        AgentEvent::CompactionFailed {
+                                            reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
+                                                error.to_string(),
+                                            ),
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "compaction event stream receiver dropped before rewrite CompactionFailed"
+                                        );
+                                    }
+                                    None
+                                }
+                            };
 
-                            if let Err(error) = self.session.replace_messages_internal(
-                                outcome.new_messages,
-                                TranscriptRewriteReason::new("compaction"),
-                            ) {
-                                tracing::warn!(error = %error, "failed to commit compaction transcript rewrite");
+                            let mut projection_failure = None;
+                            let (rewrite_committed, emit_completed_now) = if let Some((
+                                mut compacted_session,
+                                commit,
+                            )) = compacted_session
+                            {
+                                match self.memory_store.clone() {
+                                        None => {
+                                            self.session = compacted_session;
+                                            (true, true)
+                                        }
+                                        Some(memory_store) => match memory_store
+                                            .compaction_projection_persistence()
+                                        {
+                                            crate::memory::CompactionProjectionPersistence::Unsupported => {
+                                                projection_failure = Some(
+                                                    crate::memory::MemoryStoreError::Unsupported {
+                                                        operation: "compaction_projection",
+                                                    },
+                                                );
+                                                (false, false)
+                                            }
+                                            crate::memory::CompactionProjectionPersistence::EphemeralImmediate => {
+                                                // Process-local only: publish
+                                                // the in-memory rewrite first,
+                                                // then index, and roll both
+                                                // local facts back on failure.
+                                                let original_session = std::mem::replace(
+                                                    &mut self.session,
+                                                    compacted_session,
+                                                );
+                                                let indexed = match self
+                                                    .compaction_memory_batch(&outcome.discarded)
+                                                {
+                                                    Ok(batch) => memory_store
+                                                        .index_scoped_batch(batch)
+                                                        .await,
+                                                    Err(error) => Err(error),
+                                                };
+                                                match indexed {
+                                                    Ok(_) => (true, true),
+                                                    Err(error) => {
+                                                        self.session = original_session;
+                                                        projection_failure = Some(error);
+                                                        (false, false)
+                                                    }
+                                                }
+                                            }
+                                            crate::memory::CompactionProjectionPersistence::DurableStaged => {
+                                                match self
+                                                    .stage_durable_compaction_projection(
+                                                        memory_store.as_ref(),
+                                                        &commit,
+                                                        &outcome.rewrite_authority,
+                                                        &outcome.discarded,
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok(projection) => {
+                                                        let intent = crate::memory::CompactionProjectionIntent {
+                                                            projection: projection.clone(),
+                                                            summary_tokens: outcome.summary_usage.output_tokens,
+                                                            messages_before: outcome.messages_before,
+                                                            messages_after: outcome.messages_after,
+                                                        };
+                                                        match compacted_session
+                                                            .add_compaction_projection_intent(intent)
+                                                        {
+                                                            Ok(()) => {
+                                                                // Stage is durable but invisible;
+                                                                // completion belongs to runtime
+                                                                // atomic_apply + finalization.
+                                                                let adopted = match self
+                                                                    .compaction_transaction
+                                                                    .as_mut()
+                                                                {
+                                                                    Some(transaction)
+                                                                        if matches!(
+                                                                            &transaction.phase,
+                                                                            crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(_)
+                                                                        ) =>
+                                                                    {
+                                                                        transaction
+                                                                            .projections
+                                                                            .push(projection.clone());
+                                                                        true
+                                                                    }
+                                                                    Some(_) => false,
+                                                                    None => {
+                                                                        self.compaction_transaction =
+                                                                            Some(crate::agent::CompactionTransaction {
+                                                                                phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(
+                                                                                    Box::new(rollback_state),
+                                                                                ),
+                                                                                projections: vec![projection.clone()],
+                                                                            });
+                                                                        true
+                                                                    }
+                                                                };
+                                                                if adopted {
+                                                                    self.session = compacted_session;
+                                                                    if self
+                                                                        .in_flight_compaction_stage
+                                                                        .as_ref()
+                                                                        == Some(&projection)
+                                                                    {
+                                                                        self.in_flight_compaction_stage = None;
+                                                                    }
+                                                                    (true, false)
+                                                                } else {
+                                                                    let abort_error = self
+                                                                        .abort_in_flight_compaction_stage(
+                                                                            memory_store.as_ref(),
+                                                                        )
+                                                                        .await
+                                                                        .err();
+                                                                    projection_failure = Some(
+                                                                        crate::memory::MemoryStoreError::Storage(
+                                                                            match abort_error {
+                                                                                Some(abort_error) => format!(
+                                                                                    "compaction transaction is not awaiting runtime commit; additionally failed to abort invisible stage: {abort_error}"
+                                                                                ),
+                                                                                None => "compaction transaction is not awaiting runtime commit".to_string(),
+                                                                            },
+                                                                        ),
+                                                                    );
+                                                                    (false, false)
+                                                                }
+                                                            }
+                                                            Err(error) => {
+                                                                let abort_error = self
+                                                                    .abort_in_flight_compaction_stage(
+                                                                        memory_store.as_ref(),
+                                                                    )
+                                                                    .await
+                                                                    .err();
+                                                                projection_failure = Some(
+                                                                    crate::memory::MemoryStoreError::Storage(
+                                                                        match abort_error {
+                                                                            Some(abort_error) => format!(
+                                                                                "failed to carry compaction projection intent: {error}; additionally failed to abort invisible stage: {abort_error}"
+                                                                            ),
+                                                                            None => format!(
+                                                                                "failed to carry compaction projection intent: {error}"
+                                                                            ),
+                                                                        },
+                                                                    ),
+                                                                );
+                                                                (false, false)
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(error) => {
+                                                        projection_failure = Some(error);
+                                                        (false, false)
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    }
+                            } else {
+                                (false, false)
+                            };
+                            if let Some(error) = projection_failure {
+                                tracing::warn!(
+                                    error = %error,
+                                    attempted_entries = outcome.discarded.len(),
+                                    "memory store rejected compaction projection; preserving original session history"
+                                );
                                 if !crate::event_tap::tap_emit(
                                     &self.event_tap,
                                     event_tx.as_ref(),
                                     AgentEvent::CompactionFailed {
-                                        reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
+                                        reason: crate::event::CompactionFailureReason::memory_indexing_failed(
+                                            outcome.discarded.len(),
                                             error.to_string(),
                                         ),
                                     },
@@ -1315,30 +2006,36 @@ where
                                 .await
                                 {
                                     tracing::warn!(
-                                        "compaction event stream receiver dropped before rewrite CompactionFailed"
+                                        "compaction event stream receiver dropped before memory-indexing CompactionFailed"
                                     );
                                 }
-                                continue;
                             }
-                            self.session.record_usage(outcome.summary_usage.clone());
-                            self.budget.record_usage(&outcome.summary_usage);
-                            self.last_input_tokens = 0;
-                            self.compaction_cadence.last_compaction_boundary_index =
-                                Some(outcome.session_boundary_index);
-                            if !crate::event_tap::tap_emit(
-                                &self.event_tap,
-                                event_tx.as_ref(),
-                                AgentEvent::CompactionCompleted {
-                                    summary_tokens: outcome.summary_usage.output_tokens,
-                                    messages_before: outcome.messages_before,
-                                    messages_after: outcome.messages_after,
-                                },
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "compaction event stream receiver dropped before CompactionCompleted"
-                                );
+                            if let Some(projection) = self.in_flight_compaction_stage.as_ref() {
+                                return Err(AgentError::InternalError(format!(
+                                    "compaction stage {} remains pending cleanup",
+                                    projection.revision()
+                                )));
+                            }
+                            if rewrite_committed {
+                                self.last_input_tokens = 0;
+                                self.compaction_cadence.last_compaction_boundary_index =
+                                    Some(outcome.session_boundary_index);
+                                if emit_completed_now
+                                    && !crate::event_tap::tap_emit(
+                                        &self.event_tap,
+                                        event_tx.as_ref(),
+                                        AgentEvent::CompactionCompleted {
+                                            summary_tokens: outcome.summary_usage.output_tokens,
+                                            messages_before: outcome.messages_before,
+                                            messages_after: outcome.messages_after,
+                                        },
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "compaction event stream receiver dropped before CompactionCompleted"
+                                    );
+                                }
                             }
                         }
                     }
@@ -1362,67 +2059,27 @@ where
         Ok(())
     }
 
+    #[cfg(test)]
     async fn index_compaction_discards(
         &self,
-        discarded: &[Message],
+        discarded: &[crate::compact::CompactionDiscard],
     ) -> crate::memory::MemoryIndexDelivery {
         let session_id = self.session.id().clone();
         let scope = crate::memory::MemoryIndexScope::for_session(session_id.clone());
         let Some(memory_store) = self.memory_store.as_ref() else {
             return crate::memory::MemoryIndexDelivery::NoStore { scope };
         };
-        let mut requests = Vec::new();
-        // Compaction discards the front prefix of session history, so a
-        // discarded entry's index IS its offset in the original transcript.
-        // The typed source carries that offset as the canonical origin handle,
-        // not the compaction turn number (which was only a proxy).
-        for (offset, message) in discarded.iter().enumerate() {
-            // Carry the typed indexability decision to the store; the store
-            // owns the include/exclude policy rather than the producer inferring
-            // it from an empty flattened string.
-            let content = message.indexable_content();
-            let metadata = crate::memory::MemoryMetadata {
-                session_id: session_id.clone(),
-                source: crate::memory::MemorySource::Compaction {
-                    source_range: crate::memory::MessageRange::single(offset as u64),
-                },
-                indexed_at: crate::time_compat::SystemTime::now(),
-            };
-            let request =
-                match crate::memory::MemoryIndexRequest::new(scope.clone(), content, metadata) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        let attempted_entries = requests.len() + 1;
-                        return crate::memory::MemoryIndexDelivery::Rejected {
-                            scope,
-                            attempted_entries,
-                            error,
-                        };
-                    }
-                };
-            requests.push(request);
-        }
-
-        let attempted_entries = requests.len();
-        if attempted_entries == 0 {
-            return crate::memory::MemoryIndexDelivery::Delivered(
-                crate::memory::MemoryIndexReceipt {
-                    scope,
-                    indexed_entries: 0,
-                },
-            );
-        }
-
-        let batch = match crate::memory::MemoryIndexBatch::new(scope.clone(), requests) {
+        let batch = match self.compaction_memory_batch(discarded) {
             Ok(batch) => batch,
             Err(error) => {
                 return crate::memory::MemoryIndexDelivery::Rejected {
                     scope,
-                    attempted_entries,
+                    attempted_entries: discarded.len(),
                     error,
                 };
             }
         };
+        let attempted_entries = batch.len();
         match memory_store.index_scoped_batch(batch).await {
             Ok(receipt) => crate::memory::MemoryIndexDelivery::Delivered(receipt),
             Err(error) => crate::memory::MemoryIndexDelivery::Rejected {
@@ -1430,6 +2087,674 @@ where
                 attempted_entries,
                 error,
             },
+        }
+    }
+
+    fn compaction_memory_batch(
+        &self,
+        discarded: &[crate::compact::CompactionDiscard],
+    ) -> Result<crate::memory::MemoryIndexBatch, crate::memory::MemoryStoreError> {
+        self.compaction_memory_batch_at(discarded, crate::time_compat::SystemTime::now())
+    }
+
+    fn compaction_memory_batch_at(
+        &self,
+        discarded: &[crate::compact::CompactionDiscard],
+        indexed_at: crate::time_compat::SystemTime,
+    ) -> Result<crate::memory::MemoryIndexBatch, crate::memory::MemoryStoreError> {
+        let session_id = self.session.id().clone();
+        let scope = crate::memory::MemoryIndexScope::for_session(session_id.clone());
+        let mut requests = Vec::new();
+        // The compactor binds every discarded message to its canonical offset
+        // in the full pre-compaction transcript. `run_compaction` validates
+        // that provenance before this projection boundary.
+        for discard in discarded {
+            // Carry the typed indexability decision to the store; the store
+            // owns the include/exclude policy rather than the producer inferring
+            // it from an empty flattened string.
+            let content = discard.message.indexable_content();
+            let metadata = crate::memory::MemoryMetadata {
+                session_id: session_id.clone(),
+                source: crate::memory::MemorySource::Compaction {
+                    source_range: crate::memory::MessageRange::single(discard.source_offset),
+                },
+                indexed_at,
+            };
+            let request = crate::memory::MemoryIndexRequest::new(scope.clone(), content, metadata)?;
+            requests.push(request);
+        }
+        crate::memory::MemoryIndexBatch::new(scope, requests)
+    }
+
+    async fn stage_durable_compaction_projection(
+        &mut self,
+        memory_store: &dyn crate::memory::MemoryStore,
+        commit: &crate::TranscriptRewriteCommit,
+        authority: &crate::agent::compact::ValidatedCompactionRewrite,
+        discarded: &[crate::compact::CompactionDiscard],
+    ) -> Result<crate::memory::CompactionProjectionId, crate::memory::MemoryStoreError> {
+        let projection = crate::memory::CompactionProjectionId::from_validated_transcript_rewrite(
+            self.session.id().clone(),
+            commit,
+            authority,
+        )
+        .ok_or_else(|| {
+            crate::memory::MemoryStoreError::Storage(
+                "validated compaction witness does not authorize the projection commit".to_string(),
+            )
+        })?;
+        let coordinator = self.compaction_commit_coordinator.as_ref().ok_or(
+            crate::memory::MemoryStoreError::Unsupported {
+                operation: "durable_compaction_without_runtime_coordinator",
+            },
+        )?;
+        coordinator
+            .authorize_projection(&projection)
+            .map_err(|error| crate::memory::MemoryStoreError::Storage(error.to_string()))?;
+        // Stable retry payload: the rewrite commit timestamp, not a fresh
+        // wall-clock read, owns the staged metadata identity.
+        let batch = self.compaction_memory_batch_at(discarded, commit.committed_at)?;
+        if self.in_flight_compaction_stage.is_some() {
+            return Err(crate::memory::MemoryStoreError::Storage(
+                "cannot stage compaction while another exact stage identity is in flight"
+                    .to_string(),
+            ));
+        }
+        // Install the deterministic identity before the cancellation point.
+        // If this await is dropped after the store commits, hard-interrupt
+        // cleanup can abort this exact stage directly.
+        self.in_flight_compaction_stage = Some(projection.clone());
+        let staged = memory_store
+            .stage_compaction_batch(projection.clone(), batch)
+            .await;
+        match staged {
+            Ok(receipt) if receipt.projection == projection => Ok(projection),
+            Ok(_) => {
+                let cleanup = self
+                    .abort_in_flight_compaction_stage(memory_store)
+                    .await
+                    .err();
+                Err(crate::memory::MemoryStoreError::Storage(match cleanup {
+                    Some(cleanup) => format!(
+                        "memory store returned a stage receipt for a different compaction rewrite; additionally failed exact-stage cleanup: {cleanup}"
+                    ),
+                    None => {
+                        "memory store returned a stage receipt for a different compaction rewrite"
+                            .to_string()
+                    }
+                }))
+            }
+            Err(error) => {
+                let cleanup = self
+                    .abort_in_flight_compaction_stage(memory_store)
+                    .await
+                    .err();
+                Err(crate::memory::MemoryStoreError::Storage(match cleanup {
+                    Some(cleanup) => format!(
+                        "failed to stage compaction projection: {error}; additionally failed exact-stage cleanup: {cleanup}"
+                    ),
+                    None => format!("failed to stage compaction projection: {error}"),
+                }))
+            }
+        }
+    }
+
+    async fn abort_in_flight_compaction_stage(
+        &mut self,
+        memory_store: &dyn crate::memory::MemoryStore,
+    ) -> Result<(), crate::memory::MemoryStoreError> {
+        let Some(projection) = self.in_flight_compaction_stage.clone() else {
+            return Ok(());
+        };
+        memory_store.abort_compaction_batch(&projection).await?;
+        if self.in_flight_compaction_stage.as_ref() == Some(&projection) {
+            self.in_flight_compaction_stage = None;
+        }
+        Ok(())
+    }
+
+    fn exact_compaction_projection_set(
+        expected: &[crate::memory::CompactionProjectionId],
+        actual: &[crate::memory::CompactionProjectionId],
+    ) -> bool {
+        expected.len() == actual.len()
+            && expected
+                .iter()
+                .all(|projection| actual.contains(projection))
+    }
+
+    fn validate_runtime_compaction_authority(
+        &self,
+        intents: &[crate::memory::CompactionProjectionIntent],
+        live_transaction: Option<(&[crate::memory::CompactionProjectionId], bool)>,
+    ) -> Result<Vec<crate::memory::CompactionProjectionId>, AgentError> {
+        let mut unique = std::collections::HashSet::new();
+        let mut projections = Vec::with_capacity(intents.len());
+        for intent in intents {
+            if intent.projection.session_id() != self.session.id() {
+                return Err(AgentError::InternalError(format!(
+                    "runtime compaction outbox projection {} belongs to foreign session {}",
+                    intent.projection.revision(),
+                    intent.projection.session_id()
+                )));
+            }
+            if !unique.insert(intent.projection.clone()) {
+                return Err(AgentError::InternalError(format!(
+                    "runtime compaction outbox contains duplicate projection {}",
+                    intent.projection.revision()
+                )));
+            }
+            projections.push(intent.projection.clone());
+        }
+
+        let validated_session_intents = self
+            .session
+            .validated_compaction_projection_intents()
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to validate session compaction intents against transcript history: {error}"
+                ))
+            })?;
+        let history = self.session.transcript_history_state().map_err(|error| {
+            AgentError::InternalError(format!(
+                "failed to load compaction transcript history: {error}"
+            ))
+        })?;
+        let commits = history
+            .as_ref()
+            .map(|history| history.commits.as_slice())
+            .unwrap_or_default();
+        for projection in &projections {
+            if !commits
+                .iter()
+                .any(|commit| projection.matches_transcript_rewrite(self.session.id(), commit))
+            {
+                return Err(AgentError::InternalError(format!(
+                    "runtime compaction outbox projection {} is not backed by the session transcript graph",
+                    projection.revision()
+                )));
+            }
+        }
+
+        if let Some((expected, bookkeeping_complete)) = live_transaction {
+            let mut expected_unique = std::collections::HashSet::new();
+            if expected
+                .iter()
+                .any(|projection| !expected_unique.insert(projection.clone()))
+            {
+                return Err(AgentError::InternalError(
+                    "live compaction transaction contains duplicate projection identities"
+                        .to_string(),
+                ));
+            }
+            if !Self::exact_compaction_projection_set(expected, &projections) {
+                return Err(AgentError::InternalError(format!(
+                    "runtime compaction outbox does not exactly match the live transaction (expected {}, received {})",
+                    expected.len(),
+                    projections.len()
+                )));
+            }
+            if bookkeeping_complete {
+                if !validated_session_intents.is_empty() {
+                    return Err(AgentError::InternalError(
+                        "runtime-committed compaction bookkeeping is complete but session intents remain"
+                            .to_string(),
+                    ));
+                }
+            } else if validated_session_intents.len() != intents.len()
+                || !validated_session_intents
+                    .iter()
+                    .all(|session_intent| intents.contains(session_intent))
+            {
+                return Err(AgentError::InternalError(
+                    "runtime compaction outbox does not exactly match the live session intents"
+                        .to_string(),
+                ));
+            }
+        } else {
+            // Recovery may retry after an older process finalized only a
+            // prefix and removed those local intents. RuntimeStore remains the
+            // exact commit authority, but every still-carried session intent
+            // must be present byte-for-byte and every supplied projection must
+            // remain backed by the validated transcript graph.
+            if !validated_session_intents
+                .iter()
+                .all(|session_intent| intents.contains(session_intent))
+            {
+                return Err(AgentError::InternalError(
+                    "runtime compaction outbox omits a validated session projection intent"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(projections)
+    }
+
+    /// Finalize every runtime-authorized memory stage before mutating local
+    /// intent bookkeeping. The local mutation is all-or-none; a partial store
+    /// failure keeps the typed transaction commit-only and fully retryable.
+    pub async fn finalize_committed_compaction_projections(
+        &mut self,
+        projections: &[crate::memory::CompactionProjectionId],
+    ) -> Result<(), AgentError> {
+        if let Some(transaction) = self.compaction_transaction.as_ref()
+            && !matches!(
+                &transaction.phase,
+                crate::agent::CompactionTransactionPhase::RuntimeCommitted { .. }
+            )
+        {
+            return Err(AgentError::InternalError(
+                "compaction finalization requires a runtime-committed transaction".to_string(),
+            ));
+        }
+        if projections.is_empty() {
+            return Ok(());
+        }
+        let memory_store = self.memory_store.clone().ok_or_else(|| {
+            AgentError::InternalError(
+                "runtime compaction outbox has work but the agent has no memory store".to_string(),
+            )
+        })?;
+        let coordinator = self.compaction_commit_coordinator.clone().ok_or_else(|| {
+            AgentError::InternalError(
+                "runtime compaction outbox has work but the agent has no commit coordinator"
+                    .to_string(),
+            )
+        })?;
+
+        for projection in projections {
+            coordinator
+                .authorize_projection(projection)
+                .map_err(|error| AgentError::InternalError(error.to_string()))?;
+        }
+        for projection in projections {
+            memory_store
+                .finalize_compaction_batch(projection)
+                .await
+                .map_err(|error| {
+                    AgentError::InternalError(format!(
+                        "failed to finalize compaction memory projection {}: {error}",
+                        projection.revision()
+                    ))
+                })?;
+        }
+
+        // Build bookkeeping on a clone so serialization failure cannot remove
+        // only a prefix after all memory stages have already published.
+        let bookkeeping_was_complete =
+            self.compaction_transaction
+                .as_ref()
+                .is_some_and(|transaction| {
+                    matches!(
+                        &transaction.phase,
+                        crate::agent::CompactionTransactionPhase::RuntimeCommitted {
+                            bookkeeping_complete: true
+                        }
+                    )
+                });
+        let mut next_session = self.session.clone();
+        let mut completed_intents = Vec::new();
+        for projection in projections {
+            let completed = next_session
+                .complete_compaction_projection_intent(projection)
+                .map_err(|error| {
+                    AgentError::InternalError(format!(
+                        "failed to complete compaction projection intent {}: {error}",
+                        projection.revision()
+                    ))
+                })?;
+            if completed.is_none()
+                && self.compaction_transaction.is_some()
+                && !bookkeeping_was_complete
+            {
+                return Err(AgentError::InternalError(format!(
+                    "live runtime-committed compaction intent {} disappeared before bookkeeping",
+                    projection.revision()
+                )));
+            }
+            if let Some(intent) = completed {
+                completed_intents.push(intent);
+            }
+        }
+        self.session = next_session;
+        if let Some(transaction) = self.compaction_transaction.as_mut() {
+            transaction.phase = crate::agent::CompactionTransactionPhase::RuntimeCommitted {
+                bookkeeping_complete: true,
+            };
+        }
+
+        // Authoritative intent bookkeeping is complete before event delivery.
+        // Keep the explicit RuntimeCommitted phase through every await so a
+        // cancelled observer delivery can never re-enable rollback.
+        for intent in completed_intents {
+            if !crate::event_tap::tap_emit(
+                &self.event_tap,
+                self.default_event_tx.as_ref(),
+                AgentEvent::CompactionCompleted {
+                    summary_tokens: intent.summary_tokens,
+                    messages_before: intent.messages_before,
+                    messages_after: intent.messages_after,
+                },
+            )
+            .await
+            {
+                tracing::warn!(
+                    revision = intent.projection.revision(),
+                    "compaction event stream receiver dropped before committed CompactionCompleted"
+                );
+            }
+        }
+        let live_transaction_completed =
+            self.compaction_transaction
+                .as_ref()
+                .is_some_and(|transaction| {
+                    matches!(
+                        &transaction.phase,
+                        crate::agent::CompactionTransactionPhase::RuntimeCommitted {
+                            bookkeeping_complete: true
+                        }
+                    ) && Self::exact_compaction_projection_set(
+                        &transaction.projections,
+                        projections,
+                    )
+                });
+        if live_transaction_completed {
+            self.compaction_transaction = None;
+        }
+        Ok(())
+    }
+
+    /// Reconcile invisible stages against the exact RuntimeStore atomic outbox
+    /// and finalize those committed identities. A live transaction crosses the
+    /// commit-only boundary synchronously after exact authority validation and
+    /// before any store await.
+    pub async fn reconcile_runtime_compaction_projections(
+        &mut self,
+        intents: &[crate::memory::CompactionProjectionIntent],
+    ) -> Result<(), AgentError> {
+        let live_transaction = match self.compaction_transaction.as_ref() {
+            Some(transaction) => match &transaction.phase {
+                crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(_) => {
+                    Some((transaction.projections.clone(), false))
+                }
+                crate::agent::CompactionTransactionPhase::RuntimeCommitted {
+                    bookkeeping_complete,
+                } => Some((transaction.projections.clone(), *bookkeeping_complete)),
+                crate::agent::CompactionTransactionPhase::AbortPending { .. } => {
+                    return Err(AgentError::InternalError(
+                        "runtime compaction outbox cannot commit an abort-pending transaction"
+                            .to_string(),
+                    ));
+                }
+            },
+            None => None,
+        };
+        let projections = self.validate_runtime_compaction_authority(
+            intents,
+            live_transaction
+                .as_ref()
+                .map(|(projections, complete)| (projections.as_slice(), *complete)),
+        )?;
+        if let Some(transaction) = self.compaction_transaction.as_mut()
+            && matches!(
+                &transaction.phase,
+                crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(_)
+            )
+        {
+            transaction.phase = crate::agent::CompactionTransactionPhase::RuntimeCommitted {
+                bookkeeping_complete: false,
+            };
+        }
+        if self
+            .in_flight_compaction_stage
+            .as_ref()
+            .is_some_and(|stage| projections.contains(stage))
+        {
+            return Err(AgentError::InternalError(
+                "runtime outbox named an in-flight stage that never reached session intent authority"
+                    .to_string(),
+            ));
+        }
+        if !projections.is_empty() {
+            let coordinator = self.compaction_commit_coordinator.as_ref().ok_or_else(|| {
+                AgentError::InternalError(
+                    "runtime compaction outbox has work but the agent has no commit coordinator"
+                        .to_string(),
+                )
+            })?;
+            for projection in &projections {
+                coordinator
+                    .authorize_projection(projection)
+                    .map_err(|error| AgentError::InternalError(error.to_string()))?;
+            }
+        }
+
+        let durable_store = self.memory_store.clone().filter(|memory_store| {
+            memory_store.compaction_projection_persistence()
+                == crate::memory::CompactionProjectionPersistence::DurableStaged
+        });
+        if (!projections.is_empty() || self.in_flight_compaction_stage.is_some())
+            && durable_store.is_none()
+        {
+            return Err(AgentError::InternalError(
+                "runtime compaction outbox has work without a durable staged memory store"
+                    .to_string(),
+            ));
+        }
+        if let Some(memory_store) = durable_store.as_ref() {
+            if self.in_flight_compaction_stage.is_some() {
+                self.abort_in_flight_compaction_stage(memory_store.as_ref())
+                    .await
+                    .map_err(|error| {
+                        AgentError::InternalError(format!(
+                            "failed to abort exact in-flight compaction stage before runtime reconciliation: {error}"
+                        ))
+                    })?;
+            }
+            memory_store
+                .reconcile_compaction_stages(
+                    &crate::memory::MemoryOwner::canonical_session(self.session.id().clone()),
+                    &projections,
+                )
+                .await
+                .map_err(|error| {
+                    AgentError::InternalError(format!(
+                        "failed to reconcile runtime compaction stages: {error}"
+                    ))
+                })?;
+        }
+        self.finalize_committed_compaction_projections(&projections)
+            .await
+    }
+
+    fn monotonic_compaction_usage_delta(
+        live: &crate::types::Usage,
+        rollback: &crate::types::Usage,
+    ) -> Result<crate::types::Usage, AgentError> {
+        fn delta(live: u64, rollback: u64, field: &str) -> Result<u64, AgentError> {
+            live.checked_sub(rollback).ok_or_else(|| {
+                AgentError::InternalError(format!(
+                    "compaction rollback observed non-monotonic {field} usage ({live} < {rollback})"
+                ))
+            })
+        }
+        fn optional_delta(
+            live: Option<u64>,
+            rollback: Option<u64>,
+            field: &str,
+        ) -> Result<Option<u64>, AgentError> {
+            if live.is_none() && rollback.is_none() {
+                return Ok(None);
+            }
+            delta(live.unwrap_or(0), rollback.unwrap_or(0), field).map(Some)
+        }
+
+        Ok(crate::types::Usage {
+            input_tokens: delta(live.input_tokens, rollback.input_tokens, "input-token")?,
+            output_tokens: delta(live.output_tokens, rollback.output_tokens, "output-token")?,
+            cache_creation_tokens: optional_delta(
+                live.cache_creation_tokens,
+                rollback.cache_creation_tokens,
+                "cache-creation-token",
+            )?,
+            cache_read_tokens: optional_delta(
+                live.cache_read_tokens,
+                rollback.cache_read_tokens,
+                "cache-read-token",
+            )?,
+        })
+    }
+
+    /// Abort invisible stages only while the runtime commit boundary is still
+    /// open. Rollback is applied exactly once, then represented as
+    /// `AbortPending`; retries perform cleanup only and never reapply usage or
+    /// cadence deltas. RuntimeCommitted is permanently commit-only.
+    pub async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), AgentError> {
+        let rollback_state = self
+            .compaction_transaction
+            .as_ref()
+            .and_then(|transaction| match &transaction.phase {
+                crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(rollback) => {
+                    Some((**rollback).clone())
+                }
+                _ => None,
+            });
+        if let Some(rollback) = rollback_state {
+            let retained_usage = Self::monotonic_compaction_usage_delta(
+                &self.session.total_usage(),
+                &rollback.rollback_session.total_usage(),
+            )?;
+            let attempted_cadence = self.compaction_cadence.clone();
+            let mut restored_session = rollback.rollback_session;
+            if retained_usage != crate::types::Usage::default() {
+                restored_session.record_usage(retained_usage);
+            }
+            let mut restored_cadence = rollback.rollback_compaction_cadence;
+            restored_cadence.session_boundary_index = attempted_cadence.session_boundary_index;
+            restored_cadence.last_compaction_attempt_boundary_index =
+                attempted_cadence.last_compaction_attempt_boundary_index;
+            self.session = restored_session;
+            self.last_input_tokens = rollback.rollback_last_input_tokens;
+            self.compaction_cadence = restored_cadence;
+            if let Some(transaction) = self.compaction_transaction.as_mut() {
+                transaction.phase = crate::agent::CompactionTransactionPhase::AbortPending {
+                    cadence_persist_pending: true,
+                };
+            }
+        }
+
+        if self
+            .compaction_transaction
+            .as_ref()
+            .is_some_and(|transaction| {
+                matches!(
+                    &transaction.phase,
+                    crate::agent::CompactionTransactionPhase::RuntimeCommitted { .. }
+                )
+            })
+        {
+            return Err(AgentError::InternalError(
+                "runtime-committed compaction transaction is commit-only and refuses abort"
+                    .to_string(),
+            ));
+        }
+
+        let mut errors = Vec::new();
+        let cadence_persist_pending =
+            self.compaction_transaction
+                .as_ref()
+                .is_some_and(|transaction| {
+                    matches!(
+                        &transaction.phase,
+                        crate::agent::CompactionTransactionPhase::AbortPending {
+                            cadence_persist_pending: true
+                        }
+                    )
+                });
+        if cadence_persist_pending {
+            let cadence = self.compaction_cadence.clone();
+            match crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence) {
+                Ok(()) => {
+                    if let Some(transaction) = self.compaction_transaction.as_mut() {
+                        transaction.phase =
+                            crate::agent::CompactionTransactionPhase::AbortPending {
+                                cadence_persist_pending: false,
+                            };
+                    }
+                }
+                Err(error) => errors.push(format!(
+                    "failed to persist rolled-back compaction cadence: {error}"
+                )),
+            }
+        }
+
+        let projections = self
+            .compaction_transaction
+            .as_ref()
+            .map(|transaction| transaction.projections.clone())
+            .unwrap_or_default();
+        let has_cleanup = self.in_flight_compaction_stage.is_some() || !projections.is_empty();
+        let memory_store = if has_cleanup {
+            match self.memory_store.clone() {
+                Some(memory_store) => Some(memory_store),
+                None => {
+                    errors.push(
+                        "uncommitted compaction cleanup has stages without a memory store"
+                            .to_string(),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(memory_store) = memory_store {
+            if let Some(projection) = self.in_flight_compaction_stage.clone()
+                && let Err(error) = self
+                    .abort_in_flight_compaction_stage(memory_store.as_ref())
+                    .await
+            {
+                errors.push(format!(
+                    "failed to abort exact in-flight compaction stage {}: {error}",
+                    projection.revision()
+                ));
+            }
+            for projection in projections {
+                match memory_store.abort_compaction_batch(&projection).await {
+                    Ok(()) => {
+                        if let Some(transaction) = self.compaction_transaction.as_mut() {
+                            transaction
+                                .projections
+                                .retain(|candidate| candidate != &projection);
+                        }
+                    }
+                    Err(error) => errors.push(format!(
+                        "failed to abort uncommitted compaction projection {}: {error}",
+                        projection.revision()
+                    )),
+                }
+            }
+        }
+
+        let abort_complete = self
+            .compaction_transaction
+            .as_ref()
+            .is_some_and(|transaction| {
+                transaction.projections.is_empty()
+                    && matches!(
+                        &transaction.phase,
+                        crate::agent::CompactionTransactionPhase::AbortPending {
+                            cadence_persist_pending: false
+                        }
+                    )
+            });
+        if abort_complete {
+            self.compaction_transaction = None;
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AgentError::InternalError(errors.join("; ")))
         }
     }
 
@@ -1597,6 +2922,16 @@ where
         let mut event_stream_open = true;
         let mut run_has_visible_or_actionable_output = false;
         self.extraction_state.reset();
+        // RuntimeStore holds the pre-run Session snapshot until an explicit
+        // sticky-fallback CAS advances its control projection. Seal that exact
+        // parent once; CallingLlm visibility promotion/catalog refreshes mutate
+        // only the live Agent session and must not rewrite the CAS expectation.
+        let mut sticky_fallback_durable_visibility_parent =
+            self.session.try_tool_visibility_state().map_err(|error| {
+                AgentError::ConfigError(format!(
+                    "failed to read the pre-run durable visibility parent: {error}"
+                ))
+            })?;
         // Flush any cancel-after-boundary commands left undrained by a prior
         // run so a stale request never leaks into this fresh run. The producer
         // end (the requesting surface) cannot reach the agent-owned receiver, so
@@ -2130,7 +3465,13 @@ where
                         });
                     }
 
-                    let effective_max_tokens = self.config.resolved_max_tokens_per_turn();
+                    let configured_max_tokens = self.config.resolved_max_tokens_per_turn();
+                    let effective_max_tokens = self
+                        .active_model_profile
+                        .as_ref()
+                        .and_then(crate::ModelProfileWitness::max_output_tokens)
+                        .map(|limit| configured_max_tokens.min(limit))
+                        .unwrap_or(configured_max_tokens);
                     let mut effective_temperature = self.config.temperature;
                     // Typed field-wise merge on the carrier: explicit params
                     // win, build-derived tool defaults fill unset slots. A
@@ -2280,11 +3621,16 @@ where
                                 None
                             },
                             allow_empty_success: run_has_visible_or_actionable_output,
+                            durable_visibility_parent:
+                                &mut sticky_fallback_durable_visibility_parent,
                         })
                         .await
                     {
                         Ok(r) => r,
                         Err(e) => {
+                            if e.requires_session_teardown() {
+                                return Err(e);
+                            }
                             if in_extraction {
                                 return self
                                     .complete_extraction_failed(
@@ -2321,6 +3667,8 @@ where
                                 })?;
                                 return self.build_result(turn_count, tool_call_count).await;
                             }
+                            self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &e)
+                                .await?;
                             return Err(e);
                         }
                     };
@@ -3484,7 +4832,8 @@ mod tests {
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{
-        CompactionContext, CompactionCurator, CompactionCuratorError, CompactionResult,
+        COMPACTION_SUMMARY_PREFIX, CompactionContext, CompactionCurator, CompactionCuratorError,
+        CompactionDiscard, CompactionResult, CompactionRetained, CompactionSummary,
         CompactionWindow, Compactor, CuratedCompactionSummary,
     };
     use crate::error::{
@@ -3537,8 +4886,14 @@ mod tests {
     ///
     /// See #32 Class W1 — runtime_turn_authority missing handle.
     fn with_test_turn_state_handle(builder: AgentBuilder) -> AgentBuilder {
+        with_test_turn_state_handle_for_session(builder, crate::Session::new())
+    }
+
+    fn with_test_turn_state_handle_for_session(
+        builder: AgentBuilder,
+        mut session: crate::Session,
+    ) -> AgentBuilder {
         use crate::agent::test_turn_state_handle::TestTurnStateHandle;
-        let mut session = crate::Session::new();
         session
             .set_build_state(crate::SessionBuildState::default())
             .expect("test session build state should serialize");
@@ -3610,6 +4965,24 @@ mod tests {
             &self,
         ) -> Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>> {
             self.seen_provider_params.lock().unwrap().clone()
+        }
+    }
+
+    struct HotSwapLimitRecordingClient {
+        model: String,
+        seen_max_tokens: Mutex<Vec<u32>>,
+    }
+
+    impl HotSwapLimitRecordingClient {
+        fn new(model: &str) -> Self {
+            Self {
+                model: model.to_string(),
+                seen_max_tokens: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_max_tokens(&self) -> Vec<u32> {
+            self.seen_max_tokens.lock().unwrap().clone()
         }
     }
 
@@ -3914,6 +5287,37 @@ mod tests {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for HotSwapLimitRecordingClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_max_tokens.lock().unwrap().push(max_tokens);
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::OpenAI
+        }
+
+        fn model(&self) -> &str {
+            &self.model
+        }
+    }
+
     struct ImageHydrationLlmClient {
         seen_user_blocks: Mutex<Vec<Vec<ContentBlock>>>,
     }
@@ -4088,6 +5492,25 @@ mod tests {
         seen_contexts: Mutex<Vec<CompactionContext>>,
     }
 
+    fn identity_compaction_retentions(messages: &[Message]) -> Vec<CompactionRetained> {
+        messages
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(offset, message)| {
+                let offset = u64::try_from(offset).unwrap_or(u64::MAX);
+                CompactionRetained::new(offset, offset, message)
+            })
+            .collect()
+    }
+
+    fn test_compaction_summary(rebuilt_offset: u64, summary: &str) -> CompactionSummary {
+        let message = Message::User(UserMessage::compaction_summary(format!(
+            "{COMPACTION_SUMMARY_PREFIX}{summary}"
+        )));
+        CompactionSummary::new(rebuilt_offset, message)
+    }
+
     impl TrackingCompactor {
         fn new(compact_on_boundary: Option<u64>) -> Self {
             Self {
@@ -4120,9 +5543,11 @@ mod tests {
             32
         }
 
-        fn rebuild_history(&self, messages: &[Message], _summary: &str) -> CompactionResult {
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
             CompactionResult {
                 messages: messages.to_vec(),
+                summary: test_compaction_summary(0, summary),
+                retained: identity_compaction_retentions(messages),
                 discarded: Vec::new(),
             }
         }
@@ -4166,9 +5591,11 @@ mod tests {
             32
         }
 
-        fn rebuild_history(&self, messages: &[Message], _summary: &str) -> CompactionResult {
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
             CompactionResult {
                 messages: messages.to_vec(),
+                summary: test_compaction_summary(0, summary),
+                retained: identity_compaction_retentions(messages),
                 discarded: Vec::new(),
             }
         }
@@ -4276,19 +5703,132 @@ mod tests {
         fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
             let last_user = messages
                 .iter()
+                .enumerate()
                 .rev()
-                .find(|message| matches!(message, Message::User(_)))
-                .cloned();
-            let mut compacted = vec![Message::User(UserMessage::compaction_summary(format!(
-                "[Context compacted] {summary}"
-            )))];
-            if let Some(last_user) = last_user {
-                compacted.push(last_user);
+                .find(|(_, message)| matches!(message, Message::User(_)))
+                .map(|(offset, message)| (offset, message.clone()));
+            let summary_mapping = test_compaction_summary(0, summary);
+            let mut compacted = vec![summary_mapping.message.clone()];
+            let mut retained = Vec::new();
+            if let Some((source_offset, last_user)) = last_user.as_ref() {
+                retained.push(CompactionRetained::new(
+                    u64::try_from(*source_offset).unwrap_or(u64::MAX),
+                    u64::try_from(compacted.len()).unwrap_or(u64::MAX),
+                    last_user.clone(),
+                ));
+                compacted.push(last_user.clone());
             }
-            let discarded_len = messages.len().saturating_sub(1);
             CompactionResult {
                 messages: compacted,
-                discarded: messages.iter().take(discarded_len).cloned().collect(),
+                summary: summary_mapping,
+                retained,
+                discarded: messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(offset, _)| {
+                        last_user
+                            .as_ref()
+                            .is_none_or(|(retained_offset, _)| offset != retained_offset)
+                    })
+                    .map(|(offset, message)| {
+                        CompactionDiscard::new(
+                            u64::try_from(offset).unwrap_or(u64::MAX),
+                            message.clone(),
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    struct InvalidRewriteCompactor;
+
+    impl Compactor for InvalidRewriteCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            ctx.session_boundary_index == 1
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
+            let summary_mapping = test_compaction_summary(0, summary);
+            let (tool_result_offset, orphan_tool_result) = messages
+                .iter()
+                .cloned()
+                .enumerate()
+                .find(|(_, message)| matches!(message, Message::ToolResults { .. }))
+                .expect("invalid-rewrite fixture requires a source tool-result message");
+            CompactionResult {
+                // Both rebuilt messages have valid provenance: the summary is
+                // the sole inserted message and the tool result is retained
+                // byte-for-byte from the source. Dropping its paired assistant
+                // tool-use message makes only the resulting transcript SHAPE
+                // invalid, so the test reaches `replace_messages_internal`.
+                messages: vec![summary_mapping.message.clone(), orphan_tool_result.clone()],
+                summary: summary_mapping,
+                retained: vec![CompactionRetained::new(
+                    u64::try_from(tool_result_offset).unwrap_or(u64::MAX),
+                    1,
+                    orphan_tool_result,
+                )],
+                discarded: messages
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .filter(|(offset, _)| *offset != tool_result_offset)
+                    .map(|(offset, message)| {
+                        CompactionDiscard::new(u64::try_from(offset).unwrap_or(u64::MAX), message)
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    struct NoOpClaimingDiscardCompactor;
+
+    impl Compactor for NoOpClaimingDiscardCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            ctx.session_boundary_index == 1
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
+            CompactionResult {
+                // Offset zero is claimed as discarded while the identical
+                // value remains at the one unmapped (nominal summary) slot.
+                // The explicit provenance is structurally complete, but the
+                // accepted transcript is still a no-op and must not be
+                // projected into semantic memory.
+                messages: messages.to_vec(),
+                summary: test_compaction_summary(0, summary),
+                retained: messages
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(offset, message)| {
+                        let offset = u64::try_from(offset).unwrap_or(u64::MAX);
+                        CompactionRetained::new(offset, offset, message)
+                    })
+                    .collect(),
+                discarded: messages
+                    .first()
+                    .cloned()
+                    .map(|message| vec![CompactionDiscard::new(0, message)])
+                    .unwrap_or_default(),
             }
         }
     }
@@ -4418,10 +5958,25 @@ mod tests {
                 .map(|(scope, _, _)| scope.clone())
                 .collect()
         }
+
+        fn source_ranges(&self) -> Vec<crate::memory::MessageRange> {
+            self.entries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(_, _, metadata)| metadata.source.source_range())
+                .collect()
+        }
     }
 
     #[async_trait]
     impl MemoryStore for RecordingMemoryStore {
+        fn compaction_projection_persistence(
+            &self,
+        ) -> crate::memory::CompactionProjectionPersistence {
+            crate::memory::CompactionProjectionPersistence::EphemeralImmediate
+        }
+
         async fn index_scoped_batch(
             &self,
             batch: MemoryIndexBatch,
@@ -4456,6 +6011,1029 @@ mod tests {
         ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
             Ok(Vec::new())
         }
+    }
+
+    struct AbortRetryMemoryStore {
+        fail_once: Mutex<Option<crate::memory::CompactionProjectionId>>,
+        finalize_fail_once: Mutex<Option<crate::memory::CompactionProjectionId>>,
+        staged: Mutex<Vec<crate::memory::CompactionProjectionId>>,
+        aborted: Mutex<Vec<crate::memory::CompactionProjectionId>>,
+        finalized: Mutex<Vec<crate::memory::CompactionProjectionId>>,
+        reconciled_committed: Mutex<Vec<Vec<crate::memory::CompactionProjectionId>>>,
+    }
+
+    impl AbortRetryMemoryStore {
+        fn new() -> Self {
+            Self {
+                fail_once: Mutex::new(None),
+                finalize_fail_once: Mutex::new(None),
+                staged: Mutex::new(Vec::new()),
+                aborted: Mutex::new(Vec::new()),
+                finalized: Mutex::new(Vec::new()),
+                reconciled_committed: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for AbortRetryMemoryStore {
+        fn compaction_projection_persistence(
+            &self,
+        ) -> crate::memory::CompactionProjectionPersistence {
+            crate::memory::CompactionProjectionPersistence::DurableStaged
+        }
+
+        async fn index_scoped_batch(
+            &self,
+            batch: MemoryIndexBatch,
+        ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+            let (scope, requests) = batch.into_parts();
+            Ok(MemoryIndexReceipt {
+                scope,
+                indexed_entries: requests.len(),
+            })
+        }
+
+        async fn stage_compaction_batch(
+            &self,
+            projection: crate::memory::CompactionProjectionId,
+            batch: MemoryIndexBatch,
+        ) -> Result<crate::memory::CompactionStageReceipt, MemoryStoreError> {
+            let staged_entries = batch.len();
+            self.staged.lock().unwrap().push(projection.clone());
+            Ok(crate::memory::CompactionStageReceipt {
+                projection,
+                staged_entries,
+            })
+        }
+
+        async fn abort_compaction_batch(
+            &self,
+            projection: &crate::memory::CompactionProjectionId,
+        ) -> Result<(), MemoryStoreError> {
+            let mut fail_once = self.fail_once.lock().unwrap();
+            if fail_once.as_ref() == Some(projection) {
+                *fail_once = None;
+                return Err(MemoryStoreError::Storage(
+                    "injected abort failure".to_string(),
+                ));
+            }
+            self.staged
+                .lock()
+                .unwrap()
+                .retain(|staged| staged != projection);
+            self.aborted.lock().unwrap().push(projection.clone());
+            Ok(())
+        }
+
+        async fn finalize_compaction_batch(
+            &self,
+            projection: &crate::memory::CompactionProjectionId,
+        ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+            let mut fail_once = self.finalize_fail_once.lock().unwrap();
+            if fail_once.as_ref() == Some(projection) {
+                *fail_once = None;
+                return Err(MemoryStoreError::Storage(
+                    "injected finalize failure".to_string(),
+                ));
+            }
+            self.staged
+                .lock()
+                .unwrap()
+                .retain(|staged| staged != projection);
+            let mut finalized = self.finalized.lock().unwrap();
+            if !finalized.contains(projection) {
+                finalized.push(projection.clone());
+            }
+            Ok(MemoryIndexReceipt {
+                scope: MemoryIndexScope::for_session(projection.session_id().clone()),
+                indexed_entries: 0,
+            })
+        }
+
+        async fn reconcile_compaction_stages(
+            &self,
+            _owner: &crate::memory::MemoryOwner,
+            committed: &[crate::memory::CompactionProjectionId],
+        ) -> Result<crate::memory::CompactionStageReconcileReceipt, MemoryStoreError> {
+            self.reconciled_committed
+                .lock()
+                .unwrap()
+                .push(committed.to_vec());
+            Ok(crate::memory::CompactionStageReconcileReceipt::default())
+        }
+
+        async fn search(
+            &self,
+            _scope: &MemorySearchScope,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct AllowCompactionCoordinator {
+        session_id: crate::SessionId,
+    }
+
+    impl crate::memory::CompactionCommitCoordinator for AllowCompactionCoordinator {
+        fn authorize_projection(
+            &self,
+            projection: &crate::memory::CompactionProjectionId,
+        ) -> Result<(), crate::memory::CompactionCommitCoordinationError> {
+            if projection.session_id() == &self.session_id {
+                Ok(())
+            } else {
+                Err(
+                    crate::memory::CompactionCommitCoordinationError::SessionMismatch {
+                        expected: self.session_id.clone(),
+                        actual: projection.session_id().clone(),
+                    },
+                )
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PostCompactionOutcome {
+        CallbackPending,
+        Failure,
+        SuccessWithUsage,
+    }
+
+    struct CompactionTerminalLlmClient {
+        ordinary_calls: Mutex<usize>,
+        second_outcome: PostCompactionOutcome,
+    }
+
+    impl CompactionTerminalLlmClient {
+        fn new(second_outcome: PostCompactionOutcome) -> Self {
+            Self {
+                ordinary_calls: Mutex::new(0),
+                second_outcome,
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CompactionTerminalLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if last_user == "COMPACT NOW" {
+                return Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "durable summary".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage {
+                        input_tokens: 7,
+                        output_tokens: 3,
+                        ..Usage::default()
+                    },
+                ));
+            }
+
+            let ordinary_call = {
+                let mut calls = self.ordinary_calls.lock().unwrap();
+                let call = *calls;
+                *calls = calls.saturating_add(1);
+                call
+            };
+            if ordinary_call == 1 {
+                return match self.second_outcome {
+                    PostCompactionOutcome::CallbackPending => Ok(super::LlmStreamResult::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "callback-after-compaction".to_string(),
+                            name: "external_callback".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .unwrap(),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                        Usage::default(),
+                    )),
+                    PostCompactionOutcome::Failure => Err(AgentError::InternalError(
+                        "synthetic post-compaction turn failure".to_string(),
+                    )),
+                    PostCompactionOutcome::SuccessWithUsage => Ok(super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "post-compaction success".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        Usage {
+                            input_tokens: 11,
+                            output_tokens: 4,
+                            cache_creation_tokens: Some(6),
+                            cache_read_tokens: Some(9),
+                        },
+                    )),
+                };
+            }
+
+            let usage = if ordinary_call == 0 {
+                Usage {
+                    input_tokens: 23,
+                    output_tokens: 5,
+                    ..Usage::default()
+                }
+            } else {
+                Usage::default()
+            };
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                usage,
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct CallbackPendingTools {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    impl CallbackPendingTools {
+        fn new() -> Self {
+            Self {
+                tools: Arc::from([Arc::new(ToolDef {
+                    name: "external_callback".into(),
+                    description: "external callback fixture".to_string(),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: None,
+                })]),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for CallbackPendingTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::CallbackPending {
+                tool_name: call.name.to_string(),
+                args: serde_json::json!({}),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn post_compaction_failure_rolls_back_rewrite_before_next_success() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let client = Arc::new(CompactionTerminalLlmClient::new(
+            PostCompactionOutcome::Failure,
+        ));
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .budget(BudgetLimits::unlimited().with_max_tokens(1_000))
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator { session_id }))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let usage_before = agent.session().total_usage();
+        let budget_before = agent.budget.token_usage().unwrap().0;
+        let last_input_tokens_before = agent.last_input_tokens;
+        let cadence_before = agent.compaction_cadence.clone();
+        let error = agent.run("second".into()).await.unwrap_err();
+
+        assert!(error.to_string().contains("synthetic post-compaction"));
+        assert!(agent.compaction_transaction.is_none());
+        assert_eq!(memory_store.staged.lock().unwrap().len(), 0);
+        assert_eq!(memory_store.aborted.lock().unwrap().len(), 1);
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "rollback must restore discarded source history"
+        );
+        assert!(
+            !agent.session().messages().iter().any(|message| {
+                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
+            }),
+            "rollback must remove the uncommitted compaction summary"
+        );
+        assert!(
+            agent
+                .session()
+                .compaction_projection_intents()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            agent
+                .session()
+                .transcript_history_state()
+                .unwrap()
+                .is_none(),
+            "rollback must remove the uncommitted transcript rewrite"
+        );
+        assert_eq!(
+            agent.compaction_cadence.session_boundary_index,
+            cadence_before.session_boundary_index.saturating_add(1)
+        );
+        assert_eq!(
+            agent
+                .compaction_cadence
+                .last_compaction_attempt_boundary_index,
+            Some(cadence_before.session_boundary_index)
+        );
+        assert_eq!(
+            agent.compaction_cadence.last_compaction_boundary_index,
+            cadence_before.last_compaction_boundary_index,
+            "a rolled-back rewrite is an attempt, not a successful compaction"
+        );
+        let persisted_cadence: crate::compact::SessionCompactionCadence = serde_json::from_value(
+            agent.session().metadata()[crate::compact::SESSION_COMPACTION_CADENCE_KEY].clone(),
+        )
+        .unwrap();
+        assert_eq!(persisted_cadence, agent.compaction_cadence);
+        assert_eq!(agent.last_input_tokens, last_input_tokens_before);
+        assert_ne!(last_input_tokens_before, 0);
+        let summary_usage = Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            ..Usage::default()
+        };
+        let mut expected_usage = usage_before;
+        expected_usage.add(&summary_usage);
+        assert_eq!(agent.session().total_usage(), expected_usage);
+        assert_eq!(
+            agent.budget.token_usage(),
+            Some((budget_before + summary_usage.total_tokens(), 1_000)),
+            "provider work remains charged even when the rewrite rolls back"
+        );
+
+        let staged_before_retry = memory_store.staged.lock().unwrap().len();
+        let aborted_before_retry = memory_store.aborted.lock().unwrap().len();
+        agent.run("third".into()).await.unwrap();
+        assert!(agent.compaction_transaction.is_none());
+        assert_eq!(
+            memory_store.staged.lock().unwrap().len(),
+            staged_before_retry,
+            "the retained attempt cadence must prevent immediate re-compaction"
+        );
+        assert_eq!(
+            memory_store.aborted.lock().unwrap().len(),
+            aborted_before_retry
+        );
+        assert!(
+            agent
+                .session()
+                .compaction_projection_intents()
+                .unwrap()
+                .is_empty(),
+            "the next successful turn must not persist an orphan rewrite intent"
+        );
+        assert!(
+            agent
+                .session()
+                .transcript_history_state()
+                .unwrap()
+                .is_none(),
+            "the next successful turn must not persist the rolled-back rewrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_compaction_hook_failure_retains_full_monotonic_usage_delta() {
+        use crate::hooks::{
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookInvocation,
+            HookPoint, HookReasonCode,
+        };
+
+        struct DenySecondRunCompletedHook {
+            completed: Mutex<usize>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for DenySecondRunCompletedHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::RunCompleted {
+                    return Ok(HookExecutionReport::empty());
+                }
+                let mut completed = self.completed.lock().unwrap();
+                let current = *completed;
+                *completed = completed.saturating_add(1);
+                if current == 0 {
+                    return Ok(HookExecutionReport::empty());
+                }
+                Ok(HookExecutionReport {
+                    decision: Some(HookDecision::Deny {
+                        hook_id: crate::hooks::HookId::new("deny-post-compaction-completion"),
+                        reason_code: HookReasonCode::PolicyViolation,
+                        message: "deny post-compaction completion".to_string(),
+                        payload: None,
+                    }),
+                    ..HookExecutionReport::empty()
+                })
+            }
+        }
+
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let client = Arc::new(CompactionTerminalLlmClient::new(
+            PostCompactionOutcome::SuccessWithUsage,
+        ));
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .budget(BudgetLimits::unlimited().with_max_tokens(2_000))
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator { session_id }))
+            .with_hook_engine(Arc::new(DenySecondRunCompletedHook {
+                completed: Mutex::new(0),
+            }))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let usage_before = agent.session().total_usage();
+        let budget_before = agent.budget.token_usage().unwrap().0;
+        let error = agent.run("second".into()).await.unwrap_err();
+        assert!(matches!(
+            error,
+            AgentError::HookDenied {
+                point: HookPoint::RunCompleted,
+                ..
+            }
+        ));
+
+        let mut expected = usage_before;
+        expected.add(&Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            ..Usage::default()
+        });
+        expected.add(&Usage {
+            input_tokens: 11,
+            output_tokens: 4,
+            cache_creation_tokens: Some(6),
+            cache_read_tokens: Some(9),
+        });
+        assert_eq!(agent.session().total_usage(), expected);
+        assert_eq!(
+            agent.budget.token_usage(),
+            Some((budget_before + 25, 2_000))
+        );
+        assert!(agent.compaction_transaction.is_none());
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first"))
+        );
+        assert!(memory_store.staged.lock().unwrap().is_empty());
+        assert_eq!(memory_store.aborted.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compaction_projection_rejection_still_charges_summary_provider_usage() {
+        let memory_store = Arc::new(RecordingMemoryStore::failing());
+        let client = Arc::new(CompactionTerminalLlmClient::new(
+            PostCompactionOutcome::SuccessWithUsage,
+        ));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .budget(BudgetLimits::unlimited().with_max_tokens(2_000))
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .memory_store(memory_store)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let usage_before = agent.session().total_usage();
+        let budget_before = agent.budget.token_usage().unwrap().0;
+        agent.run("second".into()).await.unwrap();
+
+        let mut expected = usage_before;
+        expected.add(&Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            ..Usage::default()
+        });
+        expected.add(&Usage {
+            input_tokens: 11,
+            output_tokens: 4,
+            cache_creation_tokens: Some(6),
+            cache_read_tokens: Some(9),
+        });
+        assert_eq!(agent.session().total_usage(), expected);
+        assert_eq!(
+            agent.budget.token_usage(),
+            Some((budget_before + 25, 2_000)),
+            "a rejected semantic-memory projection must not refund its successful summary call"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "projection rejection must still preserve the source transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_pending_preserves_compaction_pair_for_runtime_boundary_commit() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let client = Arc::new(CompactionTerminalLlmClient::new(
+            PostCompactionOutcome::CallbackPending,
+        ));
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator { session_id }))
+            .build_standalone(
+                client,
+                Arc::new(CallbackPendingTools::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let error = agent.run("second".into()).await.unwrap_err();
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+
+        let transaction = agent
+            .compaction_transaction
+            .as_ref()
+            .expect("callback-pending boundary must retain its compaction transaction");
+        assert!(matches!(
+            &transaction.phase,
+            crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(_)
+        ));
+        let intents = agent.session().compaction_projection_intents().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(transaction.projections, vec![intents[0].projection.clone()]);
+        assert_eq!(
+            memory_store.staged.lock().unwrap().as_slice(),
+            transaction.projections.as_slice(),
+            "callback-pending must keep the invisible stage paired with the session-carried outbox intent"
+        );
+        assert!(memory_store.aborted.lock().unwrap().is_empty());
+        assert!(
+            agent
+                .session()
+                .transcript_history_state()
+                .unwrap()
+                .is_some(),
+            "callback-pending is a commit-worthy boundary and must retain the typed rewrite"
+        );
+    }
+
+    fn append_abort_test_projection(
+        session: &mut crate::Session,
+        label: &str,
+    ) -> crate::memory::CompactionProjectionId {
+        session.push(Message::User(UserMessage::text(format!(
+            "verbose context {label} one"
+        ))));
+        session.push(Message::User(UserMessage::text(format!(
+            "verbose context {label} two"
+        ))));
+        let messages_before = session.messages().len();
+        let replacement = vec![Message::User(UserMessage::compaction_summary(format!(
+            "compacted {label}"
+        )))];
+        let authority = crate::agent::compact::ValidatedCompactionRewrite::for_test(
+            session.messages(),
+            &replacement,
+        )
+        .unwrap();
+        let commit = session
+            .replace_messages_for_compaction_internal(replacement, &authority)
+            .unwrap()
+            .unwrap();
+        let projection = crate::memory::CompactionProjectionId::from_validated_transcript_rewrite(
+            session.id().clone(),
+            &commit,
+            &authority,
+        )
+        .unwrap();
+        session
+            .add_compaction_projection_intent(crate::memory::CompactionProjectionIntent {
+                projection: projection.clone(),
+                summary_tokens: 1,
+                messages_before,
+                messages_after: 1,
+            })
+            .unwrap();
+        projection
+    }
+
+    #[tokio::test]
+    async fn empty_runtime_outbox_keeps_transaction_abortable_after_commit_failure() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let rollback_session = agent.session().clone();
+        let rollback_messages = rollback_session.messages().to_vec();
+        let rollback_history =
+            serde_json::to_value(rollback_session.transcript_history_state().unwrap()).unwrap();
+        let rollback_usage = rollback_session.total_usage();
+        let rollback_last_input_tokens = agent.last_input_tokens;
+        let rollback_compaction_cadence = agent.compaction_cadence.clone();
+        let attempted_boundary = rollback_compaction_cadence.session_boundary_index + 1;
+        let projection = append_abort_test_projection(agent.session_mut(), "atomic-apply-failure");
+        let attempted_usage = Usage {
+            input_tokens: 13,
+            output_tokens: 7,
+            cache_creation_tokens: Some(5),
+            cache_read_tokens: Some(3),
+        };
+        agent.session_mut().record_usage(attempted_usage.clone());
+        agent.last_input_tokens = rollback_last_input_tokens + 13;
+        agent.compaction_cadence.session_boundary_index = attempted_boundary;
+        agent
+            .compaction_cadence
+            .last_compaction_attempt_boundary_index = Some(attempted_boundary);
+        agent.compaction_cadence.last_compaction_boundary_index = Some(attempted_boundary);
+        memory_store.staged.lock().unwrap().push(projection.clone());
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                crate::agent::CompactionRollbackState {
+                    rollback_session,
+                    rollback_last_input_tokens,
+                    rollback_compaction_cadence: rollback_compaction_cadence.clone(),
+                },
+            )),
+            projections: vec![projection.clone()],
+        });
+
+        let error = agent
+            .reconcile_runtime_compaction_projections(&[])
+            .await
+            .expect_err("an empty outbox cannot authorize a live staged projection");
+        assert!(error.to_string().contains("does not exactly match"));
+        assert!(matches!(
+            agent
+                .compaction_transaction
+                .as_ref()
+                .map(|transaction| &transaction.phase),
+            Some(crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(_))
+        ));
+
+        agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .expect("the typed post-commit-failure path must roll back and abort");
+        assert!(agent.compaction_transaction.is_none());
+        assert_eq!(agent.session().messages(), rollback_messages);
+        assert_eq!(
+            serde_json::to_value(agent.session().transcript_history_state().unwrap()).unwrap(),
+            rollback_history
+        );
+        let mut expected_usage = rollback_usage;
+        expected_usage.add(&attempted_usage);
+        assert_eq!(agent.session().total_usage(), expected_usage);
+        assert_eq!(agent.last_input_tokens, rollback_last_input_tokens);
+        assert_eq!(
+            agent.compaction_cadence.session_boundary_index,
+            attempted_boundary
+        );
+        assert_eq!(
+            agent
+                .compaction_cadence
+                .last_compaction_attempt_boundary_index,
+            Some(attempted_boundary)
+        );
+        assert_eq!(
+            agent.compaction_cadence.last_compaction_boundary_index,
+            rollback_compaction_cadence.last_compaction_boundary_index,
+            "a rolled-back compaction must retain the attempt but not claim successful completion"
+        );
+        assert!(
+            agent
+                .session()
+                .compaction_projection_intents()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(memory_store.staged.lock().unwrap().is_empty());
+        assert_eq!(
+            memory_store.aborted.lock().unwrap().as_slice(),
+            &[projection]
+        );
+        assert!(memory_store.finalized.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abort_uncommitted_projections_drains_all_and_retains_only_failures_for_retry() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let rollback_session = agent.session().clone();
+        let rollback_messages = rollback_session.messages().to_vec();
+        let rollback_history = rollback_session.transcript_history_state().unwrap();
+        let rollback_usage = rollback_session.total_usage();
+        let first = append_abort_test_projection(agent.session_mut(), "first");
+        let second = append_abort_test_projection(agent.session_mut(), "second");
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                crate::agent::CompactionRollbackState {
+                    rollback_session,
+                    rollback_last_input_tokens: agent.last_input_tokens,
+                    rollback_compaction_cadence: agent.compaction_cadence.clone(),
+                },
+            )),
+            projections: vec![first.clone(), second.clone()],
+        });
+        *memory_store.fail_once.lock().unwrap() = Some(first.clone());
+
+        let error = agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected abort failure"));
+        assert_eq!(
+            agent
+                .compaction_transaction
+                .as_ref()
+                .map(|transaction| transaction.projections.as_slice()),
+            Some(std::slice::from_ref(&first))
+        );
+        assert!(matches!(
+            agent
+                .compaction_transaction
+                .as_ref()
+                .map(|transaction| &transaction.phase),
+            Some(crate::agent::CompactionTransactionPhase::AbortPending { .. })
+        ));
+        assert_eq!(memory_store.aborted.lock().unwrap().as_slice(), &[second]);
+        assert_eq!(agent.session().messages(), rollback_messages.as_slice());
+        assert_eq!(
+            serde_json::to_value(agent.session().transcript_history_state().unwrap()).unwrap(),
+            serde_json::to_value(rollback_history).unwrap()
+        );
+        assert_eq!(agent.session().total_usage(), rollback_usage);
+        assert!(
+            agent
+                .session()
+                .compaction_projection_intents()
+                .unwrap()
+                .is_empty(),
+            "intent removal must precede abort so a missing stage cannot be outboxed"
+        );
+
+        agent
+            .run("ingress retries abort cleanup before LLM".into())
+            .await
+            .unwrap();
+        assert!(agent.compaction_transaction.is_none());
+        assert!(memory_store.aborted.lock().unwrap().contains(&first));
+    }
+
+    #[tokio::test]
+    async fn abort_marker_only_cleans_exact_stage_without_empty_reconciliation() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut staged_session = agent.session().clone();
+        let projection = append_abort_test_projection(&mut staged_session, "in-flight");
+        memory_store.staged.lock().unwrap().push(projection.clone());
+        agent.in_flight_compaction_stage = Some(projection.clone());
+        let reconciliations_before = memory_store.reconciled_committed.lock().unwrap().len();
+
+        agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .expect("marker-only cleanup should abort its exact deterministic identity");
+
+        assert!(agent.in_flight_compaction_stage.is_none());
+        assert_eq!(
+            memory_store.aborted.lock().unwrap().as_slice(),
+            &[projection]
+        );
+        assert_eq!(
+            memory_store.reconciled_committed.lock().unwrap().len(),
+            reconciliations_before,
+            "marker cleanup must use its exact projection identity, not invent a new empty-authority reconciliation"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_committed_finalize_failure_refuses_abort_and_retries_atomically() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator { session_id }))
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let rollback = crate::agent::CompactionRollbackState {
+            rollback_session: agent.session().clone(),
+            rollback_last_input_tokens: agent.last_input_tokens,
+            rollback_compaction_cadence: agent.compaction_cadence.clone(),
+        };
+        let first = append_abort_test_projection(agent.session_mut(), "commit-first");
+        let second = append_abort_test_projection(agent.session_mut(), "commit-second");
+        let intents = agent
+            .session()
+            .validated_compaction_projection_intents()
+            .unwrap();
+        memory_store
+            .staged
+            .lock()
+            .unwrap()
+            .extend([first.clone(), second.clone()]);
+        *memory_store.finalize_fail_once.lock().unwrap() = Some(second.clone());
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                rollback,
+            )),
+            projections: vec![first.clone(), second.clone()],
+        });
+
+        let error = agent
+            .reconcile_runtime_compaction_projections(&intents)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected finalize failure"));
+        assert!(matches!(
+            agent
+                .compaction_transaction
+                .as_ref()
+                .map(|transaction| &transaction.phase),
+            Some(crate::agent::CompactionTransactionPhase::RuntimeCommitted {
+                bookkeeping_complete: false
+            })
+        ));
+        assert_eq!(
+            agent
+                .session()
+                .validated_compaction_projection_intents()
+                .unwrap(),
+            intents,
+            "a partial store finalize must not remove a prefix of local intent authority"
+        );
+        let abort_error = agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .unwrap_err();
+        assert!(abort_error.to_string().contains("commit-only"));
+
+        agent
+            .reconcile_runtime_compaction_projections(&intents)
+            .await
+            .unwrap();
+        assert!(agent.compaction_transaction.is_none());
+        assert!(
+            agent
+                .session()
+                .validated_compaction_projection_intents()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            memory_store.finalized.lock().unwrap().as_slice(),
+            &[first, second]
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_outbox_exact_authority_rejects_subset_superset_and_duplicates() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator { session_id }))
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let rollback = crate::agent::CompactionRollbackState {
+            rollback_session: agent.session().clone(),
+            rollback_last_input_tokens: agent.last_input_tokens,
+            rollback_compaction_cadence: agent.compaction_cadence.clone(),
+        };
+        let first = append_abort_test_projection(agent.session_mut(), "exact-first");
+        let second = append_abort_test_projection(agent.session_mut(), "exact-second");
+        let third = append_abort_test_projection(agent.session_mut(), "exact-extra");
+        let intents = agent
+            .session()
+            .validated_compaction_projection_intents()
+            .unwrap();
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                rollback,
+            )),
+            projections: vec![first, second],
+        });
+        let reconciliations_before = memory_store.reconciled_committed.lock().unwrap().len();
+
+        let subset = vec![intents[0].clone()];
+        assert!(
+            agent
+                .reconcile_runtime_compaction_projections(&subset)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("does not exactly match")
+        );
+        let duplicate = vec![intents[0].clone(), intents[0].clone()];
+        assert!(
+            agent
+                .reconcile_runtime_compaction_projections(&duplicate)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+        let superset = intents;
+        assert_eq!(superset[2].projection, third);
+        assert!(
+            agent
+                .reconcile_runtime_compaction_projections(&superset)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("does not exactly match")
+        );
+        assert_eq!(
+            memory_store.reconciled_committed.lock().unwrap().len(),
+            reconciliations_before,
+            "invalid authority sets must fail before touching durable stages"
+        );
+        assert!(matches!(
+            agent
+                .compaction_transaction
+                .as_ref()
+                .map(|transaction| &transaction.phase),
+            Some(crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(_))
+        ));
     }
 
     struct NoTools;
@@ -5693,12 +8271,15 @@ mod tests {
             .await;
 
         let discarded = vec![
-            Message::User(UserMessage::text("indexable user turn")),
-            Message::tool_results(vec![ToolResult::new(
-                "call-1".to_string(),
-                "tool output".to_string(),
-                false,
-            )]),
+            CompactionDiscard::new(4, Message::User(UserMessage::text("indexable user turn"))),
+            CompactionDiscard::new(
+                9,
+                Message::tool_results(vec![ToolResult::new(
+                    "call-1".to_string(),
+                    "tool output".to_string(),
+                    false,
+                )]),
+            ),
         ];
 
         let delivery = agent.index_compaction_discards(&discarded).await;
@@ -5729,6 +8310,10 @@ mod tests {
             )),
             "the tool-result message must reach the store with its typed ToolResults exclusion, not be silently dropped by the producer: {typed:?}"
         );
+        let source_ranges = memory_store.source_ranges();
+        assert_eq!(source_ranges.len(), 2);
+        assert_eq!(source_ranges[0].start(), 4);
+        assert_eq!(source_ranges[1].start(), 9);
     }
 
     #[tokio::test]
@@ -5782,6 +8367,18 @@ mod tests {
             !saw_completed,
             "compaction must not complete when memory indexing rejects discarded history"
         );
+        let cadence: crate::compact::SessionCompactionCadence = serde_json::from_value(
+            agent
+                .session()
+                .metadata()
+                .get(crate::compact::SESSION_COMPACTION_CADENCE_KEY)
+                .expect("failed compaction cadence must be persisted")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(cadence.session_boundary_index, 2);
+        assert_eq!(cadence.last_compaction_boundary_index, None);
+        assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
     }
 
     #[tokio::test]
@@ -5812,6 +8409,155 @@ mod tests {
                 .iter()
                 .any(|message| message.as_indexable_text().contains("first")),
             "failed indexing must preserve the authoritative source history"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_compaction_rewrite_is_rejected_before_memory_projection() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let memory_store = Arc::new(RecordingMemoryStore::new());
+        let mut session = crate::Session::new();
+        session.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "orphan-call".to_string(),
+                    name: "fixture_tool".into(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            ),
+        ));
+        session.push(Message::tool_results(vec![ToolResult::new(
+            "orphan-call".to_string(),
+            "fixture result".to_string(),
+            false,
+        )]));
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .compactor(Arc::new(InvalidRewriteCompactor))
+            .memory_store(memory_store.clone())
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("first".into(), tx)
+            .await
+            .expect("invalid compaction rewrite should preserve history and continue the turn");
+
+        assert!(
+            memory_store.contents().is_empty(),
+            "rewrite validation must happen before any semantic-memory projection commits"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "invalid compaction must preserve the authoritative transcript"
+        );
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let rewrite_error = events.iter().find_map(|event| match event {
+            crate::event::AgentEvent::CompactionFailed {
+                reason: crate::event::CompactionFailureReason::TranscriptRewriteFailed { message },
+            } => Some(message),
+            _ => None,
+        });
+        assert!(
+            rewrite_error
+                .as_ref()
+                .is_some_and(|message| message.contains(
+                    "tool_results at message 1 follows user, not an assistant tool-use message"
+                )),
+            "the provenance-valid rebuild must reach transcript-shape validation, got: {events:?}"
+        );
+
+        let cadence: crate::compact::SessionCompactionCadence = serde_json::from_value(
+            agent
+                .session()
+                .metadata()
+                .get(crate::compact::SESSION_COMPACTION_CADENCE_KEY)
+                .expect("invalid rewrite attempt cadence must be persisted")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(cadence.session_boundary_index, 2);
+        assert_eq!(cadence.last_compaction_boundary_index, None);
+        assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
+
+        // Recreate the agent from the durable session value. The next compactor
+        // would retry at every non-zero boundary unless the restored failed-
+        // rewrite attempt participates in the cadence guard.
+        let resumed_client = Arc::new(FailingCompactionLlmClient::new());
+        let resumed_compactor = Arc::new(CadenceAwareFailingCompactor::new());
+        let mut resumed_agent =
+            with_test_turn_state_handle_for_session(AgentBuilder::new(), agent.session().clone())
+                .compactor(resumed_compactor.clone())
+                .build_standalone(
+                    resumed_client.clone(),
+                    Arc::new(NoTools),
+                    Arc::new(NoopStore),
+                )
+                .await;
+        resumed_agent
+            .run("third after invalid-rewrite restart".into())
+            .await
+            .expect("restored failed-attempt cadence should guard the next turn");
+        assert_eq!(
+            resumed_compactor
+                .seen_contexts()
+                .iter()
+                .map(|ctx| (
+                    ctx.session_boundary_index,
+                    ctx.last_compaction_boundary_index
+                ))
+                .collect::<Vec<_>>(),
+            vec![(2, Some(1))]
+        );
+        assert_eq!(
+            resumed_client.seen_last_user_messages(),
+            vec!["third after invalid-rewrite restart".to_string()],
+            "restored failed-attempt cadence must suppress an immediate compaction retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn hostile_compaction_summary_is_rejected_before_memory_projection() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let memory_store = Arc::new(RecordingMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(Arc::new(NoOpClaimingDiscardCompactor))
+            .memory_store(memory_store.clone())
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let messages_before = agent.session().messages().to_vec();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("hostile compaction rebuild should preserve history and continue the turn");
+
+        assert!(
+            memory_store.contents().is_empty(),
+            "a hostile summary mapping must be rejected before memory projection"
+        );
+        assert!(
+            agent.session().messages().starts_with(&messages_before),
+            "invalid compaction must preserve the authoritative pre-turn transcript"
+        );
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+                event,
+                crate::event::AgentEvent::CompactionFailed {
+                    reason: crate::event::CompactionFailureReason::TranscriptRewriteFailed {
+                        message
+                    }
+                } if message.contains("summary mapping")
+            )),
+            "hostile summary mapping must surface the typed invalid-rebuild failure"
         );
     }
 
@@ -7170,6 +9916,184 @@ mod tests {
             )),
             "next LLM request must use typed hot-swapped provider params/defaults, not the build-time JSON bag",
         );
+    }
+
+    fn explicit_hot_swap_identity(model: &str) -> crate::SessionLlmIdentity {
+        crate::SessionLlmIdentity {
+            model: model.to_string(),
+            provider: crate::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        }
+    }
+
+    fn explicit_hot_swap_policy(model: &str) -> crate::SessionLlmRequestPolicy {
+        crate::SessionLlmRequestPolicy {
+            model: model.to_string(),
+            provider_params: None,
+            provider_tool_defaults: None,
+        }
+    }
+
+    fn explicit_hot_swap_session(model: &str) -> crate::Session {
+        let mut session = crate::Session::new();
+        session
+            .set_session_metadata(crate::SessionMetadata {
+                schema_version: crate::SESSION_METADATA_SCHEMA_VERSION,
+                model: model.to_string(),
+                max_tokens: 16_384,
+                structured_output_retries: 2,
+                provider: crate::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: crate::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("hot-swap test metadata should serialize");
+        session
+            .set_tool_visibility_state(
+                crate::session::AuthorizedSessionToolVisibilityState::from_generated_authority(
+                    crate::SessionToolVisibilityState::default(),
+                ),
+            )
+            .expect("hot-swap test visibility parent should serialize");
+        session
+    }
+
+    #[tokio::test]
+    async fn explicit_hot_swap_moves_profile_limit_and_durable_identity_both_directions() {
+        let registry = fallback_activation_test_registry();
+        let primary = Arc::new(HotSwapLimitRecordingClient::new("primary"));
+        let backup = Arc::new(HotSwapLimitRecordingClient::new("backup"));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new()
+                .model("primary")
+                .max_tokens_per_turn(16_384)
+                .with_effective_model_registry(Arc::clone(&registry)),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_tool_visibility_owner(explicit_test_visibility_owner())
+        .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        agent.config.max_turns = Some(1);
+
+        agent
+            .hot_swap_llm_identity(
+                backup.clone(),
+                explicit_hot_swap_identity("backup"),
+                explicit_hot_swap_policy("backup"),
+            )
+            .expect("primary to backup hot-swap should commit");
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("durable metadata must remain present")
+                .llm_identity(),
+            explicit_hot_swap_identity("backup")
+        );
+        assert_eq!(
+            agent
+                .active_model_profile
+                .as_ref()
+                .map(crate::ModelProfileWitness::model),
+            Some("backup")
+        );
+        agent
+            .run("use backup profile".into())
+            .await
+            .expect("backup request should succeed");
+        assert_eq!(backup.seen_max_tokens(), vec![2048]);
+
+        agent
+            .hot_swap_llm_identity(
+                primary.clone(),
+                explicit_hot_swap_identity("primary"),
+                explicit_hot_swap_policy("primary"),
+            )
+            .expect("backup to primary hot-swap should commit");
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("durable metadata must remain present")
+                .llm_identity(),
+            explicit_hot_swap_identity("primary")
+        );
+        assert_eq!(
+            agent
+                .active_model_profile
+                .as_ref()
+                .map(crate::ModelProfileWitness::model),
+            Some("primary")
+        );
+        agent
+            .run("use primary profile again".into())
+            .await
+            .expect("primary request should succeed");
+        assert_eq!(primary.seen_max_tokens(), vec![8192]);
+    }
+
+    #[tokio::test]
+    async fn explicit_hot_swap_rejects_unknown_profile_before_live_mutation() {
+        let registry = fallback_activation_test_registry();
+        let primary = Arc::new(HotSwapLimitRecordingClient::new("primary"));
+        let unknown = Arc::new(HotSwapLimitRecordingClient::new("unknown"));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new()
+                .model("primary")
+                .max_tokens_per_turn(16_384)
+                .with_effective_model_registry(Arc::clone(&registry)),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_tool_visibility_owner(explicit_test_visibility_owner())
+        .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        agent.config.max_turns = Some(1);
+
+        let error = agent
+            .hot_swap_llm_identity(
+                unknown.clone(),
+                explicit_hot_swap_identity("unknown"),
+                explicit_hot_swap_policy("unknown"),
+            )
+            .expect_err("an unregistered target must fail before publication");
+        assert!(
+            matches!(error, AgentError::ConfigError(ref message)
+                if message.contains("absent from the agent's effective model registry")),
+            "unexpected rejection: {error:?}"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("durable metadata must remain present")
+                .llm_identity(),
+            explicit_hot_swap_identity("primary")
+        );
+        assert_eq!(
+            agent
+                .active_model_profile
+                .as_ref()
+                .map(crate::ModelProfileWitness::model),
+            Some("primary")
+        );
+
+        agent
+            .run("rejected swap keeps primary".into())
+            .await
+            .expect("the original client should remain live");
+        assert_eq!(primary.seen_max_tokens(), vec![8192]);
+        assert!(unknown.seen_max_tokens().is_empty());
     }
 
     #[tokio::test]
@@ -9816,25 +12740,87 @@ mod tests {
     }
 
     struct FallbackActivatingClient {
+        registry: Arc<crate::ModelRegistry>,
         active: std::sync::atomic::AtomicUsize,
         fallback_proposals: std::sync::atomic::AtomicUsize,
+        fallback_commits: std::sync::atomic::AtomicUsize,
+        fail_backup: std::sync::atomic::AtomicBool,
+        fail_post_activation_identity_read_once: std::sync::atomic::AtomicBool,
         seen_tools: Mutex<Vec<Vec<String>>>,
         seen_notice_bodies: Mutex<Vec<Vec<String>>>,
         seen_max_tokens: Mutex<Vec<u32>>,
         seen_provider_params:
             Mutex<Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>>>,
+        forged_client_capability_filter: Mutex<ToolFilter>,
+        forged_client_max_output_tokens: std::sync::atomic::AtomicU32,
+    }
+
+    fn fallback_activation_test_registry() -> Arc<crate::ModelRegistry> {
+        let mut config = crate::Config::default();
+        for (model, vision, max_output_tokens) in [("primary", true, 8192), ("backup", false, 2048)]
+        {
+            config.models.custom.insert(
+                model.to_string(),
+                crate::config::CustomModelConfig {
+                    provider: crate::Provider::OpenAI,
+                    display_name: None,
+                    context_window: Some(128_000),
+                    max_output_tokens: Some(max_output_tokens),
+                    vision: Some(vision),
+                    web_search: Some(false),
+                    call_timeout_secs: None,
+                },
+            );
+        }
+        let empty_catalog = crate::ModelCatalog {
+            entries: &[],
+            capabilities: &[],
+            provider_defaults: &[],
+            image_generation_models: &[],
+            providers: &[],
+            default_models: &[],
+            image_generation_defaults: &[],
+            global_default_model: "",
+            provider_priority: &[],
+        };
+        Arc::new(
+            crate::ModelRegistry::from_config(&config, empty_catalog)
+                .expect("fallback activation test registry"),
+        )
     }
 
     impl FallbackActivatingClient {
         fn new() -> Self {
             Self {
+                registry: fallback_activation_test_registry(),
                 active: std::sync::atomic::AtomicUsize::new(0),
                 fallback_proposals: std::sync::atomic::AtomicUsize::new(0),
+                fallback_commits: std::sync::atomic::AtomicUsize::new(0),
+                fail_backup: std::sync::atomic::AtomicBool::new(false),
+                fail_post_activation_identity_read_once: std::sync::atomic::AtomicBool::new(false),
                 seen_tools: Mutex::new(Vec::new()),
                 seen_notice_bodies: Mutex::new(Vec::new()),
                 seen_max_tokens: Mutex::new(Vec::new()),
                 seen_provider_params: Mutex::new(Vec::new()),
+                forged_client_capability_filter: Mutex::new(ToolFilter::All),
+                forged_client_max_output_tokens: std::sync::atomic::AtomicU32::new(u32::MAX),
             }
+        }
+
+        fn with_post_activation_identity_read_failure() -> Self {
+            let client = Self::new();
+            client
+                .fail_post_activation_identity_read_once
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            client
+        }
+
+        fn with_terminal_backup_failure() -> Self {
+            let client = Self::new();
+            client
+                .fail_backup
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            client
         }
 
         fn seen_tools(&self) -> Vec<Vec<String>> {
@@ -9858,6 +12844,250 @@ mod tests {
         fn fallback_proposals(&self) -> usize {
             self.fallback_proposals
                 .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn fallback_commits(&self) -> usize {
+            self.fallback_commits
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn registry(&self) -> Arc<crate::ModelRegistry> {
+            Arc::clone(&self.registry)
+        }
+
+        fn forge_client_local_model_facts(&self) {
+            *self.forged_client_capability_filter.lock().unwrap() = ToolFilter::All;
+            self.forged_client_max_output_tokens
+                .store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    struct RecordingModelRoutingHandle {
+        commits: Arc<
+            Mutex<
+                Vec<(
+                    crate::SessionLlmIdentity,
+                    crate::SessionLlmIdentity,
+                    u32,
+                    crate::handles::StickyModelFallbackVisibilityPlan,
+                )>,
+            >,
+        >,
+        visibility_owner: Arc<dyn crate::ToolVisibilityOwner>,
+    }
+
+    struct RecordingStickyModelFallbackCommit {
+        commits: Arc<
+            Mutex<
+                Vec<(
+                    crate::SessionLlmIdentity,
+                    crate::SessionLlmIdentity,
+                    u32,
+                    crate::handles::StickyModelFallbackVisibilityPlan,
+                )>,
+            >,
+        >,
+        visibility_owner: Arc<dyn crate::ToolVisibilityOwner>,
+        previous_identity: crate::SessionLlmIdentity,
+        target_identity: crate::SessionLlmIdentity,
+        retry_attempt: u32,
+        visibility_plan: crate::handles::StickyModelFallbackVisibilityPlan,
+    }
+
+    impl crate::handles::StickyModelFallbackMachineCommit for RecordingStickyModelFallbackCommit {
+        fn commit(self: Box<Self>) -> Result<(), crate::handles::DslTransitionError> {
+            self.commits.lock().unwrap().push((
+                self.previous_identity,
+                self.target_identity,
+                self.retry_attempt,
+                self.visibility_plan.clone(),
+            ));
+            self.visibility_owner
+                .replace_visibility_state(self.visibility_plan.next_state)
+                .map_err(|error| {
+                    crate::handles::DslTransitionError::no_matching(
+                        "RecordingStickyModelFallbackCommit::commit",
+                        error.to_string(),
+                    )
+                })
+        }
+    }
+
+    struct ImmediateStickyFallbackOperation;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::handles::StickyModelFallbackCommitOperation for ImmediateStickyFallbackOperation {
+        async fn wait(&self) -> Result<(), crate::handles::StickyModelFallbackCommitError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingStickyFallbackCoordinator {
+        calls: std::sync::atomic::AtomicUsize,
+        target_models: Mutex<Vec<String>>,
+    }
+
+    impl RecordingStickyFallbackCoordinator {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl crate::handles::StickyModelFallbackCommitCoordinator for RecordingStickyFallbackCoordinator {
+        fn begin(
+            &self,
+            machine_commit: Box<dyn crate::handles::StickyModelFallbackMachineCommit>,
+            control_delta: crate::handles::StickyModelFallbackControlDelta,
+        ) -> Result<
+            Arc<dyn crate::handles::StickyModelFallbackCommitOperation>,
+            crate::handles::StickyModelFallbackCommitError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.target_models
+                .lock()
+                .unwrap()
+                .push(control_delta.target_identity().model.clone());
+            machine_commit
+                .commit()
+                .map_err(crate::handles::StickyModelFallbackCommitError::MachineRejected)?;
+            Ok(Arc::new(ImmediateStickyFallbackOperation))
+        }
+    }
+
+    struct RejectingStickyFallbackCoordinator {
+        error: crate::handles::StickyModelFallbackCommitError,
+    }
+
+    impl crate::handles::StickyModelFallbackCommitCoordinator for RejectingStickyFallbackCoordinator {
+        fn begin(
+            &self,
+            _machine_commit: Box<dyn crate::handles::StickyModelFallbackMachineCommit>,
+            _control_delta: crate::handles::StickyModelFallbackControlDelta,
+        ) -> Result<
+            Arc<dyn crate::handles::StickyModelFallbackCommitOperation>,
+            crate::handles::StickyModelFallbackCommitError,
+        > {
+            Err(self.error.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingFallbackVisibilityOwner {
+        state: std::sync::RwLock<crate::SessionToolVisibilityState>,
+    }
+
+    impl crate::ToolVisibilityOwner for RecordingFallbackVisibilityOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.state
+                .read()
+                .map(|state| state.clone())
+                .map_err(|_| crate::ToolScopeApplyError::LockPoisoned)
+        }
+
+        fn replace_visibility_state(
+            &self,
+            visibility_state: crate::SessionToolVisibilityState,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            *self
+                .state
+                .write()
+                .map_err(|_| crate::ToolScopeApplyError::LockPoisoned)? = visibility_state;
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: crate::ToolFilter,
+            _witnesses: std::collections::BTreeMap<crate::ToolName, crate::ToolVisibilityWitness>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            Err(crate::ToolScopeStageError::Owner {
+                message: "recording fallback owner does not stage filters".to_string(),
+            })
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: std::collections::BTreeSet<crate::ToolName>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            Err(crate::ToolScopeStageError::Owner {
+                message: "recording fallback owner does not stage deferred names".to_string(),
+            })
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            Err(crate::ToolScopeStageError::Owner {
+                message: "recording fallback owner does not request deferred tools".to_string(),
+            })
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.visibility_state()
+        }
+    }
+
+    impl RecordingModelRoutingHandle {
+        fn new(visibility_owner: Arc<dyn crate::ToolVisibilityOwner>) -> Self {
+            Self {
+                commits: Arc::new(Mutex::new(Vec::new())),
+                visibility_owner,
+            }
+        }
+
+        fn commits(
+            &self,
+        ) -> Vec<(
+            crate::SessionLlmIdentity,
+            crate::SessionLlmIdentity,
+            u32,
+            crate::handles::StickyModelFallbackVisibilityPlan,
+        )> {
+            self.commits.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::handles::ModelRoutingHandle for RecordingModelRoutingHandle {
+        fn set_baseline(
+            &self,
+            _baseline_model: crate::lifecycle::run_primitive::ModelId,
+            _realtime_capable: bool,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn hydrate_llm_capability_surface(
+            &self,
+            _identity: &crate::SessionLlmIdentity,
+            _profile: Option<&crate::model_profile::ModelProfile>,
+            _capability_base_filter: &crate::ToolFilter,
+        ) -> Result<(), crate::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn stage_sticky_model_fallback(
+            &self,
+            activation: crate::StickyModelFallbackActivationProof,
+            visibility_plan: &crate::handles::StickyModelFallbackVisibilityPlan,
+        ) -> Result<
+            Box<dyn crate::handles::StickyModelFallbackMachineCommit>,
+            crate::handles::DslTransitionError,
+        > {
+            Ok(Box::new(RecordingStickyModelFallbackCommit {
+                commits: Arc::clone(&self.commits),
+                visibility_owner: Arc::clone(&self.visibility_owner),
+                previous_identity: activation.previous_identity().clone(),
+                target_identity: activation.target_identity().clone(),
+                retry_attempt: activation.retry_attempt(),
+                visibility_plan: visibility_plan.clone(),
+            }))
         }
     }
 
@@ -9905,6 +13135,18 @@ mod tests {
                     "mock overloaded",
                 ));
             }
+            if self.fail_backup.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(AgentError::llm(
+                    "mock",
+                    crate::error::LlmFailureReason::ProviderError(
+                        crate::error::LlmProviderError::retryable(
+                            crate::error::LlmProviderErrorKind::ServerOverloaded,
+                            serde_json::json!({"message": "backup also busy"}),
+                        ),
+                    ),
+                    "backup also overloaded",
+                ));
+            }
 
             Ok(super::LlmStreamResult::new(
                 vec![AssistantBlock::Text {
@@ -9917,7 +13159,7 @@ mod tests {
         }
 
         fn provider(&self) -> crate::provider::Provider {
-            crate::provider::Provider::Other
+            crate::provider::Provider::OpenAI
         }
 
         fn model(&self) -> &'static str {
@@ -9940,18 +13182,22 @@ mod tests {
             Some(crate::AgentLlmFallbackSwitch {
                 previous_identity: crate::SessionLlmIdentity {
                     model: "primary".to_string(),
-                    provider: crate::provider::Provider::Other,
+                    provider: crate::provider::Provider::OpenAI,
                     self_hosted_server_id: None,
                     provider_params: None,
                     auth_binding: None,
                 },
                 new_identity: crate::SessionLlmIdentity {
                     model: "backup".to_string(),
-                    provider: crate::provider::Provider::Other,
+                    provider: crate::provider::Provider::OpenAI,
                     self_hosted_server_id: None,
                     provider_params: None,
                     auth_binding: None,
                 },
+                target_profile: self
+                    .registry
+                    .profile_witness_for_provider(crate::Provider::OpenAI, "backup")
+                    .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
                     provider_params: Some(
@@ -9963,41 +13209,107 @@ mod tests {
                     ),
                     provider_tool_defaults: None,
                 },
-                capability_base_filter: ToolFilter::Deny(
-                    [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
-                        .into_iter()
-                        .collect(),
-                ),
-                context_window: Some(128_000),
-                max_output_tokens: Some(2048),
                 skipped_targets: Vec::new(),
             })
         }
 
-        fn commit_model_fallback(&self, identity: &crate::SessionLlmIdentity) {
-            if identity.model == "backup" {
-                self.active.store(1, std::sync::atomic::Ordering::SeqCst);
+        fn commit_model_fallback(
+            &self,
+            previous_identity: &crate::SessionLlmIdentity,
+            target_identity: &crate::SessionLlmIdentity,
+        ) -> Result<(), AgentError> {
+            self.fallback_commits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let expected_previous = self
+                .active_model_fallback_identity()
+                .ok_or_else(|| AgentError::ConfigError("missing active identity".to_string()))?;
+            if expected_previous != *previous_identity {
+                return Err(AgentError::ConfigError(
+                    "fallback test client previous identity mismatch".to_string(),
+                ));
+            }
+            self.active.store(
+                usize::from(target_identity.model == "backup"),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            Ok(())
+        }
+
+        fn active_model_fallback_identity(&self) -> Option<crate::SessionLlmIdentity> {
+            if self.active.load(std::sync::atomic::Ordering::SeqCst) != 0
+                && self
+                    .fail_post_activation_identity_read_once
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return None;
+            }
+            Some(crate::SessionLlmIdentity {
+                model: self.model().to_string(),
+                provider: crate::provider::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            })
+        }
+    }
+
+    /// A custom client that proposes a fallback and exposes exact identity but
+    /// deliberately omits the activation implementation. The trait default
+    /// must fail closed before any canonical fallback state changes.
+    struct ProposalOnlyFallbackClient {
+        inner: FallbackActivatingClient,
+    }
+
+    impl ProposalOnlyFallbackClient {
+        fn new() -> Self {
+            Self {
+                inner: FallbackActivatingClient::new(),
             }
         }
 
-        fn active_capability_base_filter(&self) -> ToolFilter {
-            if self.active.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-                ToolFilter::All
-            } else {
-                ToolFilter::Deny(
-                    [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
-                        .into_iter()
-                        .collect(),
-                )
-            }
+        fn registry(&self) -> Arc<crate::ModelRegistry> {
+            self.inner.registry()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ProposalOnlyFallbackClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            tools: &[Arc<ToolDef>],
+            max_tokens: u32,
+            temperature: Option<f32>,
+            provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.inner
+                .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                .await
         }
 
-        fn active_max_output_tokens(&self) -> Option<u32> {
-            (self.active.load(std::sync::atomic::Ordering::SeqCst) != 0).then_some(2048)
+        fn provider(&self) -> crate::provider::Provider {
+            self.inner.provider()
+        }
+
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+
+        fn prepare_model_fallback(
+            &self,
+            failure: &AgentError,
+        ) -> Option<crate::AgentLlmFallbackSwitch> {
+            self.inner.prepare_model_fallback(failure)
+        }
+
+        fn active_model_fallback_identity(&self) -> Option<crate::SessionLlmIdentity> {
+            self.inner.active_model_fallback_identity()
         }
     }
 
     struct PartialOutputThenRecoverClient {
+        registry: Arc<crate::ModelRegistry>,
         calls: std::sync::atomic::AtomicUsize,
         stream_output_observed: std::sync::atomic::AtomicBool,
         fallback_committed: std::sync::atomic::AtomicBool,
@@ -10006,6 +13318,7 @@ mod tests {
     impl PartialOutputThenRecoverClient {
         fn new() -> Self {
             Self {
+                registry: fallback_activation_test_registry(),
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 stream_output_observed: std::sync::atomic::AtomicBool::new(false),
                 fallback_committed: std::sync::atomic::AtomicBool::new(false),
@@ -10060,7 +13373,7 @@ mod tests {
         }
 
         fn provider(&self) -> crate::provider::Provider {
-            crate::provider::Provider::Other
+            crate::provider::Provider::OpenAI
         }
 
         fn model(&self) -> &'static str {
@@ -10078,33 +13391,56 @@ mod tests {
             Some(crate::AgentLlmFallbackSwitch {
                 previous_identity: crate::SessionLlmIdentity {
                     model: "primary".to_string(),
-                    provider: crate::provider::Provider::Other,
+                    provider: crate::provider::Provider::OpenAI,
                     self_hosted_server_id: None,
                     provider_params: None,
                     auth_binding: None,
                 },
                 new_identity: crate::SessionLlmIdentity {
                     model: "backup".to_string(),
-                    provider: crate::provider::Provider::Other,
+                    provider: crate::provider::Provider::OpenAI,
                     self_hosted_server_id: None,
                     provider_params: None,
                     auth_binding: None,
                 },
+                target_profile: self
+                    .registry
+                    .profile_witness_for_provider(crate::Provider::OpenAI, "backup")
+                    .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
-                capability_base_filter: ToolFilter::All,
-                context_window: None,
-                max_output_tokens: None,
                 skipped_targets: Vec::new(),
             })
         }
 
-        fn commit_model_fallback(&self, _identity: &crate::SessionLlmIdentity) {
-            self.fallback_committed
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+        fn commit_model_fallback(
+            &self,
+            previous_identity: &crate::SessionLlmIdentity,
+            target_identity: &crate::SessionLlmIdentity,
+        ) -> Result<(), AgentError> {
+            if self.active_model_fallback_identity().as_ref() != Some(previous_identity) {
+                return Err(AgentError::ConfigError(
+                    "partial-output test client previous identity mismatch".to_string(),
+                ));
+            }
+            self.fallback_committed.store(
+                target_identity.model == "backup",
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            Ok(())
+        }
+
+        fn active_model_fallback_identity(&self) -> Option<crate::SessionLlmIdentity> {
+            Some(crate::SessionLlmIdentity {
+                model: self.model().to_string(),
+                provider: crate::provider::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            })
         }
 
         fn begin_stream_output_observation(&self) {
@@ -10202,17 +13538,31 @@ mod tests {
             crate::VIEW_IMAGE_TOOL_NAME,
             "shell",
         ]));
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .with_tool_visibility_owner(explicit_test_visibility_owner())
-            .retry_policy(RetryPolicy {
-                max_retries: 1,
-                initial_delay: Duration::from_millis(1),
-                max_delay: Duration::from_millis(1),
-                multiplier: 1.0,
-                call_timeout: None,
-            })
-            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
-            .await;
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let coordinator = Arc::new(RecordingStickyFallbackCoordinator::default());
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_effective_model_registry(client.registry())
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing.clone())
+        .with_sticky_model_fallback_commit_coordinator(coordinator.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+        .await;
 
         let result = agent
             .run("trigger fallback".to_string().into())
@@ -10220,6 +13570,15 @@ mod tests {
             .expect("fallback retry should succeed");
 
         assert_eq!(result.text, "ok after fallback");
+        let commits = model_routing.commits();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].0.model, "primary");
+        assert_eq!(commits[0].1.model, "backup");
+        assert_eq!(commits[0].2, 1);
+        assert!(commits[0].3.committed_visible_set_changed);
+        assert!(commits[0].3.revision_bumped);
+        assert_eq!(commits[0].3.previous_state.active_revision, 0);
+        assert_eq!(commits[0].3.next_state.active_revision, 1);
         let seen_tools = client.seen_tools();
         assert_eq!(seen_tools.len(), 2);
         assert!(
@@ -10284,7 +13643,19 @@ mod tests {
                     .collect()
             )
         );
+        assert_eq!(snapshot.active_revision, crate::ToolScopeRevision(1));
+        let durable_visibility = agent
+            .session()
+            .try_tool_visibility_state()
+            .expect("fallback visibility metadata should decode")
+            .expect("fallback visibility metadata should be present");
+        assert_eq!(durable_visibility, commits[0].3.next_state);
 
+        // A fallback-capable adapter may keep arbitrary client-local model
+        // facts, but those are no longer semantic AgentLlmClient APIs. Forge a
+        // fail-open filter and huge limit before the next turn: ToolScope plus
+        // the registry-minted active witness must remain authoritative.
+        client.forge_client_local_model_facts();
         let second = agent
             .run("sticky fallback".to_string().into())
             .await
@@ -10301,6 +13672,315 @@ mod tests {
         assert_eq!(
             seen_max_tokens[2], 2048,
             "subsequent fallback turn should keep the backup model max-token clamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_fallback_retry_keeps_the_accepted_target_sticky() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(FallbackActivatingClient::with_terminal_backup_failure());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let coordinator = Arc::new(RecordingStickyFallbackCoordinator::default());
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_effective_model_registry(client.registry())
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing.clone())
+        .with_sticky_model_fallback_commit_coordinator(coordinator.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let error = agent
+            .run("both providers fail".to_string().into())
+            .await
+            .expect_err("the fallback retry should exhaust the generated retry budget");
+        assert!(
+            matches!(
+                &error,
+                AgentError::TerminalFailure {
+                    outcome: TurnTerminalOutcome::Failed,
+                    cause_kind: crate::TurnTerminalCauseKind::RetryExhausted,
+                    ..
+                }
+            ),
+            "fallback exhaustion must preserve the typed terminal cause: {error}"
+        );
+        assert_eq!(client.model(), "backup");
+        assert_eq!(coordinator.calls(), 1);
+        assert_eq!(
+            coordinator.target_models.lock().unwrap().as_slice(),
+            &["backup".to_string()]
+        );
+        let commits = model_routing.commits();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("fallback session metadata")
+                .llm_identity()
+                .model,
+            "backup",
+            "a terminal retry does not undo the already accepted sticky target"
+        );
+        assert_eq!(
+            agent.tool_scope.visibility_state().unwrap(),
+            commits[0].3.next_state
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_fallback_coordinator_terminalizes_error_recovery_for_next_run() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(FallbackActivatingClient::new());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let coordinator = Arc::new(RejectingStickyFallbackCoordinator {
+            error: crate::handles::StickyModelFallbackCommitError::Store(
+                "synthetic pre-commit store rejection".to_string(),
+            ),
+        });
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_effective_model_registry(client.registry())
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .with_sticky_model_fallback_commit_coordinator(coordinator)
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        for prompt in ["first rejected fallback", "second rejected fallback"] {
+            let error = agent
+                .run(prompt.to_string().into())
+                .await
+                .expect_err("coordinator rejection must fail the turn");
+            assert!(error.to_string().contains("pre-commit store rejection"));
+            let snapshot = agent
+                .execution_snapshot()
+                .expect("turn snapshot")
+                .expect("test turn authority");
+            assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+            assert_eq!(snapshot.active_run_id, None);
+            assert_eq!(
+                client.model(),
+                "primary",
+                "safe coordinator rejection must compensate the client before the next run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn divergent_durable_identity_parent_rejects_fallback_before_any_commit() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(FallbackActivatingClient::new());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let coordinator = Arc::new(RecordingStickyFallbackCoordinator::default());
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_effective_model_registry(client.registry())
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing.clone())
+        .with_sticky_model_fallback_commit_coordinator(coordinator.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let mut divergent = agent
+            .session()
+            .session_metadata()
+            .expect("test session metadata");
+        divergent.model = "divergent-parent".to_string();
+        agent
+            .session_mut()
+            .set_session_metadata(divergent)
+            .expect("divergent test parent should serialize");
+
+        let error = agent
+            .run(
+                "reject divergent durable fallback parent"
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .expect_err("a divergent durable identity parent must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the machine-authorized parent"),
+            "unexpected rejection: {error}"
+        );
+        assert_eq!(coordinator.calls(), 0);
+        assert!(model_routing.commits().is_empty());
+        assert_eq!(client.model(), "primary");
+    }
+
+    #[tokio::test]
+    async fn model_fallback_post_activation_identity_read_failure_rolls_back_client() {
+        use crate::retry::RetryPolicy;
+
+        let client =
+            Arc::new(FallbackActivatingClient::with_post_activation_identity_read_failure());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_effective_model_registry(client.registry())
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let error = agent
+            .run(
+                "fail post-activation identity verification"
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .expect_err("post-activation identity verification failure must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("fallback client activation verification"),
+            "the original verification failure must be preserved: {error}"
+        );
+        assert_eq!(
+            client.fallback_commits(),
+            2,
+            "activation must be followed by an explicit target-to-previous rollback attempt"
+        );
+        assert_eq!(
+            client.model(),
+            "primary",
+            "a failed post-activation identity read must not strand the client on the target"
+        );
+        assert!(
+            model_routing.commits().is_empty(),
+            "machine identity and visibility must remain untouched when client verification fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_fallback_proposer_without_activation_leaves_all_fallback_state_unchanged() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(ProposalOnlyFallbackClient::new());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("primary"),
+        )
+        .with_effective_model_registry(client.registry())
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        let previous_model = agent.config.model.clone();
+        let previous_visibility = agent.tool_scope.visibility_state().unwrap();
+
+        let error = agent
+            .run("reject proposal-only fallback".to_string().into())
+            .await
+            .expect_err("a proposer without activation must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("without an activation implementation"),
+            "{error}"
+        );
+        assert_eq!(client.model(), "primary");
+        assert_eq!(agent.config.model, previous_model);
+        assert_eq!(
+            agent.tool_scope.visibility_state().unwrap(),
+            previous_visibility
+        );
+        assert!(model_routing.commits().is_empty());
+        assert!(
+            !agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::SystemNotice(notice)
+                    if notice.blocks.iter().any(|block| matches!(
+                        block,
+                        crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                            if category == "model_fallback"
+                    ))
+            )),
+            "rejected client activation must not append fallback session state"
         );
     }
 
@@ -10989,18 +14669,74 @@ mod tests {
     }
 
     struct ExtractionFallbackOverrideClient {
+        registry: Arc<crate::ModelRegistry>,
         active_fallback: std::sync::atomic::AtomicBool,
         call_count: std::sync::atomic::AtomicUsize,
+        mismatched_fallback_tag: bool,
+        reject_target_compile: bool,
+        target_profile: crate::ModelProfileWitness,
+        seen_max_tokens: Mutex<Vec<u32>>,
         seen_provider_params:
             Mutex<Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>>>,
     }
 
+    fn extraction_fallback_registry() -> crate::ModelRegistry {
+        let mut config = crate::Config::default();
+        config.models.custom.insert(
+            "claude-backup".to_string(),
+            crate::config::CustomModelConfig {
+                provider: crate::Provider::Anthropic,
+                display_name: Some("Extraction fallback".to_string()),
+                context_window: Some(64_000),
+                max_output_tokens: Some(1024),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        crate::ModelRegistry::from_config(
+            &config,
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        )
+        .expect("extraction fallback registry")
+    }
+
     impl ExtractionFallbackOverrideClient {
         fn new() -> Self {
+            let registry = Arc::new(extraction_fallback_registry());
+            let target_profile = registry
+                .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+                .expect("registered extraction fallback profile");
             Self {
+                registry,
                 active_fallback: std::sync::atomic::AtomicBool::new(false),
                 call_count: std::sync::atomic::AtomicUsize::new(0),
+                mismatched_fallback_tag: false,
+                reject_target_compile: false,
+                target_profile,
+                seen_max_tokens: Mutex::new(Vec::new()),
                 seen_provider_params: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_provider_mismatch() -> Self {
+            Self {
+                mismatched_fallback_tag: true,
+                ..Self::new()
+            }
+        }
+
+        fn with_target_profile(target_profile: crate::ModelProfileWitness) -> Self {
+            Self {
+                target_profile,
+                ..Self::new()
+            }
+        }
+
+        fn with_target_compile_rejection() -> Self {
+            Self {
+                reject_target_compile: true,
+                ..Self::new()
             }
         }
 
@@ -11008,6 +14744,14 @@ mod tests {
             &self,
         ) -> Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>> {
             self.seen_provider_params.lock().unwrap().clone()
+        }
+
+        fn seen_max_tokens(&self) -> Vec<u32> {
+            self.seen_max_tokens.lock().unwrap().clone()
+        }
+
+        fn registry(&self) -> Arc<crate::ModelRegistry> {
+            Arc::clone(&self.registry)
         }
     }
 
@@ -11017,10 +14761,11 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Arc<ToolDef>],
-            _max_tokens: u32,
+            max_tokens: u32,
             _temperature: Option<f32>,
             provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
         ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_max_tokens.lock().unwrap().push(max_tokens);
             self.seen_provider_params
                 .lock()
                 .unwrap()
@@ -11076,7 +14821,8 @@ mod tests {
             _failure: &AgentError,
         ) -> Option<crate::AgentLlmFallbackSwitch> {
             use crate::lifecycle::run_primitive::{
-                AnthropicProviderTag, OpaqueProviderBody, ProviderParamsOverride, ProviderTag,
+                AnthropicProviderTag, OpaqueProviderBody, OpenAiProviderTag,
+                ProviderParamsOverride, ProviderTag,
             };
 
             if self
@@ -11101,31 +14847,84 @@ mod tests {
                     provider_params: None,
                     auth_binding: None,
                 },
+                target_profile: self.target_profile.clone(),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "claude-backup".to_string(),
                     provider_params: Some(ProviderParamsOverride {
-                        provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
-                            web_search: Some(OpaqueProviderBody::from_value(
-                                &serde_json::json!({"type": "web_search"}),
-                            )),
-                            ..Default::default()
-                        })),
+                        provider_tag: Some(if self.mismatched_fallback_tag {
+                            ProviderTag::OpenAi(OpenAiProviderTag::default())
+                        } else {
+                            ProviderTag::Anthropic(AnthropicProviderTag {
+                                web_search: Some(OpaqueProviderBody::from_value(
+                                    &serde_json::json!({"type": "web_search"}),
+                                )),
+                                ..Default::default()
+                            })
+                        }),
                         ..Default::default()
                     }),
                     provider_tool_defaults: None,
                 },
-                capability_base_filter: ToolFilter::All,
-                context_window: Some(128_000),
-                max_output_tokens: Some(4096),
                 skipped_targets: Vec::new(),
             })
         }
 
-        fn commit_model_fallback(&self, identity: &crate::SessionLlmIdentity) {
-            if identity.provider == crate::provider::Provider::Anthropic {
-                self.active_fallback
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+        fn commit_model_fallback(
+            &self,
+            previous_identity: &crate::SessionLlmIdentity,
+            target_identity: &crate::SessionLlmIdentity,
+        ) -> Result<(), AgentError> {
+            if self.active_model_fallback_identity().as_ref() != Some(previous_identity) {
+                return Err(AgentError::ConfigError(
+                    "extraction fallback test client previous identity mismatch".to_string(),
+                ));
             }
+            self.active_fallback.store(
+                target_identity.provider == crate::provider::Provider::Anthropic,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            Ok(())
+        }
+
+        fn active_model_fallback_identity(&self) -> Option<crate::SessionLlmIdentity> {
+            Some(crate::SessionLlmIdentity {
+                model: self.model().to_string(),
+                provider: self.provider(),
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            })
+        }
+
+        fn compile_model_fallback_schema(
+            &self,
+            target_identity: &crate::SessionLlmIdentity,
+            output_schema: &crate::OutputSchema,
+        ) -> Result<crate::CompiledSchema, AgentError> {
+            if target_identity.provider != crate::provider::Provider::Anthropic
+                || target_identity.model != "claude-backup"
+            {
+                return Err(AgentError::ConfigError(
+                    "unexpected fallback compile target".to_string(),
+                ));
+            }
+            if self.reject_target_compile {
+                return Err(AgentError::ConfigError(
+                    "target client rejects compiled schema".to_string(),
+                ));
+            }
+            let mut schema = output_schema.schema.as_value().clone();
+            schema
+                .as_object_mut()
+                .ok_or_else(|| AgentError::ConfigError("schema root is not an object".to_string()))?
+                .insert(
+                    "x-target-compiled".to_string(),
+                    serde_json::json!("anthropic"),
+                );
+            Ok(crate::CompiledSchema {
+                schema,
+                warnings: Vec::new(),
+            })
         }
     }
 
@@ -11207,18 +15006,37 @@ mod tests {
         }))
         .unwrap();
 
-        let client = Arc::new(ExtractionFallbackOverrideClient::new());
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .output_schema(schema)
-            .retry_policy(RetryPolicy {
-                max_retries: 1,
-                initial_delay: Duration::ZERO,
-                max_delay: Duration::ZERO,
-                multiplier: 1.0,
-                call_timeout: None,
-            })
-            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
-            .await;
+        let registry = Arc::new(extraction_fallback_registry());
+        let target_profile = registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("same-registry fallback profile");
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_profile(
+            target_profile,
+        ));
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .output_schema(schema)
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
 
         let result = agent
             .run("extract after fallback".to_string().into())
@@ -11226,6 +15044,45 @@ mod tests {
             .expect("extraction fallback should retry and validate structured output");
 
         assert_eq!(result.structured_output.unwrap()["answer"], "42");
+        let commits = model_routing.commits();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            commits[0].3.next_state.capability_base_filter,
+            ToolFilter::Deny(
+                [crate::VIEW_IMAGE_TOOL_NAME.to_string()]
+                    .into_iter()
+                    .collect()
+            ),
+            "visibility must derive from the same-authority registry profile, not the client's forged All filter"
+        );
+        assert_eq!(
+            client.seen_max_tokens().last().copied(),
+            Some(1024),
+            "fallback request must use the registry-owned output-token limit, not the client's forged 4096 limit"
+        );
+        let fallback_payload = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::SystemNotice(notice) => {
+                    notice.blocks.iter().find_map(|block| match block {
+                        crate::types::SystemNoticeBlock::RuntimeNotice {
+                            category,
+                            payload,
+                            ..
+                        } if category == "model_fallback" => payload.as_ref(),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("fallback notice payload");
+        assert_eq!(
+            fallback_payload.pointer("/to/context_window"),
+            Some(&serde_json::json!(64_000)),
+            "fallback notice must carry the registry-owned context window, not the client's forged 128000 window"
+        );
         let seen_params = client.seen_provider_params();
         assert_eq!(
             seen_params.len(),
@@ -11258,12 +15115,476 @@ mod tests {
                     "fallback extraction retry should carry structured output for the new provider"
                 );
                 assert_eq!(
+                    tag.structured_output
+                        .as_ref()
+                        .and_then(|schema| schema.schema.as_value().get("x-target-compiled")),
+                    Some(&serde_json::json!("anthropic")),
+                    "fallback request must carry the target client's compiled schema, not the raw source schema"
+                );
+                assert_eq!(
                     tag.web_search, None,
                     "fallback extraction retry must not re-enable provider-native web search"
                 );
             }
             other => panic!("expected Anthropic fallback extraction params, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn extraction_fallback_authority_unknown_survives_as_teardown_required() {
+        use crate::lifecycle::core_executor::{CoreExecutorError, CoreExecutorTeardownReason};
+        use crate::retry::RetryPolicy;
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }))
+        .unwrap();
+        let registry = Arc::new(extraction_fallback_registry());
+        let target_profile = registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("same-registry fallback profile");
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_profile(
+            target_profile,
+        ));
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let coordinator = Arc::new(RejectingStickyFallbackCoordinator {
+            error: crate::handles::StickyModelFallbackCommitError::SnapshotOutcomeUnknown(
+                "synthetic extraction CAS acknowledgement loss".to_string(),
+            ),
+        });
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .output_schema(schema)
+        .with_effective_model_registry(registry)
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .with_sticky_model_fallback_commit_coordinator(coordinator)
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let error = agent
+            .run("extract across unknown fallback CAS".to_string().into())
+            .await
+            .expect_err("authority-unknown extraction fallback must not become RunResult");
+        assert!(matches!(
+            &error,
+            AgentError::StickyModelFallbackAuthorityUnknown { message }
+                if message.contains("extraction CAS acknowledgement loss")
+        ));
+
+        let core_error =
+            CoreExecutorError::apply_failed_from_session_error(crate::SessionError::Agent(error));
+        assert!(matches!(
+            core_error,
+            CoreExecutorError::TeardownRequired {
+                reason: CoreExecutorTeardownReason::SessionUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fallback_provider_tag_mismatch_rejects_before_any_identity_or_visibility_commit() {
+        use crate::retry::RetryPolicy;
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }))
+        .unwrap();
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_provider_mismatch());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new(),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .output_schema(schema)
+        .with_effective_model_registry(client.registry())
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing.clone())
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        let previous_model = agent.config.model.clone();
+        let previous_visibility = agent
+            .tool_scope
+            .visibility_state()
+            .expect("initial visibility state");
+
+        let error = agent
+            .run("reject mismatched fallback".to_string().into())
+            .await
+            .expect_err("provider-tag mismatch must fail before fallback commit");
+
+        assert!(error.to_string().contains("provider tag"), "{error}");
+        assert!(
+            !client
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "client fallback pointer must remain unchanged"
+        );
+        assert!(
+            model_routing.commits().is_empty(),
+            "generated routing authority must not be called after preparation rejects"
+        );
+        assert_eq!(agent.config.model, previous_model);
+        assert_eq!(
+            agent.tool_scope.visibility_state().unwrap(),
+            previous_visibility,
+            "canonical visibility owner must remain unchanged"
+        );
+        assert!(
+            !agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::SystemNotice(notice)
+                    if notice.blocks.iter().any(|block| matches!(
+                        block,
+                        crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                            if category == "model_fallback"
+                    ))
+            )),
+            "rejected preparation must not append the fallback notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_target_schema_compile_rejection_leaves_all_fallback_state_unchanged() {
+        use crate::retry::RetryPolicy;
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }))
+        .unwrap();
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_compile_rejection());
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .with_effective_model_registry(client.registry())
+            .with_tool_visibility_owner(generated_visibility_owner)
+            .with_model_routing_handle(model_routing.clone())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let previous_model = agent.config.model.clone();
+        let previous_visibility = agent.tool_scope.visibility_state().unwrap();
+
+        let error = agent
+            .run("reject target schema compilation".to_string().into())
+            .await
+            .expect_err("target schema compile rejection must abort fallback activation");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to compile structured output for fallback target"),
+            "{error}"
+        );
+        assert_eq!(
+            client.call_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "target compile failure must happen before a fallback provider call"
+        );
+        assert!(
+            !client
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(model_routing.commits().is_empty());
+        assert_eq!(agent.config.model, previous_model);
+        assert_eq!(
+            agent.tool_scope.visibility_state().unwrap(),
+            previous_visibility
+        );
+        assert!(!agent.session().messages().iter().any(|message| matches!(
+            message,
+            Message::SystemNotice(notice)
+                if notice.blocks.iter().any(|block| matches!(
+                    block,
+                    crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                        if category == "model_fallback"
+                ))
+        )));
+    }
+
+    #[tokio::test]
+    async fn fallback_profile_witness_mismatch_rejects_atomically() {
+        use crate::retry::RetryPolicy;
+
+        let registry = crate::ModelRegistry::from_config(
+            &crate::Config::default(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        )
+        .expect("synthetic model registry");
+        let mismatched_profile = registry
+            .profile_witness_for_provider(
+                crate::Provider::OpenAI,
+                crate::model_profile::test_catalog::OPENAI_MODEL,
+            )
+            .expect("OpenAI profile witness");
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_profile(
+            mismatched_profile,
+        ));
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(
+                crate::OutputSchema::new(serde_json::json!({
+                    "type": "object",
+                    "properties": { "answer": { "type": "string" } },
+                    "required": ["answer"]
+                }))
+                .unwrap(),
+            )
+            .with_tool_visibility_owner(generated_visibility_owner)
+            .with_model_routing_handle(model_routing.clone())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let previous_model = agent.config.model.clone();
+        let previous_visibility = agent.tool_scope.visibility_state().unwrap();
+
+        let error = agent
+            .run("reject mismatched profile witness".to_string().into())
+            .await
+            .expect_err("profile provenance mismatch must fail before fallback commit");
+
+        assert!(
+            error.to_string().contains("profile witness targets"),
+            "{error}"
+        );
+        assert!(
+            !client
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(model_routing.commits().is_empty());
+        assert_eq!(agent.config.model, previous_model);
+        assert_eq!(
+            agent.tool_scope.visibility_state().unwrap(),
+            previous_visibility
+        );
+        assert!(!agent.session().messages().iter().any(|message| matches!(
+            message,
+            Message::SystemNotice(notice)
+                if notice.blocks.iter().any(|block| matches!(
+                    block,
+                    crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                        if category == "model_fallback"
+                ))
+        )));
+    }
+
+    #[tokio::test]
+    async fn foreign_identical_registry_profile_witness_rejects_atomically() {
+        use crate::retry::RetryPolicy;
+
+        let effective_registry = Arc::new(extraction_fallback_registry());
+        let foreign_registry = extraction_fallback_registry();
+        assert_ne!(
+            effective_registry.authority(),
+            foreign_registry.authority(),
+            "independently constructed identical registries must have distinct authority"
+        );
+        let foreign_profile = foreign_registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("foreign identical-pair profile witness");
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_profile(
+            foreign_profile,
+        ));
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(
+                crate::OutputSchema::new(serde_json::json!({
+                    "type": "object",
+                    "properties": { "answer": { "type": "string" } },
+                    "required": ["answer"]
+                }))
+                .unwrap(),
+            )
+            .with_effective_model_registry(Arc::clone(&effective_registry))
+            .with_tool_visibility_owner(generated_visibility_owner)
+            .with_model_routing_handle(model_routing.clone())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let previous_model = agent.config.model.clone();
+        let previous_visibility = agent.tool_scope.visibility_state().unwrap();
+
+        let error = agent
+            .run("reject foreign registry witness".to_string().into())
+            .await
+            .expect_err("foreign registry witness must fail before fallback commit");
+
+        assert!(
+            error
+                .to_string()
+                .contains("was not minted by the agent's effective model registry"),
+            "{error}"
+        );
+        assert!(
+            !client
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(model_routing.commits().is_empty());
+        assert_eq!(agent.config.model, previous_model);
+        assert_eq!(
+            agent.tool_scope.visibility_state().unwrap(),
+            previous_visibility
+        );
+        assert!(!agent.session().messages().iter().any(|message| matches!(
+            message,
+            Message::SystemNotice(notice)
+                if notice.blocks.iter().any(|block| matches!(
+                    block,
+                    crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                        if category == "model_fallback"
+                ))
+        )));
+    }
+
+    #[tokio::test]
+    async fn registry_absent_fallback_target_rejects_even_with_a_valid_foreign_profile() {
+        use crate::retry::RetryPolicy;
+
+        let effective_registry = Arc::new(
+            crate::ModelRegistry::from_config(
+                &crate::Config::default(),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )
+            .expect("effective registry without synthetic fallback target"),
+        );
+        assert!(
+            effective_registry
+                .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+                .is_none(),
+            "test target must be unresolved in the captured effective registry"
+        );
+        let foreign_registry = extraction_fallback_registry();
+        let foreign_profile = foreign_registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("foreign registry contains the target");
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_profile(
+            foreign_profile,
+        ));
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(
+                crate::OutputSchema::new(serde_json::json!({
+                    "type": "object",
+                    "properties": { "answer": { "type": "string" } },
+                    "required": ["answer"]
+                }))
+                .unwrap(),
+            )
+            .with_effective_model_registry(Arc::clone(&effective_registry))
+            .with_tool_visibility_owner(generated_visibility_owner)
+            .with_model_routing_handle(model_routing.clone())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let previous_visibility = agent.tool_scope.visibility_state().unwrap();
+
+        let error = agent
+            .run("reject registry-absent fallback".to_string().into())
+            .await
+            .expect_err("registry-absent fallback targets must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("is absent from the agent's effective model registry"),
+            "{error}"
+        );
+        assert!(
+            !client
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(model_routing.commits().is_empty());
+        assert_eq!(
+            agent.tool_scope.visibility_state().unwrap(),
+            previous_visibility
+        );
     }
 
     #[tokio::test]

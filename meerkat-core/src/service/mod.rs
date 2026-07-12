@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 pub use crate::session::{
     TranscriptEditError, TranscriptReplacement, TranscriptRewriteCommit, TranscriptRewriteReason,
-    TranscriptRewriteSelection,
+    TranscriptRewriteSelection, TranscriptRewriteSemantic,
 };
 
 /// Controls whether `create_session()` should execute an initial turn.
@@ -1831,6 +1831,32 @@ pub trait SessionService: Send + Sync {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError>;
+
+    /// Reconcile invisible compaction-memory stages from the exact
+    /// RuntimeStore atomic outbox. Runtime-backed durable services override
+    /// this; unknown services accept only an empty no-work set.
+    async fn reconcile_runtime_compaction_projections(
+        &self,
+        _id: &SessionId,
+        intents: Vec<crate::CompactionProjectionIntent>,
+    ) -> Result<(), SessionError> {
+        if intents.is_empty() {
+            Ok(())
+        } else {
+            Err(SessionError::Unsupported(
+                "reconcile_runtime_compaction_projections".to_string(),
+            ))
+        }
+    }
+
+    /// Abort a live compaction transaction after the runtime boundary was
+    /// rejected and its authoritative outbox was observed empty.
+    async fn abort_uncommitted_compaction_projections(
+        &self,
+        _id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Ok(())
+    }
 
     /// Cancel an in-flight turn.
     ///

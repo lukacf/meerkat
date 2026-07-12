@@ -387,6 +387,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 execution_kind: None,
                 peer_response_terminal_apply_intent: None,
                 auth_binding: None,
+                transcript_identity: Default::default(),
             },
         );
         let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, turn_metadata);
@@ -765,11 +766,13 @@ fn spawn_heartbeat(
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             let send_fut = router.send(
                 peer,
-                meerkat_comms::MessageKind::Request { objective_id: None,
+                meerkat_comms::MessageKind::Request {
+                    objective_id: None,
                     intent: "heartbeat".into(),
                     params: serde_json::json!(null),
                     blocks: None,
                     handling_mode: None,
+                    content_taint: None,
                 },
             );
             let failed =
@@ -1001,9 +1004,14 @@ async fn setup_session(
     let result = match service.create_session(req).await {
         Ok(result) => result,
         Err(error) => {
-            runtime_adapter
+            if let Err(cleanup_error) = runtime_adapter
                 .unregister_session(&prepared_session_id)
-                .await;
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "create session: {error}; additionally failed to unregister prepared runtime session: {cleanup_error}"
+                ));
+            }
             return Err(anyhow::anyhow!("create session: {error}"));
         }
     };
@@ -1203,6 +1211,23 @@ impl CoreExecutor for TargetCoreExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
+    async fn reconcile_committed_compaction_projections(
+        &mut self,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.service
+            .abort_uncommitted_compaction_projections(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.service
             .cancel_after_boundary(&self.session_id)
@@ -1384,7 +1409,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
         // serve_tcp form the canonical RPC-host triad. Lifting these would require an
         // alternate transport stack; this surface legitimately owns the RPC-host role.
-        let mut rpc_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
+        let rpc_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
             rpc_factory,
             rpc_config,
             1024,

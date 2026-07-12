@@ -830,6 +830,14 @@ macro_rules! mob_catalog_machine_dsl {
             ClassifyPendingSupervisorAcceptance { rejection_cause: Enum<MobBridgeRejectionCause> },
             EnsureMember { agent_identity: AgentIdentity },
             Reconcile { desired: Set<AgentIdentity>, retire_stale: bool },
+            // Classify member-scoped pending-spawn teardown for a public
+            // retire request from canonical membership + spawn-incarnation
+            // truth. The shell supplies only the stable identity. MobMachine
+            // emits one structural verdict: cancel the exact pending session
+            // while retiring the named committed incarnation, proceed with a
+            // committed incarnation that has no pending spawn, or preserve a
+            // pending later incarnation because no committed member exists.
+            ClassifyRetirePendingSpawnDisposition { agent_identity: AgentIdentity },
             Retire { mob_id: MobId, agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, generation: Generation, releasing: Option<SessionId>, session_id: Option<SessionId> },
             RetireAbsent { agent_identity: AgentIdentity },
             RequestPendingSessionIngressDetachForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
@@ -1374,6 +1382,12 @@ macro_rules! mob_catalog_machine_dsl {
             // proceed) instead of composing the admission itself.
             ProfileMutationAdmissionResolved { admission: Enum<MobProfileMutationAdmissionKind> },
             MemberOperationEligibilityResolved { admission: Enum<MobMemberOperationEligibilityKind> },
+            // Structural, incarnation-scoped retire verdicts. Separate effect
+            // variants keep cancel / no-cancel / preserve impossible to blur
+            // through an optional field in handwritten code.
+            RetirePendingSpawnCancellationAuthorized { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, pending_spawn_session_id: SessionId },
+            RetireCommittedIncarnationWithoutPendingSpawnResolved { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation },
+            RetireAbsentPendingSpawnPreservationResolved { agent_identity: AgentIdentity },
             // Machine-owned bridge-rejection recovery verdict. The mob shell
             // mirrors this (RebindRecover -> re-run BindMember; FatalBubbleUp ->
             // bubble the rejection up) instead of reducing the raw wire cause
@@ -1574,6 +1588,9 @@ macro_rules! mob_catalog_machine_dsl {
         disposition CreateMobAdmissionResolved => local seam SurfaceResultAlignment,
         disposition ProfileMutationAdmissionResolved => local seam SurfaceResultAlignment,
         disposition MemberOperationEligibilityResolved => local seam SurfaceResultAlignment,
+        disposition RetirePendingSpawnCancellationAuthorized => local seam SurfaceResultAlignment,
+        disposition RetireCommittedIncarnationWithoutPendingSpawnResolved => local seam SurfaceResultAlignment,
+        disposition RetireAbsentPendingSpawnPreservationResolved => local seam SurfaceResultAlignment,
         disposition BridgeRejectionRecoveryClassified => local seam SurfaceResultAlignment,
         disposition PendingSupervisorAcceptanceClassified => local seam SurfaceResultAlignment,
         disposition FrameSeedConfirmed => local seam SurfaceResultAlignment,
@@ -10526,6 +10543,91 @@ macro_rules! mob_catalog_machine_dsl {
         // Retire / RetireAll
         // =====================================================================
 
+        // Public retire requests carry a stable identity, while cancellation
+        // authority must be scoped to an exact spawn incarnation. Resolve that
+        // distinction entirely from canonical MobMachine maps before the shell
+        // performs mechanics. In particular, an identity with no committed
+        // runtime preserves any pending session for a later incarnation.
+        transition ClassifyRetirePendingSpawnDispositionCancelCommittedRunning {
+            on input ClassifyRetirePendingSpawnDisposition { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "retire_identity_is_committed" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "retire_generation_is_committed" { self.identity_runtime_generations.contains_key(agent_identity) == true }
+            guard "retire_pending_spawn_is_present" { self.pending_spawn_sessions.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit RetirePendingSpawnCancellationAuthorized {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                generation: self.identity_runtime_generations.get_copied(agent_identity).get("value"),
+                pending_spawn_session_id: self.pending_spawn_sessions.get_cloned(agent_identity).get("value")
+            }
+        }
+
+        transition ClassifyRetirePendingSpawnDispositionCancelCommittedStopped {
+            on input ClassifyRetirePendingSpawnDisposition { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "retire_identity_is_committed" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "retire_generation_is_committed" { self.identity_runtime_generations.contains_key(agent_identity) == true }
+            guard "retire_pending_spawn_is_present" { self.pending_spawn_sessions.contains_key(agent_identity) == true }
+            update {}
+            to Stopped
+            emit RetirePendingSpawnCancellationAuthorized {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                generation: self.identity_runtime_generations.get_copied(agent_identity).get("value"),
+                pending_spawn_session_id: self.pending_spawn_sessions.get_cloned(agent_identity).get("value")
+            }
+        }
+
+        transition ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingRunning {
+            on input ClassifyRetirePendingSpawnDisposition { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "retire_identity_is_committed" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "retire_generation_is_committed" { self.identity_runtime_generations.contains_key(agent_identity) == true }
+            guard "retire_pending_spawn_is_absent" { self.pending_spawn_sessions.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit RetireCommittedIncarnationWithoutPendingSpawnResolved {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                generation: self.identity_runtime_generations.get_copied(agent_identity).get("value")
+            }
+        }
+
+        transition ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingStopped {
+            on input ClassifyRetirePendingSpawnDisposition { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "retire_identity_is_committed" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "retire_generation_is_committed" { self.identity_runtime_generations.contains_key(agent_identity) == true }
+            guard "retire_pending_spawn_is_absent" { self.pending_spawn_sessions.contains_key(agent_identity) == false }
+            update {}
+            to Stopped
+            emit RetireCommittedIncarnationWithoutPendingSpawnResolved {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                generation: self.identity_runtime_generations.get_copied(agent_identity).get("value")
+            }
+        }
+
+        transition ClassifyRetirePendingSpawnDispositionPreserveAbsentRunning {
+            on input ClassifyRetirePendingSpawnDisposition { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "retire_identity_is_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Running
+            emit RetireAbsentPendingSpawnPreservationResolved { agent_identity: agent_identity }
+        }
+
+        transition ClassifyRetirePendingSpawnDispositionPreserveAbsentStopped {
+            on input ClassifyRetirePendingSpawnDisposition { agent_identity }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "retire_identity_is_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Stopped
+            emit RetireAbsentPendingSpawnPreservationResolved { agent_identity: agent_identity }
+        }
+
         transition RetireRunningReleasing {
             on input Retire { mob_id, agent_runtime_id, agent_identity, generation, releasing, session_id }
             guard { self.lifecycle_phase == Phase::Running }
@@ -12204,7 +12306,7 @@ impl From<u64> for FenceToken {
 }
 
 /// Bridging type for generation counter. Maps to `crate::ids::Generation`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Generation(pub u64);
 
 impl From<u64> for Generation {

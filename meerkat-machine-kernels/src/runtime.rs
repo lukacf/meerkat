@@ -3530,7 +3530,7 @@ mod tests {
         ));
 
         let previous_visibility = visibility_state(all_filter.clone(), 2, 5);
-        let accepted_next_visibility = visibility_state(deny_view_image.clone(), 6, 5);
+        let accepted_next_visibility = visibility_state(deny_view_image.clone(), 6, 7);
         let accepted_delta =
             visibility_delta(all_filter.clone(), deny_view_image.clone(), true, true);
         assert!(schema_helper_bool(
@@ -3572,7 +3572,7 @@ mod tests {
             ],
         ));
 
-        let accepted_next_visibility = visibility_state(deny_view_image.clone(), 6, 5);
+        let accepted_next_visibility = visibility_state(deny_view_image.clone(), 6, 7);
         let bad_delta = visibility_delta(all_filter, deny_view_image.clone(), true, false);
         assert!(!schema_helper_bool(
             &kernel,

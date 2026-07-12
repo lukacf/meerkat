@@ -41,6 +41,23 @@ pub enum RuntimeDriverError {
     #[error("Recovery corruption: {reason}")]
     RecoveryCorruption { reason: String },
 
+    /// Atomic unregister persistence may already be durable. The live retry
+    /// anchor is retained, but no compensating durable rollback may run.
+    #[error("Unregister finalization outcome is unknown: {reason}")]
+    UnregisterFinalizationOutcomeUnknown { reason: String },
+
+    /// The machine-owned unregister saga still owns this runtime epoch and is
+    /// continuing asynchronously. The caller may retry to join the same saga;
+    /// this is not permission to replace or abandon the owned executor.
+    #[error("Unregister teardown is still in progress for runtime {runtime_id}")]
+    UnregisterInProgress { runtime_id: LogicalRuntimeId },
+
+    /// The machine-owned ordinary-stop cleanup coordinator still owns this
+    /// runtime epoch. The caller may retry to join the same coordinator; this
+    /// is not permission to unregister, replace, or abandon the exact executor.
+    #[error("Runtime stop cleanup is still in progress for runtime {runtime_id}")]
+    RuntimeStopInProgress { runtime_id: LogicalRuntimeId },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),

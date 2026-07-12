@@ -236,6 +236,7 @@ export class Mob {
       agentIdentity?: string;
       roleName?: string;
       profileName?: string;
+      modelOverride?: string;
       authBinding?: WireAuthBindingRef;
       runtimeMode?: string;
       backend?: string;
@@ -251,6 +252,7 @@ export class Mob {
       agentIdentity?: string;
       roleName?: string;
       profileName?: string;
+      modelOverride?: string;
       authBinding?: WireAuthBindingRef;
       forkContext?: Record<string, unknown>;
       runtimeMode?: string;

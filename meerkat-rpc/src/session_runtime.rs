@@ -98,8 +98,12 @@ use meerkat::session_runtime::live_orchestration::{apply_precheck_gates, prechec
 #[cfg(test)]
 type ServiceStartTurnResultReceiver =
     tokio::sync::oneshot::Receiver<Result<RunResult, SessionError>>;
-type ServiceApplyRuntimeTurnResultReceiver =
-    tokio::sync::oneshot::Receiver<Result<CoreApplyOutput, SessionError>>;
+type ServiceApplyRuntimeTurnResultReceiver = tokio::sync::oneshot::Receiver<
+    Result<
+        CoreApplyOutput,
+        meerkat::session_runtime::staged_promotion::StagedApplyRuntimeTurnError,
+    >,
+>;
 type RecoverableServiceApplyRuntimeTurnResultReceiver = tokio::sync::oneshot::Receiver<(
     Result<CoreApplyOutput, SessionError>,
     Option<ActiveCapacityGuard>,
@@ -519,7 +523,14 @@ impl RpcMobSessionService {
             if self.staged_sessions.contains(session_id).await {
                 return Ok(());
             }
-            let _ = self.service.discard_live_session(session_id).await;
+            // Keep the runtime registration as the retry anchor until live
+            // state has been discarded successfully. The machine-owned
+            // unregister saga runs only after that phase is proven complete.
+            match self.service.discard_live_session(session_id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            self.archive_runtime_cleanup().run(session_id).await?;
             return Err(SessionError::NotFound {
                 id: session_id.clone(),
             });
@@ -765,10 +776,19 @@ impl SessionService for RpcMobSessionService {
             self.direct_create_after_ack_hook.clone(),
         )
         .await;
-        if result.is_err() {
-            self.runtime_adapter.unregister_session(&session_id).await;
+        match result {
+            Ok(result) => Ok(result),
+            Err(primary_error) => {
+                match self.runtime_adapter.unregister_session(&session_id).await {
+                    Ok(()) => Err(primary_error),
+                    Err(cleanup_error) => Err(SessionError::Agent(
+                        meerkat_core::AgentError::InternalError(format!(
+                            "{primary_error}; additionally failed to unregister direct mob runtime session {session_id}: {cleanup_error}"
+                        )),
+                    )),
+                }
+            }
         }
-        result
     }
 
     async fn start_turn(
@@ -789,6 +809,25 @@ impl SessionService for RpcMobSessionService {
             admission,
         )
         .await
+    }
+
+    async fn reconcile_runtime_compaction_projections(
+        &self,
+        id: &SessionId,
+        intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    ) -> Result<(), SessionError> {
+        self.service
+            .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    async fn abort_uncommitted_compaction_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .abort_uncommitted_compaction_projections(id)
+            .await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -1170,6 +1209,18 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     }
 }
 
+fn combine_rpc_cleanup_error(
+    mut primary_error: RpcError,
+    cleanup_error: impl std::fmt::Display,
+    context: &str,
+) -> RpcError {
+    primary_error.message = format!(
+        "{}; additionally failed to {context}: {cleanup_error}",
+        primary_error.message
+    );
+    primary_error
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptNoopTarget {
     Present,
@@ -1271,6 +1322,18 @@ fn merge_content_inputs(deferred: ContentInput, turn: ContentInput) -> ContentIn
 // ---------------------------------------------------------------------------
 // SessionRuntime
 // ---------------------------------------------------------------------------
+
+struct RuntimeCompletionCleanupFailure {
+    releases_pre_admission: bool,
+    error: meerkat_runtime::CompletionWaitError,
+}
+
+fn gate_runtime_completion_outcome(
+    outcome: meerkat_runtime::CompletionOutcome,
+    cleanup_result: Result<Option<bool>, RuntimeCompletionCleanupFailure>,
+) -> Result<(meerkat_runtime::CompletionOutcome, Option<bool>), RuntimeCompletionCleanupFailure> {
+    cleanup_result.map(|cleanup_authority| (outcome, cleanup_authority))
+}
 
 /// Core runtime that manages agent sessions.
 ///
@@ -1663,6 +1726,35 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
     ) -> Result<bool, RpcError> {
+        if !self
+            .archived_persisted_session_without_live_by_authority(session_id)
+            .await?
+        {
+            return Ok(false);
+        }
+        // Discard precedes unregister so a discard failure retains the exact
+        // machine registration as the retry anchor. A successful (or already
+        // absent) discard permits canonical runtime cleanup; its result is
+        // never hidden behind the archived NotFound projection.
+        match self.service.discard_live_session(session_id).await {
+            Ok(()) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(session_error_to_rpc(error)),
+        }
+        self.discard_staged_capacity_admission(session_id);
+        self.archive_runtime_cleanup()
+            .run(session_id)
+            .await
+            .map_err(session_error_to_rpc)?;
+        Ok(true)
+    }
+
+    /// Pure archive authority query used by runtime-owned executors. Cleanup
+    /// cannot run until the runtime loop publishes its exact executor back to
+    /// the machine-owned unregister saga.
+    pub(crate) async fn archived_persisted_session_without_live_by_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RpcError> {
         let Some(stored) = self
             .service
             .load_authoritative_session(session_id)
@@ -1680,12 +1772,6 @@ impl SessionRuntime {
         if self.staged_sessions.contains(session_id).await {
             return Ok(false);
         }
-        let _ = self.service.discard_live_session(session_id).await;
-        self.discard_staged_capacity_admission(session_id);
-        self.archive_runtime_cleanup()
-            .run(session_id)
-            .await
-            .map_err(session_error_to_rpc)?;
         Ok(true)
     }
 
@@ -1707,6 +1793,16 @@ impl SessionRuntime {
             code: error::SESSION_NOT_FOUND,
             message: format!("session not found: {session_id}"),
             data: None,
+        }
+    }
+
+    fn archived_session_teardown_required_rpc(session_id: &SessionId) -> RpcError {
+        RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: format!("archived session {session_id} requires canonical runtime teardown"),
+            data: Some(serde_json::json!({
+                "core_executor_teardown_reason": meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::ArchivedSession.as_str(),
+            })),
         }
     }
 
@@ -2328,43 +2424,95 @@ impl SessionRuntime {
         runtime_was_registered: bool,
         staged_session_existed: bool,
         protect_active_admission: bool,
-    ) {
+    ) -> Result<(), RpcError> {
         if runtime_was_registered || staged_session_existed {
-            return;
+            return Ok(());
+        }
+        if !adapter.contains_session(session_id).await {
+            return Ok(());
         }
         if self.staged_sessions.contains(session_id).await {
-            return;
+            return Ok(());
         }
         let _ = protect_active_admission;
-        if adapter
+        if !adapter
             .list_active_inputs(session_id)
             .await
-            .is_ok_and(|inputs| !inputs.is_empty())
+            .map_err(runtime_driver_error_to_rpc)?
+            .is_empty()
         {
-            return;
+            return Ok(());
         }
         match self.service.has_live_session(session_id).await {
-            Ok(true) => return,
+            Ok(true) => return Ok(()),
             Ok(false) => {}
-            Err(_) => return,
+            Err(error) => {
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "failed to inspect live-session ownership while compensating new RPC runtime for session {session_id}: {error}"
+                    ),
+                    data: None,
+                });
+            }
         }
-        adapter.unregister_session(session_id).await;
+        adapter
+            .unregister_session(session_id)
+            .await
+            .map_err(runtime_driver_error_to_rpc)
+    }
+
+    async fn unregister_new_runtime_registration_after_rpc_error(
+        self: &Arc<Self>,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        runtime_was_registered: bool,
+        staged_session_existed: bool,
+        protect_active_admission: bool,
+        primary: RpcError,
+    ) -> RpcError {
+        match self
+            .unregister_new_runtime_registration_if_idle(
+                adapter,
+                session_id,
+                runtime_was_registered,
+                staged_session_existed,
+                protect_active_admission,
+            )
+            .await
+        {
+            Ok(()) => primary,
+            Err(cleanup) => RpcError {
+                code: primary.code,
+                message: format!(
+                    "{}; additionally failed to unregister newly prepared RPC runtime for session {session_id}: {}",
+                    primary.message, cleanup.message
+                ),
+                data: primary.data,
+            },
+        }
     }
 
     async fn cleanup_runtime_after_completion_outcome(
-        &self,
+        self: &Arc<Self>,
         session_id: &SessionId,
         cleanup_observation: meerkat_runtime::CompletionCleanupObservation,
-    ) -> Option<bool> {
+    ) -> Result<Option<bool>, RuntimeCompletionCleanupFailure> {
+        // Serialize the final observation/unregister decision with RPC runtime
+        // materialization. Otherwise a replacement runtime could be inserted
+        // after cleanup authority is resolved and then be mistaken for the
+        // registration owned by this completion.
+        let runtime_registration_lock = self.runtime_registration_lock(session_id);
+        let _runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let archived_now = match self.authoritative_session_archived(session_id).await {
             Ok(archived_now) => archived_now,
             Err(error) => {
-                tracing::warn!(
-                    %session_id,
-                    error = ?error,
-                    "runtime completion cleanup skipped because archive authority was unavailable"
-                );
-                return None;
+                return Err(RuntimeCompletionCleanupFailure {
+                    releases_pre_admission: false,
+                    error: meerkat_runtime::CompletionWaitError::AuthorityUnavailable(format!(
+                        "runtime completion archive authority unavailable for session {session_id}: {error:?}"
+                    )),
+                });
             }
         };
         let live_session = if archived_now {
@@ -2378,15 +2526,24 @@ impl SessionRuntime {
                     meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Absent
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        %session_id,
-                        error = ?error,
-                        "runtime completion cleanup skipped because live-session authority was unavailable"
-                    );
-                    return None;
+                    return Err(RuntimeCompletionCleanupFailure {
+                        releases_pre_admission: false,
+                        error: meerkat_runtime::CompletionWaitError::AuthorityUnavailable(
+                            format!(
+                                "runtime completion live-session authority unavailable for session {session_id}: {error}"
+                            ),
+                        ),
+                    });
                 }
             }
         };
+        let runtime_termination_cleanup = cleanup_observation
+            .proves_runtime_termination_for(session_id)
+            && matches!(
+                live_session,
+                meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::Absent
+            );
+        let runtime_termination_proof = cleanup_observation.clone();
         let cleanup_authority = match self
             .runtime_adapter
             .resolve_runtime_completion_cleanup(
@@ -2399,7 +2556,7 @@ impl SessionRuntime {
         {
             Ok(authority) => authority,
             Err(error) => {
-                if archived_now {
+                if archived_now && !self.runtime_adapter.contains_session(session_id).await {
                     // Benign post-teardown arrival: the session was archived
                     // (its unregister drain already resolved every completion
                     // waiter with the committed/terminal outcome) and its
@@ -2411,21 +2568,83 @@ impl SessionRuntime {
                         error = ?error,
                         "runtime completion cleanup observed a post-archive teardown (benign)"
                     );
-                } else {
-                    tracing::warn!(
-                        %session_id,
-                        error = ?error,
-                        "runtime completion cleanup skipped because generated cleanup authority was unavailable"
-                    );
+                    return Ok(Some(true));
                 }
-                return None;
+                if runtime_termination_cleanup
+                    && !self.runtime_adapter.contains_session(session_id).await
+                {
+                    // The machine-owned unregister coordinator can remove the
+                    // entry before completion waiters are delivered, after
+                    // the executor's external-only cleanup discarded the live
+                    // session. The
+                    // runtime-minted, session-bound RuntimeTerminated
+                    // observation plus independently observed absent live
+                    // session is the narrow proof that lets the relay finish
+                    // the remaining surface anchors without weakening
+                    // ordinary cleanup.
+                    return match self
+                        .archive_runtime_cleanup()
+                        .run_after_runtime_termination(session_id, &runtime_termination_proof)
+                        .await
+                    {
+                        Ok(()) => Ok(Some(true)),
+                        Err(cleanup_error) => Err(RuntimeCompletionCleanupFailure {
+                            // RuntimeTerminated cleanup authority always
+                            // releases this input's pre-admission. Retaining it
+                            // after the runtime and live session are proven
+                            // terminal would leak capacity while offering no
+                            // retry authority. Required cleanup failure still
+                            // withholds the public completion outcome.
+                            releases_pre_admission: true,
+                            error: meerkat_runtime::CompletionWaitError::AuthorityUnavailable(
+                                format!(
+                                    "runtime completion cleanup failed for session {session_id}: runtime cleanup failed: {cleanup_error}"
+                                ),
+                            ),
+                        }),
+                    };
+                }
+                return Err(RuntimeCompletionCleanupFailure {
+                    releases_pre_admission: false,
+                    error: meerkat_runtime::CompletionWaitError::AuthorityUnavailable(format!(
+                        "generated runtime completion cleanup authority unavailable for session {session_id}: {error}"
+                    )),
+                });
             }
         };
         if cleanup_authority.requires_runtime_cleanup() {
-            let _ = self.service.discard_live_session(session_id).await;
-            let _ = self.archive_runtime_cleanup().run(session_id).await;
+            let discard_error = match self.service.discard_live_session(session_id).await {
+                Ok(()) | Err(SessionError::NotFound { .. }) => None,
+                Err(error) => Some(error),
+            };
+            let runtime_cleanup_error = if runtime_termination_cleanup
+                && !self.runtime_adapter.contains_session(session_id).await
+            {
+                self.archive_runtime_cleanup()
+                    .run_after_runtime_termination(session_id, &runtime_termination_proof)
+                    .await
+                    .err()
+            } else {
+                self.archive_runtime_cleanup().run(session_id).await.err()
+            };
+            if discard_error.is_some() || runtime_cleanup_error.is_some() {
+                let mut causes = Vec::new();
+                if let Some(error) = discard_error {
+                    causes.push(format!("live-session discard failed: {error}"));
+                }
+                if let Some(error) = runtime_cleanup_error {
+                    causes.push(format!("runtime cleanup failed: {error}"));
+                }
+                return Err(RuntimeCompletionCleanupFailure {
+                    releases_pre_admission: cleanup_authority.releases_pre_admission(),
+                    error: meerkat_runtime::CompletionWaitError::AuthorityUnavailable(format!(
+                        "runtime completion cleanup failed for session {session_id}: {}",
+                        causes.join("; ")
+                    )),
+                });
+            }
         }
-        Some(cleanup_authority.releases_pre_admission())
+        Ok(Some(cleanup_authority.releases_pre_admission()))
     }
 
     async fn release_runtime_pre_admission_after_wait_failure_authority(
@@ -2512,13 +2731,35 @@ impl SessionRuntime {
             let completion = handle.try_wait_with_cleanup_observation().await;
             match completion {
                 Ok((outcome, cleanup_observation)) => {
-                    let cleanup_authority = runtime
+                    let cleanup_result = runtime
                         .cleanup_runtime_after_completion_outcome(&session_id, cleanup_observation)
                         .await;
-                    if cleanup_authority == Some(true) {
-                        runtime.restore_or_release_runtime_pre_admission(&session_id, &input_id);
+                    match gate_runtime_completion_outcome(outcome, cleanup_result) {
+                        Ok((outcome, cleanup_authority)) => {
+                            if cleanup_authority == Some(true) {
+                                runtime.restore_or_release_runtime_pre_admission(
+                                    &session_id,
+                                    &input_id,
+                                );
+                            }
+                            let _ = outcome_tx.send(Ok(outcome));
+                        }
+                        Err(cleanup_failure) => {
+                            if cleanup_failure.releases_pre_admission {
+                                runtime.restore_or_release_runtime_pre_admission(
+                                    &session_id,
+                                    &input_id,
+                                );
+                            }
+                            tracing::warn!(
+                                %session_id,
+                                %input_id,
+                                error = %cleanup_failure.error,
+                                "runtime completion outcome withheld because required cleanup failed"
+                            );
+                            let _ = outcome_tx.send(Err(cleanup_failure.error));
+                        }
                     }
-                    let _ = outcome_tx.send(Ok(outcome));
                 }
                 Err(error) => {
                     runtime
@@ -2774,7 +3015,6 @@ impl SessionRuntime {
         let comms_refresh = self.comms_context_refresh_callback(keep_alive);
         meerkat::session_runtime::staged_promotion::spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
             Arc::clone(&self.service),
-            Arc::clone(&self.runtime_adapter),
             comms_refresh,
             session_id,
             create_req,
@@ -2800,7 +3040,6 @@ impl SessionRuntime {
         admission: ActiveCapacityGuard,
     ) -> ServiceApplyRuntimeTurnResultReceiver {
         let service = Arc::clone(&self.service);
-        let runtime_adapter = Arc::clone(&self.runtime_adapter);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = match service
@@ -2817,13 +3056,16 @@ impl SessionRuntime {
                             contributing_input_ids,
                         )
                         .await
+                        .map_err(
+                            meerkat::session_runtime::staged_promotion::StagedApplyRuntimeTurnError::from,
+                        )
                 }
-                Err(err) => {
-                    if !runtime_was_registered {
-                        runtime_adapter.unregister_session(&session_id).await;
-                    }
-                    Err(err)
-                }
+                Err(err) => Err(
+                    meerkat::session_runtime::staged_promotion::classify_recovered_create_failure(
+                        err,
+                        runtime_was_registered,
+                    ),
+                ),
             };
             let _ = result_tx.send(result);
         });
@@ -2834,16 +3076,14 @@ impl SessionRuntime {
         session_id: &SessionId,
         result_rx: ServiceApplyRuntimeTurnResultReceiver,
     ) -> Result<CoreApplyOutput, RpcError> {
-        meerkat::session_runtime::staged_promotion::await_service_apply_runtime_turn(
-            session_id, result_rx,
-        )
-        .await
-        .map_err(|err| RpcError {
+        result_rx.await.map_err(|_| RpcError {
             code: error::INTERNAL_ERROR,
-            message: err.to_string(),
+            message: format!(
+                "session service apply_runtime_turn task ended before reporting a result for {session_id}"
+            ),
             data: None,
         })?
-        .map_err(session_error_to_rpc)
+        .map_err(staged_apply_runtime_turn_error_to_rpc)
     }
 
     async fn await_service_apply_runtime_turn_with_recoverable_admission(
@@ -2998,9 +3238,26 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         runtime_was_registered: bool,
-    ) {
-        if !runtime_was_registered {
-            let _ = self.archive_runtime_cleanup().run(session_id).await;
+    ) -> Result<(), SessionError> {
+        if runtime_was_registered {
+            return Ok(());
+        }
+        self.archive_runtime_cleanup().run(session_id).await
+    }
+
+    async fn combine_with_recovered_runtime_cleanup(
+        &self,
+        session_id: &SessionId,
+        runtime_was_registered: bool,
+        primary_error: RpcError,
+        context: &'static str,
+    ) -> RpcError {
+        match self
+            .cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+            .await
+        {
+            Ok(()) => primary_error,
+            Err(cleanup_error) => combine_rpc_cleanup_error(primary_error, cleanup_error, context),
         }
     }
 
@@ -3790,10 +4047,11 @@ impl SessionRuntime {
             .await
     }
 
-    async fn discard_stale_live_session(&self, session_id: &SessionId) {
+    async fn discard_stale_live_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
         self.runtime_state_ops()
             .discard_stale_live_session(session_id)
-            .await;
+            .await
+            .map_err(session_error_to_rpc)
     }
 
     fn runtime_state_ops(&self) -> meerkat::session_runtime::runtime_state::RuntimeStateOps<'_> {
@@ -3927,7 +4185,7 @@ impl SessionRuntime {
         pre_admission: Option<RuntimePreAdmission>,
     ) -> Result<
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
-        meerkat_core::service::SessionError,
+        meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
         self.apply_runtime_context_appends_with_recovery(
             session_id,
@@ -3939,7 +4197,7 @@ impl SessionRuntime {
             pre_admission,
         )
         .await
-        .map_err(|err| rpc_error_to_session_error(err, session_id))
+        .map_err(crate::session_executor::core_executor_error_from_rpc)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3955,13 +4213,13 @@ impl SessionRuntime {
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, crate::protocol::RpcError>
     {
         if self
-            .archived_persisted_session_without_live(session_id)
+            .archived_persisted_session_without_live_by_authority(session_id)
             .await?
         {
-            return Err(Self::session_not_found_rpc(session_id));
+            return Err(Self::archived_session_teardown_required_rpc(session_id));
         }
         if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await;
+            self.discard_stale_live_session(session_id).await?;
         }
         let admission = match pre_admission {
             Some(admission) => admission.into_admission(),
@@ -4617,7 +4875,7 @@ impl SessionRuntime {
         let workgraph_service = self.workgraph_service().ok();
 
         if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await;
+            self.discard_stale_live_session(session_id).await?;
         }
 
         // Reject build-only overrides that cannot be applied via runtime turn
@@ -4692,7 +4950,18 @@ impl SessionRuntime {
         );
         let input_id = input.id().clone();
 
-        self.ensure_runtime_executor(session_id).await?;
+        if let Err(primary) = self.ensure_runtime_executor(session_id).await {
+            return Err(self
+                .unregister_new_runtime_registration_after_rpc_error(
+                    &self.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    false,
+                    primary,
+                )
+                .await);
+        }
 
         // Manage comms drain lifecycle based on keep_alive override.
         #[cfg(feature = "comms")]
@@ -4706,15 +4975,16 @@ impl SessionRuntime {
                 {
                     Ok(applied) => applied,
                     Err(err) => {
-                        self.unregister_new_runtime_registration_if_idle(
-                            &self.runtime_adapter,
-                            session_id,
-                            runtime_was_registered,
-                            staged_session_existed,
-                            false,
-                        )
-                        .await;
-                        return Err(err);
+                        return Err(self
+                            .unregister_new_runtime_registration_after_rpc_error(
+                                &self.runtime_adapter,
+                                session_id,
+                                runtime_was_registered,
+                                staged_session_existed,
+                                false,
+                                err,
+                            )
+                            .await);
                     }
                 }
             } else {
@@ -4727,15 +4997,16 @@ impl SessionRuntime {
                     None => match self.persisted_keep_alive(session_id).await {
                         Ok(keep_alive) => keep_alive,
                         Err(err) => {
-                            self.unregister_new_runtime_registration_if_idle(
-                                &self.runtime_adapter,
-                                session_id,
-                                runtime_was_registered,
-                                staged_session_existed,
-                                false,
-                            )
-                            .await;
-                            return Err(err);
+                            return Err(self
+                                .unregister_new_runtime_registration_after_rpc_error(
+                                    &self.runtime_adapter,
+                                    session_id,
+                                    runtime_was_registered,
+                                    staged_session_existed,
+                                    false,
+                                    err,
+                                )
+                                .await);
                         }
                     },
                 },
@@ -4746,28 +5017,41 @@ impl SessionRuntime {
                     // Check if the runtime adapter already has comms configured
                     // for this session (e.g., via enable_comms_drain). If so,
                     // the session-service comms check is not authoritative.
-                    let adapter_has_comms = self
-                        .runtime_adapter
-                        .session_has_comms(session_id)
-                        .await
-                        .map_err(runtime_driver_error_to_rpc)?;
+                    let adapter_has_comms =
+                        match self.runtime_adapter.session_has_comms(session_id).await {
+                            Ok(has_comms) => has_comms,
+                            Err(error) => {
+                                return Err(self
+                                    .unregister_new_runtime_registration_after_rpc_error(
+                                        &self.runtime_adapter,
+                                        session_id,
+                                        runtime_was_registered,
+                                        staged_session_existed,
+                                        false,
+                                        runtime_driver_error_to_rpc(error),
+                                    )
+                                    .await);
+                            }
+                        };
                     let staged_keep_alive_authorized =
                         staged_session_existed && staged_keep_alive == Some(true);
                     if !adapter_has_comms && !staged_keep_alive_authorized {
-                        self.unregister_new_runtime_registration_if_idle(
-                            &self.runtime_adapter,
-                            session_id,
-                            runtime_was_registered,
-                            staged_session_existed,
-                            false,
-                        )
-                        .await;
-                        return Err(RpcError {
+                        let primary = RpcError {
                             code: error::INVALID_PARAMS,
                             message: "keep_alive requires a session created with comms_name"
                                 .to_string(),
                             data: None,
-                        });
+                        };
+                        return Err(self
+                            .unregister_new_runtime_registration_after_rpc_error(
+                                &self.runtime_adapter,
+                                session_id,
+                                runtime_was_registered,
+                                staged_session_existed,
+                                false,
+                                primary,
+                            )
+                            .await);
                     }
                 }
                 // RuntimeTurnMetadata is the only carrier for materialized
@@ -4790,20 +5074,46 @@ impl SessionRuntime {
                         "start_turn_via_runtime: mob-owned peer ingress — skipping drain reconfigure"
                     );
                 } else {
-                    let peer_ingress_enabled = self
+                    let peer_ingress_enabled = match self
                         .preserve_existing_peer_ingress(session_id, keep_alive)
-                        .await?;
+                        .await
+                    {
+                        Ok(enabled) => enabled,
+                        Err(primary) => {
+                            return Err(self
+                                .unregister_new_runtime_registration_after_rpc_error(
+                                    &self.runtime_adapter,
+                                    session_id,
+                                    runtime_was_registered,
+                                    staged_session_existed,
+                                    false,
+                                    primary,
+                                )
+                                .await);
+                        }
+                    };
                     // Preserve an already-active peer ingress channel for
                     // externally-enabled sessions even when the persisted
                     // keep_alive bit is false. Without this, ordinary turn
                     // routing can accidentally tear down the persistent comms
                     // drain that autonomous peers rely on for between-turn
                     // responses.
-                    if comms_rt.is_some() || peer_ingress_enabled {
-                        self.runtime_adapter
+                    if (comms_rt.is_some() || peer_ingress_enabled)
+                        && let Err(error) = self
+                            .runtime_adapter
                             .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
                             .await
-                            .map_err(runtime_driver_error_to_rpc)?;
+                    {
+                        return Err(self
+                            .unregister_new_runtime_registration_after_rpc_error(
+                                &self.runtime_adapter,
+                                session_id,
+                                runtime_was_registered,
+                                staged_session_existed,
+                                false,
+                                runtime_driver_error_to_rpc(error),
+                            )
+                            .await);
                     }
                 }
             }
@@ -4813,15 +5123,16 @@ impl SessionRuntime {
             match Self::take_runtime_pre_admission_guard(&mut pre_admission, session_id) {
                 Ok(admission) => admission,
                 Err(err) => {
-                    self.unregister_new_runtime_registration_if_idle(
-                        &self.runtime_adapter,
-                        session_id,
-                        runtime_was_registered,
-                        staged_session_existed,
-                        false,
-                    )
-                    .await;
-                    return Err(err);
+                    return Err(self
+                        .unregister_new_runtime_registration_after_rpc_error(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            false,
+                            err,
+                        )
+                        .await);
                 }
             };
         let pre_admission_registration = match self.register_runtime_pre_admission(
@@ -4831,15 +5142,16 @@ impl SessionRuntime {
         ) {
             Ok(registration) => registration,
             Err(err) => {
-                self.unregister_new_runtime_registration_if_idle(
-                    &self.runtime_adapter,
-                    session_id,
-                    runtime_was_registered,
-                    staged_session_existed,
-                    false,
-                )
-                .await;
-                return Err(err);
+                return Err(self
+                    .unregister_new_runtime_registration_after_rpc_error(
+                        &self.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        false,
+                        err,
+                    )
+                    .await);
             }
         };
         let (outcome, handle) = match self
@@ -4849,19 +5161,21 @@ impl SessionRuntime {
         {
             Ok(pair) => pair,
             Err(e) => {
-                self.unregister_new_runtime_registration_if_idle(
-                    &self.runtime_adapter,
-                    session_id,
-                    runtime_was_registered,
-                    staged_session_existed,
-                    false,
-                )
-                .await;
-                return Err(RpcError {
+                let primary = RpcError {
                     code: error::INTERNAL_ERROR,
                     message: format!("runtime accept failed: {e}"),
                     data: None,
-                });
+                };
+                return Err(self
+                    .unregister_new_runtime_registration_after_rpc_error(
+                        &self.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        false,
+                        primary,
+                    )
+                    .await);
             }
         };
         // Forward events while waiting for completion
@@ -4869,24 +5183,25 @@ impl SessionRuntime {
         // which is spawned inside SessionRuntimeExecutor::apply())
 
         let Some(handle) = handle else {
-            self.unregister_new_runtime_registration_if_idle(
-                &self.runtime_adapter,
-                session_id,
-                runtime_was_registered,
-                staged_session_existed,
-                false,
-            )
-            .await;
-            // Input already terminal (dedup of completed input)
             let existing_id = match outcome {
                 AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.to_string(),
                 _ => "unknown".to_string(),
             };
-            return Err(RpcError {
+            let primary = RpcError {
                 code: error::DUPLICATE_INPUT,
                 message: "input already processed".to_string(),
                 data: Some(serde_json::json!({ "existing_id": existing_id })),
-            });
+            };
+            return Err(self
+                .unregister_new_runtime_registration_after_rpc_error(
+                    &self.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    false,
+                    primary,
+                )
+                .await);
         };
 
         let completion_rx = self.spawn_runtime_pre_admission_cleanup_with_outcome(
@@ -4969,9 +5284,20 @@ impl SessionRuntime {
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
 
         if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await;
+            self.discard_stale_live_session(session_id).await?;
         }
-        self.ensure_runtime_executor(session_id).await?;
+        if let Err(primary) = self.ensure_runtime_executor(session_id).await {
+            return Err(self
+                .unregister_new_runtime_registration_after_rpc_error(
+                    &self.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    true,
+                    primary,
+                )
+                .await);
+        }
 
         let mut pre_admission_registration = None;
         let should_pre_admit = match self
@@ -4981,15 +5307,16 @@ impl SessionRuntime {
         {
             Ok(should_pre_admit) => should_pre_admit,
             Err(error) => {
-                self.unregister_new_runtime_registration_if_idle(
-                    &self.runtime_adapter,
-                    session_id,
-                    runtime_was_registered,
-                    staged_session_existed,
-                    true,
-                )
-                .await;
-                return Err(runtime_driver_error_to_rpc(error));
+                return Err(self
+                    .unregister_new_runtime_registration_after_rpc_error(
+                        &self.runtime_adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        true,
+                        runtime_driver_error_to_rpc(error),
+                    )
+                    .await);
             }
         };
         let cleanup_protects_active_admission = !should_pre_admit;
@@ -4997,15 +5324,16 @@ impl SessionRuntime {
             match self.reserve_or_join_active_turn(session_id).await {
                 Ok(admission) => Some(RuntimePreAdmissionGuard::new(admission)),
                 Err(err) => {
-                    self.unregister_new_runtime_registration_if_idle(
-                        &self.runtime_adapter,
-                        session_id,
-                        runtime_was_registered,
-                        staged_session_existed,
-                        cleanup_protects_active_admission,
-                    )
-                    .await;
-                    return Err(err);
+                    return Err(self
+                        .unregister_new_runtime_registration_after_rpc_error(
+                            &self.runtime_adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            cleanup_protects_active_admission,
+                            err,
+                        )
+                        .await);
                 }
             }
         } else {
@@ -5016,15 +5344,16 @@ impl SessionRuntime {
                 match Self::take_runtime_pre_admission_guard(admission, session_id) {
                     Ok(admission) => admission,
                     Err(err) => {
-                        self.unregister_new_runtime_registration_if_idle(
-                            &self.runtime_adapter,
-                            session_id,
-                            runtime_was_registered,
-                            staged_session_existed,
-                            cleanup_protects_active_admission,
-                        )
-                        .await;
-                        return Err(err);
+                        return Err(self
+                            .unregister_new_runtime_registration_after_rpc_error(
+                                &self.runtime_adapter,
+                                session_id,
+                                runtime_was_registered,
+                                staged_session_existed,
+                                cleanup_protects_active_admission,
+                                err,
+                            )
+                            .await);
                     }
                 };
             pre_admission_registration = Some(
@@ -5035,21 +5364,22 @@ impl SessionRuntime {
                 ) {
                     Ok(registration) => registration,
                     Err(err) => {
-                        self.unregister_new_runtime_registration_if_idle(
-                            &self.runtime_adapter,
-                            session_id,
-                            runtime_was_registered,
-                            staged_session_existed,
-                            false,
-                        )
-                        .await;
-                        return Err(err);
+                        return Err(self
+                            .unregister_new_runtime_registration_after_rpc_error(
+                                &self.runtime_adapter,
+                                session_id,
+                                runtime_was_registered,
+                                staged_session_existed,
+                                false,
+                                err,
+                            )
+                            .await);
                     }
                 },
             );
         }
 
-        let result = self
+        let mut result = self
             .runtime_adapter
             .accept_input_without_wake(session_id, input)
             .await
@@ -5058,16 +5388,19 @@ impl SessionRuntime {
                 message: format!("runtime accept failed: {e}"),
                 data: None,
             });
-        if result.is_err() {
-            self.unregister_new_runtime_registration_if_idle(
-                &self.runtime_adapter,
-                session_id,
-                runtime_was_registered,
-                staged_session_existed,
-                cleanup_protects_active_admission,
-            )
-            .await;
-        }
+        result = match result {
+            Ok(outcome) => Ok(outcome),
+            Err(primary) => Err(self
+                .unregister_new_runtime_registration_after_rpc_error(
+                    &self.runtime_adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    cleanup_protects_active_admission,
+                    primary,
+                )
+                .await),
+        };
         if let Some(registration) = pre_admission_registration {
             let keep_admission_for_active_input =
                 matches!(result, Ok(meerkat_runtime::AcceptOutcome::Accepted { .. }))
@@ -5097,7 +5430,7 @@ impl SessionRuntime {
         let input_id = input.id().clone();
 
         if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await;
+            self.discard_stale_live_session(session_id).await?;
         }
 
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
@@ -5106,8 +5439,21 @@ impl SessionRuntime {
 
         let runtime_was_registered = adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
-        self.ensure_runtime_executor_on_adapter(adapter, session_id)
-            .await?;
+        if let Err(primary) = self
+            .ensure_runtime_executor_on_adapter(adapter, session_id)
+            .await
+        {
+            return Err(self
+                .unregister_new_runtime_registration_after_rpc_error(
+                    adapter,
+                    session_id,
+                    runtime_was_registered,
+                    staged_session_existed,
+                    true,
+                    primary,
+                )
+                .await);
+        }
 
         let should_pre_admit = match adapter
             .input_requires_active_pre_admission(session_id, &input)
@@ -5115,15 +5461,16 @@ impl SessionRuntime {
         {
             Ok(should_pre_admit) => should_pre_admit,
             Err(error) => {
-                self.unregister_new_runtime_registration_if_idle(
-                    adapter,
-                    session_id,
-                    runtime_was_registered,
-                    staged_session_existed,
-                    true,
-                )
-                .await;
-                return Err(runtime_driver_error_to_rpc(error));
+                return Err(self
+                    .unregister_new_runtime_registration_after_rpc_error(
+                        adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        true,
+                        runtime_driver_error_to_rpc(error),
+                    )
+                    .await);
             }
         };
         let cleanup_protects_active_admission = !should_pre_admit;
@@ -5131,15 +5478,16 @@ impl SessionRuntime {
             match self.reserve_or_join_active_turn(session_id).await {
                 Ok(admission) => Some(RuntimePreAdmissionGuard::new(admission)),
                 Err(err) => {
-                    self.unregister_new_runtime_registration_if_idle(
-                        adapter,
-                        session_id,
-                        runtime_was_registered,
-                        staged_session_existed,
-                        cleanup_protects_active_admission,
-                    )
-                    .await;
-                    return Err(err);
+                    return Err(self
+                        .unregister_new_runtime_registration_after_rpc_error(
+                            adapter,
+                            session_id,
+                            runtime_was_registered,
+                            staged_session_existed,
+                            cleanup_protects_active_admission,
+                            err,
+                        )
+                        .await);
                 }
             }
         } else {
@@ -5151,15 +5499,16 @@ impl SessionRuntime {
                 match Self::take_runtime_pre_admission_guard(admission, session_id) {
                     Ok(admission) => admission,
                     Err(err) => {
-                        self.unregister_new_runtime_registration_if_idle(
-                            adapter,
-                            session_id,
-                            runtime_was_registered,
-                            staged_session_existed,
-                            cleanup_protects_active_admission,
-                        )
-                        .await;
-                        return Err(err);
+                        return Err(self
+                            .unregister_new_runtime_registration_after_rpc_error(
+                                adapter,
+                                session_id,
+                                runtime_was_registered,
+                                staged_session_existed,
+                                cleanup_protects_active_admission,
+                                err,
+                            )
+                            .await);
                     }
                 };
             pre_admission_registration = Some(
@@ -5170,15 +5519,16 @@ impl SessionRuntime {
                 ) {
                     Ok(registration) => registration,
                     Err(err) => {
-                        self.unregister_new_runtime_registration_if_idle(
-                            adapter,
-                            session_id,
-                            runtime_was_registered,
-                            staged_session_existed,
-                            cleanup_protects_active_admission,
-                        )
-                        .await;
-                        return Err(err);
+                        return Err(self
+                            .unregister_new_runtime_registration_after_rpc_error(
+                                adapter,
+                                session_id,
+                                runtime_was_registered,
+                                staged_session_existed,
+                                cleanup_protects_active_admission,
+                                err,
+                            )
+                            .await);
                     }
                 },
             );
@@ -5190,15 +5540,16 @@ impl SessionRuntime {
         {
             Ok(pair) => pair,
             Err(error) => {
-                self.unregister_new_runtime_registration_if_idle(
-                    adapter,
-                    session_id,
-                    runtime_was_registered,
-                    staged_session_existed,
-                    cleanup_protects_active_admission,
-                )
-                .await;
-                return Err(runtime_driver_error_to_rpc(error));
+                return Err(self
+                    .unregister_new_runtime_registration_after_rpc_error(
+                        adapter,
+                        session_id,
+                        runtime_was_registered,
+                        staged_session_existed,
+                        cleanup_protects_active_admission,
+                        runtime_driver_error_to_rpc(error),
+                    )
+                    .await);
             }
         };
 
@@ -5227,7 +5578,7 @@ impl SessionRuntime {
                 staged_session_existed,
                 cleanup_protects_active_admission,
             )
-            .await;
+            .await?;
         }
         drop(runtime_registration_guard);
         drop(runtime_registration_lock);
@@ -5308,10 +5659,10 @@ impl SessionRuntime {
         }
 
         if self
-            .archived_persisted_session_without_live(session_id)
+            .archived_persisted_session_without_live_by_authority(session_id)
             .await?
         {
-            return Err(Self::session_not_found_rpc(session_id));
+            return Err(Self::archived_session_teardown_required_rpc(session_id));
         }
 
         // Context-only staged primitives may land directly as runtime
@@ -5341,10 +5692,10 @@ impl SessionRuntime {
         }
 
         if self
-            .archived_persisted_session_without_live(session_id)
+            .archived_persisted_session_without_live_by_authority(session_id)
             .await?
         {
-            return Err(Self::session_not_found_rpc(session_id));
+            return Err(Self::archived_session_teardown_required_rpc(session_id));
         }
 
         let pre_turn_context_appends = match primitive {
@@ -5596,6 +5947,31 @@ impl SessionRuntime {
                 build_config.llm_client_override = Some(client);
                 promotion_cleanup.update_build_config(&build_config);
             }
+            // A staged slot may survive executor-required teardown and retry.
+            // Its serialized build config therefore cannot remain the owner
+            // of epoch-local SessionRuntimeBindings: refresh from the current
+            // MeerkatMachine registration immediately before materialization
+            // and preserve that witness if this attempt is restored again.
+            let current_bindings = match self
+                .runtime_adapter
+                .prepare_bindings(session_id.clone())
+                .await
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    promotion_cleanup.restore_now().await;
+                    return Err(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: format!(
+                            "failed to refresh runtime bindings for staged session {session_id}: {error}"
+                        ),
+                        data: None,
+                    });
+                }
+            };
+            build_config.runtime_build_mode =
+                meerkat_core::RuntimeBuildMode::SessionOwned(current_bindings);
+            promotion_cleanup.update_build_config(&build_config);
             let runtime_generation = if build_config.config_generation.is_none() {
                 if let Some(runtime) = self.config_runtime() {
                     runtime.get().await.ok().map(|snapshot| snapshot.generation)
@@ -5734,15 +6110,19 @@ impl SessionRuntime {
                 )
                 .await
             {
-                self.cleanup_recovered_runtime_if_new(
-                    session_id,
-                    recovered_create.runtime_was_registered,
-                )
-                .await;
-                return Err(RpcError {
+                let primary = RpcError {
                     code: error::INTERNAL_ERROR,
                     message: error.to_string(),
                     data: None,
+                };
+                return Err(if recovered_create.runtime_was_registered {
+                    primary
+                } else {
+                    staged_apply_runtime_turn_error_to_rpc(
+                        meerkat::session_runtime::staged_promotion::StagedApplyRuntimeTurnError::unavailable_teardown(
+                            primary.message,
+                        ),
+                    )
                 });
             }
         }
@@ -5859,12 +6239,18 @@ impl SessionRuntime {
                 .create_session_after_prepare_bindings_session_id
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id.clone());
-            let _ = self.archive_runtime_cleanup().run(&session_id).await;
-            return Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message,
-                data: None,
-            });
+            return Err(self
+                .combine_with_recovered_runtime_cleanup(
+                    &session_id,
+                    false,
+                    RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message,
+                        data: None,
+                    },
+                    "clean up prepared runtime after create failure",
+                )
+                .await);
         }
 
         #[cfg(feature = "mcp")]
@@ -5874,8 +6260,14 @@ impl SessionRuntime {
         {
             Ok(build_config) => build_config,
             Err(err) => {
-                let _ = self.archive_runtime_cleanup().run(&session_id).await;
-                return Err(err);
+                return Err(self
+                    .combine_with_recovered_runtime_cleanup(
+                        &session_id,
+                        false,
+                        err,
+                        "clean up prepared runtime after MCP attachment failure",
+                    )
+                    .await);
             }
         };
 
@@ -5913,17 +6305,29 @@ impl SessionRuntime {
             )
             .await
         {
-            let _ = self.archive_runtime_cleanup().run(&session_id).await;
-            return Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("failed to stage session {session_id}: {err}"),
-                data: None,
-            });
+            return Err(self
+                .combine_with_recovered_runtime_cleanup(
+                    &session_id,
+                    false,
+                    RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: format!("failed to stage session {session_id}: {err}"),
+                        data: None,
+                    },
+                    "clean up prepared runtime after staged-session insertion failure",
+                )
+                .await);
         }
         if let Err(err) = self.insert_staged_capacity_admission(session_id.clone(), admission) {
             let _ = self.staged_sessions.abandon(&session_id).await;
-            let _ = self.archive_runtime_cleanup().run(&session_id).await;
-            return Err(err);
+            return Err(self
+                .combine_with_recovered_runtime_cleanup(
+                    &session_id,
+                    false,
+                    err,
+                    "clean up prepared runtime after capacity-admission insertion failure",
+                )
+                .await);
         }
 
         Ok(session_id)
@@ -6387,15 +6791,20 @@ impl SessionRuntime {
         let build = match create_request.build.clone() {
             Some(build) => build,
             None => {
-                self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
-                    .await;
-                return Err(RpcError {
-                    code: error::INTERNAL_ERROR,
-                    message: format!(
-                        "recovered create request for session {session_id} is missing build options"
-                    ),
-                    data: None,
-                });
+                return Err(self
+                    .combine_with_recovered_runtime_cleanup(
+                        session_id,
+                        runtime_was_registered,
+                        RpcError {
+                            code: error::INTERNAL_ERROR,
+                            message: format!(
+                                "recovered create request for session {session_id} is missing build options"
+                            ),
+                            data: None,
+                        },
+                        "clean up newly recovered runtime after missing build options",
+                    )
+                    .await);
             }
         };
         let model = create_request.model.clone();
@@ -6415,9 +6824,14 @@ impl SessionRuntime {
                 match self.llm_identity_from_pending_build(&build_config).await {
                     Ok(identity) => identity,
                     Err(err) => {
-                        self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
-                            .await;
-                        return Err(err);
+                        return Err(self
+                        .combine_with_recovered_runtime_cleanup(
+                            session_id,
+                            runtime_was_registered,
+                            err,
+                            "clean up newly recovered runtime after identity resolution failure",
+                        )
+                        .await);
                     }
                 };
             let now = now_unix_secs();
@@ -6454,22 +6868,34 @@ impl SessionRuntime {
                 )
                 .await
             {
-                self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
-                    .await;
-                return Err(RpcError {
-                    code: error::INTERNAL_ERROR,
-                    message: format!("failed to stage recovered session {session_id}: {err}"),
-                    data: None,
-                });
+                return Err(self
+                    .combine_with_recovered_runtime_cleanup(
+                        session_id,
+                        runtime_was_registered,
+                        RpcError {
+                            code: error::INTERNAL_ERROR,
+                            message: format!(
+                                "failed to stage recovered session {session_id}: {err}"
+                            ),
+                            data: None,
+                        },
+                        "clean up newly recovered runtime after staging failure",
+                    )
+                    .await);
             }
         }
         if let Err(err) =
             self.insert_staged_capacity_admission(session_id.clone(), admission.into_admission())
         {
             let _ = self.staged_sessions.abandon(session_id).await;
-            self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
-                .await;
-            return Err(err);
+            return Err(self
+                .combine_with_recovered_runtime_cleanup(
+                    session_id,
+                    runtime_was_registered,
+                    err,
+                    "clean up newly recovered runtime after capacity-admission insertion failure",
+                )
+                .await);
         }
 
         // Recursively call start_turn which will now find the pending session.
@@ -7256,14 +7682,6 @@ impl SessionRuntime {
                 )
                 .await
                 .map_err(session_error_to_rpc)?;
-                self.pending_session_event_streams
-                    .lock()
-                    .await
-                    .remove(session_id);
-                #[cfg(feature = "mcp")]
-                if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
-                    state.adapter.shutdown().await;
-                }
                 return Ok(());
             }
             Ok(false) => {}
@@ -7283,41 +7701,13 @@ impl SessionRuntime {
             }
         }
 
-        let result = await_session_archive_with_runtime_cleanup(
+        await_session_archive_with_runtime_cleanup(
             Arc::clone(&self.service),
             self.archive_runtime_cleanup(),
             session_id.clone(),
         )
         .await
-        .map_err(session_error_to_rpc);
-
-        if result.is_ok() {
-            self.runtime_adapter.unregister_session(session_id).await;
-
-            #[cfg(feature = "mcp")]
-            if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
-                state.adapter.shutdown().await;
-            }
-
-            self.pending_session_event_streams
-                .lock()
-                .await
-                .remove(session_id);
-
-            #[cfg(feature = "comms")]
-            if let Err(error) = self.runtime_adapter.abort_comms_drain(session_id).await {
-                // The primary archive outcome owns `result`; the drain-abort
-                // fault is surfaced as a typed warning rather than overwriting
-                // the committed archive verdict.
-                tracing::warn!(
-                    %session_id,
-                    %error,
-                    "failed to abort comms drain during session archive cleanup"
-                );
-            }
-        }
-
-        result
+        .map_err(session_error_to_rpc)
     }
 
     /// List all active sessions, optionally filtered by query parameters.
@@ -8471,6 +8861,26 @@ fn decode_wire_content_blocks(
 // Error mapping
 // ---------------------------------------------------------------------------
 
+fn staged_apply_runtime_turn_error_to_rpc(
+    error: meerkat::session_runtime::staged_promotion::StagedApplyRuntimeTurnError,
+) -> RpcError {
+    match error {
+        meerkat::session_runtime::staged_promotion::StagedApplyRuntimeTurnError::Session(error) => {
+            session_error_to_rpc(error)
+        }
+        meerkat::session_runtime::staged_promotion::StagedApplyRuntimeTurnError::TeardownRequired {
+            reason,
+            message,
+        } => RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message,
+            data: Some(serde_json::json!({
+                "core_executor_teardown_reason": reason.as_str(),
+            })),
+        },
+    }
+}
+
 fn session_error_to_rpc(err: SessionError) -> RpcError {
     let code = match &err {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
@@ -8508,16 +8918,31 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         }
         _ => None,
     };
+    let core_executor_teardown_reason = match &err {
+        SessionError::Agent(meerkat_core::AgentError::StickyModelFallbackAuthorityUnknown {
+            ..
+        }) => Some(
+            meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable,
+        ),
+        _ => None,
+    };
     RpcError {
         code,
         message: err.to_string(),
-        data: err.structured_data().or_else(|| {
-            core_apply_failure_cause.map(|cause| {
+        data: core_executor_teardown_reason
+            .map(|reason| {
                 serde_json::json!({
-                    "core_apply_failure_cause": cause
+                    "core_executor_teardown_reason": reason.as_str(),
                 })
             })
-        }),
+            .or_else(|| err.structured_data())
+            .or_else(|| {
+                core_apply_failure_cause.map(|cause| {
+                    serde_json::json!({
+                        "core_apply_failure_cause": cause
+                    })
+                })
+            }),
     }
 }
 
@@ -8694,6 +9119,28 @@ mod tests {
         assert_eq!(overrides.keep_alive, Some(false));
     }
 
+    #[test]
+    fn runtime_completion_gate_withholds_outcome_on_required_cleanup_failure() {
+        let gated = gate_runtime_completion_outcome(
+            meerkat_runtime::CompletionOutcome::CompletedWithoutResult,
+            Err(RuntimeCompletionCleanupFailure {
+                releases_pre_admission: true,
+                error: meerkat_runtime::CompletionWaitError::AuthorityUnavailable(
+                    "synthetic required cleanup failure".to_string(),
+                ),
+            }),
+        );
+
+        let failure = gated.expect_err("cleanup failure must withhold the completed outcome");
+        assert!(failure.releases_pre_admission);
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("synthetic required cleanup failure")
+        );
+    }
+
     /// Dogma K12: durable replay must project the persisted stream-envelope
     /// identity (`mob_id`, durable `seq`, payload) — never fabricate a
     /// session-scoped envelope with `mob_id: None`.
@@ -8743,58 +9190,15 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
-    struct RuntimeTerminationFixtureExecutor;
-
-    #[async_trait]
-    impl meerkat_core::lifecycle::CoreExecutor for RuntimeTerminationFixtureExecutor {
-        async fn apply(
-            &mut self,
-            run_id: meerkat_core::lifecycle::RunId,
-            primitive: meerkat_core::lifecycle::RunPrimitive,
-        ) -> Result<
-            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
-            meerkat_core::lifecycle::CoreExecutorError,
-        > {
-            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                receipt: meerkat_core::lifecycle::RunBoundaryReceiptDraft {
-                    run_id,
-                    boundary: meerkat_core::lifecycle::RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                },
-                session_snapshot: None,
-                terminal: None,
-            })
-        }
-
-        async fn cancel_after_boundary(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
-            Ok(())
-        }
-
-        async fn stop_runtime_executor(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
-            Ok(())
-        }
-    }
-
     async fn runtime_terminated_completion_handle(
         adapter: &Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
         session_id: &SessionId,
         reason: &str,
     ) -> meerkat_runtime::CompletionHandle {
         adapter
-            .ensure_session_with_executor(
-                session_id.clone(),
-                Box::new(RuntimeTerminationFixtureExecutor),
-            )
+            .register_session(session_id.clone())
             .await
-            .expect("test machine should attach runtime executor");
+            .expect("test machine should register runtime authority");
         let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
             "pending completion fixture",
             None,
@@ -9593,6 +9997,8 @@ mod tests {
     struct FailingLifecycleRuntimeStore {
         inner: meerkat_runtime::InMemoryRuntimeStore,
         fail_lifecycle_once: AtomicBool,
+        fail_lifecycle_after_successes: AtomicUsize,
+        fail_delete_ops_once: AtomicBool,
     }
 
     impl FailingLifecycleRuntimeStore {
@@ -9600,6 +10006,8 @@ mod tests {
             Self {
                 inner: meerkat_runtime::InMemoryRuntimeStore::new(),
                 fail_lifecycle_once: AtomicBool::new(false),
+                fail_lifecycle_after_successes: AtomicUsize::new(usize::MAX),
+                fail_delete_ops_once: AtomicBool::new(false),
             }
         }
 
@@ -9607,10 +10015,24 @@ mod tests {
             self.fail_lifecycle_once
                 .store(true, AtomicOrdering::Release);
         }
+
+        fn fail_lifecycle_commit_after(&self, successful_commits: usize) {
+            self.fail_lifecycle_after_successes
+                .store(successful_commits, AtomicOrdering::Release);
+        }
+
+        fn fail_next_delete_ops_lifecycle(&self) {
+            self.fail_delete_ops_once
+                .store(true, AtomicOrdering::Release);
+        }
     }
 
     #[async_trait::async_trait]
     impl meerkat_runtime::RuntimeStore for FailingLifecycleRuntimeStore {
+        fn supports_compaction_projection_outbox(&self) -> bool {
+            meerkat_runtime::RuntimeStore::supports_compaction_projection_outbox(&self.inner)
+        }
+
         async fn commit_session_snapshot(
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -9669,6 +10091,26 @@ mod tests {
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
             self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn load_pending_compaction_projections(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, meerkat_runtime::RuntimeStoreError>
+        {
+            self.inner
+                .load_pending_compaction_projections(runtime_id)
+                .await
+        }
+
+        async fn mark_compaction_projection_finalized(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            projection: &meerkat_core::CompactionProjectionId,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .mark_compaction_projection_finalized(runtime_id, projection)
+                .await
         }
 
         async fn clear_session_snapshot(
@@ -9731,13 +10173,61 @@ mod tests {
             commit: meerkat_runtime::store::MachineLifecycleCommit,
             input_states: &[InputStatePersistenceRecord],
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
-            if self.fail_lifecycle_once.swap(false, AtomicOrdering::AcqRel) {
+            let scheduled_failure = self
+                .fail_lifecycle_after_successes
+                .fetch_update(
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Acquire,
+                    |remaining| match remaining {
+                        usize::MAX => None,
+                        0 => Some(usize::MAX),
+                        remaining => Some(remaining - 1),
+                    },
+                )
+                .is_ok_and(|previous| previous == 0);
+            if scheduled_failure || self.fail_lifecycle_once.swap(false, AtomicOrdering::AcqRel) {
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                     "synthetic service-turn lifecycle commit failure".to_string(),
                 ));
             }
             self.inner
                 .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+
+        async fn commit_unregister_finalization(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            let scheduled_failure = self
+                .fail_lifecycle_after_successes
+                .fetch_update(
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Acquire,
+                    |remaining| match remaining {
+                        usize::MAX => None,
+                        0 => Some(usize::MAX),
+                        remaining => Some(remaining - 1),
+                    },
+                )
+                .is_ok_and(|previous| previous == 0);
+            if scheduled_failure || self.fail_lifecycle_once.swap(false, AtomicOrdering::AcqRel) {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "synthetic service-turn lifecycle commit failure".to_string(),
+                ));
+            }
+            if self
+                .fail_delete_ops_once
+                .swap(false, AtomicOrdering::AcqRel)
+            {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "synthetic RPC unregister cleanup failure".to_string(),
+                ));
+            }
+            self.inner
+                .commit_unregister_finalization(runtime_id, commit, input_states)
                 .await
         }
 
@@ -9763,8 +10253,102 @@ mod tests {
             &self,
             runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            if self
+                .fail_delete_ops_once
+                .swap(false, AtomicOrdering::AcqRel)
+            {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "synthetic RPC unregister cleanup failure".to_string(),
+                ));
+            }
             self.inner.delete_ops_lifecycle(runtime_id).await
         }
+    }
+
+    #[tokio::test]
+    async fn rpc_new_runtime_compensation_combines_cleanup_failure_and_remains_retryable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store = Arc::new(FailingLifecycleRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            1,
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            crate::router::NotificationSink::noop(),
+        ));
+        let session_id = SessionId::new();
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let snapshot = meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+            .capture_persistence_snapshot(
+                meerkat_core::RuntimeEpochId::new(),
+                &meerkat_core::EpochCursorState::new(),
+            )
+            .expect("capture ops lifecycle snapshot");
+        meerkat_runtime::RuntimeStore::persist_ops_lifecycle(
+            runtime_store.as_ref(),
+            &runtime_id,
+            &snapshot,
+        )
+        .await
+        .expect("persist ops lifecycle snapshot");
+        runtime
+            .runtime_adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register persistent runtime");
+        runtime_store.fail_next_delete_ops_lifecycle();
+
+        let error = runtime
+            .unregister_new_runtime_registration_after_rpc_error(
+                &runtime.runtime_adapter,
+                &session_id,
+                false,
+                false,
+                false,
+                RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: "synthetic RPC materialization failure".to_string(),
+                    data: None,
+                },
+            )
+            .await;
+        assert!(
+            error
+                .message
+                .contains("synthetic RPC materialization failure"),
+            "combined error must retain primary failure: {}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .contains("synthetic RPC unregister cleanup failure"),
+            "combined error must retain cleanup failure: {}",
+            error.message
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed durable unregister must retain runtime registration for retry"
+        );
+
+        runtime
+            .unregister_new_runtime_registration_if_idle(
+                &runtime.runtime_adapter,
+                &session_id,
+                false,
+                false,
+                false,
+            )
+            .await
+            .expect("retry should complete retained unregister work");
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "successful retry must remove runtime registration"
+        );
     }
 
     #[async_trait]
@@ -10414,7 +10998,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "test must remove live runtime bindings before context-only recovery"
@@ -10520,7 +11105,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "test must remove live runtime bindings before realtime-open recovery"
@@ -10912,6 +11498,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_failure_combines_required_runtime_cleanup_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store = Arc::new(FailingLifecycleRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            1,
+            meerkat::PersistenceBundle::new(store, runtime_store_dyn, blob_store),
+            crate::router::NotificationSink::noop(),
+        ));
+        *runtime
+            .create_session_after_prepare_bindings_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some("synthetic post-prepare create failure".to_string());
+        runtime_store.fail_lifecycle_commit_after(1);
+
+        let failed = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect_err("create and its required cleanup should both fail");
+        assert!(
+            failed
+                .message
+                .contains("synthetic post-prepare create failure"),
+            "combined error must retain the create failure: {failed:?}"
+        );
+        assert!(
+            failed
+                .message
+                .contains("synthetic service-turn lifecycle commit failure"),
+            "combined error must retain the unregister failure: {failed:?}"
+        );
+        let retry_session_id = runtime
+            .create_session_after_prepare_bindings_session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("test hook should capture prepared session id");
+        assert!(
+            runtime
+                .runtime_adapter
+                .contains_session(&retry_session_id)
+                .await,
+            "failed unregister must retain the machine-owned retry anchor"
+        );
+
+        runtime
+            .archive_runtime_cleanup()
+            .run(&retry_session_id)
+            .await
+            .expect("cleanup retry should succeed once lifecycle persistence recovers");
+        assert!(
+            !runtime
+                .runtime_adapter
+                .contains_session(&retry_session_id)
+                .await,
+            "successful retry must consume the retained runtime entry"
+        );
+    }
+
+    #[tokio::test]
     async fn realtime_open_config_carries_pending_system_context_as_typed_runtime_context() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = make_runtime(temp_factory(&temp), 10);
@@ -11097,7 +11749,8 @@ mod tests {
         runtime
             .runtime_adapter()
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
@@ -14549,7 +15202,22 @@ mod tests {
     #[tokio::test]
     async fn interrupt_on_cold_persisted_stopped_projection_is_noop_when_session_exists() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(
+                Arc::clone(&store),
+                Arc::clone(&runtime_store),
+                Arc::clone(&blob_store),
+            ),
+            crate::router::NotificationSink::noop(),
+        ));
         let build_config = mock_build_config();
 
         let created = runtime
@@ -14578,10 +15246,33 @@ mod tests {
             .stop_runtime_executor(&created.session_id, "seed stopped projection")
             .await
             .expect("runtime state should persist");
-        runtime
-            .runtime_adapter
-            .unregister_session(&created.session_id)
-            .await;
+        assert_eq!(
+            runtime
+                .service
+                .persisted_runtime_state(&created.session_id)
+                .await
+                .expect("runtime-state projection load should succeed"),
+            Some(meerkat_runtime::RuntimeState::Stopped)
+        );
+
+        // Rebuild the surface with fresh process-local runtime authority while
+        // retaining both durable stores. Unregister would finalize Stopped to
+        // Idle and would not represent a crash/restart boundary.
+        drop(runtime);
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            crate::router::NotificationSink::noop(),
+        ));
+        assert!(
+            !runtime
+                .runtime_adapter
+                .contains_session(&created.session_id)
+                .await,
+            "cold RPC runtime must not inherit process-local registration"
+        );
 
         runtime
             .interrupt(&created.session_id)
@@ -14862,7 +15553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archived_store_only_runtime_apply_fails_as_archived_projection() {
+    async fn archived_prepared_only_core_executor_requests_post_handoff_teardown() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -14870,36 +15561,118 @@ mod tests {
             1,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
         );
-        let _active = runtime
+        let archived_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
-            .expect("fill active admission capacity");
-
-        let mut archived = Session::new();
-        let archived_id = archived.id().clone();
-        mark_archived_store_projection(&mut archived);
-        meerkat::SessionStore::save(store.as_ref(), &archived)
-            .await
-            .expect("save archived store-only session");
-
-        let primitive = runtime_content_turn_primitive();
+            .expect("create session to archive through machine authority");
         let (event_tx, _event_rx) = mpsc::channel(100);
-        let rejected = runtime
-            .apply_runtime_turn(
+        runtime
+            .start_turn(
                 &archived_id,
-                RunId::new(),
-                &primitive,
-                ContentInput::Text("archived store-only session".to_string()),
+                "materialize before archive".into(),
                 event_tx,
                 None,
                 None,
+                None,
+                None,
             )
-            .await;
+            .await
+            .expect("materialize session before archive");
+        runtime
+            .service
+            .archive_with_machine_protocol(
+                &archived_id,
+                MachineSessionArchiveProtocol::from_machine(runtime.runtime_adapter.as_ref()),
+            )
+            .await
+            .expect("archive should retain retired runtime registration for cleanup");
+
+        let primitive = runtime_content_turn_primitive();
+        let mut executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            archived_id.clone(),
+        );
+        let rejected =
+            meerkat_core::lifecycle::CoreExecutor::apply(&mut executor, RunId::new(), primitive)
+                .await;
+        assert!(matches!(
+            rejected,
+            Err(meerkat_core::lifecycle::CoreExecutorError::TeardownRequired {
+                reason: meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::ArchivedSession,
+                ..
+            })
+        ));
         assert!(
-            rejected.as_ref().err().is_some_and(|err| {
-                err.code == error::SESSION_NOT_FOUND || archived_store_projection_rpc_error(err)
-            }),
-            "store-only archived projection must fail closed as an archived projection: {rejected:?}"
+            runtime.runtime_adapter.contains_session(&archived_id).await,
+            "RPC CoreExecutor must retain prepared-only registration until canonical post-handoff teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_rpc_helper_propagates_unregister_failure_and_retains_retry_anchor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store = Arc::new(FailingLifecycleRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            1,
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            crate::router::NotificationSink::noop(),
+        ));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before archive".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+        runtime
+            .service
+            .archive_with_machine_protocol(
+                &session_id,
+                MachineSessionArchiveProtocol::from_machine(runtime.runtime_adapter.as_ref()),
+            )
+            .await
+            .expect("archive through machine authority");
+        runtime_store.fail_next_lifecycle_commit();
+
+        let failed = runtime
+            .reject_archived_persisted_session_without_live(&session_id)
+            .await
+            .expect_err("required unregister failure must remain visible");
+        assert!(
+            failed
+                .message
+                .contains("synthetic service-turn lifecycle commit failure"),
+            "unexpected archived cleanup error: {failed:?}"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed unregister must retain exact machine retry authority"
+        );
+
+        let retired = runtime
+            .reject_archived_persisted_session_without_live(&session_id)
+            .await
+            .expect_err("successful retry still projects archived session as NotFound");
+        assert_eq!(retired.code, error::SESSION_NOT_FOUND);
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "successful retry must retire the retained registration"
         );
     }
 
@@ -15059,7 +15832,8 @@ mod tests {
                 false,
                 true,
             )
-            .await;
+            .await
+            .expect("queued input must make unregister compensation a no-op");
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
             "queued external event must protect the new runtime registration from stale cleanup"
@@ -15568,7 +16342,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
         runtime
             .ensure_runtime_executor(&session_id)
             .await
@@ -15610,7 +16385,8 @@ mod tests {
                 false,
                 true,
             )
-            .await;
+            .await
+            .expect("active input must make unregister compensation a no-op");
         assert!(
             runtime.runtime_adapter.contains_session(&session_id).await,
             "new-runtime cleanup must not unregister a session with active runtime input"
@@ -15721,6 +16497,207 @@ mod tests {
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("failed runtime input cleanup should release active admission");
+    }
+
+    #[tokio::test]
+    async fn runtime_pre_admission_cleanup_accepts_machine_saga_after_external_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize live session before runtime termination".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize live session");
+        assert!(
+            runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("inspect live session before stop"),
+            "test requires a non-archived live session before terminal cleanup"
+        );
+        assert!(
+            !runtime
+                .runtime_adapter
+                .session_has_executor(&session_id)
+                .await
+                .expect("inspect runtime attachment"),
+            "direct materialization must leave the pending input unattached for deterministic stop ordering"
+        );
+
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "pending RPC completion whose machine cleanup saga wins",
+            None,
+        ));
+        let input_id = input.id().clone();
+        let admission = runtime
+            .reserve_active_turn(&session_id)
+            .await
+            .expect("reserve active turn for pending runtime input");
+        runtime
+            .insert_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)
+            .expect("register pending input pre-admission");
+        let (_accepted, handle) = runtime
+            .runtime_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("accept pending runtime input");
+        let handle = handle.expect("pending runtime input should return completion handle");
+
+        // With no executor attached, the machine terminalizes the pending
+        // input without consuming it. Invoke the production RPC executor's
+        // external-only post-terminal cleanup before starting the waiter
+        // relay, then let the machine-owned saga remove runtime authority.
+        runtime
+            .runtime_adapter
+            .stop_runtime_executor(&session_id, "successful RPC runtime stop")
+            .await
+            .expect("runtime stop should terminalize pending input");
+        let mut executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            session_id.clone(),
+        );
+        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
+            &mut executor,
+        )
+        .await
+        .expect("executor external cleanup should succeed");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "external cleanup must not recursively unregister machine authority"
+        );
+        assert!(
+            !runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("inspect live session after executor cleanup"),
+            "executor must discard the non-archived live session before the relay starts"
+        );
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("machine-owned saga should retire the stopped registration");
+        assert!(!runtime.runtime_adapter.contains_session(&session_id).await);
+
+        let outcome = runtime
+            .spawn_runtime_pre_admission_cleanup_with_outcome(session_id.clone(), input_id, handle)
+            .await
+            .expect("cleanup task should report completion")
+            .expect("verified duplicate cleanup must not withhold terminal outcome");
+        assert!(
+            matches!(
+                outcome,
+                meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
+            ),
+            "machine-saga cleanup must publish the truthful terminal outcome: {outcome:?}"
+        );
+
+        runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("machine-saga terminal cleanup should release active admission");
+    }
+
+    #[tokio::test]
+    async fn rpc_machine_unregister_retains_registration_for_retry_after_external_cleanup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store = Arc::new(FailingLifecycleRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            1,
+            meerkat::PersistenceBundle::new(session_store, runtime_store_dyn, blob_store),
+            crate::router::NotificationSink::noop(),
+        ));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create staged session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize before terminal cleanup failure".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize live session");
+        assert!(
+            !runtime
+                .runtime_adapter
+                .session_has_executor(&session_id)
+                .await
+                .expect("inspect runtime attachment"),
+            "direct materialization must remain unattached for deterministic cleanup ordering"
+        );
+
+        runtime
+            .runtime_adapter
+            .stop_runtime_executor(&session_id, "prepare external RPC cleanup")
+            .await
+            .expect("runtime stop should terminalize before external cleanup");
+        let mut executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            session_id.clone(),
+        );
+        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
+            &mut executor,
+        )
+        .await
+        .expect("external cleanup should discard only the live RPC session");
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "external cleanup must retain machine registration authority"
+        );
+
+        runtime_store.fail_next_lifecycle_commit();
+        let error = runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect_err("durable machine unregister failure must remain visible");
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic service-turn lifecycle commit failure"),
+            "machine saga should preserve the real unregister failure: {error}"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed durable machine cleanup must retain the registration retry anchor"
+        );
+
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("machine unregister retry should accept the absent live session");
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "successful retry must remove the retained runtime registration"
+        );
     }
 
     #[tokio::test]
@@ -16049,6 +17026,31 @@ mod tests {
         assert!(
             mob_state.handle_for(&mob_id).await.is_err(),
             "post-NotFound direct archive cleanup must remove the retained mob cleanup anchor"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_forwards_compaction_lifecycle_to_persistent_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let service = runtime.session_service();
+        let missing_session = SessionId::new();
+
+        let reconcile = service
+            .reconcile_runtime_compaction_projections(&missing_session, Vec::new())
+            .await;
+        assert!(
+            reconcile.is_ok(),
+            "empty committed reconciliation must reach the builder-owned absent-session memory seam: {reconcile:?}"
+        );
+
+        let abort = service
+            .abort_uncommitted_compaction_projections(&missing_session)
+            .await;
+        assert!(
+            matches!(abort, Err(SessionError::NotFound { ref id }) if id == &missing_session),
+            "uncommitted abort must reach the persistent owner instead of taking the SessionService default: {abort:?}"
         );
     }
 
@@ -16868,7 +17870,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "test must remove live runtime bindings before mob context-only recovery"
@@ -18420,7 +19423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovered_create_archived_recheck_unregisters_prepared_bindings() {
+    async fn recovered_create_archived_recheck_retains_bindings_for_post_handoff_teardown() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -18450,7 +19453,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
 
         let stored = runtime
             .load_persisted_session(&session_id)
@@ -18502,8 +19506,8 @@ mod tests {
             "recovered create should observe current archived row: {rejected:?}"
         );
         assert!(
-            !runtime.runtime_adapter.contains_session(&session_id).await,
-            "archived recovered-create rejection must unregister prepared bindings"
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "archived recovered-create rejection must retain prepared bindings until post-handoff teardown"
         );
     }
 
@@ -18538,7 +19542,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "test starts without runtime registration"
@@ -18664,7 +19669,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
 
         let overrides = crate::handlers::turn::TurnOverrides {
             keep_alive: None,
@@ -18941,6 +19947,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn realtime_materialization_create_failure_restores_staged_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            1,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create staged realtime session");
+        store.set_fail_save(true);
+        let failed = runtime
+            .materialize_staged_session_for_realtime_open(&session_id)
+            .await;
+        assert!(
+            failed
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("forced save failure")),
+            "injected create failure should be surfaced: {failed:?}"
+        );
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "failed realtime materialization must restore the staged session"
+        );
+        let blocked = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.message.contains("Max sessions")),
+            "restored staged session must retain its capacity admission: {blocked:?}"
+        );
+
+        store.clear_failures();
+        runtime
+            .materialize_staged_session_for_realtime_open(&session_id)
+            .await
+            .expect("materialization should retry after durable store recovers");
+        assert!(
+            runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query retried live session"),
+            "successful retry should materialize the restored staged session"
+        );
+        assert!(!runtime.staged_sessions.contains(&session_id).await);
+    }
+
+    #[tokio::test]
     async fn pending_runtime_apply_pre_run_archive_projection_failure_fails_closed_and_retries() {
         // LUC-524 R004: the no-pending pre-run cleanup archive on the
         // runtime-apply path fails closed when the durable lifecycle commit
@@ -18990,6 +20052,33 @@ mod tests {
             Some(RuntimeState::Retired),
             "failed cleanup archive must not retire the runtime (document commit realizes first)"
         );
+        assert_eq!(
+            failed
+                .as_ref()
+                .err()
+                .and_then(|error| error.data.as_ref())
+                .and_then(|data| data.get("core_executor_teardown_reason"))
+                .and_then(serde_json::Value::as_str),
+            Some(
+                meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::SessionUnavailable
+                    .as_str()
+            ),
+            "failed staged rollback must request post-handoff runtime teardown: {failed:?}"
+        );
+        let mut failed_executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            session_id.clone(),
+        );
+        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
+            &mut failed_executor,
+        )
+        .await
+        .expect("post-handoff cleanup should discard the failed materialization");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("post-handoff teardown should unregister the failed runtime");
 
         store.clear_failures();
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -19027,9 +20116,14 @@ mod tests {
             "runtime retirement should hide compatibility projection state"
         );
         assert!(
-            !runtime.runtime_adapter.contains_session(&session_id).await,
-            "machine-retired no-pending apply should unregister prepared runtime bindings"
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "direct no-pending apply must retain prepared bindings until post-handoff teardown"
         );
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test cleanup should drive canonical post-handoff unregister");
         runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
@@ -19311,7 +20405,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&recoverable)
-            .await;
+            .await
+            .expect("recoverable runtime session should unregister cleanly");
 
         let blocker = runtime
             .create_session(slow_build_config(250), None, None, Vec::new())
@@ -19585,6 +20680,23 @@ mod tests {
             "recovered resume-pending without a boundary should return no-pending terminal: {output:?}"
         );
         assert!(
+            runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("query live recovered session before handoff cleanup"),
+            "direct apply must retain the recovered live session until the exact executor is handed off"
+        );
+        let mut executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            session_id.clone(),
+        );
+        meerkat_core::lifecycle::CoreExecutor::cleanup_after_runtime_stop_terminalized(
+            &mut executor,
+        )
+        .await
+        .expect("post-handoff RPC executor cleanup should discard the recovered live session");
+        assert!(
             !runtime
                 .service
                 .has_live_session(&session_id)
@@ -19593,9 +20705,14 @@ mod tests {
             "recovered pre-run terminal must not leave an untracked live deferred session"
         );
         assert!(
-            !runtime.runtime_adapter.contains_session(&session_id).await,
-            "recovered pre-run terminal must unregister stale runtime registration"
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "external executor cleanup must retain registration for the machine-owned unregister saga"
         );
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test should drive the post-handoff unregister saga");
 
         runtime
             .create_session(mock_build_config(), None, None, Vec::new())
@@ -19686,7 +20803,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
 
         store.set_fail_save(true);
         let primitive = runtime_content_turn_primitive();
@@ -22116,7 +23234,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
 
         let auth_binding = test_auth_binding("dev", "default");
         let overrides = crate::handlers::turn::TurnOverrides {
@@ -22373,7 +23492,8 @@ mod tests {
         runtime
             .runtime_adapter
             .unregister_session(&session_id)
-            .await;
+            .await
+            .expect("runtime session should unregister cleanly");
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "test requires a persisted-only session with no runtime registration"
@@ -22621,6 +23741,36 @@ mod tests {
         let rpc_err = session_error_to_rpc(session_err);
 
         assert_eq!(rpc_err.code, error::REQUEST_CANCELLED);
+    }
+
+    #[test]
+    fn session_error_to_rpc_preserves_sticky_fallback_teardown_requirement() {
+        use meerkat_core::lifecycle::core_executor::{
+            CoreExecutorError, CoreExecutorTeardownReason,
+        };
+
+        let rpc_err = session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::StickyModelFallbackAuthorityUnknown {
+                message: "sticky fallback CAS outcome is ambiguous".to_string(),
+            },
+        ));
+        assert_eq!(
+            rpc_err
+                .data
+                .as_ref()
+                .and_then(|data| data.get("core_executor_teardown_reason"))
+                .and_then(serde_json::Value::as_str),
+            Some(CoreExecutorTeardownReason::SessionUnavailable.as_str())
+        );
+
+        let decoded = crate::session_executor::core_executor_error_from_rpc(rpc_err);
+        assert!(matches!(
+            decoded,
+            CoreExecutorError::TeardownRequired {
+                reason: CoreExecutorTeardownReason::SessionUnavailable,
+                ..
+            }
+        ));
     }
 
     #[test]

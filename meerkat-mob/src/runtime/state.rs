@@ -463,6 +463,16 @@ pub(super) enum MobCommand {
             >,
         >,
     },
+    /// Deterministically stage a provisioned pending-spawn shell capability
+    /// for an already committed member. The public Retire command then drives
+    /// the real classifier, machine cancellation, abort, and anchor retention.
+    #[cfg(test)]
+    StagePendingSpawnForRetireTest {
+        agent_identity: AgentIdentity,
+        pending_spawn_session_id: SessionId,
+        operation_id: meerkat_core::ops::OperationId,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     ApplyExternalPeerReciprocalTrust {
         key: mob_dsl::ExternalPeerKey,
         target_comms: std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>,
@@ -647,6 +657,8 @@ impl MobCommand {
             Self::QueryMachineState { .. } => "QueryMachineState",
             #[cfg(test)]
             Self::AuthorizeMemberTrustCleanupForTest { .. } => "AuthorizeMemberTrustCleanupForTest",
+            #[cfg(test)]
+            Self::StagePendingSpawnForRetireTest { .. } => "StagePendingSpawnForRetireTest",
             Self::ApplyExternalPeerReciprocalTrust { .. } => "ApplyExternalPeerReciprocalTrust",
             Self::ProjectMachineSignal { .. } => "ProjectMachineSignal",
             Self::RecordMissingMemberBridgeSession { .. } => "RecordMissingMemberBridgeSession",

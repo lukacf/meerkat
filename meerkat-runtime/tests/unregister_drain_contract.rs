@@ -578,9 +578,7 @@ async fn shell_unregister_waits_for_inflight_run_and_waiters_get_committed_outco
     let unregister = {
         let adapter = Arc::clone(&adapter);
         let sid = sid.clone();
-        tokio::spawn(async move {
-            adapter.unregister_session(&sid).await;
-        })
+        tokio::spawn(async move { adapter.unregister_session(&sid).await })
     };
     // Give unregister time to reach the teardown seam, then let the run
     // commit.
@@ -590,7 +588,8 @@ async fn shell_unregister_waits_for_inflight_run_and_waiters_get_committed_outco
     tokio::time::timeout(Duration::from_secs(5), unregister)
         .await
         .expect("unregister must not hang")
-        .expect("unregister task must not panic");
+        .expect("unregister task must not panic")
+        .expect("unregister should complete cleanly");
 
     let result = tokio::time::timeout(Duration::from_secs(5), handle.wait())
         .await
@@ -625,7 +624,10 @@ async fn shell_notify_drain_exited_after_teardown_is_benign() {
         .await
         .expect("register session");
 
-    adapter.unregister_session(&sid).await;
+    adapter
+        .unregister_session(&sid)
+        .await
+        .expect("session should unregister cleanly");
     assert!(
         !adapter.contains_session(&sid).await,
         "unregister must remove the session entry"

@@ -2072,6 +2072,82 @@ impl ToolScope {
             .map_err(|_| ToolScopeApplyError::LockPoisoned)
     }
 
+    /// Derive the canonical visibility transaction for a capability-filter
+    /// change without mutating either the generated owner or this projection.
+    /// The returned plan is submitted to generated model-routing authority;
+    /// only an accepted transition may publish it.
+    pub(crate) fn propose_sticky_model_fallback_visibility(
+        &self,
+        target_capability_base_filter: ToolFilter,
+    ) -> Result<
+        (
+            crate::handles::StickyModelFallbackVisibilityPlan,
+            Arc<[Arc<ToolDef>]>,
+        ),
+        ToolScopeApplyError,
+    > {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        let previous_state = self.visibility_owner.visibility_state()?;
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
+        let view_image_tool_available =
+            state.known_base_names.contains(crate::VIEW_IMAGE_TOOL_NAME);
+        let previous_view_image_visible = view_image_tool_available
+            && Self::compose(&[
+                previous_state.capability_base_filter.clone(),
+                previous_state.inherited_base_filter.clone(),
+                previous_state.active_filter.clone(),
+            ])
+            .allows(crate::VIEW_IMAGE_TOOL_NAME);
+
+        let mut next_state = previous_state.clone();
+        next_state.capability_base_filter = target_capability_base_filter;
+        let next_tools =
+            Self::visible_tools_for_state(&state, &next_state, require_filter_witnesses);
+        let next_view_image_visible = view_image_tool_available
+            && Self::compose(&[
+                next_state.capability_base_filter.clone(),
+                next_state.inherited_base_filter.clone(),
+                next_state.active_filter.clone(),
+            ])
+            .allows(crate::VIEW_IMAGE_TOOL_NAME);
+        let committed_visible_set_changed = previous_view_image_visible != next_view_image_visible;
+        if committed_visible_set_changed {
+            let next_active_revision = previous_state
+                .active_revision
+                .max(previous_state.staged_revision)
+                + 1;
+            next_state.active_revision = next_active_revision;
+            // A fallback is an immediate committed visibility change. Rebase
+            // the staged lane onto that new monotonic point so the next normal
+            // boundary can never promote an older revision. Preserve a real
+            // pending staged change (staged > active) by minting it one revision
+            // after the fallback; otherwise the staged lane converges on the
+            // newly committed active revision.
+            next_state.staged_revision =
+                if previous_state.staged_revision > previous_state.active_revision {
+                    next_active_revision + 1
+                } else {
+                    next_active_revision
+                };
+        }
+
+        Ok((
+            crate::handles::StickyModelFallbackVisibilityPlan {
+                previous_state,
+                next_state,
+                view_image_tool_available,
+                previous_view_image_visible,
+                next_view_image_visible,
+                committed_visible_set_changed,
+                revision_bumped: committed_visible_set_changed,
+            },
+            next_tools,
+        ))
+    }
+
     /// Force the live projection closed after a boundary apply failure.
     ///
     /// This updates the projection state itself, not only the caller's local
@@ -2833,6 +2909,35 @@ mod tests {
 
         assert!(second > first);
         assert_eq!(handle.staged_revision().unwrap(), second);
+    }
+
+    #[test]
+    fn sticky_fallback_rebases_pending_staged_revision_after_new_active_commit() {
+        let scope = scope_with_generated_visibility(tools(&[crate::VIEW_IMAGE_TOOL_NAME, "shell"]));
+        let pending = scope
+            .handle()
+            .stage_external_filter(ToolFilter::Deny(set(&["shell"])))
+            .expect("stage pending filter");
+        assert_eq!(pending, ToolScopeRevision(1));
+
+        let (plan, _) = scope
+            .propose_sticky_model_fallback_visibility(ToolFilter::Deny(set(&[
+                crate::VIEW_IMAGE_TOOL_NAME,
+            ])))
+            .expect("derive fallback visibility transaction");
+
+        assert_eq!(plan.previous_state.active_revision, 0);
+        assert_eq!(plan.previous_state.staged_revision, 1);
+        assert_eq!(plan.next_state.active_revision, 2);
+        assert_eq!(
+            plan.next_state.staged_revision, 3,
+            "pending staged intent must be rebased after the immediate fallback commit"
+        );
+        assert_eq!(
+            plan.next_state.staged_filter,
+            ToolFilter::Deny(set(&["shell"])),
+            "rebasing must preserve pending staged intent"
+        );
     }
 
     #[test]

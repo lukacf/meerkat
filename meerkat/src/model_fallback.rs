@@ -7,16 +7,14 @@ use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AgentLlmClient, AgentLlmFallbackSkippedTarget, AgentLlmFallbackSwitch, LlmStreamResult,
-    Provider, SessionLlmIdentity, SessionLlmRequestPolicy, ToolDef, ToolFilter,
+    Provider, SessionLlmIdentity, SessionLlmRequestPolicy, ToolDef,
 };
 
 pub struct ModelFallbackCandidate {
     pub identity: SessionLlmIdentity,
     pub request_policy: SessionLlmRequestPolicy,
     pub client: Arc<dyn AgentLlmClient>,
-    pub capability_base_filter: ToolFilter,
-    pub context_window: Option<u32>,
-    pub max_output_tokens: Option<u32>,
+    pub target_profile: meerkat_core::ModelProfileWitness,
 }
 
 pub struct ModelFallbackClient {
@@ -38,6 +36,16 @@ impl ModelFallbackClient {
             .min(self.candidates.len().saturating_sub(1))
     }
 
+    fn candidate_index(&self, identity: &SessionLlmIdentity) -> Option<usize> {
+        self.candidates.iter().position(|candidate| {
+            candidate.identity.model == identity.model
+                && candidate.identity.provider == identity.provider
+                && candidate.identity.self_hosted_server_id == identity.self_hosted_server_id
+                && candidate.identity.provider_params == identity.provider_params
+                && candidate.identity.auth_binding == identity.auth_binding
+        })
+    }
+
     fn context_downgrade_skip_reason(
         failure: &AgentError,
         _failed: &ModelFallbackCandidate,
@@ -51,7 +59,7 @@ impl ModelFallbackClient {
             _ => return None,
         };
 
-        let next_window = next.context_window?;
+        let next_window = next.target_profile.context_window()?;
         (next_window < requested).then(|| {
             format!(
                 "context overflow requested {requested} tokens; {next_window}-token fallback cannot recover it"
@@ -104,9 +112,7 @@ impl AgentLlmClient for ModelFallbackClient {
                 previous_identity: current.identity.clone(),
                 new_identity: next.identity.clone(),
                 request_policy: next.request_policy.clone(),
-                capability_base_filter: next.capability_base_filter.clone(),
-                context_window: next.context_window,
-                max_output_tokens: next.max_output_tokens,
+                target_profile: next.target_profile.clone(),
                 skipped_targets,
             });
         }
@@ -114,24 +120,67 @@ impl AgentLlmClient for ModelFallbackClient {
         None
     }
 
-    fn commit_model_fallback(&self, identity: &SessionLlmIdentity) {
-        if let Some(idx) = self.candidates.iter().position(|candidate| {
-            candidate.identity.model == identity.model
-                && candidate.identity.provider == identity.provider
-                && candidate.identity.auth_binding == identity.auth_binding
-        }) {
-            self.active.store(idx, Ordering::SeqCst);
+    fn commit_model_fallback(
+        &self,
+        previous_identity: &SessionLlmIdentity,
+        target_identity: &SessionLlmIdentity,
+    ) -> Result<(), AgentError> {
+        let current_idx = self.active_index();
+        if self.candidates[current_idx].identity != *previous_identity {
+            return Err(AgentError::ConfigError(format!(
+                "fallback client expected active identity '{}:{}' but found '{}:{}'",
+                previous_identity.provider.as_str(),
+                previous_identity.model,
+                self.candidates[current_idx].identity.provider.as_str(),
+                self.candidates[current_idx].identity.model
+            )));
         }
+        let target_idx = self.candidate_index(target_identity).ok_or_else(|| {
+            AgentError::ConfigError(format!(
+                "fallback target '{}:{}' is not an exact prebuilt candidate",
+                target_identity.provider.as_str(),
+                target_identity.model
+            ))
+        })?;
+        self.active
+            .compare_exchange(current_idx, target_idx, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|observed| {
+                let observed = observed.min(self.candidates.len().saturating_sub(1));
+                AgentError::ConfigError(format!(
+                    "fallback client active candidate changed concurrently to '{}:{}'",
+                    self.candidates[observed].identity.provider.as_str(),
+                    self.candidates[observed].identity.model
+                ))
+            })?;
+        Ok(())
     }
 
-    fn active_capability_base_filter(&self) -> ToolFilter {
-        self.candidates[self.active_index()]
-            .capability_base_filter
-            .clone()
+    fn active_model_fallback_identity(&self) -> Option<SessionLlmIdentity> {
+        Some(self.candidates[self.active_index()].identity.clone())
     }
 
-    fn active_max_output_tokens(&self) -> Option<u32> {
-        self.candidates[self.active_index()].max_output_tokens
+    fn compile_model_fallback_schema(
+        &self,
+        target_identity: &SessionLlmIdentity,
+        output_schema: &meerkat_core::OutputSchema,
+    ) -> Result<CompiledSchema, AgentError> {
+        let target_idx = self.candidate_index(target_identity).ok_or_else(|| {
+            AgentError::ConfigError(format!(
+                "fallback target '{}:{}' is not an exact prebuilt candidate",
+                target_identity.provider.as_str(),
+                target_identity.model
+            ))
+        })?;
+        self.candidates[target_idx]
+            .client
+            .compile_schema(output_schema)
+            .map_err(|error| {
+                AgentError::ConfigError(format!(
+                    "fallback target '{}:{}' rejected structured output schema: {error}",
+                    target_identity.provider.as_str(),
+                    target_identity.model
+                ))
+            })
     }
 
     fn begin_stream_output_observation(&self) {
@@ -160,7 +209,7 @@ impl AgentLlmClient for ModelFallbackClient {
 mod tests {
     use super::*;
     use meerkat_core::error::{LlmProviderError, LlmProviderErrorKind};
-    use meerkat_core::{AssistantBlock, StopReason, Usage};
+    use meerkat_core::{AssistantBlock, ModelCatalog, StopReason, Usage};
     use tokio::sync::Mutex;
 
     struct ScriptedClient {
@@ -208,11 +257,38 @@ mod tests {
     fn candidate(
         provider: Provider,
         model: &str,
-        capability_base_filter: ToolFilter,
         context_window: Option<u32>,
         max_output_tokens: Option<u32>,
         seen_tools: Arc<Mutex<Vec<Vec<String>>>>,
     ) -> ModelFallbackCandidate {
+        let mut config = meerkat_core::Config::default();
+        config.models.custom.insert(
+            model.to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider,
+                display_name: None,
+                context_window,
+                max_output_tokens,
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let empty_catalog = ModelCatalog {
+            entries: &[],
+            capabilities: &[],
+            provider_defaults: &[],
+            image_generation_models: &[],
+            providers: &[],
+            default_models: &[],
+            image_generation_defaults: &[],
+            global_default_model: "",
+            provider_priority: &[],
+        };
+        let target_profile = meerkat_core::ModelRegistry::from_config(&config, empty_catalog)
+            .expect("fallback test registry")
+            .profile_witness_for_provider(provider, model)
+            .expect("registered fallback test profile");
         let identity = SessionLlmIdentity {
             model: model.to_string(),
             provider,
@@ -232,9 +308,7 @@ mod tests {
                 model: model.to_string(),
                 seen_tools,
             }),
-            capability_base_filter,
-            context_window,
-            max_output_tokens,
+            target_profile,
         }
     }
 
@@ -256,7 +330,6 @@ mod tests {
             candidate(
                 Provider::OpenAI,
                 "primary",
-                ToolFilter::All,
                 Some(200_000),
                 Some(4096),
                 Arc::clone(&seen_tools),
@@ -264,7 +337,6 @@ mod tests {
             candidate(
                 Provider::Anthropic,
                 "backup",
-                ToolFilter::Deny(["view_image".to_string()].into_iter().collect()),
                 Some(200_000),
                 Some(2048),
                 Arc::clone(&seen_tools),
@@ -278,10 +350,12 @@ mod tests {
 
         assert_eq!(switch.previous_identity.model, "primary");
         assert_eq!(switch.new_identity.model, "backup");
-        assert_eq!(switch.max_output_tokens, Some(2048));
+        assert_eq!(switch.target_profile.max_output_tokens(), Some(2048));
         assert_eq!(client.provider(), Provider::OpenAI);
         assert_eq!(client.model(), "primary");
-        client.commit_model_fallback(&switch.new_identity);
+        client
+            .commit_model_fallback(&switch.previous_identity, &switch.new_identity)
+            .expect("exact fallback candidate activation");
         assert_eq!(client.provider(), Provider::Anthropic);
         assert_eq!(client.model(), "backup");
     }
@@ -293,15 +367,13 @@ mod tests {
             candidate(
                 Provider::OpenAI,
                 "large",
-                ToolFilter::All,
                 Some(1_000_000),
                 None,
                 Arc::clone(&seen_tools),
             ),
             candidate(
-                Provider::SelfHosted,
+                Provider::Gemini,
                 "small",
-                ToolFilter::All,
                 Some(128_000),
                 None,
                 Arc::clone(&seen_tools),
@@ -309,7 +381,6 @@ mod tests {
             candidate(
                 Provider::Anthropic,
                 "large-backup",
-                ToolFilter::All,
                 Some(1_200_000),
                 None,
                 Arc::clone(&seen_tools),

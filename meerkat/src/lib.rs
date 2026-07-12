@@ -177,6 +177,7 @@ pub use meerkat_core::{
     SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, TranscriptEditRunningBehavior, TranscriptRewriteCommit,
     TranscriptRewriteReason, TranscriptRewriteRecord, TranscriptRewriteSelection,
+    TranscriptRewriteSemantic,
 };
 
 // Re-export client types

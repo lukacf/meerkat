@@ -5370,6 +5370,10 @@ pub mod inputs {
         pub retire_stale: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyRetirePendingSpawnDisposition {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Retire {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
@@ -6102,6 +6106,7 @@ pub enum Input {
     ClassifyPendingSupervisorAcceptance(inputs::ClassifyPendingSupervisorAcceptance),
     EnsureMember(inputs::EnsureMember),
     Reconcile(inputs::Reconcile),
+    ClassifyRetirePendingSpawnDisposition(inputs::ClassifyRetirePendingSpawnDisposition),
     Retire(inputs::Retire),
     RetireAbsent(inputs::RetireAbsent),
     RequestPendingSessionIngressDetachForMobDestroy(
@@ -6279,6 +6284,9 @@ impl Input {
             }
             Self::EnsureMember(_) => InputKind::EnsureMember,
             Self::Reconcile(_) => InputKind::Reconcile,
+            Self::ClassifyRetirePendingSpawnDisposition(_) => {
+                InputKind::ClassifyRetirePendingSpawnDisposition
+            }
             Self::Retire(_) => InputKind::Retire,
             Self::RetireAbsent(_) => InputKind::RetireAbsent,
             Self::RequestPendingSessionIngressDetachForMobDestroy(_) => {
@@ -6477,6 +6485,7 @@ pub enum InputKind {
     ClassifyPendingSupervisorAcceptance,
     EnsureMember,
     Reconcile,
+    ClassifyRetirePendingSpawnDisposition,
     Retire,
     RetireAbsent,
     RequestPendingSessionIngressDetachForMobDestroy,
@@ -7410,6 +7419,23 @@ pub mod effects {
         pub admission: MobMemberOperationEligibilityKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetirePendingSpawnCancellationAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub generation: Generation,
+        pub pending_spawn_session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetireCommittedIncarnationWithoutPendingSpawnResolved {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetireAbsentPendingSpawnPreservationResolved {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BridgeRejectionRecoveryClassified {
         pub rejection_cause: MobBridgeRejectionCause,
         pub recovery: MobBridgeRejectionRecovery,
@@ -7785,6 +7811,13 @@ pub enum Effect {
     CreateMobAdmissionResolved(effects::CreateMobAdmissionResolved),
     ProfileMutationAdmissionResolved(effects::ProfileMutationAdmissionResolved),
     MemberOperationEligibilityResolved(effects::MemberOperationEligibilityResolved),
+    RetirePendingSpawnCancellationAuthorized(effects::RetirePendingSpawnCancellationAuthorized),
+    RetireCommittedIncarnationWithoutPendingSpawnResolved(
+        effects::RetireCommittedIncarnationWithoutPendingSpawnResolved,
+    ),
+    RetireAbsentPendingSpawnPreservationResolved(
+        effects::RetireAbsentPendingSpawnPreservationResolved,
+    ),
     BridgeRejectionRecoveryClassified(effects::BridgeRejectionRecoveryClassified),
     PendingSupervisorAcceptanceClassified(effects::PendingSupervisorAcceptanceClassified),
     FrameSeedConfirmed(effects::FrameSeedConfirmed),
@@ -7902,6 +7935,9 @@ pub enum EffectKind {
     CreateMobAdmissionResolved,
     ProfileMutationAdmissionResolved,
     MemberOperationEligibilityResolved,
+    RetirePendingSpawnCancellationAuthorized,
+    RetireCommittedIncarnationWithoutPendingSpawnResolved,
+    RetireAbsentPendingSpawnPreservationResolved,
     BridgeRejectionRecoveryClassified,
     PendingSupervisorAcceptanceClassified,
     FrameSeedConfirmed,
@@ -8881,6 +8917,12 @@ pub enum TransitionId {
     CompleteFlowRunningZero,
     FinishRunRunning,
     FinishRunRunningZero,
+    ClassifyRetirePendingSpawnDispositionCancelCommittedRunning,
+    ClassifyRetirePendingSpawnDispositionCancelCommittedStopped,
+    ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingRunning,
+    ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingStopped,
+    ClassifyRetirePendingSpawnDispositionPreserveAbsentRunning,
+    ClassifyRetirePendingSpawnDispositionPreserveAbsentStopped,
     RetireRunningReleasing,
     RetireRunningPreservingBinding,
     RetireRunningNoBinding,

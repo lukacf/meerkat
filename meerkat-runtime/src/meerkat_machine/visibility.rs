@@ -13,6 +13,10 @@ use meerkat_core::ToolName;
 /// as dispatch-path callers without a second shell-side source.
 #[derive(Default)]
 pub struct MachineToolVisibilityOwner {
+    /// Canonical visibility projection. Any operation that needs both this
+    /// projection and the shared DSL authority must acquire this lock first,
+    /// then the DSL mutex. Snapshot readers sample visibility facts directly
+    /// from the DSL instead of nesting these locks in the opposite order.
     pub state: StdRwLock<SessionToolVisibilityState>,
     /// Handle to the per-session DSL authority — set by
     /// `MeerkatMachine::session_management` immediately after the owner is
@@ -24,6 +28,37 @@ pub struct MachineToolVisibilityOwner {
     /// staging trait method — the owner refuses staging calls in that
     /// state rather than falling back to any shadow counter.
     dsl_authority: StdRwLock<Option<Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>>>,
+    #[cfg(test)]
+    lock_order_probe: std::sync::OnceLock<Arc<VisibilityLockOrderProbe>>,
+}
+
+#[cfg(test)]
+pub(super) struct VisibilityLockOrderProbe {
+    snapshot_dsl_acquired: std::sync::Barrier,
+    first_locks_acquired: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl VisibilityLockOrderProbe {
+    pub(super) fn new() -> Self {
+        Self {
+            snapshot_dsl_acquired: std::sync::Barrier::new(2),
+            first_locks_acquired: std::sync::Barrier::new(2),
+        }
+    }
+
+    fn snapshot_acquired_dsl(&self) {
+        self.snapshot_dsl_acquired.wait();
+        self.first_locks_acquired.wait();
+    }
+
+    pub(super) fn wait_for_snapshot_dsl(&self) {
+        self.snapshot_dsl_acquired.wait();
+    }
+
+    fn commit_acquired_projection(&self) {
+        self.first_locks_acquired.wait();
+    }
 }
 
 impl std::fmt::Debug for MachineToolVisibilityOwner {
@@ -61,6 +96,14 @@ impl MachineToolVisibilityOwner {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *slot = Some(authority);
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_lock_order_probe(
+        &self,
+        probe: Arc<VisibilityLockOrderProbe>,
+    ) -> Result<(), Arc<VisibilityLockOrderProbe>> {
+        self.lock_order_probe.set(probe)
     }
 
     fn dsl_authority_for_stage(
@@ -201,7 +244,13 @@ fn mirror_visibility_projection_from_authority(
     projection: &mut SessionToolVisibilityState,
     authority: &super::dsl::MeerkatMachineAuthority,
 ) {
-    let authority_state = authority.state();
+    mirror_visibility_projection_from_state(projection, authority.state());
+}
+
+pub(super) fn mirror_visibility_projection_from_state(
+    projection: &mut SessionToolVisibilityState,
+    authority_state: &super::dsl::MeerkatMachineState,
+) {
     projection.capability_base_filter = meerkat_core::ToolFilter::from(
         authority_state
             .current_session_capability_base_filter
@@ -220,6 +269,35 @@ fn mirror_visibility_projection_from_authority(
     projection.requested_witnesses =
         core_witnesses(&authority_state.requested_visibility_witnesses);
     projection.filter_witnesses = core_witnesses(&authority_state.filter_visibility_witnesses);
+}
+
+impl MachineToolVisibilityOwner {
+    /// Consume a preauthorized sticky-fallback transition only if the exact
+    /// generated parent sampled during staging is still current, mirroring the
+    /// committed visibility projection in the same critical section.
+    pub(crate) fn commit_previewed_sticky_model_fallback(
+        &self,
+        dsl: &crate::handles::HandleDslAuthority,
+        expected: &super::dsl::MeerkatMachineAuthoritySnapshot,
+        input: super::dsl::MeerkatMachineInput,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        let mut projection = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(test)]
+        if let Some(probe) = self.lock_order_probe.get() {
+            probe.commit_acquired_projection();
+        }
+        dsl.apply_previewed_input_and_sample_state(
+            expected,
+            input,
+            "ModelRoutingHandle::stage_sticky_model_fallback/commit",
+            |authority_state| {
+                mirror_visibility_projection_from_state(&mut projection, authority_state);
+            },
+        )
+    }
 }
 
 impl ToolVisibilityOwner for MachineToolVisibilityOwner {
@@ -604,7 +682,6 @@ impl MeerkatMachine {
             completions_present,
             ops_registry_present,
             epoch_id,
-            _visibility_state,
             formal_pre_run_phase,
             formal_visibility_authority_catalogs,
         ) = {
@@ -623,6 +700,10 @@ impl MeerkatMachine {
                 .dsl_authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(test)]
+            if let Some(probe) = entry.tool_visibility_owner.lock_order_probe.get() {
+                probe.snapshot_acquired_dsl();
+            }
             tracing::info!(%session_id, "meerkat_machine_spine_snapshot locked dsl authority");
             let dsl_phase =
                 crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority);
@@ -668,7 +749,6 @@ impl MeerkatMachine {
                 true,
                 true,
                 entry.epoch_id.clone(),
-                entry.tool_visibility_owner.visibility_state().ok()?,
                 formal_pre_run_phase,
                 formal_visibility_authority_catalogs,
             )

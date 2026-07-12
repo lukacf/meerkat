@@ -715,6 +715,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     const helper = await mob.spawnHelper("Summarize the thread.", {
       agentIdentity: "helper-1",
       profileName: "worker",
+      modelOverride: "gpt-5.6-sol",
     });
     assert.equal(helper.agent_identity, "helper-1");
     assert.equal(helper.member_ref, "ref-helper-1");
@@ -723,6 +724,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     const fork = await mob.forkHelper("worker-1", "Review the draft.", {
       agentIdentity: "fork-1",
       profileName: "worker",
+      modelOverride: "claude-opus-4-8",
       forkContext: { mode: "full_history" },
     });
     assert.equal(fork.agent_identity, "fork-1");
@@ -747,6 +749,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
             prompt: "Summarize the thread.",
             agent_identity: "helper-1",
             role_name: "worker",
+            model_override: "gpt-5.6-sol",
           },
         ],
         [
@@ -757,6 +760,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
             prompt: "Review the draft.",
             agent_identity: "fork-1",
             role_name: "worker",
+            model_override: "claude-opus-4-8",
             fork_context: { mode: "full_history" },
           },
         ],

@@ -117,18 +117,66 @@ fn generated_tool_visibility_owner(
     }
 }
 
-/// Build a generated visibility owner for standalone facade sessions.
+/// Shared generated authorities for a standalone facade session.
+///
+/// Standalone has no runtime loop, but turn recovery, model routing, and tool
+/// visibility still describe one session machine. Keeping all three handles on
+/// the same authority is required for sticky fallback: the turn handle admits
+/// ErrorRecovery and the routing handle commits identity + visibility against
+/// that exact state.
+#[derive(Clone)]
+pub struct StandaloneSessionRuntimeAuthorities {
+    tool_visibility_owner: meerkat_core::GeneratedToolVisibilityOwner,
+    turn_state: Arc<dyn meerkat_core::TurnStateHandle>,
+    model_routing: Arc<dyn meerkat_core::handles::ModelRoutingHandle>,
+    #[cfg(test)]
+    model_routing_test: Arc<crate::handles::RuntimeModelRoutingHandle>,
+}
+
+impl StandaloneSessionRuntimeAuthorities {
+    pub fn tool_visibility_owner(&self) -> &meerkat_core::GeneratedToolVisibilityOwner {
+        &self.tool_visibility_owner
+    }
+
+    pub fn turn_state(&self) -> &Arc<dyn meerkat_core::TurnStateHandle> {
+        &self.turn_state
+    }
+
+    pub fn model_routing(&self) -> &Arc<dyn meerkat_core::handles::ModelRoutingHandle> {
+        &self.model_routing
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit_sticky_model_fallback_for_test(
+        &self,
+        previous_identity: &meerkat_core::SessionLlmIdentity,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+        target_profile: &meerkat_core::ModelProfileWitness,
+        visibility_plan: &meerkat_core::handles::StickyModelFallbackVisibilityPlan,
+        retry_attempt: u32,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.model_routing_test
+            .commit_sticky_model_fallback_for_test(
+                previous_identity,
+                target_identity,
+                target_profile,
+                visibility_plan,
+                retry_attempt,
+            )
+    }
+}
+
+/// Build the shared generated authority bundle for a standalone session.
 ///
 /// Standalone sessions do not have a runtime loop, but durable tool visibility
-/// is still a machine fact. This owner gives those sessions the same
-/// MeerkatMachine authority path used by runtime-backed sessions instead of
-/// falling back to a handwritten local mutator.
-pub fn standalone_tool_visibility_owner(
+/// and sticky model fallback are still machine facts. This bundle gives those
+/// sessions the same single-authority path used by runtime-backed sessions.
+pub fn standalone_session_runtime_authorities(
     session_id: &SessionId,
     current_identity: &meerkat_core::SessionLlmIdentity,
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
     capability_base_filter: &ToolFilter,
-) -> Result<meerkat_core::GeneratedToolVisibilityOwner, String> {
+) -> Result<StandaloneSessionRuntimeAuthorities, String> {
     let mut authority = dsl_authority::recover_authority_from_runtime_observation(
         session_id,
         RuntimeState::Idle,
@@ -170,10 +218,59 @@ pub fn standalone_tool_visibility_owner(
         },
     )
     .map_err(|err| dsl_authority::map_error(err, "standalone visibility hydration"))?;
+    dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        dsl::MeerkatMachineInput::SetModelRoutingBaseline {
+            baseline_model: current_identity.model.clone(),
+            realtime_capable: model_profile.is_some_and(|profile| profile.realtime),
+        },
+    )
+    .map_err(|err| dsl_authority::map_error(err, "standalone model routing baseline"))?;
     let authority = Arc::new(std::sync::Mutex::new(authority));
     let owner = Arc::new(MachineToolVisibilityOwner::new());
-    owner.bind_dsl_authority(authority);
-    generated_tool_visibility_owner(owner as Arc<dyn ToolVisibilityOwner>)
+    owner.bind_dsl_authority(Arc::clone(&authority));
+    let shared_handle_authority = Arc::new(crate::handles::HandleDslAuthority::from_shared(
+        Arc::clone(&authority),
+    ));
+    let tool_visibility_owner =
+        generated_tool_visibility_owner(Arc::clone(&owner) as Arc<dyn ToolVisibilityOwner>)?;
+    let turn_state = Arc::new(crate::handles::RuntimeTurnStateHandle::standalone(
+        Arc::clone(&shared_handle_authority),
+        session_id.clone(),
+    )) as Arc<dyn meerkat_core::TurnStateHandle>;
+    let runtime_model_routing = Arc::new(
+        crate::handles::RuntimeModelRoutingHandle::new_with_visibility_owner(
+            shared_handle_authority,
+            owner,
+        ),
+    );
+    let model_routing =
+        Arc::clone(&runtime_model_routing) as Arc<dyn meerkat_core::handles::ModelRoutingHandle>;
+    Ok(StandaloneSessionRuntimeAuthorities {
+        tool_visibility_owner,
+        turn_state,
+        model_routing,
+        #[cfg(test)]
+        model_routing_test: runtime_model_routing,
+    })
+}
+
+/// Build only the standalone visibility projection for tool-only hosts.
+/// AgentFactory uses [`standalone_session_runtime_authorities`] so turn,
+/// routing, and visibility never split across private authorities.
+pub fn standalone_tool_visibility_owner(
+    session_id: &SessionId,
+    current_identity: &meerkat_core::SessionLlmIdentity,
+    model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+    capability_base_filter: &ToolFilter,
+) -> Result<meerkat_core::GeneratedToolVisibilityOwner, String> {
+    standalone_session_runtime_authorities(
+        session_id,
+        current_identity,
+        model_profile,
+        capability_base_filter,
+    )
+    .map(|authorities| authorities.tool_visibility_owner)
 }
 
 /// Error type for [`MeerkatMachine::prepare_bindings`].
@@ -960,11 +1057,102 @@ impl StagedSessionDslInput {
             )
         })
     }
+
+    /// Whether committing this already-staged transition could publish a
+    /// cross-machine seam signal. A caller may restore `previous_snapshot`
+    /// after dispatch failure only when this is false: once any routed signal
+    /// may have escaped, rolling local authority back would split truth.
+    fn has_routed_signal_effect(&self) -> bool {
+        self.effects
+            .as_slice()
+            .iter()
+            .any(|effect| composition::lift_routed_signal(effect).is_some())
+    }
 }
 
 #[derive(Clone, Copy)]
 enum CommittedEffectDispatchFailure {
     PreserveCommittedDslState,
+}
+
+type UnregisterTeardownResult = Result<(), RuntimeDriverError>;
+type RuntimeStopCleanupResult = Result<(), RuntimeDriverError>;
+
+/// Joinable result channel for the one owned unregister saga of an epoch.
+#[derive(Clone)]
+struct UnregisterTeardownCoordinator {
+    epoch_id: meerkat_core::RuntimeEpochId,
+    coordinator_id: uuid::Uuid,
+    result_rx: crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>,
+}
+
+/// Joinable result channel for the one owned ordinary-stop cleanup operation
+/// of an epoch. Completed results remain installed until a successful resume
+/// replaces the executor, or an explicit stop/unregister authorizes a retry.
+#[derive(Clone)]
+struct RuntimeStopCleanupCoordinator {
+    epoch_id: meerkat_core::RuntimeEpochId,
+    coordinator_id: uuid::Uuid,
+    teardown_slot: Option<Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>>,
+    completion_authority: Arc<
+        crate::tokio::sync::Mutex<
+            Option<crate::meerkat_machine::driver::RuntimeCompletionResultAuthority>,
+        >,
+    >,
+    result_rx: crate::tokio::sync::watch::Receiver<Option<RuntimeStopCleanupResult>>,
+}
+
+#[derive(Clone)]
+struct PendingUnregisterFinalization {
+    durability_authority: session_management::RuntimeOpsLifecycleDurabilityAuthority,
+    committed_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
+}
+
+struct UnregisterTeardownMechanicalObservations {
+    runtime_loop_forced_abort: std::sync::atomic::AtomicBool,
+    comms_drain_forced_abort: std::sync::atomic::AtomicBool,
+}
+
+/// Owned persistence worker for one runtime's ops epoch. The unregister saga
+/// closes the registry producer and joins this worker before the atomic store
+/// finalization can retire the epoch.
+#[cfg(not(target_arch = "wasm32"))]
+struct OpsLifecyclePersistenceWorker {
+    handle: std::thread::JoinHandle<()>,
+}
+
+#[cfg(target_arch = "wasm32")]
+struct OpsLifecyclePersistenceWorker {
+    handle: crate::tokio::task::JoinHandle<()>,
+}
+
+impl UnregisterTeardownMechanicalObservations {
+    fn new() -> Self {
+        Self {
+            runtime_loop_forced_abort: std::sync::atomic::AtomicBool::new(false),
+            comms_drain_forced_abort: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn from_durable_process_recovery(
+        progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+    ) -> Self {
+        let observations = Self::new();
+        if let Some(progress) = progress {
+            // A pending producer obligation recovered in a fresh process has
+            // lost its original JoinHandle. Closing it now is necessarily a
+            // process-loss/forced disposition, never evidence of clean drain.
+            observations.runtime_loop_forced_abort.store(
+                progress.runtime_loop_drain_pending(),
+                std::sync::atomic::Ordering::Release,
+            );
+            observations.comms_drain_forced_abort.store(
+                progress.comms_drain_exit_pending(),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+        observations
+    }
 }
 
 /// Per-session state: driver + generated authority binding + shell handles.
@@ -996,6 +1184,10 @@ struct RuntimeSessionEntry {
     control_projection: Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
     /// Shared async-operation lifecycle registry for this runtime/session.
     ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+    /// Joinable durability worker for `ops_lifecycle`. Never detached: final
+    /// unregister must prove it has observed the closed producer before the
+    /// store records the epoch tombstone.
+    ops_lifecycle_persistence_worker: Option<OpsLifecyclePersistenceWorker>,
     /// Runtime epoch identity — stable across rebuilds, rotated on reset/restart-without-recovery.
     epoch_id: meerkat_core::RuntimeEpochId,
     /// Mechanical close gate for handles minted from this session entry.
@@ -1014,6 +1206,26 @@ struct RuntimeSessionEntry {
     /// This is mechanical shell state only. The generated `MeerkatMachine`
     /// `registration_phase` is the semantic executor registration authority.
     attachment_slot: RuntimeLoopAttachmentSlot,
+    /// Exact executor-cleanup handoff retained across unregister retries.
+    ///
+    /// The attachment channels and loop JoinHandle are consumed by the first
+    /// teardown attempt, but a failing external cleanup restores its executor
+    /// into this slot so the next machine-owned saga can retry without
+    /// fabricating quiescence.
+    runtime_loop_teardown: Option<Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>>,
+    /// Current epoch's owned unregister saga, if one is active.
+    unregister_coordinator: Option<UnregisterTeardownCoordinator>,
+    /// Current epoch's single ordinary-stop cleanup owner. Unlike unregister,
+    /// its successful terminal leaves this registration in generated Stopped.
+    runtime_stop_cleanup_coordinator: Option<RuntimeStopCleanupCoordinator>,
+    /// Retry witness installed before the final generated UnregisterSession
+    /// transition. If an owned saga panics after that transition changes the
+    /// live projection to Queuing/session_id=None, the next saga resumes the
+    /// same atomic store commit instead of trying to BeginUnregister again.
+    pending_unregister_finalization: Option<PendingUnregisterFinalization>,
+    /// Cancellation-safe shell observations waiting to be committed through
+    /// the matching generated unregister feedback inputs.
+    unregister_teardown_observations: Arc<UnregisterTeardownMechanicalObservations>,
     /// Temporary live interrupt capability for prepared, session-owned turns
     /// that run before the runtime loop attachment is published.
     provisional_interrupt_handle:
@@ -1059,6 +1271,48 @@ enum RuntimeLoopAttachmentSlot {
 }
 
 impl RuntimeSessionEntry {
+    fn dsl_mutation_blocked_by_unregister(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<RuntimeDriverError> {
+        if self.pending_unregister_finalization.is_some() {
+            return Some(RuntimeDriverError::UnregisterFinalizationOutcomeUnknown {
+                reason: format!(
+                    "session {session_id} retains an ambiguous unregister finalization; retry unregister before applying any other lifecycle mutation"
+                ),
+            });
+        }
+        self.handle_teardown_gate
+            .is_closed()
+            .then(|| RuntimeDriverError::ValidationFailed {
+                reason: format!("session {session_id} is a teardown-only unregister retry anchor"),
+            })
+    }
+
+    fn registration_blocked_by_unregister(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<RuntimeDriverError> {
+        if let Some(error) = self.dsl_mutation_blocked_by_unregister(session_id) {
+            return Some(error);
+        }
+        if self.unregister_coordinator.is_some() {
+            return Some(RuntimeDriverError::NotReady {
+                state: self.control_snapshot().phase,
+            });
+        }
+        let Some(coordinator) = self.runtime_stop_cleanup_coordinator.as_ref() else {
+            return None;
+        };
+        match coordinator.result_rx.borrow().clone() {
+            None => Some(RuntimeDriverError::RuntimeStopInProgress {
+                runtime_id: self.runtime_id.clone(),
+            }),
+            Some(Ok(())) => None,
+            Some(Err(error)) => Some(error),
+        }
+    }
+
     fn control_snapshot(&self) -> crate::driver::ephemeral::RuntimeControlProjection {
         self.control_projection
             .read()
@@ -1087,6 +1341,14 @@ impl RuntimeSessionEntry {
             authority.state().registration_phase,
             dsl::RegistrationPhase::Active
         )
+    }
+
+    fn generated_executor_registration_has_viable_attachment(&self) -> bool {
+        self.generated_executor_registration_active()
+            && match &self.attachment_slot {
+                RuntimeLoopAttachmentSlot::Empty => true,
+                RuntimeLoopAttachmentSlot::Attached(_) => self.attachment_is_live(),
+            }
     }
 
     fn close_handle_teardown_gate(&self) {
@@ -1147,7 +1409,7 @@ impl RuntimeSessionEntry {
     }
 
     fn stage_generated_executor_exit_observation(&self) -> Result<StagedSessionDslInput, String> {
-        MeerkatMachine::stage_runtime_internal_dsl_transition_on_authority(
+        MeerkatMachine::stage_runtime_owner_dsl_transition_on_authority(
             &self.dsl_authority,
             crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited,
         )
@@ -1165,9 +1427,19 @@ impl RuntimeSessionEntry {
         effect_tx: mpsc::Sender<crate::effect::RuntimeEffect>,
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
-        loop_handle: tokio::task::JoinHandle<()>,
+        spawned_loop: crate::runtime_loop::SpawnedRuntimeLoop,
     ) {
+        let crate::runtime_loop::SpawnedRuntimeLoop {
+            loop_handle,
+            teardown_slot,
+            startup: _,
+        } = spawned_loop;
         self.provisional_interrupt_handle = None;
+        // Generated revival admits a new executor only after the prior stop
+        // coordinator completed successfully. The new attachment owns a fresh
+        // epoch-local cleanup operation and replaces the completed receipt.
+        self.runtime_stop_cleanup_coordinator = None;
+        self.runtime_loop_teardown = Some(Arc::clone(&teardown_slot));
         self.attachment_slot = RuntimeLoopAttachmentSlot::Attached(RuntimeLoopAttachment {
             wake_tx,
             effect_tx,
@@ -1184,9 +1456,9 @@ impl RuntimeSessionEntry {
     /// closes the loop's receivers, which drives the loop through its canonical
     /// `StopRuntimeExecutor` + `RuntimeExecutorExited` exit. The slot is left
     /// `Empty`. Returns `None` when no loop is attached.
-    fn take_loop_join_handle(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+    fn take_runtime_loop_attachment(&mut self) -> Option<RuntimeLoopAttachment> {
         match std::mem::replace(&mut self.attachment_slot, RuntimeLoopAttachmentSlot::Empty) {
-            RuntimeLoopAttachmentSlot::Attached(attachment) => Some(attachment.loop_handle),
+            RuntimeLoopAttachmentSlot::Attached(attachment) => Some(attachment),
             RuntimeLoopAttachmentSlot::Empty => None,
         }
     }
@@ -1199,6 +1471,37 @@ impl RuntimeSessionEntry {
             return true;
         }
         false
+    }
+
+    fn retire_completed_runtime_stop_after_revival(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        if !matches!(self.attachment_slot, RuntimeLoopAttachmentSlot::Empty) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "revived session {session_id} still carries a runtime-loop attachment"
+            )));
+        }
+        match self.runtime_stop_cleanup_coordinator.as_ref() {
+            None if self.runtime_loop_teardown.is_none() => return Ok(()),
+            None => {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "revived session {session_id} carries a teardown slot without its stop coordinator"
+                )));
+            }
+            Some(coordinator) => match coordinator.result_rx.borrow().clone() {
+                Some(Ok(())) => {}
+                None => {
+                    return Err(RuntimeDriverError::RuntimeStopInProgress {
+                        runtime_id: self.runtime_id.clone(),
+                    });
+                }
+                Some(Err(error)) => return Err(error),
+            },
+        }
+        self.runtime_stop_cleanup_coordinator = None;
+        self.runtime_loop_teardown = None;
+        Ok(())
     }
 
     fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
@@ -1260,6 +1563,29 @@ impl RuntimeSessionEntry {
 }
 
 impl MeerkatMachine {
+    #[cfg(test)]
+    pub(crate) async fn model_routing_handle_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<crate::handles::RuntimeModelRoutingHandle>> {
+        let (dsl_authority, visibility_owner) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions.get(session_id)?;
+            (
+                Arc::clone(&entry.dsl_authority),
+                Arc::clone(&entry.tool_visibility_owner),
+            )
+        };
+        Some(Arc::new(
+            crate::handles::RuntimeModelRoutingHandle::new_with_visibility_owner(
+                Arc::new(crate::handles::HandleDslAuthority::from_shared(
+                    dsl_authority,
+                )),
+                visibility_owner,
+            ),
+        ))
+    }
+
     /// Acquire the per-session mutation gate.
     ///
     /// Returns an `Arc<Mutex<()>>` that the caller must `.lock().await` and
@@ -1285,6 +1611,31 @@ impl MeerkatMachine {
                 return Some(gate_guard);
             }
         }
+    }
+
+    async fn lock_registration_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        let blocked = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.registration_blocked_by_unregister(session_id)
+        };
+        if let Some(error) = blocked {
+            return Err(error);
+        }
+        Ok(gate_guard)
     }
 
     pub(crate) async fn lock_current_session_driver_gate(
@@ -1340,27 +1691,31 @@ impl MeerkatMachine {
         Ok(gate_guard)
     }
 
-    async fn current_session_driver_with_authority(
+    pub(crate) async fn current_runtime_stop_cleanup_in_progress(
         &self,
         session_id: &SessionId,
-    ) -> Result<(SharedDriver, crate::tokio::sync::OwnedMutexGuard<()>), RuntimeDriverError> {
-        let gate_guard = self
-            .lock_current_session_mutation_gate(session_id)
-            .await
+        driver: &SharedDriver,
+    ) -> Result<bool, RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
             .ok_or(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
             })?;
-        let driver = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?
-                .driver
-                .clone()
+        if !Arc::ptr_eq(&entry.driver, driver) {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            });
+        }
+        let Some(coordinator) = entry.runtime_stop_cleanup_coordinator.as_ref() else {
+            return Ok(false);
         };
-        Ok((driver, gate_guard))
+        if coordinator.epoch_id != entry.epoch_id {
+            return Err(RuntimeDriverError::Internal(format!(
+                "stale runtime-stop cleanup coordinator epoch for session {session_id}"
+            )));
+        }
+        Ok(coordinator.result_rx.borrow().is_none())
     }
 
     async fn session_dsl_authority(
@@ -2141,7 +2496,8 @@ impl LiveChannelStatusAuthority {
 /// comms drain, epoch bindings) and routes all internal mutations through one
 /// canonical command reducer, with smaller group handlers retained only as
 /// implementation detail helpers.
-pub struct MeerkatMachine {
+#[doc(hidden)]
+pub struct MeerkatMachineShared {
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,
     /// Optional RuntimeStore for persistent drivers.
@@ -2174,6 +2530,25 @@ pub struct MeerkatMachine {
     /// signals.
     composition_signal_dispatcher:
         StdRwLock<Option<composition::MeerkatCompositionSignalDispatcher>>,
+}
+
+/// Cloneable handle to the process-local runtime authority.
+///
+/// Clones share every machine-owned session fact and shell-mechanics lock.
+/// The owned unregister coordinator uses a clone so dropping any individual
+/// stop/unregister caller can never cancel teardown halfway through the
+/// generated `Draining` window.
+#[derive(Clone)]
+pub struct MeerkatMachine {
+    shared: Arc<MeerkatMachineShared>,
+}
+
+impl std::ops::Deref for MeerkatMachine {
+    type Target = MeerkatMachineShared;
+
+    fn deref(&self) -> &Self::Target {
+        self.shared.as_ref()
+    }
 }
 
 impl MeerkatMachine {
@@ -2231,17 +2606,19 @@ impl MeerkatMachine {
         ));
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
-            sessions: RwLock::new(HashMap::new()),
-            store: None,
-            blob_store: None,
-            llm_reconfigure_host: StdRwLock::new(None),
-            auth_lease: StdRwLock::new(auth_lease),
-            #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(oauth_flows),
-            #[cfg(feature = "live")]
-            live_unbound_rejection_authority: live_unbound_rejection_authority(),
-            session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-            composition_signal_dispatcher: StdRwLock::new(None),
+            shared: Arc::new(MeerkatMachineShared {
+                sessions: RwLock::new(HashMap::new()),
+                store: None,
+                blob_store: None,
+                llm_reconfigure_host: StdRwLock::new(None),
+                auth_lease: StdRwLock::new(auth_lease),
+                #[cfg(not(target_arch = "wasm32"))]
+                oauth_flows: StdRwLock::new(oauth_flows),
+                #[cfg(feature = "live")]
+                live_unbound_rejection_authority: live_unbound_rejection_authority(),
+                session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                composition_signal_dispatcher: StdRwLock::new(None),
+            }),
         }
     }
 
@@ -2259,17 +2636,19 @@ impl MeerkatMachine {
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
-            sessions: RwLock::new(HashMap::new()),
-            store: Some(store),
-            blob_store: Some(blob_store),
-            llm_reconfigure_host: StdRwLock::new(None),
-            auth_lease: StdRwLock::new(auth_lease),
-            #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(oauth_flows),
-            #[cfg(feature = "live")]
-            live_unbound_rejection_authority: live_unbound_rejection_authority(),
-            session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-            composition_signal_dispatcher: StdRwLock::new(None),
+            shared: Arc::new(MeerkatMachineShared {
+                sessions: RwLock::new(HashMap::new()),
+                store: Some(store),
+                blob_store: Some(blob_store),
+                llm_reconfigure_host: StdRwLock::new(None),
+                auth_lease: StdRwLock::new(auth_lease),
+                #[cfg(not(target_arch = "wasm32"))]
+                oauth_flows: StdRwLock::new(oauth_flows),
+                #[cfg(feature = "live")]
+                live_unbound_rejection_authority: live_unbound_rejection_authority(),
+                session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                composition_signal_dispatcher: StdRwLock::new(None),
+            }),
         }
     }
 
@@ -2291,17 +2670,19 @@ impl MeerkatMachine {
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
-            sessions: RwLock::new(HashMap::new()),
-            store: Some(store),
-            blob_store: Some(Arc::new(UnavailableBlobStore)),
-            llm_reconfigure_host: StdRwLock::new(None),
-            auth_lease: StdRwLock::new(auth_lease),
-            #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(oauth_flows),
-            #[cfg(feature = "live")]
-            live_unbound_rejection_authority: live_unbound_rejection_authority(),
-            session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-            composition_signal_dispatcher: StdRwLock::new(None),
+            shared: Arc::new(MeerkatMachineShared {
+                sessions: RwLock::new(HashMap::new()),
+                store: Some(store),
+                blob_store: Some(Arc::new(UnavailableBlobStore)),
+                llm_reconfigure_host: StdRwLock::new(None),
+                auth_lease: StdRwLock::new(auth_lease),
+                #[cfg(not(target_arch = "wasm32"))]
+                oauth_flows: StdRwLock::new(oauth_flows),
+                #[cfg(feature = "live")]
+                live_unbound_rejection_authority: live_unbound_rejection_authority(),
+                session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
+                composition_signal_dispatcher: StdRwLock::new(None),
+            }),
         }
     }
 

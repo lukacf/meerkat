@@ -2,7 +2,10 @@
 //!
 //! Gated behind the `session-compaction` feature.
 
-use meerkat_core::compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
+use meerkat_core::compact::{
+    COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext, CompactionResult,
+    CompactionSummary, Compactor,
+};
 use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, ContentBlock, Message};
 
 /// Summarization prompt sent to the LLM with the current history.
@@ -17,12 +20,6 @@ Include:
 - Tool call patterns that worked or failed
 
 Be concise and structured. Prioritize information the next context needs to act, not narrate.";
-
-/// Prefix injected before the summary in the rebuilt history.
-const SUMMARY_PREFIX: &str = "\
-[Context compacted] A previous context produced the following summary of work so far. \
-The current tool and session state is preserved. Use this summary to continue without \
-duplicating work:\n\n";
 
 /// Default compaction strategy implementation.
 pub struct DefaultCompactor {
@@ -181,21 +178,33 @@ impl Compactor for DefaultCompactor {
 
     fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
         let mut rebuilt = Vec::new();
+        let mut retained = Vec::new();
         let mut discarded = Vec::new();
 
         // 1. Preserve system prompt (extracted from messages, single source of truth)
         if let Some(Message::System(sys)) = messages.first() {
-            rebuilt.push(Message::System(sys.clone()));
+            let message = Message::System(sys.clone());
+            retained.push(meerkat_core::compact::CompactionRetained::new(
+                0,
+                u64::try_from(rebuilt.len()).unwrap_or(u64::MAX),
+                message.clone(),
+            ));
+            rebuilt.push(message);
         }
 
         // 2. Inject summary as a user message carrying the typed compaction-
         //    summary transcript role so the transcript-continuity save-guard
         //    recognizes the rebuilt-transcript boundary from a typed field, not
         //    the rendered `[Context compacted]` prefix.
-        let summary_content = format!("{SUMMARY_PREFIX}{summary}");
-        rebuilt.push(Message::User(
-            meerkat_core::types::UserMessage::compaction_summary(summary_content),
+        let summary_content = format!("{COMPACTION_SUMMARY_PREFIX}{summary}");
+        let summary_message = Message::User(meerkat_core::types::UserMessage::compaction_summary(
+            summary_content,
         ));
+        let summary_mapping = CompactionSummary::new(
+            u64::try_from(rebuilt.len()).unwrap_or(u64::MAX),
+            summary_message.clone(),
+        );
+        rebuilt.push(summary_message);
 
         // 3. Identify recent complete turns to retain
         // A "turn" is User -> BlockAssistant -> ToolResults sequence.
@@ -230,28 +239,54 @@ impl Compactor for DefaultCompactor {
             }
         }
 
-        let retain_from = if self.config.recent_turn_budget == 0 {
-            // Retain nothing -- discard all history
-            history.len()
-        } else if turn_starts.len() > self.config.recent_turn_budget {
-            let idx = turn_starts.len() - self.config.recent_turn_budget;
-            turn_starts[idx]
-        } else {
+        // A successful compaction must summarize and remove real source
+        // content on every pass. A prior summary/non-turn prefix is discarded,
+        // but it cannot be the only discarded content: replacing that prefix
+        // with an identical new summary would be a no-op and would never
+        // advance the rewrite chain. The turn budget is therefore a maximum,
+        // and at least the oldest live turn is summarized on every pass.
+        let retain_turn_count = if self.config.recent_turn_budget == 0 {
             0
+        } else {
+            self.config
+                .recent_turn_budget
+                .min(turn_starts.len().saturating_sub(1))
+        };
+        let retain_from = if retain_turn_count == 0 {
+            history.len()
+        } else {
+            turn_starts[turn_starts.len() - retain_turn_count]
         };
 
         // Everything before retain_from goes to discarded
-        for msg in &history[..retain_from] {
-            discarded.push(msg.clone());
+        for (relative_offset, msg) in history[..retain_from].iter().enumerate() {
+            let source_offset =
+                u64::try_from(non_system_start.saturating_add(relative_offset)).unwrap_or(u64::MAX);
+            discarded.push(meerkat_core::compact::CompactionDiscard::new(
+                source_offset,
+                msg.clone(),
+            ));
         }
 
         // Everything from retain_from remains active history. Summary LLM input
         // uses a separate text projection; retained messages keep typed
         // media/blob references verbatim so compaction does not lose context.
-        rebuilt.extend(history[retain_from..].iter().cloned());
+        for (relative_offset, msg) in history[retain_from..].iter().enumerate() {
+            let source_offset = non_system_start
+                .saturating_add(retain_from)
+                .saturating_add(relative_offset);
+            retained.push(meerkat_core::compact::CompactionRetained::new(
+                u64::try_from(source_offset).unwrap_or(u64::MAX),
+                u64::try_from(rebuilt.len()).unwrap_or(u64::MAX),
+                msg.clone(),
+            ));
+            rebuilt.push(msg.clone());
+        }
 
         CompactionResult {
             messages: rebuilt,
+            summary: summary_mapping,
+            retained,
             discarded,
         }
     }
@@ -461,6 +496,16 @@ mod tests {
         ];
         let result = c.rebuild_history(&messages, "summary text");
         assert!(matches!(&result.messages[0], Message::System(s) if s.content == "system"));
+        assert_eq!(result.summary.rebuilt_offset, 1);
+        assert_eq!(result.messages[1], result.summary.message);
+        assert_eq!(result.discarded.len(), 1);
+        assert_eq!(result.discarded[0].source_offset, 1);
+        assert!(matches!(
+            &result.discarded[0].message,
+            Message::User(u) if u.text_content() == "turn1"
+        ));
+        assert_eq!(result.retained[0].source_offset, 0);
+        assert_eq!(result.retained[0].rebuilt_offset, 0);
     }
 
     #[test]
@@ -478,6 +523,66 @@ mod tests {
         // Summary + last 1 turn (turn3)
         assert_eq!(result.messages.len(), 2); // summary + turn3
         assert_eq!(result.discarded.len(), 2); // turn1, turn2
+    }
+
+    #[test]
+    fn test_rebuild_below_turn_budget_still_discards_oldest_turn() {
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 4,
+            ..make_config()
+        });
+        let messages = vec![
+            Message::User(UserMessage::text("turn1")),
+            Message::User(UserMessage::text("turn2")),
+        ];
+
+        let result = c.rebuild_history(&messages, "summary");
+
+        assert_eq!(result.messages.len(), messages.len());
+        assert_eq!(result.discarded.len(), 1);
+        assert_eq!(result.discarded[0].source_offset, 0);
+        assert!(matches!(
+            &result.messages[0],
+            Message::User(user) if user.transcript_role.is_compaction_summary()
+        ));
+        assert!(matches!(
+            &result.messages[1],
+            Message::User(user) if user.text_content() == "turn2"
+        ));
+    }
+
+    #[test]
+    fn test_rebuild_below_turn_budget_discards_prior_summary_and_oldest_live_turn() {
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 4,
+            ..make_config()
+        });
+        let messages = vec![
+            Message::User(UserMessage::compaction_summary("old summary")),
+            Message::User(UserMessage::text("turn1")),
+            Message::User(UserMessage::text("turn2")),
+        ];
+
+        let result = c.rebuild_history(&messages, "summary");
+
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.discarded.len(), 2);
+        assert!(matches!(
+            &result.discarded[0].message,
+            Message::User(user) if user.transcript_role.is_compaction_summary()
+        ));
+        assert!(matches!(
+            &result.discarded[1].message,
+            Message::User(user) if user.text_content() == "turn1"
+        ));
+        assert!(matches!(
+            &result.messages[1],
+            Message::User(user) if user.text_content() == "turn2"
+        ));
+        assert!(result.retained.iter().all(|retention| !matches!(
+            &retention.message,
+            Message::User(user) if user.transcript_role.is_compaction_summary()
+        )));
     }
 
     #[test]
@@ -537,7 +642,7 @@ mod tests {
         ));
         assert_eq!(result.discarded.len(), 2, "prior summary + turn1 discarded");
         assert!(matches!(
-            &result.discarded[0],
+            &result.discarded[0].message,
             Message::User(u) if u.transcript_role.is_compaction_summary()
         ));
     }
@@ -561,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rebuild_budget_larger_than_history_keeps_all_turns() {
+    fn test_rebuild_budget_larger_than_history_still_replaces_oldest_turn() {
         let c = DefaultCompactor::new(CompactionConfig {
             recent_turn_budget: 10,
             ..make_config()
@@ -572,9 +677,15 @@ mod tests {
             Message::User(UserMessage::text("t3")),
         ];
         let result = c.rebuild_history(&messages, "summary");
-        // Summary + all original turns (budget exceeds available turns)
-        assert_eq!(result.messages.len(), 4);
-        assert_eq!(result.discarded.len(), 0);
+        // A successful compaction never retains every source and appends a
+        // summary. The budget is a maximum, so the oldest turn is summarized
+        // and the remaining two stay live.
+        assert_eq!(result.messages.len(), 3);
+        assert_eq!(result.discarded.len(), 1);
+        assert!(matches!(
+            &result.discarded[0].message,
+            Message::User(user) if user.text_content() == "t1"
+        ));
     }
 
     #[test]
@@ -591,10 +702,10 @@ mod tests {
         let result = c.rebuild_history(&messages, "summary");
         // Discarded should be in original order: a, b
         assert_eq!(result.discarded.len(), 2);
-        if let Message::User(u) = &result.discarded[0] {
+        if let Message::User(u) = &result.discarded[0].message {
             assert_eq!(u.text_content(), "a");
         }
-        if let Message::User(u) = &result.discarded[1] {
+        if let Message::User(u) = &result.discarded[1].message {
             assert_eq!(u.text_content(), "b");
         }
     }
@@ -1071,15 +1182,15 @@ mod tests {
         let discarded_summary = result
             .discarded
             .iter()
-            .find(|message| {
+            .find(|discard| {
                 matches!(
-                    message,
+                    &discard.message,
                     Message::User(user) if user.transcript_role.is_compaction_summary()
                 )
             })
             .expect("prior compaction summary must be in the discard set");
         assert_eq!(
-            discarded_summary.indexable_content(),
+            discarded_summary.message.indexable_content(),
             MemoryIndexableContent::Excluded(MemoryIndexExclusion::CompactionSummary),
             "discarded prior summary must carry the typed exclusion, not re-index"
         );
@@ -1088,15 +1199,15 @@ mod tests {
         let discarded_turn = result
             .discarded
             .iter()
-            .find(|message| {
+            .find(|discard| {
                 matches!(
-                    message,
+                    &discard.message,
                     Message::User(user) if user.transcript_role.is_conversational()
                 )
             })
             .expect("a conversational turn is also discarded");
         assert!(
-            discarded_turn.indexable_content().is_indexable(),
+            discarded_turn.message.indexable_content().is_indexable(),
             "conversational discards remain indexable"
         );
     }

@@ -358,6 +358,8 @@ pub enum OpsLifecycleError {
     WaitNotActive(WaitRequestId),
     #[error("wait_all contains duplicate operation id: {0}")]
     DuplicateWaitOperation(OperationId),
+    #[error("operation owner is retired")]
+    OwnerRetired,
     #[error("internal lifecycle registry error: {0}")]
     Internal(String),
 }

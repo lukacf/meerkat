@@ -30,8 +30,94 @@ pub struct ModelRegistryEntry {
     pub self_hosted: Option<SelfHostedServerRef>,
 }
 
+/// Registry-minted provenance for one exact provider/model capability profile.
+///
+/// The fields are deliberately private: callers can only obtain this witness
+/// through [`ModelRegistry::profile_witness_for_provider`], which validates the
+/// exact typed provider/model pair against one effective-registry authority.
+/// This keeps a [`ModelProfile`] from being detached from either the catalog
+/// identity or the registry instance that minted it when it crosses a
+/// model-fallback commit boundary.
+#[derive(Clone)]
+pub struct ModelProfileWitness {
+    registry_authority: ModelRegistryAuthority,
+    provider: Provider,
+    model: String,
+    profile: ModelProfile,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+}
+
+impl fmt::Debug for ModelProfileWitness {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModelProfileWitness")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("profile", &self.profile)
+            .field("context_window", &self.context_window)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModelProfileWitness {
+    /// Typed provider identity validated by the effective model registry.
+    pub fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    /// Exact model identifier validated by the effective model registry.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Capability profile projected for this exact provider/model identity.
+    pub fn profile(&self) -> &ModelProfile {
+        &self.profile
+    }
+
+    /// Context-window limit owned by the same effective-registry entry.
+    pub fn context_window(&self) -> Option<u32> {
+        self.context_window
+    }
+
+    /// Maximum output-token limit owned by the same effective-registry entry.
+    pub fn max_output_tokens(&self) -> Option<u32> {
+        self.max_output_tokens
+    }
+
+    /// Whether this witness was minted for the supplied session identity.
+    pub fn matches_identity(&self, identity: &crate::SessionLlmIdentity) -> bool {
+        self.provider == identity.provider && self.model == identity.model
+    }
+
+    pub(crate) fn was_minted_by(&self, authority: ModelRegistryAuthority) -> bool {
+        self.registry_authority == authority
+    }
+}
+
+/// Opaque authority of one constructed effective model registry.
+///
+/// This identity is construction-scoped, not a hash of registry contents:
+/// separately constructed registries are distinct authorities even when they
+/// contain byte-identical profiles. Cloning a registry preserves its authority
+/// so all consumers of that captured effective registry can validate the same
+/// witnesses. Witnesses are in-memory fallback proposals and are not serialized
+/// across restart; a cold build reconstructs the registry and its candidates
+/// together under a fresh authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ModelRegistryAuthority(uuid::Uuid);
+
+impl ModelRegistryAuthority {
+    fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelRegistry {
+    authority: ModelRegistryAuthority,
     entries: BTreeMap<String, ModelRegistryEntry>,
     profiles: BTreeMap<(Provider, String), ModelProfile>,
     defaults: BTreeMap<Provider, String>,
@@ -193,10 +279,16 @@ impl ModelRegistry {
         )?;
 
         Ok(Self {
+            authority: ModelRegistryAuthority::new(),
             entries,
             profiles,
             defaults,
         })
+    }
+
+    /// Authority shared by this effective registry and all of its clones.
+    pub(crate) fn authority(&self) -> ModelRegistryAuthority {
+        self.authority
     }
 
     /// Returns model projection metadata by id.
@@ -240,6 +332,29 @@ impl ModelRegistry {
         self.profiles
             .get(&(provider, model_id.to_string()))
             .cloned()
+    }
+
+    /// Mint provenance for the exact provider/model profile in this registry.
+    ///
+    /// Unknown pairs and provider/model mismatches fail closed. The returned
+    /// witness cannot be re-labelled by callers, so downstream machine inputs
+    /// can bind the capability projection to the identity that was actually
+    /// validated here.
+    pub fn profile_witness_for_provider(
+        &self,
+        provider: Provider,
+        model_id: &str,
+    ) -> Option<ModelProfileWitness> {
+        let entry = self.entry_for_provider(provider, model_id)?;
+        let profile = self.profile_for_provider(provider, model_id)?;
+        Some(ModelProfileWitness {
+            registry_authority: self.authority,
+            provider,
+            model: model_id.to_string(),
+            profile,
+            context_window: entry.context_window,
+            max_output_tokens: entry.max_output_tokens,
+        })
     }
 
     pub fn require_inline_video_for_provider(
@@ -578,6 +693,76 @@ mod tests {
         assert!(
             profile.image_tool_results,
             "Responses-mode self-hosted models should retain configured image tool-result support"
+        );
+    }
+
+    #[test]
+    fn profile_witness_is_minted_only_for_the_exact_provider_model_pair() {
+        let registry = ModelRegistry::from_config(&Config::default(), test_catalog())
+            .unwrap_or_else(|error| panic!("registry construction failed: {error}"));
+        let witness = registry
+            .profile_witness_for_provider(Provider::OpenAI, OPENAI_MODEL)
+            .unwrap_or_else(|| panic!("missing exact OpenAI profile witness"));
+        assert_eq!(witness.provider(), Provider::OpenAI);
+        assert_eq!(witness.model(), OPENAI_MODEL);
+        assert_eq!(witness.profile().provider, Provider::OpenAI);
+        assert!(
+            registry
+                .profile_witness_for_provider(Provider::Anthropic, OPENAI_MODEL)
+                .is_none(),
+            "a profile witness cannot be relabelled onto another provider"
+        );
+        assert!(
+            registry
+                .profile_witness_for_provider(Provider::OpenAI, ANTHROPIC_MODEL)
+                .is_none(),
+            "a profile witness cannot be relabelled onto another model"
+        );
+    }
+
+    #[test]
+    fn profile_witness_is_scoped_to_one_registry_authority_not_registry_contents() {
+        let config = Config::default();
+        let registry = ModelRegistry::from_config(&config, test_catalog())
+            .unwrap_or_else(|error| panic!("registry construction failed: {error}"));
+        let cloned_registry = registry.clone();
+        let independently_constructed = ModelRegistry::from_config(&config, test_catalog())
+            .unwrap_or_else(|error| panic!("second registry construction failed: {error}"));
+        let witness = cloned_registry
+            .profile_witness_for_provider(Provider::OpenAI, OPENAI_MODEL)
+            .unwrap_or_else(|| panic!("missing cloned-registry profile witness"));
+
+        assert!(witness.was_minted_by(registry.authority()));
+        assert!(
+            !format!("{witness:?}").contains(&format!("{:?}", registry.authority())),
+            "public witness diagnostics must not reveal the raw registry authority"
+        );
+        assert_eq!(cloned_registry.authority(), registry.authority());
+        assert_ne!(independently_constructed.authority(), registry.authority());
+        assert!(
+            !witness.was_minted_by(independently_constructed.authority()),
+            "identical registry contents must not make independent authorities interchangeable"
+        );
+
+        let mut changed_config = config;
+        changed_config.models.custom.insert(
+            "authority-rotation-probe".to_string(),
+            CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: None,
+                context_window: Some(32_000),
+                max_output_tokens: Some(1024),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let rebuilt_after_config_change =
+            ModelRegistry::from_config(&changed_config, test_catalog())
+                .unwrap_or_else(|error| panic!("changed registry construction failed: {error}"));
+        assert!(
+            !witness.was_minted_by(rebuilt_after_config_change.authority()),
+            "rebuilding after config mutation must rotate registry authority"
         );
     }
 

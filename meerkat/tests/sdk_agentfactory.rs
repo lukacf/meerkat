@@ -207,10 +207,27 @@ impl meerkat_core::compact::Compactor for NoopCompactor {
     fn rebuild_history(
         &self,
         messages: &[Message],
-        _summary: &str,
+        summary: &str,
     ) -> meerkat_core::compact::CompactionResult {
+        let summary_message = Message::User(meerkat_core::types::UserMessage::compaction_summary(
+            format!(
+                "{}{}",
+                meerkat_core::compact::COMPACTION_SUMMARY_PREFIX,
+                summary
+            ),
+        ));
         meerkat_core::compact::CompactionResult {
             messages: messages.to_vec(),
+            summary: meerkat_core::compact::CompactionSummary::new(0, summary_message),
+            retained: messages
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(offset, message)| {
+                    let offset = u64::try_from(offset).unwrap_or(u64::MAX);
+                    meerkat_core::compact::CompactionRetained::new(offset, offset, message)
+                })
+                .collect(),
             discarded: Vec::new(),
         }
     }

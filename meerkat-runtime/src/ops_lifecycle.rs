@@ -416,6 +416,12 @@ struct ShellState {
     persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
     /// Shared cursor state for persistence snapshots.
     persist_cursor_state: Option<Arc<meerkat_core::EpochCursorState>>,
+    /// Mechanical epoch fence closed by canonical owner teardown.
+    ///
+    /// Generated authority terminalizes each known operation. This bit closes
+    /// the shell admission door so detached callbacks that retained an Arc to
+    /// the registry cannot create or mutate operations after unregister.
+    owner_retired: bool,
 }
 
 /// Wrapper around the DSL authority that provides `Debug` output.
@@ -472,6 +478,15 @@ impl ShellState {
             persist_tx: None,
             persist_epoch_id: None,
             persist_cursor_state: None,
+            owner_retired: false,
+        }
+    }
+
+    fn ensure_owner_active(&self) -> Result<(), OpsLifecycleError> {
+        if self.owner_retired {
+            Err(OpsLifecycleError::OwnerRetired)
+        } else {
+            Ok(())
         }
     }
 
@@ -2032,6 +2047,7 @@ impl RuntimeOpsLifecycleRegistry {
                 persist_tx: None,
                 persist_epoch_id: None,
                 persist_cursor_state: None,
+                owner_retired: false,
             }),
         }
     }
@@ -2106,10 +2122,40 @@ impl RuntimeOpsLifecycleRegistry {
         cursor_state: Arc<meerkat_core::EpochCursorState>,
     ) {
         if let Ok(mut state) = self.state.write() {
+            if state.owner_retired {
+                return;
+            }
             state.persist_tx = Some(tx);
             state.persist_epoch_id = Some(epoch_id);
             state.persist_cursor_state = Some(cursor_state);
         }
+    }
+
+    /// Terminalize every live operation, persist those generated transitions,
+    /// then close both lifecycle admission and the persistence producer.
+    ///
+    /// The write lock excludes every callback that retained this registry.
+    /// Each terminal transition waits for its durable worker acknowledgement;
+    /// taking the sender afterward therefore leaves no queued write behind.
+    /// The unregister coordinator must join the owned worker before publishing
+    /// final lifecycle deletion in the RuntimeStore.
+    pub(crate) fn retire_owner_for_unregister(
+        &self,
+        reason: String,
+    ) -> Result<(), OpsLifecycleError> {
+        let closed_sender = {
+            let mut state = self.write_state()?;
+            if state.owner_retired {
+                return Ok(());
+            }
+            terminate_owner_locked(&mut state, &reason)?;
+            state.owner_retired = true;
+            state.persist_epoch_id = None;
+            state.persist_cursor_state = None;
+            state.persist_tx.take()
+        };
+        drop(closed_sender);
+        Ok(())
     }
 
     /// Recover from a persisted snapshot.
@@ -2629,6 +2675,7 @@ fn apply_op_transition(
     input: mm_dsl::MeerkatMachineInput,
     action: mm_dsl::OpLifecycleActionKind,
 ) -> Result<(), OpsLifecycleError> {
+    state.ensure_owner_active()?;
     state
         .dsl_apply_raw(input)
         .map_err(|err| classify_generated_op_rejection(state, err, id, action))
@@ -2645,6 +2692,34 @@ fn apply_terminal_op_transition_and_persist(
     if let Err(err) = state.maybe_persist() {
         state.dsl.0.restore_snapshot(previous_snapshot);
         return Err(err);
+    }
+    Ok(())
+}
+
+fn terminate_owner_locked(state: &mut ShellState, reason: &str) -> Result<(), OpsLifecycleError> {
+    state.ensure_owner_active()?;
+    let to_terminate = state.owner_termination_targets()?;
+
+    for (op_id, _status) in &to_terminate {
+        let terminal_outcome = OperationTerminalOutcome::Terminated {
+            reason: reason.to_owned(),
+        };
+        let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
+
+        apply_terminal_op_transition_and_persist(
+            state,
+            op_id,
+            mm_dsl::MeerkatMachineInput::TerminateOp {
+                operation_id: mm_dsl::OperationId::from_domain(op_id).0,
+                outcome: outcome_kind,
+                payload: terminal_outcome,
+            },
+            mm_dsl::OpLifecycleActionKind::Terminate,
+        )?;
+
+        if let Some(entry) = state.finalize_terminal(op_id)? {
+            state.publish_completion_entry(Some(entry));
+        }
     }
     Ok(())
 }
@@ -2730,6 +2805,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         max_concurrent: Option<usize>,
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
+        state.ensure_owner_active()?;
         let operation_id = spec.id.clone();
         let kind = spec.kind;
         let max_concurrent = max_concurrent
@@ -3088,37 +3164,17 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-
-        let to_terminate = state.owner_termination_targets()?;
-
-        for (op_id, _status) in &to_terminate {
-            let terminal_outcome = OperationTerminalOutcome::Terminated {
-                reason: reason.clone(),
-            };
-            let outcome_kind = mm_dsl::OperationTerminalOutcomeKind::from(&terminal_outcome);
-
-            apply_terminal_op_transition_and_persist(
-                &mut state,
-                op_id,
-                mm_dsl::MeerkatMachineInput::TerminateOp {
-                    operation_id: mm_dsl::OperationId::from_domain(op_id).0,
-                    outcome: outcome_kind,
-                    payload: terminal_outcome,
-                },
-                mm_dsl::OpLifecycleActionKind::Terminate,
-            )?;
-
-            if let Some(entry) = state.finalize_terminal(op_id)? {
-                state.publish_completion_entry(Some(entry));
-            }
+        if state.owner_retired {
+            return Ok(());
         }
-        Ok(())
+        terminate_owner_locked(&mut state, &reason)
     }
 
     fn collect_completed(
         &self,
     ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
         let mut state = self.write_state()?;
+        state.ensure_owner_active()?;
 
         let ids: Vec<OperationId> = state.completed_order.iter().cloned().collect();
         let mut collected = Vec::with_capacity(ids.len());
@@ -3158,6 +3214,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         projection: Option<&meerkat_core::EpochCursorState>,
     ) -> Result<CompletionSeq, OpsLifecycleError> {
         let mut state = self.write_state()?;
+        state.ensure_owner_active()?;
         let input = match consumer {
             CompletionCursorConsumer::AgentApplied => {
                 mm_dsl::MeerkatMachineInput::AdvanceAgentCompletionCursor { cursor }
@@ -3214,6 +3271,13 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let state = match self.write_state() {
             Ok(mut state) => {
+                if let Err(error) = state.ensure_owner_active() {
+                    return Box::pin(WaitAllFuture {
+                        registry: self,
+                        wait_request_id,
+                        state: WaitAllFutureState::Ready(Some(Err(error))),
+                    });
+                }
                 match state.begin_wait_all_authority(run_id, &wait_request_id, &owned_ids) {
                     Ok(WaitAllAuthorityPlan::AlreadySatisfied(satisfied)) => {
                         let outcomes =
@@ -4035,6 +4099,49 @@ mod tests {
             registry.snapshot(&completed_id).unwrap().unwrap().status,
             OperationStatus::Completed
         ));
+    }
+
+    #[test]
+    fn unregister_retirement_fences_detached_late_callbacks() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let running_spec = background_spec("detached-running");
+        let running_id = running_spec.id.clone();
+        registry.register_operation(running_spec).unwrap();
+        registry.provisioning_succeeded(&running_id).unwrap();
+
+        registry
+            .retire_owner_for_unregister("owner unregistered".into())
+            .unwrap();
+        assert!(matches!(
+            registry.snapshot(&running_id).unwrap().unwrap().status,
+            OperationStatus::Terminated
+        ));
+
+        let late_result = OperationResult {
+            id: running_id.clone(),
+            content: "late detached completion".into(),
+            is_error: false,
+            duration_ms: 1,
+            tokens_used: 0,
+        };
+        assert_eq!(
+            registry.complete_operation(&running_id, late_result),
+            Err(OpsLifecycleError::OwnerRetired)
+        );
+        assert_eq!(
+            registry.register_operation(background_spec("late-new-op")),
+            Err(OpsLifecycleError::OwnerRetired)
+        );
+        assert_eq!(
+            registry.report_progress(
+                &running_id,
+                OperationProgressUpdate {
+                    message: "late progress".into(),
+                    percent: None,
+                },
+            ),
+            Err(OpsLifecycleError::OwnerRetired)
+        );
     }
 
     #[test]

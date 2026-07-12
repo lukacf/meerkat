@@ -18,6 +18,363 @@ pub(super) enum SessionBindingPreparation {
     LocalSessionResources,
 }
 
+struct RuntimeCompactionCommitCoordinator {
+    session_id: SessionId,
+    runtime_binding: std::sync::Mutex<
+        Option<(
+            crate::meerkat_machine::dsl::AgentRuntimeId,
+            Option<crate::meerkat_machine::dsl::FenceToken>,
+            Option<crate::meerkat_machine::dsl::Generation>,
+        )>,
+    >,
+    runtime_epoch_id: crate::meerkat_machine::dsl::RuntimeEpochId,
+    allow_late_binding: bool,
+    dsl_authority: Arc<crate::handles::HandleDslAuthority>,
+    store: Option<Arc<dyn crate::store::RuntimeStore>>,
+}
+
+struct RuntimeStickyModelFallbackCommitCoordinator {
+    session_id: SessionId,
+    store: Option<Arc<dyn crate::store::RuntimeStore>>,
+}
+
+struct RuntimeStickyModelFallbackCommitOperation {
+    result_rx: crate::tokio::sync::watch::Receiver<
+        Option<Result<(), meerkat_core::handles::StickyModelFallbackCommitError>>,
+    >,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl meerkat_core::handles::StickyModelFallbackCommitOperation
+    for RuntimeStickyModelFallbackCommitOperation
+{
+    async fn wait(&self) -> Result<(), meerkat_core::handles::StickyModelFallbackCommitError> {
+        let mut result_rx = self.result_rx.clone();
+        loop {
+            if let Some(result) = result_rx.borrow().clone() {
+                return result;
+            }
+            if result_rx.changed().await.is_err() {
+                return Err(meerkat_core::handles::StickyModelFallbackCommitError::SupervisorLost);
+            }
+        }
+    }
+}
+
+impl meerkat_core::handles::StickyModelFallbackCommitCoordinator
+    for RuntimeStickyModelFallbackCommitCoordinator
+{
+    fn begin(
+        &self,
+        machine_commit: Box<dyn meerkat_core::handles::StickyModelFallbackMachineCommit>,
+        control_delta: meerkat_core::handles::StickyModelFallbackControlDelta,
+    ) -> Result<
+        Arc<dyn meerkat_core::handles::StickyModelFallbackCommitOperation>,
+        meerkat_core::handles::StickyModelFallbackCommitError,
+    > {
+        let Some(store) = self.store.clone() else {
+            // Ephemeral runtimes have no recovery boundary to split. Consume
+            // the generated one-shot commit synchronously and return the same
+            // retained-result operation shape used by durable runtimes.
+            let result = machine_commit
+                .commit()
+                .map_err(meerkat_core::handles::StickyModelFallbackCommitError::MachineRejected);
+            let (_result_tx, result_rx) = crate::tokio::sync::watch::channel(Some(result));
+            return Ok(Arc::new(RuntimeStickyModelFallbackCommitOperation {
+                result_rx,
+            }));
+        };
+        let session_id = self.session_id.clone();
+        let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
+        crate::tokio::spawn(async move {
+            let result =
+                run_sticky_model_fallback_commit(session_id, store, machine_commit, control_delta)
+                    .await;
+            let _ = result_tx.send(Some(result));
+        });
+        Ok(Arc::new(RuntimeStickyModelFallbackCommitOperation {
+            result_rx,
+        }))
+    }
+}
+
+async fn run_sticky_model_fallback_commit(
+    session_id: SessionId,
+    store: Arc<dyn crate::store::RuntimeStore>,
+    machine_commit: Box<dyn meerkat_core::handles::StickyModelFallbackMachineCommit>,
+    control_delta: meerkat_core::handles::StickyModelFallbackControlDelta,
+) -> Result<(), meerkat_core::handles::StickyModelFallbackCommitError> {
+    use meerkat_core::handles::StickyModelFallbackCommitError as CommitError;
+
+    let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
+    let previous_snapshot = store
+        .load_session_snapshot(&runtime_id)
+        .await
+        .map_err(|error| CommitError::Store(error.to_string()))?
+        .ok_or_else(|| CommitError::SnapshotMissing {
+            session_id: session_id.clone(),
+        })?;
+    let mut target_session: meerkat_core::Session = serde_json::from_slice(&previous_snapshot)
+        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
+    if target_session.id() != &session_id {
+        return Err(CommitError::SessionMismatch {
+            expected: session_id,
+            actual: target_session.id().clone(),
+        });
+    }
+    control_delta
+        .validate_and_apply(&mut target_session)
+        .map_err(CommitError::InvalidControlDelta)?;
+    let target_snapshot = serde_json::to_vec(&target_session)
+        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
+
+    let cas_result = store
+        .replace_session_snapshot_if_current(
+            &runtime_id,
+            &previous_snapshot,
+            target_snapshot.clone(),
+        )
+        .await;
+    if matches!(&cas_result, Ok(false)) {
+        return Err(CommitError::SnapshotConflict);
+    }
+    if let Err(cas_error) = cas_result {
+        let observed = store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .map_err(|read_error| {
+                CommitError::SnapshotOutcomeUnknown(format!(
+                    "compare-and-swap failed with '{cas_error}' and reconciliation read failed with '{read_error}'"
+                ))
+            })?;
+        match observed {
+            Some(observed) if observed == target_snapshot => {}
+            Some(observed) if observed == previous_snapshot => {
+                return Err(CommitError::Store(cas_error.to_string()));
+            }
+            _ => {
+                return Err(CommitError::SnapshotOutcomeUnknown(cas_error.to_string()));
+            }
+        }
+    }
+
+    if let Err(machine_error) = machine_commit.commit() {
+        let rollback_result = store
+            .replace_session_snapshot_if_current(
+                &runtime_id,
+                &target_snapshot,
+                previous_snapshot.clone(),
+            )
+            .await;
+        if matches!(rollback_result, Ok(true)) {
+            return Err(CommitError::MachineRejected(machine_error));
+        }
+        let observed = store.load_session_snapshot(&runtime_id).await;
+        match observed {
+            Ok(Some(observed)) if observed == previous_snapshot => {
+                Err(CommitError::MachineRejected(machine_error))
+            }
+            Ok(Some(observed)) if observed == target_snapshot => {
+                Err(CommitError::CompensationFailed(format!(
+                    "{machine_error}; durable target snapshot remains committed"
+                )))
+            }
+            Ok(Some(_)) => Err(CommitError::CompensationFailed(format!(
+                "{machine_error}; a competing durable snapshot replaced the target during compensation"
+            ))),
+            Ok(None) => Err(CommitError::CompensationFailed(format!(
+                "{machine_error}; durable snapshot disappeared during compensation"
+            ))),
+            Err(read_error) => Err(CommitError::CompensationFailed(format!(
+                "{machine_error}; compensation result could not be reconciled: {read_error}"
+            ))),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+impl meerkat_core::memory::CompactionCommitCoordinator for RuntimeCompactionCommitCoordinator {
+    fn authorize_projection(
+        &self,
+        projection: &meerkat_core::memory::CompactionProjectionId,
+    ) -> Result<(), meerkat_core::memory::CompactionCommitCoordinationError> {
+        if projection.session_id() != &self.session_id {
+            return Err(
+                meerkat_core::memory::CompactionCommitCoordinationError::SessionMismatch {
+                    expected: self.session_id.clone(),
+                    actual: projection.session_id().clone(),
+                },
+            );
+        }
+        let store = self.store.as_ref().ok_or_else(|| {
+            meerkat_core::memory::CompactionCommitCoordinationError::Rejected(
+                "runtime binding has no durable RuntimeStore".to_string(),
+            )
+        })?;
+        if !store.supports_compaction_projection_outbox() {
+            return Err(
+                meerkat_core::memory::CompactionCommitCoordinationError::Rejected(
+                    "runtime store does not support atomic compaction projection outbox"
+                        .to_string(),
+                ),
+            );
+        }
+        let current = self
+            .dsl_authority
+            .current_runtime_binding(
+                &crate::meerkat_machine::dsl::SessionId::from_domain(&self.session_id),
+                &self.runtime_epoch_id,
+                "RuntimeCompactionCommitCoordinator::authorize_projection",
+            )
+            .map_err(meerkat_core::memory::CompactionCommitCoordinationError::Rejected)?;
+        let mut expected = self
+            .runtime_binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match expected.as_ref() {
+            Some(expected) if expected == &current => {}
+            Some(expected) => {
+                return Err(
+                    meerkat_core::memory::CompactionCommitCoordinationError::Rejected(format!(
+                        "runtime binding rotated (expected {expected:?}, current {current:?})"
+                    )),
+                );
+            }
+            None if self.allow_late_binding => {
+                // Mob/local-resource construction precedes the routed
+                // RequestRuntimeBinding transition. The first resultful
+                // authorization latches the exact generated binding; later
+                // fence/generation rotation then fails closed.
+                *expected = Some(current);
+            }
+            None => {
+                return Err(
+                    meerkat_core::memory::CompactionCommitCoordinationError::Rejected(
+                        "session resources do not carry an authoritative runtime binding"
+                            .to_string(),
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod compaction_coordinator_tests {
+    use super::*;
+    use meerkat_core::memory::CompactionCommitCoordinator;
+
+    fn projection(session_id: &SessionId) -> meerkat_core::CompactionProjectionId {
+        serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "parent_revision": "parent",
+            "revision": "revision",
+            "commit_fingerprint": "sha256:coordinator-persisted-fixture",
+        }))
+        .expect("persisted compaction projection fixture")
+    }
+
+    #[test]
+    fn local_binding_rejects_before_mob_bind_accepts_after_and_rejects_stale_epoch() {
+        let session_id = SessionId::new();
+        let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
+        let epoch_id = meerkat_core::RuntimeEpochId::new();
+        let dsl_epoch_id = crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(&epoch_id);
+        let authority = Arc::new(std::sync::Mutex::new(
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
+        ));
+        let teardown_gate = crate::handles::HandleTeardownGate::open();
+        let handle = Arc::new(
+            crate::handles::HandleDslAuthority::from_shared_with_teardown_gate(
+                Arc::clone(&authority),
+                Arc::clone(&teardown_gate),
+            ),
+        );
+        let coordinator = RuntimeCompactionCommitCoordinator {
+            session_id: session_id.clone(),
+            runtime_binding: std::sync::Mutex::new(None),
+            runtime_epoch_id: dsl_epoch_id.clone(),
+            allow_late_binding: true,
+            dsl_authority: Arc::clone(&handle),
+            store: Some(Arc::new(crate::store::memory::InMemoryRuntimeStore::new())),
+        };
+        let projection = projection(&session_id);
+
+        assert!(coordinator.authorize_projection(&projection).is_err());
+        handle
+            .apply_signal(
+                crate::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+                "compaction_coordinator_test::initialize",
+            )
+            .expect("initialize machine");
+        handle
+            .apply_input(
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: dsl_session_id.clone(),
+                },
+                "compaction_coordinator_test::register",
+            )
+            .expect("register session");
+        handle
+            .apply_input(
+                crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from(
+                        "mob-runtime",
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from(7),
+                    generation: Some(crate::meerkat_machine::dsl::Generation::from(3)),
+                    runtime_epoch_id: Some(dsl_epoch_id),
+                    session_id: dsl_session_id,
+                },
+                "compaction_coordinator_test::bind",
+            )
+            .expect("mob binding");
+        coordinator
+            .authorize_projection(&projection)
+            .expect("late generated mob binding must be accepted and latched");
+
+        {
+            let mut guard = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut rotated = guard.state().clone();
+            rotated.active_fence_token = Some(crate::meerkat_machine::dsl::FenceToken::from(8));
+            *guard =
+                crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(rotated)
+                    .expect("same-epoch rotated binding state");
+        }
+        assert!(
+            coordinator.authorize_projection(&projection).is_err(),
+            "a same-gate fence rotation must not be accepted by the latched coordinator"
+        );
+
+        // Restore the originally latched facts to distinguish epoch teardown
+        // rejection from the binding-rotation assertion above.
+        {
+            let mut guard = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut restored = guard.state().clone();
+            restored.active_fence_token = Some(crate::meerkat_machine::dsl::FenceToken::from(7));
+            *guard =
+                crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(restored)
+                    .expect("restored binding state");
+        }
+        coordinator
+            .authorize_projection(&projection)
+            .expect("restored exact binding must match the latch");
+
+        teardown_gate.close();
+        assert!(
+            coordinator.authorize_projection(&projection).is_err(),
+            "a coordinator from the torn-down epoch must fail closed"
+        );
+    }
+}
+
 fn visibility_authorities_for_names(
     names: &std::collections::BTreeSet<ToolName>,
     witnesses: &std::collections::BTreeMap<ToolName, meerkat_core::ToolVisibilityWitness>,
@@ -195,6 +552,7 @@ impl MeerkatMachine {
         };
         #[cfg(not(target_arch = "wasm32"))]
         let inserted_by_call = Box::pin(self.register_session_inner(session_id.clone())).await?;
+        let registration_gate_guard = self.lock_registration_gate(&session_id).await?;
         tracing::debug!(
             %session_id,
             inserted_by_call,
@@ -266,29 +624,73 @@ impl MeerkatMachine {
                     // Machine-emitted revival: refresh the durable lifecycle
                     // record so cross-process readers never observe a stale
                     // `Stopped` snapshot for a revived session.
-                    if let Err(err) = driver_handle
-                        .lock()
-                        .await
-                        .persist_current_machine_lifecycle("resume")
-                        .await
-                    {
-                        if inserted_by_call {
-                            self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                                .await;
+                    let persistence_result = {
+                        let mut driver = driver_handle.lock().await;
+                        driver.persist_current_machine_lifecycle("resume").await
+                    };
+                    if let Err(err) = persistence_result {
+                        let restored = Self::restore_dsl_authority_snapshot_if_current(
+                            &dsl_authority_shared,
+                            staged.committed_snapshot,
+                            staged.previous_snapshot,
+                        );
+                        if restored {
+                            driver_handle
+                                .lock()
+                                .await
+                                .sync_control_projection_from_dsl_authority();
                         }
-                        return Err(err);
+                        let err = if restored {
+                            err
+                        } else {
+                            RuntimeDriverError::Internal(format!(
+                                "{err}; additionally failed to restore generated Stopped authority after revival persistence failure"
+                            ))
+                        };
+                        drop(registration_gate_guard);
+                        return Err(if inserted_by_call {
+                            self.compensate_inserted_session_error(
+                                &session_id,
+                                &epoch_id,
+                                err,
+                                "failed lifecycle persistence after session revival",
+                            )
+                            .await
+                        } else {
+                            err
+                        });
                     }
+                    let mut sessions = self.sessions.write().await;
+                    let entry =
+                        sessions
+                            .get_mut(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?;
+                    if entry.epoch_id != epoch_id || !Arc::ptr_eq(&entry.driver, &driver_handle) {
+                        return Err(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        });
+                    }
+                    entry.retire_completed_runtime_stop_after_revival(&session_id)?;
                 }
             }
             Err(reason) => {
                 let err = self
                     .classify_session_dsl_rejection(&session_id, reason)
                     .await;
-                if inserted_by_call {
-                    self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                        .await;
-                }
-                return Err(err);
+                drop(registration_gate_guard);
+                return Err(if inserted_by_call {
+                    self.compensate_inserted_session_error(
+                        &session_id,
+                        &epoch_id,
+                        err,
+                        "generated session registration rejection",
+                    )
+                    .await
+                } else {
+                    err
+                });
             }
         }
         tracing::debug!(
@@ -296,11 +698,16 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings prepared generated registration"
         );
-        if terminal_supervisor_cleanup_bindings {
+        let compaction_runtime_epoch_id =
+            crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(&epoch_id);
+        let allow_late_compaction_binding = !terminal_supervisor_cleanup_bindings
+            && preparation == SessionBindingPreparation::LocalSessionResources;
+        let compaction_runtime_binding = if terminal_supervisor_cleanup_bindings {
             tracing::debug!(
                 %session_id,
                 "preserving Destroyed lifecycle while installing terminal supervisor cleanup handles"
             );
+            None
         } else if preparation == SessionBindingPreparation::AuthoritativeRuntimeBinding {
             let runtime_id = {
                 tracing::debug!(
@@ -319,13 +726,11 @@ impl MeerkatMachine {
             let agent_runtime_id =
                 crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(&runtime_id);
             let fence_token = crate::meerkat_machine::dsl::FenceToken::from(0);
-            let runtime_epoch_id =
-                crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(&epoch_id);
             let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
-                agent_runtime_id,
+                agent_runtime_id: agent_runtime_id.clone(),
                 fence_token,
                 generation: None,
-                runtime_epoch_id: Some(runtime_epoch_id),
+                runtime_epoch_id: Some(compaction_runtime_epoch_id.clone()),
                 session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
             };
             let staged = match self
@@ -334,11 +739,19 @@ impl MeerkatMachine {
             {
                 Ok(staged) => staged,
                 Err(reason) => {
-                    if inserted_by_call {
-                        self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                            .await;
-                    }
-                    return Err(RuntimeDriverError::ValidationFailed { reason });
+                    let err = RuntimeDriverError::ValidationFailed { reason };
+                    drop(registration_gate_guard);
+                    return Err(if inserted_by_call {
+                        self.compensate_inserted_session_error(
+                            &session_id,
+                            &epoch_id,
+                            err,
+                            "binding preparation rejection",
+                        )
+                        .await
+                    } else {
+                        err
+                    });
                 }
             };
             {
@@ -363,12 +776,21 @@ impl MeerkatMachine {
                     .lock()
                     .await
                     .sync_control_projection_from_dsl_authority();
-                if inserted_by_call {
-                    self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                        .await;
-                }
-                return Err(RuntimeDriverError::Internal(reason));
+                let err = RuntimeDriverError::Internal(reason);
+                drop(registration_gate_guard);
+                return Err(if inserted_by_call {
+                    self.compensate_inserted_session_error(
+                        &session_id,
+                        &epoch_id,
+                        err,
+                        "binding preparation commit failure",
+                    )
+                    .await
+                } else {
+                    err
+                });
             }
+            Some((agent_runtime_id, Some(fence_token), None))
         } else {
             {
                 tracing::debug!(
@@ -384,7 +806,8 @@ impl MeerkatMachine {
                 ?preparation,
                 "MeerkatMachine::prepare_session_runtime_bindings applied local projection"
             );
-        }
+            None
+        };
         // Share ONE HandleDslAuthority across all 5 handles so their
         // transitions land on the session's real DSL state (same Arc
         // as RuntimeSessionEntry.dsl_authority). Phase 5F/1-5 callsites
@@ -417,13 +840,12 @@ impl MeerkatMachine {
         );
         Ok(MeerkatMachineCommandResult::Bindings(
             meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
-                session_id,
+                session_id.clone(),
                 epoch_id,
                 ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
                 cursor_state,
-                generated_tool_visibility_owner(
-                    tool_visibility_owner as Arc<dyn meerkat_core::ToolVisibilityOwner>,
-                )
+                generated_tool_visibility_owner(Arc::clone(&tool_visibility_owner)
+                    as Arc<dyn meerkat_core::ToolVisibilityOwner>)
                 .map_err(RuntimeDriverError::Internal)?,
                 Arc::new(crate::handles::RuntimeTurnStateHandle::new(Arc::clone(
                     &shared_handle_authority,
@@ -438,9 +860,16 @@ impl MeerkatMachine {
                 Arc::new(crate::handles::RuntimeSessionAdmissionHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                Arc::new(crate::handles::RuntimeModelRoutingHandle::new(Arc::clone(
-                    &shared_handle_authority,
-                ))),
+                Arc::new(
+                    crate::handles::RuntimeModelRoutingHandle::new_with_visibility_owner(
+                        Arc::clone(&shared_handle_authority),
+                        Arc::clone(&tool_visibility_owner),
+                    ),
+                ),
+                Arc::new(RuntimeStickyModelFallbackCommitCoordinator {
+                    session_id: session_id.clone(),
+                    store: self.store.clone(),
+                }),
                 auth_lease,
                 Arc::new(crate::handles::RuntimeMcpServerLifecycleHandle::new(
                     Arc::clone(&shared_handle_authority),
@@ -455,6 +884,14 @@ impl MeerkatMachine {
                 Arc::new(crate::handles::RuntimeInteractionStreamHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
+                Arc::new(RuntimeCompactionCommitCoordinator {
+                    session_id: session_id.clone(),
+                    runtime_binding: std::sync::Mutex::new(compaction_runtime_binding),
+                    runtime_epoch_id: compaction_runtime_epoch_id,
+                    allow_late_binding: allow_late_compaction_binding,
+                    dsl_authority: Arc::clone(&shared_handle_authority),
+                    store: self.store.clone(),
+                }),
                 runtime_authority,
             ),
         ))
@@ -532,6 +969,7 @@ impl MeerkatMachine {
             MeerkatMachineCommand::RegisterSession { session_id } => {
                 let sid = session_id.clone();
                 self.register_session_inner(session_id).await?;
+                let _registration_gate_guard = self.lock_registration_gate(&sid).await?;
                 // Stage-first: the generated machine owns the legality verdict.
                 // RegisterSession is not declared from Destroyed (it is a
                 // resurrection input the DestroyedShapeInvariant forbids), so a
@@ -555,14 +993,12 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::UnregisterSession { session_id } => {
-                let Some(gate_guard) = self.lock_current_session_mutation_gate(&session_id).await
-                else {
+                if !self.sessions.read().await.contains_key(&session_id) {
                     return Err(RuntimeDriverError::NotReady {
                         state: RuntimeState::Destroyed,
                     });
-                };
-                self.unregister_session_inner_locked_authorized(&session_id, gate_guard)
-                    .await?;
+                }
+                self.unregister_session_inner(&session_id).await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::SetSilentIntents {
@@ -660,7 +1096,9 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::Bool(
                     sessions
                         .get(&session_id)
-                        .map(RuntimeSessionEntry::generated_executor_registration_active)
+                        .map(
+                            RuntimeSessionEntry::generated_executor_registration_has_viable_attachment,
+                        )
                         .unwrap_or(false),
                 ))
             }

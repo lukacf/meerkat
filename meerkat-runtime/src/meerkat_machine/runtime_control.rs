@@ -1364,16 +1364,22 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: impl Into<String>,
     ) -> Result<(), RuntimeDriverError> {
-        self.execute_meerkat_machine_command(
-            None,
-            MeerkatMachineCommand::StopRuntimeExecutor {
-                session_id: session_id.clone(),
-                reason: reason.into(),
-            },
-        )
-        .await
-        .map_err(MeerkatMachine::driver_error_from_command_error)
-        .map(|_| ())
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::StopRuntimeExecutor {
+                    session_id: session_id.clone(),
+                    reason: reason.into(),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "stop_runtime_executor: unexpected command result variant: {other:?}"
+            ))),
+        }
     }
 
     pub(super) async fn stop_runtime_executor_inner(
@@ -1381,154 +1387,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        let (driver, effect_tx, effect) = {
-            let Some(gate) = self.session_mutation_gate(session_id).await else {
-                return Err(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                });
-            };
-            let gate_guard = Arc::clone(&gate).lock_owned().await;
-            let staged = match self
-                .stage_session_dsl_transition(
-                    session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
-                        reason,
-                    },
-                    "StopRuntimeExecutor",
-                )
-                .await
-            {
-                Ok(staged) => staged,
-                Err(reason) => {
-                    // Stage-first classification: a rejection on a Destroyed
-                    // binding surfaces as the terminal `Destroyed` truth.
-                    return Err(self
-                        .classify_session_dsl_rejection(session_id, reason)
-                        .await);
-                }
-            };
-            let projected_effect =
-                crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
-                    .map_err(RuntimeDriverError::Internal)?;
-
-            let (driver, effect_tx) = {
-                let sessions = self.sessions.read().await;
-                let entry = sessions
-                    .get(session_id)
-                    .ok_or(RuntimeDriverError::NotReady {
-                        state: RuntimeState::Destroyed,
-                    })?;
-                if !Arc::ptr_eq(&entry.mutation_gate, &gate) {
-                    return Err(RuntimeDriverError::NotReady {
-                        state: RuntimeState::Destroyed,
-                    });
-                }
-                (entry.driver.clone(), entry.effect_sender())
-            };
-            drop(gate_guard);
-            (driver, effect_tx, projected_effect.into_effect())
-        };
-
-        if let Some(effect_tx) = effect_tx
-            && effect_tx.send(effect).await.is_ok()
-        {
-            let stopped = tokio::time::timeout(std::time::Duration::from_millis(200), async {
-                loop {
-                    let state = {
-                        let sessions = self.sessions.read().await;
-                        let entry =
-                            sessions
-                                .get(session_id)
-                                .ok_or(RuntimeDriverError::NotReady {
-                                    state: RuntimeState::Destroyed,
-                                })?;
-                        if !Arc::ptr_eq(&entry.driver, &driver) {
-                            return Err(RuntimeDriverError::NotReady {
-                                state: RuntimeState::Destroyed,
-                            });
-                        }
-                        entry.control_snapshot().phase
-                    };
-                    match state {
-                        RuntimeState::Stopped => return Ok(()),
-                        RuntimeState::Destroyed => {
-                            return Err(RuntimeDriverError::NotReady {
-                                state: RuntimeState::Destroyed,
-                            });
-                        }
-                        _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
-                    }
-                }
-            })
-            .await;
-            match stopped {
-                Ok(result) => result?,
-                Err(_) => {
-                    let authority = self
-                        .session_dsl_authority(session_id)
-                        .await
-                        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                    let generated_stop_state = authority
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .state()
-                        .clone();
-                    if generated_stop_state.runtime_stop_deferred
-                        || generated_stop_state.lifecycle_phase
-                            == crate::meerkat_machine::dsl::MeerkatPhase::Stopped
-                    {
-                        return Ok(());
-                    }
-                    return Err(RuntimeDriverError::ValidationFailed {
-                        reason: "StopRuntimeExecutor effect was accepted but generated authority did not reach stopped"
-                            .to_string(),
-                    });
-                }
-            }
-
-            let _gate_guard = self
-                .lock_current_session_driver_gate(session_id, &driver)
-                .await?;
-            let final_state = {
-                let sessions = self.sessions.read().await;
-                sessions
-                    .get(session_id)
-                    .ok_or(RuntimeDriverError::NotReady {
-                        state: RuntimeState::Destroyed,
-                    })?
-                    .control_snapshot()
-                    .phase
-            };
-            if !matches!(final_state, RuntimeState::Stopped) {
-                return Err(RuntimeDriverError::ValidationFailed {
-                    reason: format!(
-                        "StopRuntimeExecutor effect completed without generated stopped authority: {final_state}"
-                    ),
-                });
-            }
-
-            return Ok(());
-        }
-
-        let (driver, _gate_guard) = self
-            .current_session_driver_with_authority(session_id)
-            .await?;
-        let completions = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?
-                .completions
-                .clone()
-        };
-        crate::control_plane::terminalize_async_stop(&driver, Some(&completions)).await?;
-
-        // No live effect sender was available for this stop path. Scrub any
-        // dead attachment capabilities that may still be published.
-        self.clear_dead_runtime_attachment(session_id).await;
-        Ok(())
+        self.request_runtime_stop(session_id, reason).await
     }
 
     /// Accept an input and return a completion handle that resolves when the

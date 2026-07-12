@@ -182,16 +182,24 @@ impl McpScheduleContext {
         {
             Ok(adapter) => adapter,
             Err(error) => {
-                self.ingress_context().clear_session(&session_id).await;
-                return Err(error);
+                return match self.ingress_context().clear_session(&session_id).await {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(ScheduleDomainError::Internal(format!(
+                        "{error}; additionally failed to clear scheduled runtime session {session_id}: {cleanup}"
+                    ))),
+                };
             }
         };
         let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
         let external_tools = match compose_external_tool_dispatchers(None, Some(mcp_tools)) {
             Ok(tools) => tools,
             Err(error) => {
-                self.ingress_context().clear_session(&session_id).await;
-                return Err(ScheduleDomainError::Internal(error));
+                return match self.ingress_context().clear_session(&session_id).await {
+                    Ok(()) => Err(ScheduleDomainError::Internal(error)),
+                    Err(cleanup) => Err(ScheduleDomainError::Internal(format!(
+                        "{error}; additionally failed to clear scheduled runtime session {session_id}: {cleanup}"
+                    ))),
+                };
             }
         };
 
@@ -303,13 +311,23 @@ impl McpScheduleContext {
                 match self.service.read(&session_id).await {
                     Ok(_) => {}
                     Err(meerkat_core::service::SessionError::NotFound { .. }) => {
-                        self.ingress_context().clear_session(&session_id).await;
+                        self.ingress_context()
+                            .clear_session(&session_id)
+                            .await
+                            .map_err(|cleanup| ScheduleDomainError::Internal(format!(
+                                "schedule create reported success but session {session_id} is unavailable; additionally failed to clear runtime state: {cleanup}"
+                            )))?;
                         return Err(ScheduleDomainError::Internal(format!(
                             "schedule create reported success but session {session_id} is unavailable"
                         )));
                     }
                     Err(error) => {
-                        self.ingress_context().clear_session(&session_id).await;
+                        self.ingress_context()
+                            .clear_session(&session_id)
+                            .await
+                            .map_err(|cleanup| ScheduleDomainError::Internal(format!(
+                                "schedule create reported success but session {session_id} authority is unreadable: {error}; additionally failed to clear runtime state: {cleanup}"
+                            )))?;
                         return Err(ScheduleDomainError::Internal(format!(
                             "schedule create reported success but session {session_id} authority is unreadable: {error}"
                         )));
@@ -338,7 +356,12 @@ impl McpScheduleContext {
                             "schedule create peer ingress update failed ({error}); machine archive cleanup failed: {archive_error}"
                         )));
                     }
-                    self.ingress_context().clear_session(&session_id).await;
+                    self.ingress_context()
+                        .clear_session(&session_id)
+                        .await
+                        .map_err(|cleanup| ScheduleDomainError::Internal(format!(
+                            "{error}; additionally failed to clear scheduled runtime session {session_id}: {cleanup}"
+                        )))?;
                     return Err(error);
                 }
                 Ok(session_id)
@@ -348,7 +371,12 @@ impl McpScheduleContext {
                     Ok(_) => true,
                     Err(meerkat_core::service::SessionError::NotFound { .. }) => false,
                     Err(read_error) => {
-                        self.ingress_context().clear_session(&session_id).await;
+                        self.ingress_context()
+                            .clear_session(&session_id)
+                            .await
+                            .map_err(|cleanup| ScheduleDomainError::Internal(format!(
+                                "schedule create failed ({error}); session {session_id} authority is unreadable: {read_error}; additionally failed to clear runtime state: {cleanup}"
+                            )))?;
                         return Err(ScheduleDomainError::Internal(format!(
                             "schedule create failed ({error}); session {session_id} authority is unreadable: {read_error}"
                         )));
@@ -369,8 +397,12 @@ impl McpScheduleContext {
                         "schedule create failed ({error}); machine archive cleanup failed: {archive_error}"
                     )));
                 }
-                self.ingress_context().clear_session(&session_id).await;
-                Err(ScheduleDomainError::Internal(error.to_string()))
+                match self.ingress_context().clear_session(&session_id).await {
+                    Ok(()) => Err(ScheduleDomainError::Internal(error.to_string())),
+                    Err(cleanup) => Err(ScheduleDomainError::Internal(format!(
+                        "{error}; additionally failed to clear scheduled runtime session {session_id}: {cleanup}"
+                    ))),
+                }
             }
         }
     }

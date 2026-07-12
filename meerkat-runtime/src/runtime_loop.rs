@@ -99,14 +99,23 @@ pub(crate) fn merge_batch_turn_metadata(
     }
 
     let mut acc: Option<RuntimeTurnMetadata> = None;
+    let mut transcript_identity = TranscriptIdentityConsensus::default();
     for ((_, input), semantics) in inputs.iter().zip(semantics.iter()) {
-        let meta = for_input(input, *semantics);
+        let mut meta = for_input(input, *semantics);
+        transcript_identity.observe(&meta.transcript_identity);
+        // Identity consensus needs a sticky conflict state across the whole
+        // batch. Feeding the lossy empty result of a pairwise conflict into a
+        // later merge would let unrelated causality reseed the accumulator.
+        meta.transcript_identity = TranscriptMessageIdentity::default();
         match acc.as_mut() {
             None => acc = Some(meta),
             Some(existing) => {
                 existing.merge(meta)?;
             }
         }
+    }
+    if let Some(metadata) = acc.as_mut() {
+        metadata.transcript_identity = transcript_identity.finish();
     }
     // Batch-level peer-reply capability mint: every peer *message* delivery
     // in the admitted batch contributes one typed reply capability. Minted
@@ -131,6 +140,58 @@ pub(crate) fn merge_batch_turn_metadata(
         attach_peer_reply_capabilities(metadata, deliveries)?;
     }
     Ok(acc.filter(|m| !m.is_empty()))
+}
+
+#[derive(Debug, Clone, Default)]
+enum IdentityFieldConsensus<T> {
+    #[default]
+    Unseen,
+    Agreed(T),
+    Conflicted,
+}
+
+impl<T: Eq> IdentityFieldConsensus<T> {
+    fn observe(&mut self, candidate: Option<T>) {
+        let Some(candidate) = candidate else {
+            return;
+        };
+        match self {
+            Self::Unseen => *self = Self::Agreed(candidate),
+            Self::Agreed(current) if *current == candidate => {}
+            Self::Agreed(_) => *self = Self::Conflicted,
+            Self::Conflicted => {}
+        }
+    }
+
+    fn finish(self) -> Option<T> {
+        match self {
+            Self::Agreed(value) => Some(value),
+            Self::Unseen | Self::Conflicted => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TranscriptIdentityConsensus {
+    interaction_id: IdentityFieldConsensus<InteractionId>,
+    run_id: IdentityFieldConsensus<RunId>,
+    objective_id: IdentityFieldConsensus<meerkat_core::interaction::ObjectiveId>,
+}
+
+impl TranscriptIdentityConsensus {
+    fn observe(&mut self, identity: &TranscriptMessageIdentity) {
+        self.interaction_id.observe(identity.interaction_id);
+        self.run_id.observe(identity.run_id.clone());
+        self.objective_id.observe(identity.objective_id);
+    }
+
+    fn finish(self) -> TranscriptMessageIdentity {
+        TranscriptMessageIdentity {
+            interaction_id: self.interaction_id.finish(),
+            run_id: self.run_id.finish(),
+            objective_id: self.objective_id.finish(),
+        }
+    }
 }
 
 /// Attach the batch's typed peer-reply capabilities to the accumulated turn
@@ -246,6 +307,125 @@ async fn resolve_runtime_completion_waiters(
     }
 }
 
+async fn reconcile_compaction_projection_outbox(
+    driver: &crate::meerkat_machine::SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+) -> Result<Option<Vec<u8>>, crate::RuntimeDriverError> {
+    let intents = {
+        let driver = driver.lock().await;
+        driver.load_pending_compaction_projections().await?
+    };
+    reconcile_loaded_compaction_projection_outbox(driver, executor, intents).await
+}
+
+async fn reconcile_loaded_compaction_projection_outbox(
+    driver: &crate::meerkat_machine::SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    intents: Vec<meerkat_core::CompactionProjectionIntent>,
+) -> Result<Option<Vec<u8>>, crate::RuntimeDriverError> {
+    // Always invoke the executor, including for an empty outbox: the durable
+    // memory store uses the exact empty authority set to abort stages left by
+    // a crash before RuntimeStore::atomic_apply.
+    executor
+        .reconcile_committed_compaction_projections(&intents)
+        .await
+        .map_err(|error| {
+            crate::RuntimeDriverError::Internal(format!(
+                "compaction projection reconciliation failed: {error}"
+            ))
+        })?;
+    let authoritative_snapshot = {
+        let driver = driver.lock().await;
+        driver.load_compaction_checkpoint_snapshot().await?
+    };
+    let compatibility_checkpoint = if let Some(snapshot) = authoritative_snapshot.as_deref() {
+        let cleaned = compatibility_checkpoint_after_compaction_finalize(snapshot, &intents)?;
+        executor
+            .checkpoint_committed_session_snapshot(&cleaned)
+            .await
+            .map_err(|error| {
+                crate::RuntimeDriverError::Internal(format!(
+                    "failed to checkpoint authoritative runtime snapshot after compaction reconciliation: {error}"
+                ))
+            })?;
+        Some(cleaned)
+    } else {
+        None
+    };
+
+    // The SessionStore row is a compatibility projection of the committed
+    // runtime snapshot. Keep the durable outbox pending until that projection
+    // succeeds: marking an intent finalized also cleans it from the runtime
+    // snapshot, so doing that first would let a projection failure quarantine
+    // and delete the only committed transcript authority. With the outbox
+    // still pending, a failed checkpoint leaves the runtime snapshot intact
+    // and cold recovery can retry the idempotent projection finalization.
+    for intent in &intents {
+        let driver = driver.lock().await;
+        driver
+            .mark_compaction_projection_finalized(&intent.projection)
+            .await?;
+    }
+    Ok(compatibility_checkpoint)
+}
+
+/// Settle a failed runtime boundary using the post-error outbox observation.
+/// A non-empty outbox proves that the atomic write committed despite the
+/// returned error and therefore follows the commit-only reconciliation path.
+/// An empty outbox proves there is no committed projection authority, so the
+/// executor must roll back its live rewrite and abort the exact invisible
+/// stage instead.
+async fn settle_compaction_projection_after_commit_failure(
+    driver: &crate::meerkat_machine::SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+) -> Result<Option<Vec<u8>>, crate::RuntimeDriverError> {
+    let intents = {
+        let driver = driver.lock().await;
+        driver.load_pending_compaction_projections().await?
+    };
+    if intents.is_empty() {
+        executor
+            .abort_uncommitted_compaction_projections()
+            .await
+            .map_err(|error| {
+                crate::RuntimeDriverError::Internal(format!(
+                    "uncommitted compaction projection abort failed: {error}"
+                ))
+            })?;
+        return Ok(None);
+    }
+    reconcile_loaded_compaction_projection_outbox(driver, executor, intents).await
+}
+
+fn compatibility_checkpoint_after_compaction_finalize(
+    snapshot: &[u8],
+    finalized: &[meerkat_core::CompactionProjectionIntent],
+) -> Result<Vec<u8>, crate::RuntimeDriverError> {
+    if finalized.is_empty() {
+        return Ok(snapshot.to_vec());
+    }
+    let mut session: meerkat_core::Session = serde_json::from_slice(snapshot).map_err(|error| {
+        crate::RuntimeDriverError::Internal(format!(
+            "committed runtime checkpoint is not a Session: {error}"
+        ))
+    })?;
+    for intent in finalized {
+        session
+            .complete_compaction_projection_intent(&intent.projection)
+            .map_err(|error| {
+                crate::RuntimeDriverError::Internal(format!(
+                    "failed to clear finalized compaction intent {} from compatibility checkpoint: {error}",
+                    intent.projection.revision()
+                ))
+            })?;
+    }
+    serde_json::to_vec(&session).map_err(|error| {
+        crate::RuntimeDriverError::Internal(format!(
+            "failed to serialize committed compatibility checkpoint: {error}"
+        ))
+    })
+}
+
 async fn resolve_machine_terminal_completion_waiters(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
@@ -280,21 +460,6 @@ async fn resolve_machine_terminal_completion_waiters(
     }
 }
 
-async fn runtime_terminated_completion_class(
-    driver: &crate::meerkat_machine::SharedDriver,
-) -> Result<
-    crate::meerkat_machine::driver::RuntimeCompletionResultAuthority,
-    crate::RuntimeDriverError,
-> {
-    runtime_completion_result_class(
-        driver,
-        None,
-        crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::RuntimeTerminated,
-        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
-    )
-    .await
-}
-
 fn fail_closed_completion_waiters(
     registry: &mut crate::completion::CompletionRegistry,
     input_ids: &[InputId],
@@ -307,11 +472,599 @@ fn fail_closed_completion_waiters(
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RuntimeLoopTeardownDisposition {
+    #[default]
+    PreserveRegistration,
+    UnregisterRequired,
+}
+
+impl RuntimeLoopTeardownDisposition {
+    pub(crate) fn requires_unregister(self) -> bool {
+        matches!(self, Self::UnregisterRequired)
+    }
+}
+
+struct RuntimeLoopTerminalHandoff {
+    stop_completion: Option<crate::effect::StopEffectCompletion>,
+    executor_stop_retry_reason: Option<String>,
+    deferred_executor_stop_error: Option<crate::RuntimeDriverError>,
+    disposition: RuntimeLoopTeardownDisposition,
+}
+
+impl Default for RuntimeLoopTerminalHandoff {
+    fn default() -> Self {
+        Self {
+            stop_completion: None,
+            executor_stop_retry_reason: Some(
+                "runtime loop exited without a canonical terminal stop".into(),
+            ),
+            deferred_executor_stop_error: None,
+            disposition: RuntimeLoopTeardownDisposition::PreserveRegistration,
+        }
+    }
+}
+
+struct RuntimeLoopExitHandoff {
+    executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
+    terminal: RuntimeLoopTerminalHandoff,
+}
+
+enum RuntimeLoopTeardownState {
+    Pending,
+    Ready(RuntimeLoopExitHandoff),
+    Cleaning,
+    Cleaned(Option<RuntimeLoopCleanupReceipt>),
+}
+
+/// Shared mechanical handoff from the runtime-loop body to the machine-owned
+/// cleanup coordinator.
+///
+/// The loop deposits its exact executor here as its final action. The
+/// coordinator, not a caller future and not a detached surface task, owns the
+/// required cleanup. A failed cleanup restores the executor into `Ready`, so a
+/// later explicit stop/unregister retry can discharge the same obligation.
+pub(crate) struct RuntimeLoopTeardownSlot {
+    state: std::sync::Mutex<RuntimeLoopTeardownState>,
+    last_unregister_result: std::sync::Mutex<Option<Result<(), crate::RuntimeDriverError>>>,
+    disposition: std::sync::Mutex<RuntimeLoopTeardownDisposition>,
+    changed: tokio::sync::Notify,
+}
+
+impl RuntimeLoopTeardownSlot {
+    fn pending() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            state: std::sync::Mutex::new(RuntimeLoopTeardownState::Pending),
+            last_unregister_result: std::sync::Mutex::new(None),
+            disposition: std::sync::Mutex::new(
+                RuntimeLoopTeardownDisposition::PreserveRegistration,
+            ),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub(crate) fn disposition(&self) -> RuntimeLoopTeardownDisposition {
+        *self
+            .disposition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn last_unregister_result(&self) -> Option<Result<(), crate::RuntimeDriverError>> {
+        self.last_unregister_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn clear_last_unregister_result(&self) {
+        *self
+            .last_unregister_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn publish(&self, mut handoff: RuntimeLoopExitHandoff) {
+        let mut retained_receipt = None;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*state, RuntimeLoopTeardownState::Pending) {
+            *self
+                .disposition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = handoff.terminal.disposition;
+            // The owned unregister worker can fail while the loop is still in
+            // CoreExecutor::apply (for example, persisting BeginUnregister may
+            // fail before it takes the attachment). Reconcile that retained
+            // result while publishing under the same lock order used by
+            // acknowledge_unregister_result, otherwise the stop caller can
+            // wait forever on a receipt that arrived one instruction late.
+            let retained_result = self
+                .last_unregister_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(result) = retained_result {
+                retained_receipt = handoff
+                    .terminal
+                    .stop_completion
+                    .take()
+                    .map(|stop_completion| {
+                        (
+                            RuntimeLoopCleanupReceipt {
+                                stop_completion: Some(stop_completion),
+                            },
+                            result,
+                        )
+                    });
+            }
+            *state = RuntimeLoopTeardownState::Ready(handoff);
+            drop(state);
+            self.changed.notify_waiters();
+        }
+        if let Some((receipt, result)) = retained_receipt {
+            // Only the acknowledgement is consumed. The exact executor and
+            // its default stop-hook retry obligation remain Ready for an
+            // explicit retry of the failed unregister saga.
+            receipt.acknowledge(result);
+        }
+    }
+
+    pub(crate) async fn wait_until_published(&self) {
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            changed.as_mut().enable();
+            let pending = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_pending();
+            if !pending {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    /// Run the external executor cleanup once. The exact stop acknowledgement
+    /// remains retained in the slot after success until the owned unregister
+    /// supervisor publishes the saga's final typed result.
+    pub(crate) async fn cleanup_once(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        enum CleanupClaim {
+            Handoff(RuntimeLoopExitHandoff),
+            AlreadyCleaned,
+            Wait,
+        }
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            changed.as_mut().enable();
+            let claim = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match std::mem::replace(&mut *state, RuntimeLoopTeardownState::Cleaning) {
+                    RuntimeLoopTeardownState::Ready(handoff) => CleanupClaim::Handoff(handoff),
+                    RuntimeLoopTeardownState::Cleaned(receipt) => {
+                        *state = RuntimeLoopTeardownState::Cleaned(receipt);
+                        CleanupClaim::AlreadyCleaned
+                    }
+                    RuntimeLoopTeardownState::Pending => {
+                        *state = RuntimeLoopTeardownState::Pending;
+                        CleanupClaim::Wait
+                    }
+                    RuntimeLoopTeardownState::Cleaning => {
+                        *state = RuntimeLoopTeardownState::Cleaning;
+                        CleanupClaim::Wait
+                    }
+                }
+            };
+            let handoff = match claim {
+                CleanupClaim::Handoff(handoff) => handoff,
+                CleanupClaim::AlreadyCleaned => return Ok(()),
+                CleanupClaim::Wait => {
+                    changed.await;
+                    continue;
+                }
+            };
+
+            let mut cleanup_guard = RuntimeLoopCleanupGuard::new(self, handoff);
+            if let Some(error) = cleanup_guard
+                .handoff_mut()?
+                .terminal
+                .deferred_executor_stop_error
+                .take()
+            {
+                cleanup_guard.fail_stop_completion(error.clone())?;
+                return Err(error);
+            }
+            if let Some(reason) = cleanup_guard
+                .handoff_mut()?
+                .terminal
+                .executor_stop_retry_reason
+                .clone()
+            {
+                if let Err(error) = crate::control_plane::apply_runtime_executor_stop_hook(
+                    cleanup_guard.handoff_mut()?.executor.as_mut(),
+                    reason,
+                )
+                .await
+                .map_err(|error| {
+                    crate::RuntimeDriverError::Internal(format!(
+                        "failed to retry stop-runtime-executor effect: {error}"
+                    ))
+                }) {
+                    cleanup_guard.fail_stop_completion(error.clone())?;
+                    return Err(error);
+                }
+                cleanup_guard
+                    .handoff_mut()?
+                    .terminal
+                    .executor_stop_retry_reason = None;
+            }
+            if let Err(error) = crate::control_plane::terminalize_async_stop(driver, None).await {
+                cleanup_guard.fail_stop_completion(error.clone())?;
+                return Err(error);
+            }
+            let cleanup_result = cleanup_guard
+                .handoff_mut()?
+                .executor
+                .cleanup_after_runtime_stop_terminalized()
+                .await
+                .map_err(|error| {
+                    crate::RuntimeDriverError::Internal(format!(
+                        "required executor cleanup failed after durable runtime stop: {error}"
+                    ))
+                });
+            match cleanup_result {
+                Ok(()) => {
+                    let mut handoff = cleanup_guard.complete()?;
+                    let receipt = RuntimeLoopCleanupReceipt {
+                        stop_completion: handoff.terminal.stop_completion.take(),
+                    };
+                    *self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        RuntimeLoopTeardownState::Cleaned(Some(receipt));
+                    self.changed.notify_waiters();
+                    return Ok(());
+                }
+                Err(error) => {
+                    cleanup_guard.fail_stop_completion(error.clone())?;
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// Publish the exact saga result to the retained stop acknowledgement.
+    /// On worker panic before cleanup completes, fail the acknowledgement but
+    /// leave the executor in `Ready` for an explicit unregister retry.
+    pub(crate) fn acknowledge_unregister_result(
+        &self,
+        result: Result<(), crate::RuntimeDriverError>,
+    ) {
+        let receipt = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *self
+                .last_unregister_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result.clone());
+            match &mut *state {
+                RuntimeLoopTeardownState::Cleaned(receipt) => receipt.take(),
+                RuntimeLoopTeardownState::Ready(handoff) => {
+                    let stop_completion = handoff.terminal.stop_completion.take();
+                    stop_completion.map(|stop_completion| RuntimeLoopCleanupReceipt {
+                        stop_completion: Some(stop_completion),
+                    })
+                }
+                RuntimeLoopTeardownState::Pending | RuntimeLoopTeardownState::Cleaning => None,
+            }
+        };
+        if let Some(receipt) = receipt {
+            receipt.acknowledge(result);
+        }
+    }
+
+    /// Publish an ordinary-stop coordinator result to the exact stop request
+    /// without recording unregister terminal truth. Completed cleanup remains
+    /// retryable through the entry-owned stop coordinator.
+    pub(crate) fn acknowledge_runtime_stop_result(
+        &self,
+        result: Result<(), crate::RuntimeDriverError>,
+    ) {
+        let receipt = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &mut *state {
+                RuntimeLoopTeardownState::Cleaned(receipt) => receipt.take(),
+                RuntimeLoopTeardownState::Ready(handoff) => handoff
+                    .terminal
+                    .stop_completion
+                    .take()
+                    .map(|stop_completion| RuntimeLoopCleanupReceipt {
+                        stop_completion: Some(stop_completion),
+                    }),
+                RuntimeLoopTeardownState::Pending | RuntimeLoopTeardownState::Cleaning => None,
+            }
+        };
+        if let Some(receipt) = receipt {
+            receipt.acknowledge(result);
+        }
+    }
+}
+
+impl RuntimeLoopTeardownState {
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+/// Exact acknowledgement retained until cleanup and unregister durability have
+/// both reached a typed result.
+pub(crate) struct RuntimeLoopCleanupReceipt {
+    stop_completion: Option<crate::effect::StopEffectCompletion>,
+}
+
+impl RuntimeLoopCleanupReceipt {
+    pub(crate) fn acknowledge(mut self, result: Result<(), crate::RuntimeDriverError>) {
+        if let Some(stop_completion) = self.stop_completion.take() {
+            let _ = stop_completion.send(result);
+        }
+    }
+}
+
+struct RuntimeLoopCleanupGuard<'a> {
+    slot: &'a RuntimeLoopTeardownSlot,
+    handoff: Option<RuntimeLoopExitHandoff>,
+}
+
+impl<'a> RuntimeLoopCleanupGuard<'a> {
+    fn new(slot: &'a RuntimeLoopTeardownSlot, handoff: RuntimeLoopExitHandoff) -> Self {
+        Self {
+            slot,
+            handoff: Some(handoff),
+        }
+    }
+
+    fn handoff_mut(&mut self) -> Result<&mut RuntimeLoopExitHandoff, crate::RuntimeDriverError> {
+        self.handoff.as_mut().ok_or_else(|| {
+            crate::RuntimeDriverError::Internal(
+                "runtime-loop cleanup guard lost its handoff".into(),
+            )
+        })
+    }
+
+    fn fail_stop_completion(
+        &mut self,
+        error: crate::RuntimeDriverError,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        if let Some(stop_completion) = self.handoff_mut()?.terminal.stop_completion.take() {
+            let _ = stop_completion.send(Err(error));
+        }
+        Ok(())
+    }
+
+    fn complete(mut self) -> Result<RuntimeLoopExitHandoff, crate::RuntimeDriverError> {
+        self.handoff.take().ok_or_else(|| {
+            crate::RuntimeDriverError::Internal("runtime-loop cleanup guard completed twice".into())
+        })
+    }
+}
+
+impl Drop for RuntimeLoopCleanupGuard<'_> {
+    fn drop(&mut self) {
+        let Some(handoff) = self.handoff.take() else {
+            return;
+        };
+        *self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            RuntimeLoopTeardownState::Ready(handoff);
+        self.slot.changed.notify_waiters();
+    }
+}
+
+struct RuntimeLoopHandoffGuard {
+    slot: std::sync::Arc<RuntimeLoopTeardownSlot>,
+    executor: Option<Box<dyn meerkat_core::lifecycle::CoreExecutor>>,
+}
+
+impl RuntimeLoopHandoffGuard {
+    fn new(
+        slot: std::sync::Arc<RuntimeLoopTeardownSlot>,
+        executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
+    ) -> Self {
+        Self {
+            slot,
+            executor: Some(executor),
+        }
+    }
+
+    fn executor_mut(
+        &mut self,
+    ) -> Result<&mut (dyn meerkat_core::lifecycle::CoreExecutor + '_), crate::RuntimeDriverError>
+    {
+        match self.executor.as_mut() {
+            Some(executor) => Ok(executor.as_mut()),
+            None => Err(crate::RuntimeDriverError::Internal(
+                "runtime-loop handoff guard lost its executor".into(),
+            )),
+        }
+    }
+
+    fn publish(
+        &mut self,
+        terminal: RuntimeLoopTerminalHandoff,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        let executor = self.executor.take().ok_or_else(|| {
+            crate::RuntimeDriverError::Internal(
+                "runtime-loop handoff guard published its executor twice".into(),
+            )
+        })?;
+        self.slot
+            .publish(RuntimeLoopExitHandoff { executor, terminal });
+        Ok(())
+    }
+}
+
+impl Drop for RuntimeLoopHandoffGuard {
+    fn drop(&mut self) {
+        if let Some(executor) = self.executor.take() {
+            self.slot.publish(RuntimeLoopExitHandoff {
+                executor,
+                terminal: RuntimeLoopTerminalHandoff::default(),
+            });
+        }
+    }
+}
+
+pub(crate) struct SpawnedRuntimeLoop {
+    pub(crate) loop_handle: tokio::task::JoinHandle<()>,
+    pub(crate) teardown_slot: std::sync::Arc<RuntimeLoopTeardownSlot>,
+    pub(crate) startup: std::sync::Arc<RuntimeLoopStartupSlot>,
+}
+
+impl SpawnedRuntimeLoop {
+    pub(crate) fn startup_slot(&self) -> std::sync::Arc<RuntimeLoopStartupSlot> {
+        std::sync::Arc::clone(&self.startup)
+    }
+}
+
+/// Publishes exactly one typed startup result for the runtime-loop attachment.
+///
+/// The guard is constructed before the loop task is spawned, so aborting the
+/// task before its first poll still fails the waiter instead of leaving
+/// `ensure_session_with_executor` blocked forever.
+struct RuntimeLoopStartupGuard {
+    slot: std::sync::Arc<RuntimeLoopStartupSlot>,
+    published: bool,
+}
+
+impl RuntimeLoopStartupGuard {
+    fn new(slot: std::sync::Arc<RuntimeLoopStartupSlot>) -> Self {
+        Self {
+            slot,
+            published: false,
+        }
+    }
+
+    fn publish(&mut self, result: Result<(), String>) {
+        self.slot.publish(result);
+        self.published = true;
+    }
+}
+
+impl Drop for RuntimeLoopStartupGuard {
+    fn drop(&mut self) {
+        if !self.published {
+            self.slot.publish(Err(
+                "runtime loop exited before startup reconciliation completed".to_string(),
+            ));
+        }
+    }
+}
+
+/// Mechanical readiness handoff from the loop to its attachment caller.
+///
+/// Attachment publication alone is not readiness: the loop first has to
+/// reconcile the durable compaction projection outbox through its exact
+/// executor. The slot keeps that boundary cancellation-safe and race-free.
+pub(crate) struct RuntimeLoopStartupSlot {
+    result: std::sync::Mutex<Option<Result<(), String>>>,
+    changed: tokio::sync::Notify,
+}
+
+impl RuntimeLoopStartupSlot {
+    fn pending() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            result: std::sync::Mutex::new(None),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn publish(&self, result: Result<(), String>) {
+        let mut current = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.is_some() {
+            return;
+        }
+        *current = Some(result);
+        drop(current);
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) async fn wait(&self) -> Result<(), crate::RuntimeDriverError> {
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            changed.as_mut().enable();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return result.map_err(crate::RuntimeDriverError::Internal);
+            }
+            changed.await;
+        }
+    }
+}
+
+async fn apply_runtime_loop_effect_and_record_handoff(
+    driver: &crate::meerkat_machine::SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    mut effect: crate::effect::RuntimeEffect,
+    handoff: &mut RuntimeLoopTerminalHandoff,
+) -> bool {
+    let stop_completion = effect.take_stop_completion();
+    match crate::control_plane::apply_runtime_loop_executor_effect(driver, executor, effect).await {
+        Ok(crate::control_plane::RuntimeLoopEffectOutcome::Continue) => false,
+        Ok(
+            crate::control_plane::RuntimeLoopEffectOutcome::StopTerminalizedNeedsExternalCleanup,
+        ) => {
+            handoff.stop_completion = stop_completion;
+            handoff.executor_stop_retry_reason = None;
+            handoff.deferred_executor_stop_error = None;
+            true
+        }
+        Err(failure) => {
+            tracing::error!(
+                error = %failure.error,
+                "failed to apply runtime-loop executor effect"
+            );
+            handoff.stop_completion = stop_completion;
+            handoff.executor_stop_retry_reason = failure.executor_stop_retry_reason;
+            handoff.deferred_executor_stop_error = handoff
+                .executor_stop_retry_reason
+                .as_ref()
+                .map(|_| failure.error);
+            true
+        }
+    }
+}
+
 async fn stop_runtime_loop_executor_from_dsl_effect(
     driver: &crate::meerkat_machine::SharedDriver,
-    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    _completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     reason: String,
+    handoff: &mut RuntimeLoopTerminalHandoff,
 ) -> bool {
     let authority = {
         let driver = driver.lock().await;
@@ -320,7 +1073,9 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
 
     let effects = match crate::meerkat_machine::apply_dsl_transition_on_authority(
         &authority,
-        crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor { reason },
+        crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor {
+            reason: reason.clone(),
+        },
         "RuntimeLoopStopRuntimeExecutor",
     ) {
         Ok(effects) => effects,
@@ -329,6 +1084,7 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
                 error = %error,
                 "failed to apply DSL stop-runtime-executor transition after runtime loop snapshot failure"
             );
+            handoff.executor_stop_retry_reason = Some(reason);
             return true;
         }
     };
@@ -341,27 +1097,18 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
                 error = %error,
                 "DSL stop-runtime-executor transition did not emit a runtime effect fact"
             );
+            handoff.executor_stop_retry_reason = Some(reason);
             return true;
         }
     };
 
-    match crate::control_plane::apply_executor_effect(
+    apply_runtime_loop_effect_and_record_handoff(
         driver,
-        completions,
         executor,
         projected_effect.into_effect(),
+        handoff,
     )
     .await
-    {
-        Ok(should_stop) => should_stop,
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "failed to apply stop-runtime-executor effect from runtime loop"
-            );
-            true
-        }
-    }
 }
 
 fn fail_completion_waiters(
@@ -726,6 +1473,42 @@ impl RuntimeLoopAuthorityBinding {
                 err
             })
     }
+
+    async fn runtime_stop_cleanup_in_progress(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+    ) -> Result<bool, crate::traits::RuntimeDriverError> {
+        #[cfg(test)]
+        if self.detached_test_gate.is_some() {
+            let _ = driver;
+            return Ok(false);
+        }
+
+        let machine =
+            self.machine
+                .upgrade()
+                .ok_or(crate::traits::RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?;
+        machine
+            .current_runtime_stop_cleanup_in_progress(&self.session_id, driver)
+            .await
+    }
+
+    async fn begin_durable_unregister_for_teardown(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
+        let machine =
+            self.machine
+                .upgrade()
+                .ok_or(crate::traits::RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?;
+        machine
+            .begin_unregister_from_runtime_loop_teardown(&self.session_id, driver)
+            .await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -739,7 +1522,7 @@ enum FeedWakeOutcome {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
     driver: crate::meerkat_machine::SharedDriver,
-    mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
+    executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     mut wake_rx: tokio::sync::mpsc::Receiver<()>,
     mut effect_rx: tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<crate::meerkat_machine::SharedCompletionRegistry>,
@@ -748,7 +1531,39 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
     machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
     session_id: meerkat_core::types::SessionId,
-) -> tokio::task::JoinHandle<()> {
+) -> SpawnedRuntimeLoop {
+    let teardown_slot = RuntimeLoopTeardownSlot::pending();
+    let startup = RuntimeLoopStartupSlot::pending();
+    let startup_guard = RuntimeLoopStartupGuard::new(std::sync::Arc::clone(&startup));
+    let teardown_watcher_slot = std::sync::Arc::clone(&teardown_slot);
+    let teardown_machine = machine_weak.clone();
+    let teardown_session_id = session_id.clone();
+    tokio::spawn(async move {
+        teardown_watcher_slot.wait_until_published().await;
+        let disposition = teardown_watcher_slot.disposition();
+        let Some(machine) = teardown_machine.upgrade() else {
+            return;
+        };
+        // This watcher is deliberately separate from both the loop body and
+        // the owned unregister saga. It may join an already-running direct
+        // unregister or observe its retained terminal result, but never turns
+        // a completed failure into an implicit retry. The saga never awaits
+        // this watcher, so no self-join cycle is possible.
+        if let Err(error) = machine
+            .observe_runtime_loop_teardown(
+                &teardown_session_id,
+                std::sync::Arc::clone(&teardown_watcher_slot),
+                disposition,
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id = %teardown_session_id,
+                %error,
+                "runtime-loop exit teardown did not complete; retained for retry"
+            );
+        }
+    });
     #[cfg(test)]
     let authority_binding = if machine_weak.strong_count() == 0 {
         RuntimeLoopAuthorityBinding::detached_for_test()
@@ -757,7 +1572,23 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     };
     #[cfg(not(test))]
     let authority_binding = RuntimeLoopAuthorityBinding::new(machine_weak, session_id);
-    tokio::spawn(async move {
+    let loop_teardown_slot = std::sync::Arc::clone(&teardown_slot);
+    let loop_handoff_guard = RuntimeLoopHandoffGuard::new(loop_teardown_slot, executor);
+    let loop_handle = tokio::spawn(async move {
+        let mut loop_handoff_guard = loop_handoff_guard;
+        let mut startup_guard = startup_guard;
+        macro_rules! executor_or_return {
+            () => {
+                match loop_handoff_guard.executor_mut() {
+                    Ok(executor) => executor,
+                    Err(error) => {
+                        tracing::error!(%error, "runtime loop lost executor handoff authority");
+                        return;
+                    }
+                }
+            };
+        }
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
         // Feed-based idle wake state (local to this loop).
         // Seed from generated cursor authority when available. Even an
         // all-zero runtime-owned cursor must win over the feed watermark so a
@@ -818,6 +1649,30 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 None => initial_watermark,
             };
 
+        if let Err(error) =
+            reconcile_compaction_projection_outbox(&driver, executor_or_return!()).await
+        {
+            startup_guard.publish(Err(error.to_string()));
+            tracing::error!(
+                session_id = %authority_binding.session_id,
+                %error,
+                "runtime loop failed compaction projection recovery before accepting work"
+            );
+            let _ = stop_runtime_loop_executor_from_dsl_effect(
+                &driver,
+                completions.as_ref(),
+                executor_or_return!(),
+                format!("compaction projection recovery failed: {error}"),
+                &mut terminal_handoff,
+            )
+            .await;
+            if let Err(error) = loop_handoff_guard.publish(terminal_handoff) {
+                tracing::error!(%error, "runtime loop failed to publish executor handoff");
+            }
+            return;
+        }
+        startup_guard.publish(Ok(()));
+
         loop {
             // Build a future for the idle wake. Backed by the completion feed
             // only when generated ops cursor authority is present; otherwise
@@ -847,30 +1702,21 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 Err(_) => break,
                             };
                             if effect.is_stop() {
-                                // Stop realization awaits executor cleanup
-                                // that may re-enter the machine (unregister),
-                                // which acquires this same gate — applying it
-                                // under the guard self-deadlocks the loop
-                                // task and wedges every caller of the gate.
+                                // Stop hooks may re-enter machine control, and
+                                // required cleanup is an explicit post-loop
+                                // handoff. Relinquish session authority before
+                                // realizing either boundary.
                                 drop(authority_guard);
                             }
-                            match crate::control_plane::apply_executor_effect(
+                            if apply_runtime_loop_effect_and_record_handoff(
                                 &driver,
-                                completions.as_ref(),
-                                &mut *executor,
+                                executor_or_return!(),
                                 effect,
+                                &mut terminal_handoff,
                             )
                             .await
                             {
-                                Ok(true) => break,
-                                Ok(false) => {}
-                                Err(error) => {
-                                    tracing::error!(
-                                        error = %error,
-                                        "failed to apply runtime executor effect"
-                                    );
-                                    break;
-                                }
+                                break;
                             }
                         }
                         None => {
@@ -883,8 +1729,9 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             let _ = stop_runtime_loop_executor_from_dsl_effect(
                                 &driver,
                                 completions.as_ref(),
-                                &mut *executor,
+                                executor_or_return!(),
                                 "runtime effect channel closed".to_string(),
+                                &mut terminal_handoff,
                             )
                             .await;
                             break;
@@ -896,10 +1743,11 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         Some(()) => {
                             if process_queue(
                                 &driver,
-                                &mut *executor,
+                                executor_or_return!(),
                                 &mut effect_rx,
                                 completions.as_ref(),
                                 &authority_binding,
+                                &mut terminal_handoff,
                             )
                             .await
                             {
@@ -922,10 +1770,11 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 FeedWakeOutcome::Injected => {
                                     if process_queue(
                                         &driver,
-                                        &mut *executor,
+                                        executor_or_return!(),
                                         &mut effect_rx,
                                         completions.as_ref(),
                                         &authority_binding,
+                                        &mut terminal_handoff,
                                     )
                                     .await
                                     {
@@ -944,8 +1793,9 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             let _ = stop_runtime_loop_executor_from_dsl_effect(
                                 &driver,
                                 completions.as_ref(),
-                                &mut *executor,
+                                executor_or_return!(),
                                 "runtime wake channel closed".to_string(),
+                                &mut terminal_handoff,
                             )
                             .await;
                             break;
@@ -970,10 +1820,11 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         FeedWakeOutcome::Injected => {
                             if process_queue(
                                 &driver,
-                                &mut *executor,
+                                executor_or_return!(),
                                 &mut effect_rx,
                                 completions.as_ref(),
                                 &authority_binding,
+                                &mut terminal_handoff,
                             )
                             .await
                             {
@@ -987,23 +1838,19 @@ pub(crate) fn spawn_runtime_loop_with_completions(
             }
         }
 
-        // Loop exiting — resolve any pending completion waiters as terminated.
-        if let Some(ref completions) = completions {
-            let result_class = runtime_terminated_completion_class(&driver).await;
-            let mut reg = completions.lock().await;
-            match result_class {
-                Ok(result_class) => {
-                    reg.resolve_all_runtime_terminated("runtime loop exited", result_class);
-                }
-                Err(err) => {
-                    let reason = format!("runtime loop exited without completion authority: {err}");
-                    reg.fail_all_waiters(
-                        crate::completion::CompletionWaitError::AuthorityUnavailable(reason),
-                    );
-                }
-            }
+        // This publication is the loop task's final action. The machine-owned
+        // coordinator receives the exact executor, awaits this task externally,
+        // and runs the external-only cleanup hook before any separately
+        // authorized unregister removal.
+        if let Err(error) = loop_handoff_guard.publish(terminal_handoff) {
+            tracing::error!(%error, "runtime loop failed to publish executor handoff");
         }
-    })
+    });
+    SpawnedRuntimeLoop {
+        loop_handle,
+        teardown_slot,
+        startup,
+    }
 }
 
 /// Check for new background op completions and inject a continuation if needed.
@@ -1230,14 +2077,15 @@ enum FailedBatchBacklogOutcome {
 /// `DeferInputBehindBacklogAlreadyResolved` no-op arm, so a defer error here
 /// is projection corruption, never a machine-owned resolution.
 ///
-/// Callers must drop any driver-authority guard before invoking this: the
-/// stop path can re-enter the machine (unregister) and acquire the same
-/// session mutation gate.
+/// Callers must drop any driver-authority guard before invoking this: a stop
+/// hook may re-enter machine control, while required cleanup is handed off
+/// only after the loop exits.
 async fn resolve_failed_batch_backlog(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     input_ids: &[InputId],
+    handoff: &mut RuntimeLoopTerminalHandoff,
 ) -> FailedBatchBacklogOutcome {
     let defer_error = {
         let mut d = driver.lock().await;
@@ -1264,6 +2112,7 @@ async fn resolve_failed_batch_backlog(
         completions,
         executor,
         format!("failed to defer failed input batch behind backlog: {err}"),
+        handoff,
     )
     .await;
     FailedBatchBacklogOutcome::Stopped(should_stop)
@@ -1277,6 +2126,7 @@ async fn process_queue(
     effect_rx: &mut tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     authority_binding: &RuntimeLoopAuthorityBinding,
+    handoff: &mut RuntimeLoopTerminalHandoff,
 ) -> bool {
     loop {
         let effect_authority_guard = match authority_binding
@@ -1286,36 +2136,16 @@ async fn process_queue(
             Ok(guard) => guard,
             Err(_) => return true,
         };
-        match crate::control_plane::drain_ready_executor_effects(
-            driver,
-            completions,
-            executor,
-            effect_rx,
-        )
-        .await
-        {
+        match crate::control_plane::drain_ready_executor_effects(executor, effect_rx).await {
             Ok(crate::control_plane::EffectDrainOutcome::StopEffectPending(effect)) => {
-                // The drain never applies stops: realize it here AFTER the
-                // authority guard is released (cleanup may re-enter the
-                // machine and acquire the same session mutation gate).
+                // The drain never applies stops: realize it here after the
+                // authority guard is released. Required cleanup remains a
+                // post-loop external handoff.
                 drop(effect_authority_guard);
-                return match crate::control_plane::apply_executor_effect(
-                    driver,
-                    completions,
-                    executor,
-                    effect,
+                return apply_runtime_loop_effect_and_record_handoff(
+                    driver, executor, effect, handoff,
                 )
-                .await
-                {
-                    Ok(should_stop) => should_stop,
-                    Err(error) => {
-                        tracing::error!(
-                            error = %error,
-                            "failed to apply pending stop-runtime-executor effect"
-                        );
-                        true
-                    }
-                };
+                .await;
             }
             Ok(crate::control_plane::EffectDrainOutcome::Empty) => {}
             Ok(crate::control_plane::EffectDrainOutcome::ChannelClosed) => {
@@ -1330,6 +2160,7 @@ async fn process_queue(
                     completions,
                     executor,
                     "runtime effect channel closed".to_string(),
+                    handoff,
                 )
                 .await;
             }
@@ -1343,6 +2174,19 @@ async fn process_queue(
         }
         drop(effect_authority_guard);
 
+        // Stop ownership is installed before its worker enqueues the executor
+        // effect. If that coordinator is already active, yield to the outer
+        // biased select instead of admitting queued ordinary work in the gap
+        // between the two operations.
+        match authority_binding
+            .runtime_stop_cleanup_in_progress(driver)
+            .await
+        {
+            Ok(true) => return false,
+            Ok(false) => {}
+            Err(_) => return true,
+        }
+
         let queue_authority_guard = match authority_binding
             .lock_current_driver_authority(driver, "runtime loop queue processing")
             .await
@@ -1350,6 +2194,22 @@ async fn process_queue(
             Ok(guard) => guard,
             Err(_) => return true,
         };
+
+        // Stop coordinator insertion takes this same mutation gate. Recheck
+        // after claiming it so coordinator ownership and ordinary dequeue have
+        // one total order; a stop installed after the earlier fast-path check
+        // can no longer lose one queued batch in the gap.
+        match authority_binding
+            .runtime_stop_cleanup_in_progress(driver)
+            .await
+        {
+            Ok(true) => {
+                drop(queue_authority_guard);
+                return false;
+            }
+            Ok(false) => {}
+            Err(_) => return true,
+        }
 
         enum RuntimeLoopDequeueOutcome {
             Ready {
@@ -1523,14 +2383,15 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(error = %err, "failed to record primitive rejection terminal event");
-                            // Stop paths must never run under the session
-                            // mutation gate (cleanup can re-enter the machine).
+                            // Stop hooks must never run under the session
+                            // mutation gate; cleanup is handed off after exit.
                             drop(queue_authority_guard);
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
                                 executor,
                                 format!("runtime primitive rejection snapshot failed: {err}"),
+                                handoff,
                             )
                             .await;
                             if let Some(completions) = completions.as_ref() {
@@ -1560,6 +2421,7 @@ async fn process_queue(
                             completions,
                             executor,
                             &input_ids,
+                            handoff,
                         )
                         .await
                         {
@@ -1589,6 +2451,7 @@ async fn process_queue(
                             completions,
                             executor,
                             format!("runtime turn-state preparation snapshot failed: {err}"),
+                            handoff,
                         )
                         .await;
                         if let Some(completions) = completions.as_ref() {
@@ -1613,8 +2476,14 @@ async fn process_queue(
                     // work must not strand behind the rolled-back batch until
                     // an unrelated external wake.
                     drop(queue_authority_guard);
-                    match resolve_failed_batch_backlog(driver, completions, executor, &input_ids)
-                        .await
+                    match resolve_failed_batch_backlog(
+                        driver,
+                        completions,
+                        executor,
+                        &input_ids,
+                        handoff,
+                    )
+                    .await
                     {
                         FailedBatchBacklogOutcome::ContinueProcessing => continue,
                         FailedBatchBacklogOutcome::Park => return false,
@@ -1653,6 +2522,16 @@ async fn process_queue(
                             session_snapshot,
                             terminal,
                         } = output;
+                        // A resume against a session that has no pending
+                        // boundary is a successful terminal observation, but
+                        // the executor must not remain attached afterward.
+                        // Commit and resolve this batch first, then exit so the
+                        // loop guard publishes the exact executor to the
+                        // machine-owned unregister saga.
+                        let teardown_after_commit = matches!(
+                            terminal.as_ref(),
+                            Some(CoreApplyTerminal::NoPendingBoundary)
+                        );
                         let committed_session_snapshot = session_snapshot.clone();
                         if let Err(err) = crate::meerkat_machine::commit_runtime_loop_run(
                             driver,
@@ -1664,10 +2543,27 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
+                            let compaction_cleanup_error =
+                                settle_compaction_projection_after_commit_failure(driver, executor)
+                                    .await
+                                    .err();
+                            if let Some(cleanup_error) = compaction_cleanup_error.as_ref() {
+                                tracing::error!(
+                                    %run_id,
+                                    error = %cleanup_error,
+                                    "failed to reconcile invisible compaction stages after runtime commit failure"
+                                );
+                            }
+                            let failure_detail = match compaction_cleanup_error {
+                                Some(cleanup_error) => format!(
+                                    "runtime loop commit failed: {err}; compaction stage cleanup also failed: {cleanup_error}"
+                                ),
+                                None => format!("runtime loop commit failed: {err}"),
+                            };
                             let completion_error =
-                                meerkat_core::TurnErrorMetadata::runtime_apply_failure(format!(
-                                    "runtime loop commit failed: {err}"
-                                ));
+                                meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                                    failure_detail.clone(),
+                                );
                             resolve_runtime_completion_waiters(
                                 driver,
                                 completions,
@@ -1683,17 +2579,70 @@ async fn process_queue(
                                 driver,
                                 completions,
                                 executor,
-                                format!("runtime loop commit failed for run {run_id}: {err}"),
+                                format!(
+                                    "runtime loop commit failed for run {run_id}: {failure_detail}"
+                                ),
+                                handoff,
                             )
                             .await;
                             return should_stop;
                         }
 
-                        if let Some(session_snapshot) = committed_session_snapshot.as_deref()
-                            && let Err(err) = executor
-                                .checkpoint_committed_session_snapshot(session_snapshot)
-                                .await
+                        let authoritative_checkpoint = match reconcile_compaction_projection_outbox(
+                            driver, executor,
+                        )
+                        .await
                         {
+                            Ok(checkpoint) => checkpoint,
+                            Err(err) => {
+                                tracing::error!(
+                                    %run_id,
+                                    error = %err,
+                                    "failed to finalize committed compaction projection outbox"
+                                );
+                                let completion_error =
+                                    meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                                        format!(
+                                            "runtime compaction projection finalization failed after commit: {err}"
+                                        ),
+                                    );
+                                resolve_runtime_completion_waiters(
+                                        driver,
+                                        completions,
+                                        &input_ids,
+                                        &run_id,
+                                        terminal.as_ref(),
+                                        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+                                        Some(completion_error),
+                                    )
+                                    .await;
+                                drop(terminal_authority_guard);
+                                return stop_runtime_loop_executor_from_dsl_effect(
+                                        driver,
+                                        completions,
+                                        executor,
+                                        format!(
+                                            "runtime compaction projection finalization failed after commit for run {run_id}: {err}"
+                                        ),
+                                        handoff,
+                                    )
+                                    .await;
+                            }
+                        };
+
+                        let checkpoint_result = match (
+                            authoritative_checkpoint,
+                            committed_session_snapshot.as_deref(),
+                        ) {
+                            (Some(_), _) => Ok(()),
+                            (None, Some(session_snapshot)) => {
+                                executor
+                                    .checkpoint_committed_session_snapshot(session_snapshot)
+                                    .await
+                            }
+                            (None, None) => Ok(()),
+                        };
+                        if let Err(err) = checkpoint_result {
                             tracing::error!(
                                 %run_id,
                                 error = %err,
@@ -1721,6 +2670,7 @@ async fn process_queue(
                                 format!(
                                     "runtime session checkpoint failed after commit for run {run_id}: {err}"
                                 ),
+                                handoff,
                             )
                             .await;
                             return should_stop;
@@ -1738,9 +2688,33 @@ async fn process_queue(
                         )
                         .await;
                         drop(terminal_authority_guard);
+                        if teardown_after_commit {
+                            handoff.disposition =
+                                RuntimeLoopTeardownDisposition::UnregisterRequired;
+                            if let Err(error) = authority_binding
+                                .begin_durable_unregister_for_teardown(driver)
+                                .await
+                            {
+                                // The typed handoff disposition is the
+                                // fail-closed fallback. Its watcher starts the
+                                // unregister saga, which must persist Draining
+                                // before taking the exact executor.
+                                tracing::error!(
+                                    session_id = %authority_binding.session_id,
+                                    %error,
+                                    "no-pending runtime apply could not persist BeginUnregister before loop handoff"
+                                );
+                            }
+                            return true;
+                        }
                     }
                     Err(e) => {
                         drop(d);
+                        let teardown_required = e.requires_runtime_teardown();
+                        if teardown_required {
+                            handoff.disposition =
+                                RuntimeLoopTeardownDisposition::UnregisterRequired;
+                        }
                         let terminal_authority_guard = match authority_binding
                             .lock_current_driver_authority(driver, "runtime loop terminal failure")
                             .await
@@ -1802,6 +2776,7 @@ async fn process_queue(
                                 completions,
                                 executor,
                                 format!("runtime failure snapshot failed: {err}"),
+                                handoff,
                             )
                             .await;
                             // Resolve waiter before breaking so callers don't hang.
@@ -1825,6 +2800,30 @@ async fn process_queue(
                             reason,
                         )
                         .await;
+                        if teardown_required {
+                            // This is an ownership handoff, not a retryable
+                            // failed batch. Returning exits the loop; its RAII
+                            // guard publishes the exact executor before the
+                            // watcher starts canonical unregister. Calling
+                            // unregister from inside CoreExecutor::apply would
+                            // self-join this loop.
+                            drop(terminal_authority_guard);
+                            if let Err(error) = authority_binding
+                                .begin_durable_unregister_for_teardown(driver)
+                                .await
+                            {
+                                // The typed handoff disposition is the
+                                // fail-closed fallback. Its watcher starts the
+                                // unregister saga, which must persist Draining
+                                // before taking the exact executor.
+                                tracing::error!(
+                                    session_id = %authority_binding.session_id,
+                                    %error,
+                                    "teardown-required apply could not persist BeginUnregister before loop handoff"
+                                );
+                            }
+                            return true;
+                        }
                         // The stop path inside the backlog resolution can
                         // re-enter the machine — never call it under the
                         // authority guard (ask 21c deadlock pattern).
@@ -1834,6 +2833,7 @@ async fn process_queue(
                             completions,
                             executor,
                             &input_ids,
+                            handoff,
                         )
                         .await
                         {
@@ -1857,6 +2857,7 @@ async fn process_queue(
                     completions,
                     executor,
                     reason,
+                    handoff,
                 )
                 .await;
             }
@@ -1887,6 +2888,71 @@ mod tests {
     const TEST_PEER_RESPONSE_ROUTE_ID: &str = "11111111-1111-4111-8111-111111111111";
     const TEST_PEER_RESPONSE_REQUEST_ID: &str = "22222222-2222-4222-8222-222222222222";
     const TEST_PEER_RESPONSE_REQUEST_ID_2: &str = "33333333-3333-4333-8333-333333333333";
+
+    #[test]
+    fn compatibility_checkpoint_clears_exact_finalized_compaction_intent() {
+        let mut session = meerkat_core::Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("verbose context one"),
+        ));
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("verbose context two"),
+        ));
+        let parent = session.transcript_revision().unwrap();
+        session
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::compaction_summary("compacted context"),
+                )],
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("runtime-loop-checkpoint-test".to_string()),
+                Some(parent),
+            )
+            .unwrap();
+        let mut encoded = serde_json::to_value(&session).unwrap();
+        encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["commits"][0]["selection"] = serde_json::json!({
+            "type": "compaction_message_range",
+            "range": { "start": 0, "end": 2 }
+        });
+        let mut session: meerkat_core::Session = serde_json::from_value(encoded).unwrap();
+        let commit = session
+            .transcript_history_state()
+            .unwrap()
+            .unwrap()
+            .commits
+            .last()
+            .unwrap()
+            .clone();
+        let intent = meerkat_core::CompactionProjectionIntent {
+            projection: serde_json::from_value(serde_json::json!({
+                "session_id": session.id(),
+                "parent_revision": &commit.parent_revision,
+                "revision": &commit.revision,
+                "commit_fingerprint": "sha256:bc151128bd2f8e459c3b111114ca86f1a6270b048a971fffb6d86a032d61eaa7",
+            }))
+            .unwrap(),
+            summary_tokens: 1,
+            messages_before: 2,
+            messages_after: 1,
+        };
+        session
+            .add_compaction_projection_intent(intent.clone())
+            .unwrap();
+        let stale_pre_finalize = serde_json::to_vec(&session).unwrap();
+
+        let cleaned =
+            compatibility_checkpoint_after_compaction_finalize(&stale_pre_finalize, &[intent])
+                .unwrap();
+        let recovered: meerkat_core::Session = serde_json::from_slice(&cleaned).unwrap();
+        assert!(
+            recovered
+                .compaction_projection_intents()
+                .unwrap()
+                .is_empty(),
+            "compatibility checkpoint bytes must not reintroduce a finalized intent on cold resume"
+        );
+    }
 
     fn background_spec(name: &str) -> OperationSpec {
         OperationSpec {
@@ -1943,6 +3009,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn teardown_publication_notify_race_does_not_miss_wakeups() {
+        for _ in 0..256 {
+            let slot = RuntimeLoopTeardownSlot::pending();
+            let stop_calls = Arc::new(AtomicUsize::new(0));
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let guard = RuntimeLoopHandoffGuard::new(
+                Arc::clone(&slot),
+                Box::new(
+                    crate::control_plane::test_support::StopFailingExecutor::new(
+                        stop_calls,
+                        apply_calls,
+                    ),
+                ),
+            );
+            let waiter = {
+                let slot = Arc::clone(&slot);
+                tokio::spawn(async move { slot.wait_until_published().await })
+            };
+            tokio::task::yield_now().await;
+            drop(guard);
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("teardown publication waiter must not miss notify_waiters")
+                .expect("teardown publication waiter task must not panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_guard_fails_waiter_on_pre_ready_exit() {
+        let startup = RuntimeLoopStartupSlot::pending();
+        drop(RuntimeLoopStartupGuard::new(Arc::clone(&startup)));
+
+        let error = tokio::time::timeout(Duration::from_secs(1), startup.wait())
+            .await
+            .expect("pre-ready exit must publish startup failure")
+            .expect_err("pre-ready exit cannot be reported as ready");
+        assert!(
+            error
+                .to_string()
+                .contains("exited before startup reconciliation completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_guard_fails_waiter_when_task_is_aborted_before_ready() {
+        let startup = RuntimeLoopStartupSlot::pending();
+        let startup_guard = RuntimeLoopStartupGuard::new(Arc::clone(&startup));
+        let task = tokio::spawn(async move {
+            let _startup_guard = startup_guard;
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let _ = task.await;
+
+        let error = tokio::time::timeout(Duration::from_secs(1), startup.wait())
+            .await
+            .expect("aborted pre-ready task must publish startup failure")
+            .expect_err("aborted pre-ready task cannot be reported as ready");
+        assert!(
+            error
+                .to_string()
+                .contains("exited before startup reconciliation completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn unregister_error_before_loop_publication_replays_stop_receipt_and_keeps_retry() {
+        let slot = RuntimeLoopTeardownSlot::pending();
+        let (stop_completion, stop_result) = tokio::sync::oneshot::channel();
+        let retained_error = crate::RuntimeDriverError::Internal(
+            "synthetic BeginUnregister persistence failure".into(),
+        );
+
+        // The unregister supervisor can publish this result before a blocked
+        // loop returns from apply and deposits its executor.
+        slot.acknowledge_unregister_result(Err(retained_error.clone()));
+        slot.publish(RuntimeLoopExitHandoff {
+            executor: Box::new(
+                crate::control_plane::test_support::StopFailingExecutor::new(
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(AtomicUsize::new(0)),
+                ),
+            ),
+            terminal: RuntimeLoopTerminalHandoff {
+                stop_completion: Some(stop_completion),
+                ..RuntimeLoopTerminalHandoff::default()
+            },
+        });
+
+        let observed = tokio::time::timeout(Duration::from_secs(1), stop_result)
+            .await
+            .expect("late-published stop receipt must not hang")
+            .expect("stop receipt sender must remain owned until replay")
+            .expect_err("the retained unregister failure must be replayed exactly");
+        assert_eq!(observed.to_string(), retained_error.to_string());
+
+        let state = slot
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let RuntimeLoopTeardownState::Ready(handoff) = &*state else {
+            panic!("failed pre-publication unregister must retain the exact executor for retry");
+        };
+        assert!(handoff.terminal.stop_completion.is_none());
+        assert!(
+            handoff.terminal.executor_stop_retry_reason.is_some(),
+            "replaying the caller acknowledgement must not erase the stop-hook obligation"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_guard_drop_on_early_return_executes_required_stop_hook() {
+        let slot = RuntimeLoopTeardownSlot::pending();
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let guard = RuntimeLoopHandoffGuard::new(
+            Arc::clone(&slot),
+            Box::new(
+                crate::control_plane::test_support::ApplyFailingExecutor::new(
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::clone(&stop_calls),
+                ),
+            ),
+        );
+        drop(guard); // models an early cursor-authority error return
+
+        {
+            let state = slot
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let RuntimeLoopTeardownState::Ready(handoff) = &*state else {
+                panic!("early return must publish the exact executor");
+            };
+            assert!(handoff.terminal.executor_stop_retry_reason.is_some());
+        }
+
+        slot.cleanup_once(&make_shared_ephemeral_driver("early-return-stop-hook"))
+            .await
+            .expect("unregister cleanup must realize the retained stop obligation");
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn handoff_guard_drop_during_panic_executes_required_stop_hook() {
+        let slot = RuntimeLoopTeardownSlot::pending();
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let slot = Arc::clone(&slot);
+            let stop_calls = Arc::clone(&stop_calls);
+            move || {
+                let _guard = RuntimeLoopHandoffGuard::new(
+                    slot,
+                    Box::new(
+                        crate::control_plane::test_support::ApplyFailingExecutor::new(
+                            Arc::new(AtomicUsize::new(0)),
+                            stop_calls,
+                        ),
+                    ),
+                );
+                panic!("synthetic runtime-loop panic");
+            }
+        }));
+        assert!(panic_result.is_err());
+
+        {
+            let state = slot
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let RuntimeLoopTeardownState::Ready(handoff) = &*state else {
+                panic!("panic unwinding must publish the exact executor");
+            };
+            assert!(handoff.terminal.executor_stop_retry_reason.is_some());
+        }
+
+        slot.cleanup_once(&make_shared_ephemeral_driver("panic-stop-hook"))
+            .await
+            .expect("panic handoff cleanup must realize the retained stop obligation");
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn runtime_loop_stop_effect_failure_is_fail_closed_from_helper() {
         let driver = make_shared_ephemeral_driver("stop-helper-fail-closed");
         let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -1951,12 +3199,14 @@ mod tests {
             Arc::clone(&stop_calls),
             Arc::clone(&apply_calls),
         );
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
 
         let should_stop = stop_runtime_loop_executor_from_dsl_effect(
             &driver,
             None,
             &mut executor,
             "snapshot failure should stop the runtime loop".to_string(),
+            &mut terminal_handoff,
         )
         .await;
 
@@ -1988,12 +3238,14 @@ mod tests {
             .expect("test effect should enqueue");
 
         let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
         let should_stop = process_queue(
             &driver,
             &mut executor,
             &mut effect_rx,
             None,
             &authority_binding,
+            &mut terminal_handoff,
         )
         .await;
 
@@ -2029,12 +3281,14 @@ mod tests {
         drop(effect_tx);
 
         let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
         let should_stop = process_queue(
             &driver,
             &mut executor,
             &mut effect_rx,
             None,
             &authority_binding,
+            &mut terminal_handoff,
         )
         .await;
 
@@ -2085,7 +3339,7 @@ mod tests {
             .await
             .expect("test effect should enqueue");
 
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(Duration::from_secs(1), handle.loop_handle)
             .await
             .expect("runtime loop must exit after executor-effect failure")
             .expect("runtime loop task should not panic");
@@ -2124,7 +3378,7 @@ mod tests {
 
         drop(effect_tx);
 
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(Duration::from_secs(1), handle.loop_handle)
             .await
             .expect("runtime loop must exit after effect channel closure")
             .expect("runtime loop task should not panic");
@@ -2165,7 +3419,7 @@ mod tests {
 
         drop(wake_tx);
 
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(Duration::from_secs(1), handle.loop_handle)
             .await
             .expect("runtime loop must exit after wake channel closure")
             .expect("runtime loop task should not panic");
@@ -2920,6 +4174,65 @@ mod tests {
         assert!(metadata.transcript_identity.is_empty());
     }
 
+    #[test]
+    fn merged_turn_metadata_preserves_shared_objective_across_interaction_conflict() {
+        let objective_id = meerkat_core::interaction::ObjectiveId(uuid::Uuid::from_u128(90));
+        let mut inputs = (1_u128..=3)
+            .map(|interaction| {
+                let mut input = make_peer_message("peer-1", "batched");
+                if let Input::Peer(peer) = &mut input {
+                    peer.objective_id = Some(objective_id);
+                    peer.header.correlation_id = Some(crate::CorrelationId::from_uuid(
+                        uuid::Uuid::from_u128(interaction),
+                    ));
+                }
+                input
+            })
+            .collect::<Vec<_>>();
+        let semantics = inputs.iter().map(admission_semantics).collect::<Vec<_>>();
+        let inputs = inputs
+            .drain(..)
+            .map(|input| (InputId::new(), input))
+            .collect::<Vec<_>>();
+
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .unwrap()
+            .expect("metadata should carry shared objective causality");
+
+        assert_eq!(metadata.transcript_identity.interaction_id, None);
+        assert_eq!(
+            metadata.transcript_identity.objective_id,
+            Some(objective_id)
+        );
+    }
+
+    #[test]
+    fn merged_turn_metadata_does_not_reseed_conflicted_objective() {
+        let first = meerkat_core::interaction::ObjectiveId(uuid::Uuid::from_u128(91));
+        let conflicting = meerkat_core::interaction::ObjectiveId(uuid::Uuid::from_u128(92));
+        let mut inputs = [first, conflicting, first]
+            .into_iter()
+            .map(|objective_id| {
+                let mut input = make_peer_message("peer-1", "batched");
+                if let Input::Peer(peer) = &mut input {
+                    peer.objective_id = Some(objective_id);
+                }
+                input
+            })
+            .collect::<Vec<_>>();
+        let semantics = inputs.iter().map(admission_semantics).collect::<Vec<_>>();
+        let inputs = inputs
+            .drain(..)
+            .map(|input| (InputId::new(), input))
+            .collect::<Vec<_>>();
+
+        let metadata = merge_batch_turn_metadata(&inputs, &semantics)
+            .unwrap()
+            .expect("execution kind should keep metadata non-empty");
+
+        assert_eq!(metadata.transcript_identity.objective_id, None);
+    }
+
     fn admission_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
         crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(input, true)
             .expect("generated admission semantics")
@@ -3172,6 +4485,7 @@ mod tests {
         );
         let (_effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
         let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
 
         let should_stop = process_queue(
             &driver,
@@ -3179,6 +4493,7 @@ mod tests {
             &mut effect_rx,
             None,
             &authority_binding,
+            &mut terminal_handoff,
         )
         .await;
         assert!(

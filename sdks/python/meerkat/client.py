@@ -48,6 +48,7 @@ from .generated.types import (
     ConfigPatchParams,
     ConfigSetParams,
     ConfigWriteResult,
+    CommsSendResult,
     InterruptResult,
     ServerCapabilities,
     SkillEntry,
@@ -2515,8 +2516,13 @@ class MeerkatClient:
                 else {}
             ),
             **(
-                {"progress": cast(WireMemberProgressSnapshot, result["progress"])}
-                if isinstance(result.get("progress"), dict)
+                {
+                    "progress": self._parse_member_progress_snapshot(
+                        result["progress"],
+                        "Invalid mob/member_status response",
+                    )
+                }
+                if result.get("progress") is not None
                 else {}
             ),
             # Preserve `current_session_id` as diagnostic status/continuity data only.
@@ -2682,6 +2688,7 @@ class MeerkatClient:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
+        model_override: str | None = None,
         auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
@@ -2691,6 +2698,7 @@ class MeerkatClient:
             "prompt": prompt,
             "agent_identity": agent_identity,
             "role_name": role_name,
+            "model_override": model_override,
             "auth_binding": _wire_value(auth_binding),
             "runtime_mode": runtime_mode,
             "backend": backend,
@@ -2726,6 +2734,7 @@ class MeerkatClient:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
+        model_override: str | None = None,
         auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
         fork_context: dict[str, Any] | None = None,
         runtime_mode: str | None = None,
@@ -2737,6 +2746,7 @@ class MeerkatClient:
             "prompt": prompt,
             "agent_identity": agent_identity,
             "role_name": role_name,
+            "model_override": model_override,
             "auth_binding": _wire_value(auth_binding),
             "fork_context": fork_context,
             "runtime_mode": runtime_mode,
@@ -3309,7 +3319,7 @@ class MeerkatClient:
         _rpc_signature: RpcArchiveSessionParams
         await self._request("session/archive", {"session_id": session_id})
 
-    async def _send(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
+    async def _send(self, session_id: str, **kwargs: Any) -> CommsSendResult:
         return await self.send(session_id, **kwargs)
 
     async def _peers(self, session_id: str) -> dict[str, Any]:
@@ -3344,7 +3354,7 @@ class MeerkatClient:
         stream: "MeerkatClient._InputStreamMode | None" = None,
         allow_self_session: bool | None = None,
         handling_mode: "MeerkatClient._HandlingMode | None" = None,
-    ) -> dict[str, Any]:
+    ) -> CommsSendResult:
         """Send a typed comms command.
 
         Mirrors the Rust `CommsCommandRequest` variants:
@@ -3374,7 +3384,8 @@ class MeerkatClient:
         }
         payload: dict[str, Any] = {"session_id": session_id, "kind": kind}
         payload.update({k: v for k, v in fields.items() if v is not None})
-        return await self._request("comms/send", payload)
+        result = await self._request("comms/send", payload)
+        return self._parse_comms_send_result(result)
 
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
@@ -4567,6 +4578,94 @@ class MeerkatClient:
         if not isinstance(value, bool):
             raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be boolean")
         return value
+
+    @staticmethod
+    def _parse_comms_send_result(raw: Any) -> CommsSendResult:
+        context = "Invalid comms/send response"
+        result = MeerkatClient._require_dict(raw, "result", context)
+        kind = MeerkatClient._require_string_field(result, "kind", context)
+
+        if kind == "input_accepted":
+            allowed = {"kind", "interaction_id", "stream_reserved"}
+            MeerkatClient._require_string_field(result, "interaction_id", context)
+            MeerkatClient._require_bool_field(result, "stream_reserved", context)
+        elif kind == "peer_message_sent":
+            allowed = {"kind", "envelope_id", "delivery"}
+            MeerkatClient._require_string_field(result, "envelope_id", context)
+            delivery = MeerkatClient._require_string_field(result, "delivery", context)
+            if delivery not in {"acked", "handed_off", "queued"}:
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: invalid delivery"
+                )
+        elif kind == "peer_lifecycle_sent":
+            allowed = {"kind", "envelope_id"}
+            MeerkatClient._require_string_field(result, "envelope_id", context)
+        elif kind == "peer_request_sent":
+            allowed = {
+                "kind",
+                "envelope_id",
+                "interaction_id",
+                "request_id",
+                "stream_reserved",
+            }
+            MeerkatClient._require_string_field(result, "envelope_id", context)
+            MeerkatClient._require_string_field(result, "interaction_id", context)
+            MeerkatClient._require_string_field(result, "request_id", context)
+            MeerkatClient._require_bool_field(result, "stream_reserved", context)
+        elif kind == "peer_response_sent":
+            allowed = {"kind", "envelope_id", "in_reply_to"}
+            MeerkatClient._require_string_field(result, "envelope_id", context)
+            MeerkatClient._require_string_field(result, "in_reply_to", context)
+        else:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid kind"
+            )
+        unknown = set(result) - allowed
+        if unknown:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unknown field {sorted(unknown)[0]}",
+            )
+        return cast(CommsSendResult, result)
+
+    @staticmethod
+    def _parse_member_progress_snapshot(
+        raw: Any, context: str
+    ) -> WireMemberProgressSnapshot:
+        progress = MeerkatClient._require_dict(raw, "progress", context)
+        run_state = MeerkatClient._require_string_field(progress, "run_state", context)
+        if run_state not in {"idle", "run_open", "unknown"}:
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: invalid progress.run_state")
+        last_event = MeerkatClient._require_string_field(
+            progress, "last_progress_event", context
+        )
+        if last_event not in {"execution_advanced", "became_idle", "unchanged"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid progress.last_progress_event"
+            )
+        health = MeerkatClient._require_string_field(progress, "health", context)
+        if health not in {"healthy", "degraded", "wedged", "unknown"}:
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: invalid progress.health")
+        MeerkatClient._require_non_negative_integer_field(
+            progress, "in_flight_work", context, "progress.in_flight_work"
+        )
+        MeerkatClient._require_non_negative_integer_field(
+            progress, "last_progress_at_ms", context, "progress.last_progress_at_ms"
+        )
+        allowed = {
+            "run_state",
+            "in_flight_work",
+            "last_progress_at_ms",
+            "last_progress_event",
+            "health",
+        }
+        unknown = set(progress) - allowed
+        if unknown:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: unknown progress field {sorted(unknown)[0]}",
+            )
+        return cast(WireMemberProgressSnapshot, progress)
 
     @staticmethod
     def _optional_string_field(

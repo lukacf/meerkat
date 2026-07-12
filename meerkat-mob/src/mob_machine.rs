@@ -404,6 +404,11 @@ pub enum MobMachineRuntimeInternalReason {
     /// `MemberStatus`; they are machine inputs, but not independent public
     /// commands. The machine remains the sole owner of health classification.
     MemberProgressObservationAuthority,
+    /// Public retire carries only a stable identity. The actor drives this
+    /// internal classifier so MobMachine can authorize cancellation for one
+    /// exact committed runtime/generation/pending-session incarnation, or
+    /// preserve a pending later incarnation when no committed member exists.
+    RetirePendingSpawnDispositionAuthority,
     ObjectiveOwnerBindingAuthority,
 }
 
@@ -611,6 +616,13 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // actor, not a surface command.
         input: MobMachineCatalogInput::ClassifyMemberOperationEligibility,
         reason: MobMachineRuntimeInternalReason::SurfaceResultClassificationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Stable-identity retire commands cannot classify a pending spawn from
+        // roster projection. The actor drives this internal observation and
+        // consumes the machine's exact incarnation-scoped structural verdict.
+        input: MobMachineCatalogInput::ClassifyRetirePendingSpawnDisposition,
+        reason: MobMachineRuntimeInternalReason::RetirePendingSpawnDispositionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
         // Bridge-rejection recovery class is decided by MobMachine from the

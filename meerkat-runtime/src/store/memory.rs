@@ -30,6 +30,12 @@ struct ReceiptKey {
     sequence: u64,
 }
 
+#[derive(Debug, Clone)]
+struct CompactionOutboxEntry {
+    intent: meerkat_core::CompactionProjectionIntent,
+    finalized: bool,
+}
+
 /// Inner state protected by the mutex.
 #[derive(Debug, Default)]
 struct Inner {
@@ -50,6 +56,12 @@ struct Inner {
     runtime_lifecycle: HashMap<String, MachineLifecycleSnapshot>,
     /// Persisted ops lifecycle snapshots.
     ops_lifecycle_snapshots: HashMap<String, PersistedOpsSnapshot>,
+    /// Exact ops epochs retired by atomic unregister finalization. Tombstones
+    /// outlive row deletion so detached callbacks cannot resurrect them.
+    retired_ops_epochs: HashSet<(String, meerkat_core::RuntimeEpochId)>,
+    /// Runtime id -> transcript-rewrite-keyed compaction projection outbox.
+    compaction_projection_outbox:
+        HashMap<String, HashMap<meerkat_core::CompactionProjectionId, CompactionOutboxEntry>>,
 }
 
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`.
@@ -91,9 +103,46 @@ fn deserialize_persisted_session(bytes: &[u8]) -> Result<meerkat_core::Session, 
     serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
 }
 
+fn ensure_compaction_intents_already_outboxed(
+    inner: &Inner,
+    runtime_id: &LogicalRuntimeId,
+    session: &meerkat_core::Session,
+) -> Result<(), RuntimeStoreError> {
+    let intents = super::validated_compaction_projection_intents(session)?;
+    let existing = inner.compaction_projection_outbox.get(&runtime_id.0);
+    for intent in intents {
+        match existing.and_then(|entries| entries.get(&intent.projection)) {
+            Some(entry) if entry.finalized => {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "non-boundary snapshot replays finalized compaction intent {}",
+                    intent.projection.revision()
+                )));
+            }
+            Some(entry) if entry.intent == intent => {}
+            Some(_) => {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "non-boundary snapshot conflicts with compaction outbox rewrite {}",
+                    intent.projection.revision()
+                )));
+            }
+            None => {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "non-boundary snapshot introduces compaction intent {} without atomic outbox authority",
+                    intent.projection.revision()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeStore for InMemoryRuntimeStore {
+    fn supports_compaction_projection_outbox(&self) -> bool {
+        true
+    }
+
     fn persist_auth_oauth_flow_snapshot(
         &self,
         snapshot_json: &[u8],
@@ -135,6 +184,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             serde_json::from_slice(&session_delta.session_snapshot)
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         let mut inner = self.inner.lock().await;
+        ensure_compaction_intents_already_outboxed(&inner, runtime_id, &incoming)?;
         let previous = inner
             .sessions
             .get(&runtime_id.0)
@@ -159,6 +209,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             serde_json::from_slice(&session_delta.session_snapshot)
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         let mut inner = self.inner.lock().await;
+        ensure_compaction_intents_already_outboxed(&inner, runtime_id, &incoming)?;
         let previous = inner
             .sessions
             .get(&runtime_id.0)
@@ -204,12 +255,33 @@ impl RuntimeStore for InMemoryRuntimeStore {
         // writes, so receipt/input ordering identity never advances past the
         // retained session truth.
         let mut session_snapshot_superseded = false;
+        let mut compaction_intents = Vec::new();
         if let Some(delta) = session_delta {
             let incoming_session =
                 serde_json::from_slice::<meerkat_core::Session>(&delta.session_snapshot);
             let mut persist_session_snapshot = true;
             match (incoming_session, session_store_key) {
                 (Ok(incoming_session), session_store_key) => {
+                    compaction_intents =
+                        super::validated_compaction_projection_intents(&incoming_session)?;
+                    if let Some(existing) = inner.compaction_projection_outbox.get(&rid) {
+                        for intent in &compaction_intents {
+                            if let Some(entry) = existing.get(&intent.projection) {
+                                if entry.finalized {
+                                    return Err(RuntimeStoreError::WriteFailed(format!(
+                                        "atomic session snapshot replays finalized compaction intent {}",
+                                        intent.projection.revision()
+                                    )));
+                                }
+                                if entry.intent != *intent {
+                                    return Err(RuntimeStoreError::WriteFailed(format!(
+                                        "conflicting compaction outbox intent for rewrite {}",
+                                        intent.projection.revision()
+                                    )));
+                                }
+                            }
+                        }
+                    }
                     if let Some(session_store_key) = session_store_key
                         && incoming_session.id() != &session_store_key
                     {
@@ -270,6 +342,19 @@ impl RuntimeStore for InMemoryRuntimeStore {
             return Ok(());
         }
 
+        let outbox = inner
+            .compaction_projection_outbox
+            .entry(rid.clone())
+            .or_default();
+        for intent in compaction_intents {
+            outbox
+                .entry(intent.projection.clone())
+                .or_insert(CompactionOutboxEntry {
+                    intent,
+                    finalized: false,
+                });
+        }
+
         // Receipt
         let key = ReceiptKey {
             runtime_id: rid.clone(),
@@ -285,6 +370,86 @@ impl RuntimeStore for InMemoryRuntimeStore {
             states.insert(bundle.state.input_id.clone(), bundle);
         }
 
+        Ok(())
+    }
+
+    async fn load_pending_compaction_projections(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let mut pending = inner
+            .compaction_projection_outbox
+            .get(&runtime_id.0)
+            .into_iter()
+            .flat_map(HashMap::values)
+            .filter(|entry| !entry.finalized)
+            .map(|entry| entry.intent.clone())
+            .collect::<Vec<_>>();
+        pending.sort_by(|left, right| {
+            left.projection
+                .session_id()
+                .to_string()
+                .cmp(&right.projection.session_id().to_string())
+                .then_with(|| {
+                    left.projection
+                        .parent_revision()
+                        .cmp(right.projection.parent_revision())
+                })
+                .then_with(|| left.projection.revision().cmp(right.projection.revision()))
+                .then_with(|| {
+                    left.projection
+                        .commit_fingerprint()
+                        .cmp(right.projection.commit_fingerprint())
+                })
+        });
+        Ok(pending)
+    }
+
+    async fn mark_compaction_projection_finalized(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        projection: &meerkat_core::CompactionProjectionId,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let outbox_exists = inner
+            .compaction_projection_outbox
+            .get(&runtime_id.0)
+            .is_some_and(|entries| entries.contains_key(projection));
+        if !outbox_exists {
+            return Err(RuntimeStoreError::NotFound(format!(
+                "compaction outbox rewrite {}",
+                projection.revision()
+            )));
+        }
+        let cleaned_snapshot = inner
+            .sessions
+            .get(&runtime_id.0)
+            .map(|snapshot| {
+                let mut session = deserialize_persisted_session(snapshot)?;
+                session
+                    .complete_compaction_projection_intent(projection)
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                serde_json::to_vec(&session)
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
+            })
+            .transpose()?;
+        let entry = inner
+            .compaction_projection_outbox
+            .get_mut(&runtime_id.0)
+            .and_then(|entries| entries.get_mut(projection))
+            .ok_or_else(|| {
+                RuntimeStoreError::NotFound(format!(
+                    "compaction outbox rewrite {}",
+                    projection.revision()
+                ))
+            })?;
+        entry.finalized = true;
+        if let Some(cleaned_snapshot) = cleaned_snapshot {
+            inner
+                .sessions
+                .insert(runtime_id.0.clone(), cleaned_snapshot);
+        }
         Ok(())
     }
 
@@ -339,16 +504,17 @@ impl RuntimeStore for InMemoryRuntimeStore {
         expected_current: &[u8],
         replacement: Vec<u8>,
     ) -> Result<bool, RuntimeStoreError> {
-        let _: meerkat_core::Session = serde_json::from_slice(&replacement)
+        let replacement_session: meerkat_core::Session = serde_json::from_slice(&replacement)
             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         let mut inner = self.inner.lock().await;
-        let Some(current) = inner.sessions.get_mut(&runtime_id.0) else {
+        let Some(current) = inner.sessions.get(&runtime_id.0) else {
             return Ok(false);
         };
         if current.as_slice() != expected_current {
             return Ok(false);
         }
-        *current = replacement;
+        ensure_compaction_intents_already_outboxed(&inner, runtime_id, &replacement_session)?;
+        inner.sessions.insert(runtime_id.0.clone(), replacement);
         inner.projection_quarantine.remove(&runtime_id.0);
         Ok(true)
     }
@@ -439,12 +605,57 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(())
     }
 
+    async fn commit_unregister_finalization(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        commit: MachineLifecycleCommit,
+        input_states: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let rid = runtime_id.0.clone();
+        let retired_ops_epoch = commit.retired_ops_epoch().cloned().ok_or_else(|| {
+            RuntimeStoreError::WriteFailed(
+                "unregister finalization missing exact retired ops epoch".into(),
+            )
+        })?;
+
+        // One critical section publishes the terminal lifecycle and removes
+        // the old ops epoch while recording a deletion-wins tombstone. No
+        // observer can acquire the store between them.
+        inner
+            .runtime_lifecycle
+            .insert(rid.clone(), commit.into_snapshot());
+        let states = inner.input_states.entry(rid.clone()).or_default();
+        for record in input_states {
+            let bundle = record.as_stored();
+            states.insert(bundle.state.input_id.clone(), bundle.clone());
+        }
+        if inner
+            .ops_lifecycle_snapshots
+            .get(&rid)
+            .is_some_and(|snapshot| snapshot.epoch_id == retired_ops_epoch)
+        {
+            inner.ops_lifecycle_snapshots.remove(&rid);
+        }
+        inner.retired_ops_epochs.insert((rid, retired_ops_epoch));
+        Ok(())
+    }
+
     async fn persist_ops_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
         snapshot: &PersistedOpsSnapshot,
     ) -> Result<(), RuntimeStoreError> {
         let mut inner = self.inner.lock().await;
+        if inner
+            .retired_ops_epochs
+            .contains(&(runtime_id.0.clone(), snapshot.epoch_id.clone()))
+        {
+            return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
+                runtime_id: runtime_id.0.clone(),
+                epoch_id: snapshot.epoch_id.clone(),
+            });
+        }
         inner
             .ops_lifecycle_snapshots
             .insert(runtime_id.0.clone(), snapshot.clone());
@@ -473,6 +684,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::RuntimeState;
     use crate::store::MachineLifecycleBindingFacts;
     use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 
@@ -497,6 +709,463 @@ mod tests {
             meerkat_core::types::UserMessage::text(content.to_string()),
         ));
         session
+    }
+
+    fn session_with_compaction_intent() -> (
+        meerkat_core::Session,
+        meerkat_core::CompactionProjectionIntent,
+    ) {
+        let mut session = session_with_user("verbose context one");
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("verbose context two"),
+        ));
+        let parent = session.transcript_revision().unwrap();
+        session
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::compaction_summary("compacted context"),
+                )],
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("runtime-store-test".to_string()),
+                Some(parent),
+            )
+            .unwrap();
+        let mut encoded = serde_json::to_value(&session).unwrap();
+        encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["commits"][0]["selection"] = serde_json::json!({
+            "type": "compaction_message_range",
+            "range": { "start": 0, "end": 2 }
+        });
+        let mut session: meerkat_core::Session = serde_json::from_value(encoded).unwrap();
+        let commit = session
+            .transcript_history_state()
+            .unwrap()
+            .unwrap()
+            .commits
+            .last()
+            .unwrap()
+            .clone();
+        let intent = meerkat_core::CompactionProjectionIntent {
+            projection: serde_json::from_value(serde_json::json!({
+                "session_id": session.id(),
+                "parent_revision": &commit.parent_revision,
+                "revision": &commit.revision,
+                "commit_fingerprint": "sha256:827d8ee5666e51b2ced4d303640740680d96151d92187fd6e981c29550072c62",
+            }))
+            .unwrap(),
+            summary_tokens: 5,
+            messages_before: 2,
+            messages_after: 1,
+        };
+        session
+            .add_compaction_projection_intent(intent.clone())
+            .unwrap();
+        (session, intent)
+    }
+
+    fn snapshot_with_raw_intents(
+        session: &meerkat_core::Session,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Vec<u8> {
+        let mut value = serde_json::to_value(session).unwrap();
+        value["metadata"][meerkat_core::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY] =
+            serde_json::to_value(intents).unwrap();
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    fn unbacked_intent(
+        session_id: &meerkat_core::types::SessionId,
+    ) -> meerkat_core::CompactionProjectionIntent {
+        meerkat_core::CompactionProjectionIntent {
+            projection: serde_json::from_value(serde_json::json!({
+                "session_id": session_id,
+                "parent_revision": "missing-parent",
+                "revision": "missing-revision",
+                "commit_fingerprint": "sha256:unbacked-persisted-fixture",
+            }))
+            .unwrap(),
+            summary_tokens: 1,
+            messages_before: 2,
+            messages_after: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_apply_commits_rewrite_and_compaction_outbox_as_one_boundary() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-compaction-outbox");
+        let (session, intent) = session_with_compaction_intent();
+        let snapshot = serde_json::to_vec(&session).unwrap();
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: snapshot.clone(),
+                }),
+                make_receipt(RunId::new(), 1),
+                vec![],
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(snapshot)
+        );
+        assert_eq!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap(),
+            vec![intent.clone()]
+        );
+        store
+            .mark_compaction_projection_finalized(&rid, &intent.projection)
+            .await
+            .unwrap();
+        store
+            .mark_compaction_projection_finalized(&rid, &intent.projection)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let persisted: meerkat_core::Session =
+            serde_json::from_slice(&store.load_session_snapshot(&rid).await.unwrap().unwrap())
+                .unwrap();
+        assert!(
+            persisted
+                .compaction_projection_intents()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn finalized_outbox_tombstone_rejects_atomic_and_non_boundary_snapshot_replay() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-finalized-compaction-replay");
+        let (session, intent) = session_with_compaction_intent();
+        let replay_snapshot = serde_json::to_vec(&session).unwrap();
+        let commit = session
+            .transcript_history_state()
+            .unwrap()
+            .unwrap()
+            .commits
+            .last()
+            .unwrap()
+            .clone();
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: replay_snapshot.clone(),
+                }),
+                make_receipt(RunId::new(), 1),
+                vec![],
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap();
+        store
+            .mark_compaction_projection_finalized(&rid, &intent.projection)
+            .await
+            .unwrap();
+        let cleaned_snapshot = store.load_session_snapshot(&rid).await.unwrap().unwrap();
+
+        let replay_run_id = RunId::new();
+        let error = store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: replay_snapshot.clone(),
+                }),
+                make_receipt(replay_run_id.clone(), 2),
+                vec![],
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("finalized compaction intent"));
+        assert!(
+            store
+                .load_boundary_receipt(&rid, &replay_run_id, 2)
+                .await
+                .unwrap()
+                .is_none(),
+            "finalized replay rejection must roll back the whole atomic boundary"
+        );
+
+        let error = store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: replay_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("finalized compaction intent"));
+        let error = store
+            .commit_session_transcript_rewrite_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: replay_snapshot.clone(),
+                },
+                &commit,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("finalized compaction intent"));
+        let error = store
+            .replace_session_snapshot_if_current(&rid, &cleaned_snapshot, replay_snapshot)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("finalized compaction intent"));
+
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(cleaned_snapshot)
+        );
+        assert!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a finalized tombstone must never be silently revived or left untracked"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_compaction_intent_leaves_snapshot_and_outbox_unmodified() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-invalid-compaction-outbox");
+        let (session, mut intent) = session_with_compaction_intent();
+        intent.summary_tokens += 1;
+        let conflicting = vec![
+            session.compaction_projection_intents().unwrap()[0].clone(),
+            intent,
+        ];
+        let error = store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: snapshot_with_raw_intents(&session, &conflicting),
+                }),
+                make_receipt(RunId::new(), 2),
+                vec![],
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+        assert_eq!(store.load_session_snapshot(&rid).await.unwrap(), None);
+        assert!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let foreign = session_with_compaction_intent().1;
+        for (sequence, invalid) in [foreign, unbacked_intent(session.id())]
+            .into_iter()
+            .enumerate()
+        {
+            let error = store
+                .atomic_apply(
+                    &rid,
+                    Some(SessionDelta {
+                        session_snapshot: snapshot_with_raw_intents(&session, &[invalid]),
+                    }),
+                    make_receipt(RunId::new(), 10 + sequence as u64),
+                    vec![],
+                    Some(session.id().clone()),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+            assert_eq!(store.load_session_snapshot(&rid).await.unwrap(), None);
+            assert!(
+                store
+                    .load_pending_compaction_projections(&rid)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_snapshot_does_not_advance_compaction_outbox() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-superseded-compaction-outbox");
+        let (incoming, intent) = session_with_compaction_intent();
+        let mut current = incoming.clone();
+        current
+            .complete_compaction_projection_intent(&intent.projection)
+            .unwrap();
+        current.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("already advanced"),
+        ));
+        let current_snapshot = serde_json::to_vec(&current).unwrap();
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: current_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                }),
+                make_receipt(RunId::new(), 3),
+                vec![],
+                Some(incoming.id().clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(current_snapshot)
+        );
+        assert!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_outbox_rejects_changed_intent_without_advancing_snapshot() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-conflicting-compaction-outbox");
+        let (session, intent) = session_with_compaction_intent();
+        let original_snapshot = serde_json::to_vec(&session).unwrap();
+        store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: original_snapshot.clone(),
+                }),
+                make_receipt(RunId::new(), 60),
+                vec![],
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap();
+
+        let mut advanced = session.clone();
+        advanced.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("later turn"),
+        ));
+        let mut conflicting = intent.clone();
+        conflicting.summary_tokens += 1;
+        let error = store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: snapshot_with_raw_intents(&advanced, &[conflicting]),
+                }),
+                make_receipt(RunId::new(), 61),
+                vec![],
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(original_snapshot)
+        );
+        assert_eq!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap(),
+            vec![intent]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_boundary_snapshot_apis_cannot_bypass_compaction_outbox() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("runtime-compaction-bypass");
+        let (session, _intent) = session_with_compaction_intent();
+        let snapshot = serde_json::to_vec(&session).unwrap();
+        let commit = session
+            .transcript_history_state()
+            .unwrap()
+            .unwrap()
+            .commits
+            .last()
+            .unwrap()
+            .clone();
+        assert!(
+            store
+                .commit_session_snapshot(
+                    &rid,
+                    SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    },
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .commit_session_transcript_rewrite_snapshot(
+                    &rid,
+                    SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    },
+                    &commit,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(store.load_session_snapshot(&rid).await.unwrap(), None);
+        let clean = meerkat_core::Session::with_id(session.id().clone());
+        let clean_snapshot = serde_json::to_vec(&clean).unwrap();
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: clean_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .replace_session_snapshot_if_current(&rid, &clean_snapshot, snapshot)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(clean_snapshot)
+        );
+        assert!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1159,6 +1828,133 @@ mod tests {
                 .unwrap(),
             Some(RuntimeState::Retired)
         );
+    }
+
+    #[tokio::test]
+    async fn unregister_finalization_atomically_retires_ops_epoch_and_is_idempotent() {
+        let store = InMemoryRuntimeStore::new();
+        let reopened = store.clone();
+        let runtime_id = LogicalRuntimeId::new("runtime-unregister-finalization");
+        let stale_ops = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+            .capture_persistence_snapshot(
+                meerkat_core::RuntimeEpochId::new(),
+                &meerkat_core::EpochCursorState::new(),
+            )
+            .unwrap();
+        store
+            .persist_ops_lifecycle(&runtime_id, &stale_ops)
+            .await
+            .unwrap();
+        let retired_ops_epoch = stale_ops.epoch_id.clone();
+
+        for _ in 0..2 {
+            store
+                .commit_unregister_finalization(
+                    &runtime_id,
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Stopped,
+                        MachineLifecycleBindingFacts::new(None, None, None, None),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    )
+                    .for_unregister_finalization(retired_ops_epoch.clone()),
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            crate::store::load_runtime_state(&reopened, &runtime_id)
+                .await
+                .unwrap(),
+            Some(RuntimeState::Stopped)
+        );
+        assert!(
+            reopened
+                .load_ops_lifecycle(&runtime_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the same critical section that publishes terminal lifecycle must remove the ops epoch"
+        );
+        let late_error = reopened
+            .persist_ops_lifecycle(&runtime_id, &stale_ops)
+            .await
+            .expect_err("a detached callback must not resurrect its retired ops epoch");
+        assert!(matches!(
+            late_error,
+            RuntimeStoreError::OpsLifecycleEpochRetired { epoch_id, .. }
+                if epoch_id == retired_ops_epoch
+        ));
+        assert!(
+            reopened
+                .load_ops_lifecycle(&runtime_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_old_epoch_finalizer_cannot_delete_or_overwrite_new_ops_epoch() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("runtime-old-finalizer-new-epoch");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let old_ops = registry
+            .capture_persistence_snapshot(
+                meerkat_core::RuntimeEpochId::new(),
+                &meerkat_core::EpochCursorState::new(),
+            )
+            .unwrap();
+        let new_ops = registry
+            .capture_persistence_snapshot(
+                meerkat_core::RuntimeEpochId::new(),
+                &meerkat_core::EpochCursorState::new(),
+            )
+            .unwrap();
+        store
+            .persist_ops_lifecycle(&runtime_id, &old_ops)
+            .await
+            .unwrap();
+        store
+            .persist_ops_lifecycle(&runtime_id, &new_ops)
+            .await
+            .unwrap();
+
+        store
+            .commit_unregister_finalization(
+                &runtime_id,
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Stopped,
+                    MachineLifecycleBindingFacts::new(None, None, None, None),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                )
+                .for_unregister_finalization(old_ops.epoch_id.clone()),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_ops_lifecycle(&runtime_id)
+                .await
+                .unwrap()
+                .expect("new epoch row must survive delayed old finalization")
+                .epoch_id,
+            new_ops.epoch_id
+        );
+        assert!(matches!(
+            store
+                .persist_ops_lifecycle(&runtime_id, &old_ops)
+                .await
+                .expect_err("retired old epoch stays fenced"),
+            RuntimeStoreError::OpsLifecycleEpochRetired { .. }
+        ));
+        store
+            .persist_ops_lifecycle(&runtime_id, &new_ops)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

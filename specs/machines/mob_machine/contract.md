@@ -298,6 +298,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyMemberOperationEligibility`
 - `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
 - `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
+- `ClassifyRetirePendingSpawnDisposition`(agent_identity: AgentIdentity)
 - `RetireAbsent`(agent_identity: AgentIdentity)
 - `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
 - `BindOwnerBridgeSession`(bridge_session_id: SessionId, destroy_on_owner_archive: Bool, implicit_delegation_mob: Bool)
@@ -508,6 +509,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CreateMobAdmissionResolved`(admission: MobCreateMobAdmissionKind)
 - `ProfileMutationAdmissionResolved`(admission: MobProfileMutationAdmissionKind)
 - `MemberOperationEligibilityResolved`(admission: MobMemberOperationEligibilityKind)
+- `RetirePendingSpawnCancellationAuthorized`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, pending_spawn_session_id: SessionId)
+- `RetireCommittedIncarnationWithoutPendingSpawnResolved`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation)
+- `RetireAbsentPendingSpawnPreservationResolved`(agent_identity: AgentIdentity)
 - `BridgeRejectionRecoveryClassified`(rejection_cause: MobBridgeRejectionCause, recovery: MobBridgeRejectionRecovery)
 - `PendingSupervisorAcceptanceClassified`(rejection_cause: MobBridgeRejectionCause, verdict: MobPendingSupervisorAcceptanceKind)
 - `FrameSeedConfirmed`(frame_id: FrameId, disposition: MobFrameSeedDisposition)
@@ -7940,6 +7944,62 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_active_runs`
 - Emits: `NotifyCoordinator`
 - To: `Running`
+
+### `ClassifyRetirePendingSpawnDispositionCancelCommittedRunning`
+- From: `Running`
+- On: `ClassifyRetirePendingSpawnDisposition`(agent_identity)
+- Guards:
+  - `retire_identity_is_committed`
+  - `retire_generation_is_committed`
+  - `retire_pending_spawn_is_present`
+- Emits: `RetirePendingSpawnCancellationAuthorized`
+- To: `Running`
+
+### `ClassifyRetirePendingSpawnDispositionCancelCommittedStopped`
+- From: `Stopped`
+- On: `ClassifyRetirePendingSpawnDisposition`(agent_identity)
+- Guards:
+  - `retire_identity_is_committed`
+  - `retire_generation_is_committed`
+  - `retire_pending_spawn_is_present`
+- Emits: `RetirePendingSpawnCancellationAuthorized`
+- To: `Stopped`
+
+### `ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingRunning`
+- From: `Running`
+- On: `ClassifyRetirePendingSpawnDisposition`(agent_identity)
+- Guards:
+  - `retire_identity_is_committed`
+  - `retire_generation_is_committed`
+  - `retire_pending_spawn_is_absent`
+- Emits: `RetireCommittedIncarnationWithoutPendingSpawnResolved`
+- To: `Running`
+
+### `ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingStopped`
+- From: `Stopped`
+- On: `ClassifyRetirePendingSpawnDisposition`(agent_identity)
+- Guards:
+  - `retire_identity_is_committed`
+  - `retire_generation_is_committed`
+  - `retire_pending_spawn_is_absent`
+- Emits: `RetireCommittedIncarnationWithoutPendingSpawnResolved`
+- To: `Stopped`
+
+### `ClassifyRetirePendingSpawnDispositionPreserveAbsentRunning`
+- From: `Running`
+- On: `ClassifyRetirePendingSpawnDisposition`(agent_identity)
+- Guards:
+  - `retire_identity_is_absent`
+- Emits: `RetireAbsentPendingSpawnPreservationResolved`
+- To: `Running`
+
+### `ClassifyRetirePendingSpawnDispositionPreserveAbsentStopped`
+- From: `Stopped`
+- On: `ClassifyRetirePendingSpawnDisposition`(agent_identity)
+- Guards:
+  - `retire_identity_is_absent`
+- Emits: `RetireAbsentPendingSpawnPreservationResolved`
+- To: `Stopped`
 
 ### `RetireRunningReleasing`
 - From: `Running`

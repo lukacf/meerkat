@@ -22,7 +22,7 @@ pub mod run_receipt;
 pub use core_executor::{
     CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreBoundaryStageOutput,
     CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle,
-    CoreExecutorError, CoreExecutorInterruptHandle,
+    CoreExecutorError, CoreExecutorInterruptHandle, CoreExecutorTeardownReason,
 };
 pub use identifiers::{InputId, RunId, WaitRequestId};
 pub use run_event::RunEvent;

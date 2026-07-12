@@ -363,12 +363,14 @@ class Mob:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
+        model_override: str | None = None,
     ) -> MobHelperResult:
         return await self._client.spawn_mob_helper(
             self.id,
             prompt,
             agent_identity=agent_identity,
             role_name=role_name,
+            model_override=model_override,
         )
 
     async def fork_helper(
@@ -378,6 +380,7 @@ class Mob:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
+        model_override: str | None = None,
         fork_context: dict[str, Any] | None = None,
     ) -> MobHelperResult:
         return await self._client.fork_mob_helper(
@@ -386,6 +389,7 @@ class Mob:
             prompt,
             agent_identity=agent_identity,
             role_name=role_name,
+            model_override=model_override,
             fork_context=fork_context,
         )
 

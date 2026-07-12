@@ -1961,8 +1961,46 @@ mod tests {
             )
             .unwrap();
         session.push(user("turn four"));
+
+        // Reconstruct the pre-fix shape: every ordinary append retained a
+        // complete head body even though it was not an audited rewrite.
+        let mut legacy_revisions = session
+            .transcript_history_state()
+            .unwrap()
+            .unwrap()
+            .revisions;
+        for turn in 0..16 {
+            session.push(user(&format!("legacy ordinary turn {turn}")));
+            let state = session.transcript_history_state().unwrap().unwrap();
+            let head = state
+                .revisions
+                .iter()
+                .find(|body| body.revision == state.head)
+                .unwrap()
+                .clone();
+            if legacy_revisions
+                .iter()
+                .all(|body| body.revision != head.revision)
+            {
+                legacy_revisions.push(head);
+            }
+        }
         // Write the fat blob through the legacy authoritative path.
         store.save_authoritative_projection(&session).await.unwrap();
+        let mut legacy_envelope = serde_json::to_value(&session).unwrap();
+        legacy_envelope["metadata"][meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
+            ["revisions"] = serde_json::to_value(&legacy_revisions).unwrap();
+        {
+            let conn = open_connection(store.path()).unwrap();
+            conn.execute(
+                "UPDATE sessions SET session_json = ?1 WHERE session_id = ?2",
+                params![
+                    serde_json::to_vec(&legacy_envelope).unwrap(),
+                    session.id().to_string()
+                ],
+            )
+            .unwrap();
+        }
         assert!(blob_row_bytes(store.path(), session.id()).is_some());
 
         let inc = incremental(&store);

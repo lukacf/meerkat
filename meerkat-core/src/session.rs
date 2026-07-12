@@ -378,6 +378,23 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
             commits: wire.commits,
             revisions: wire.revisions,
         };
+        // Pre-parent-pointer v1 snapshots serialized each body as
+        // {created_at,messages,revision}. When every non-root body lacks a
+        // parent, the append order is the only lineage the old format
+        // carried; reconstruct that exact linear order before digest healing
+        // and full validation.
+        if state.revisions.len() > 1
+            && state
+                .revisions
+                .iter()
+                .skip(1)
+                .all(|body| body.parent_revision.is_none())
+        {
+            for index in 1..state.revisions.len() {
+                let parent = state.revisions[index - 1].revision.clone();
+                state.revisions[index].parent_revision = Some(parent);
+            }
+        }
         // Fast path: a graph written by the current digest format has a head
         // body whose content digest equals the head string; skip the heal.
         let head_is_current = match state
@@ -402,6 +419,50 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
         }
         heal_legacy_compaction_rewrite_semantics(&mut state.commits, &state.revisions);
         Ok(state)
+    }
+}
+
+impl TranscriptHistoryState {
+    /// Drop mechanical append-head snapshots while preserving every body that
+    /// is an endpoint of an audited rewrite plus the current live head.
+    ///
+    /// Ordinary appends previously accumulated a complete transcript body on
+    /// every message mutation once any rewrite had occurred. Those bodies are
+    /// not rewrite history and are never selected for restore. Repointing the
+    /// live head directly at the latest rewrite endpoint keeps the existing
+    /// full-body lineage validator intact after the intermediate append heads
+    /// are removed.
+    fn compact_mechanical_revision_bodies(&mut self) -> Result<(), TranscriptEditError> {
+        validate_transcript_history_state(self)?;
+
+        let mut retained = BTreeSet::from([self.head.clone()]);
+        for commit in &self.commits {
+            retained.insert(commit.parent_revision.clone());
+            retained.insert(commit.revision.clone());
+        }
+
+        let head_is_audited_endpoint = self
+            .commits
+            .iter()
+            .any(|commit| commit.parent_revision == self.head || commit.revision == self.head);
+        if !head_is_audited_endpoint
+            && let Some(last_commit) = self
+                .commits
+                .last()
+                .filter(|commit| commit.revision != self.head)
+            && let Some(head_body) = self
+                .revisions
+                .iter_mut()
+                .find(|body| body.revision == self.head)
+        {
+            head_body.parent_revision = Some(last_commit.revision.clone());
+        }
+
+        let mut seen = BTreeSet::new();
+        self.revisions
+            .retain(|body| retained.contains(&body.revision) && seen.insert(body.revision.clone()));
+
+        validate_transcript_history_state(self)
     }
 }
 
@@ -989,7 +1050,7 @@ fn validate_transcript_rewrite_record(
     Ok(())
 }
 
-fn validate_transcript_history_state(
+pub(crate) fn validate_transcript_history_state(
     state: &TranscriptHistoryState,
 ) -> Result<(), TranscriptEditError> {
     if state
@@ -1060,17 +1121,41 @@ fn validate_transcript_history_state(
         }
         expected_head = commit.revision.clone();
     }
-    let mut cursor = state.head.clone();
-    while cursor != expected_head {
-        let Some(head_body) = state.revisions.iter().find(|body| body.revision == cursor) else {
-            break;
+    let head_is_audited_endpoint = state
+        .commits
+        .iter()
+        .any(|commit| commit.parent_revision == state.head || commit.revision == state.head);
+    let head_extends_latest_commit = if head_is_audited_endpoint {
+        let Some(head_body) = state
+            .revisions
+            .iter()
+            .find(|body| body.revision == state.head)
+        else {
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "missing transcript head body {}",
+                state.head
+            )));
         };
-        match head_body.parent_revision.as_deref() {
-            Some(parent) => cursor = parent.to_string(),
-            None => break,
+        revision_body_extends_head(head_body, &state.revisions, &expected_head)?
+    } else {
+        let mut cursor = state.head.as_str();
+        let mut visited = BTreeSet::new();
+        while cursor != expected_head {
+            if !visited.insert(cursor.to_string()) {
+                break;
+            }
+            let Some(head_body) = state.revisions.iter().find(|body| body.revision == cursor)
+            else {
+                break;
+            };
+            let Some(parent) = head_body.parent_revision.as_deref() else {
+                break;
+            };
+            cursor = parent;
         }
-    }
-    if cursor != expected_head {
+        cursor == expected_head
+    };
+    if !head_extends_latest_commit {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
             "transcript head {} does not extend the rewrite chain",
             state.head
@@ -1084,18 +1169,44 @@ fn revision_body_extends_head(
     revisions: &[TranscriptRevisionBody],
     head: &str,
 ) -> Result<bool, TranscriptEditError> {
-    if candidate.parent_revision.as_deref() == Some(head) {
-        return Ok(true);
-    }
     let Some(head_body) = revisions.iter().find(|body| body.revision == head) else {
         return Ok(false);
     };
+    if candidate.revision == head {
+        return Ok(true);
+    }
     if candidate.messages.len() < head_body.messages.len() {
         return Ok(false);
     }
     let prefix_digest = transcript_messages_digest(&candidate.messages[..head_body.messages.len()])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    Ok(prefix_digest == head)
+    if prefix_digest == head {
+        return Ok(true);
+    }
+
+    // A resume-time system refresh may replace the single leading System
+    // projection while preserving (and possibly appending to) the exact
+    // conversation tail. Prove that content shape directly; a historical
+    // parent_revision pointer is not occurrence identity and must never, by
+    // itself, authorize a later commit after a digest has recurred.
+    let (Some(Message::System(_)), Some(Message::System(_))) =
+        (candidate.messages.first(), head_body.messages.first())
+    else {
+        return Ok(false);
+    };
+    let head_tail_len = head_body.messages.len().saturating_sub(1);
+    if head_tail_len == 0 {
+        return Ok(true);
+    }
+    let candidate_tail = &candidate.messages[1..];
+    if candidate_tail.len() < head_tail_len {
+        return Ok(false);
+    }
+    let head_tail_digest = transcript_messages_digest(&head_body.messages[1..])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    let candidate_tail_prefix_digest = transcript_messages_digest(&candidate_tail[..head_tail_len])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    Ok(candidate_tail_prefix_digest == head_tail_digest)
 }
 
 fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
@@ -1152,17 +1263,38 @@ impl Serialize for Session {
     where
         S: Serializer,
     {
+        let mut metadata = self.metadata.clone();
+        compact_transcript_history_metadata_for_snapshot(&mut metadata)
+            .map_err(<S::Error as serde::ser::Error>::custom)?;
         let serde_repr = SessionSerde {
             version: self.version,
             id: self.id.clone(),
             messages: (*self.messages).clone(),
             created_at: self.created_at,
             updated_at: self.updated_at,
-            metadata: self.metadata.clone(),
+            metadata,
             usage: self.usage.clone(),
         };
         serde_repr.serialize(serializer)
     }
+}
+
+fn compact_transcript_history_metadata_for_snapshot(
+    metadata: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let Some(value) = metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
+        return Ok(());
+    };
+    let mut state: TranscriptHistoryState =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    state
+        .compact_mechanical_revision_bodies()
+        .map_err(|error| error.to_string())?;
+    metadata.insert(
+        SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(),
+        serde_json::to_value(state).map_err(|error| error.to_string())?,
+    );
+    Ok(())
 }
 
 impl<'de> Deserialize<'de> for Session {
@@ -1175,13 +1307,16 @@ impl<'de> Deserialize<'de> for Session {
             serde_repr.version,
         )
         .map_err(<D::Error as serde::de::Error>::custom)?;
+        let mut metadata = serde_repr.metadata;
+        compact_transcript_history_metadata_for_snapshot(&mut metadata)
+            .map_err(<D::Error as serde::de::Error>::custom)?;
         Ok(Session {
             version,
             id: serde_repr.id,
             messages: Arc::new(serde_repr.messages),
             created_at: serde_repr.created_at,
             updated_at: serde_repr.updated_at,
-            metadata: serde_repr.metadata,
+            metadata,
             usage: serde_repr.usage,
         })
     }
@@ -3197,6 +3332,7 @@ impl Session {
     /// Intentionally `pub(crate)`: cross-crate consumers must route same-session
     /// rewrites through transcript-edit APIs so the revision graph remains the
     /// semantic owner of message history.
+    #[allow(dead_code)] // Kept for core-owned optional rewrite paths and focused invariants.
     pub(crate) fn replace_messages_internal(
         &mut self,
         messages: Vec<Message>,
@@ -3265,59 +3401,75 @@ impl Session {
         Ok(Some(commit))
     }
 
-    /// Retain messages for core-owned synthetic-notice projection cleanup.
-    pub(crate) fn retain_messages_internal<F>(
-        &mut self,
-        mut retain: F,
-        reason: TranscriptRewriteReason,
-    ) -> Result<Option<TranscriptRewriteCommit>, TranscriptEditError>
-    where
-        F: FnMut(&Message) -> bool,
-    {
-        let retained = self
-            .messages
-            .iter()
-            .filter(|message| retain(message))
-            .cloned()
-            .collect::<Vec<_>>();
-        if retained.len() == self.messages.len()
-            && transcript_messages_digest(self.messages()).ok()
-                == transcript_messages_digest(&retained).ok()
-        {
-            return Ok(None);
-        }
-        self.replace_messages_internal(retained, reason)
-    }
-
     /// Atomically refresh the synthetic runtime notices of one kind.
     ///
     /// This is the ONE transcript authority operation for synthetic-notice
-    /// refresh: it strips every existing `SystemNotice` message of `kind` and
-    /// appends `replacements` (possibly empty, meaning "no current notice")
-    /// as a single edit. On a strip fault nothing is pushed and the typed
-    /// [`TranscriptEditError`] propagates — callers must not re-implement
-    /// the strip-then-push pair (the swallowed-strip variant leaves a stale
-    /// notice beside a fresh one: a divergence window).
+    /// refresh: it strips every synthetic `SystemNotice` projection of `kind`
+    /// while preserving durable notices that share the kind, then appends
+    /// `replacements` (possibly empty, meaning "no current synthetic notice")
+    /// as one mechanical projection update. It deliberately does not mint an
+    /// audited transcript rewrite commit. On a strip fault nothing is pushed
+    /// and the typed [`TranscriptEditError`] propagates — callers must not
+    /// re-implement the strip-then-push pair (the swallowed-strip variant
+    /// leaves a stale notice beside a fresh one: a divergence window).
     pub fn replace_synthetic_notices(
         &mut self,
         kind: crate::types::SystemNoticeKind,
         replacements: Vec<Message>,
     ) -> Result<(), TranscriptEditError> {
+        if !kind.is_synthetic_refresh_projection() {
+            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                "system notice kind {kind:?} is durable transcript content, not a synthetic refresh projection"
+            )));
+        }
         for (index, message) in replacements.iter().enumerate() {
-            let matches_kind =
-                matches!(message, Message::SystemNotice(notice) if notice.kind == kind);
+            let matches_kind = matches!(
+                message,
+                Message::SystemNotice(notice)
+                    if notice.kind == kind && notice.is_synthetic_refresh_projection()
+            );
             if !matches_kind {
                 return Err(TranscriptEditError::InvalidTranscriptShape(format!(
-                    "replacement {index} for synthetic notice kind {kind:?} is not a                      system notice of that kind"
+                    "replacement {index} for synthetic notice kind {kind:?} is not a system notice of that kind"
                 )));
             }
         }
-        self.retain_messages_internal(
-            |message| !matches!(message, Message::SystemNotice(notice) if notice.kind == kind),
-            TranscriptRewriteReason::new("synthetic_notice_cleanup"),
-        )?;
-        for message in replacements {
-            self.push(message);
+
+        let mut refreshed = self
+            .messages
+            .iter()
+            .filter(|message| {
+                !matches!(
+                    message,
+                    Message::SystemNotice(notice)
+                        if notice.kind == kind && notice.is_synthetic_refresh_projection()
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        refreshed.extend(replacements);
+        if transcript_messages_digest(self.messages()).ok()
+            == transcript_messages_digest(&refreshed).ok()
+        {
+            return Ok(());
+        }
+
+        let realtime_state =
+            self.reconciled_realtime_transcript_metadata_after_rewrite(&refreshed)?;
+        let updated_at = SystemTime::now();
+        let history_state = self
+            .transcript_history_state_after_message_mutation(&refreshed, updated_at)?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+
+        self.messages = Arc::new(refreshed);
+        self.updated_at = updated_at;
+        if let Some(value) = realtime_state {
+            self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
+        }
+        if let Some(value) = history_state {
+            self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
         }
         Ok(())
     }
@@ -4631,9 +4783,9 @@ impl Session {
     /// Materialize this session projection from a typed transcript history graph.
     pub fn apply_transcript_history_state(
         &mut self,
-        state: TranscriptHistoryState,
+        mut state: TranscriptHistoryState,
     ) -> Result<(), TranscriptEditError> {
-        validate_transcript_history_state(&state)?;
+        state.compact_mechanical_revision_bodies()?;
         let head_body = state
             .revisions
             .iter()
@@ -4809,6 +4961,7 @@ impl Session {
         }
         state.head = revision;
         state.commits.push(commit.clone());
+        state.compact_mechanical_revision_bodies()?;
         let value = serde_json::to_value(state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
         self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
@@ -4821,44 +4974,63 @@ impl Session {
         Ok(commit)
     }
 
-    fn refresh_transcript_head_after_message_mutation(&mut self) {
+    fn transcript_history_state_after_message_mutation(
+        &self,
+        messages: &[Message],
+        created_at: SystemTime,
+    ) -> Result<Option<TranscriptHistoryState>, TranscriptEditError> {
         if !self
             .metadata
             .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
         {
-            return;
+            return Ok(None);
         }
-        let Ok(Some(mut state)) = self.transcript_history_state() else {
-            tracing::warn!(
-                session_id = %self.id,
-                "transcript history state is malformed; leaving head unchanged after message mutation"
-            );
-            return;
-        };
-        let Ok(head) = transcript_messages_digest(self.messages()) else {
-            tracing::warn!(
-                session_id = %self.id,
-                "failed to digest transcript after message mutation; leaving head unchanged"
-            );
-            return;
-        };
-        let previous_head = state.head.clone();
+        let mut state = self
+            .transcript_history_state()
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "transcript history metadata key decoded without state".to_string(),
+                )
+            })?;
+        state.compact_mechanical_revision_bodies()?;
+        let head = transcript_messages_digest(messages)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
         if !state.revisions.iter().any(|body| body.revision == head) {
             state.revisions.push(TranscriptRevisionBody {
                 revision: head.clone(),
-                parent_revision: Some(previous_head),
-                messages: self.messages().to_vec(),
-                created_at: SystemTime::now(),
+                parent_revision: state.commits.last().map(|commit| commit.revision.clone()),
+                messages: messages.to_vec(),
+                created_at,
             });
         }
         state.head = head;
-        match serde_json::to_value(state) {
-            Ok(value) => self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value),
+        state.compact_mechanical_revision_bodies()?;
+        Ok(Some(state))
+    }
+
+    fn refresh_transcript_head_after_message_mutation(&mut self) {
+        match self
+            .transcript_history_state_after_message_mutation(self.messages(), SystemTime::now())
+        {
+            Ok(Some(state)) => match serde_json::to_value(state) {
+                Ok(value) => {
+                    self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %self.id,
+                        error = %error,
+                        "failed to serialize transcript history state after message mutation"
+                    );
+                }
+            },
+            Ok(None) => {}
             Err(error) => {
                 tracing::warn!(
                     session_id = %self.id,
                     error = %error,
-                    "failed to serialize transcript history state after message mutation"
+                    "transcript history state failed validation after message mutation"
                 );
             }
         }
@@ -5979,6 +6151,359 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ordinary_appends_after_rewrite_coalesce_mechanical_revision_bodies() {
+        let mut session = Session::new();
+        for message in 0..133 {
+            session.push(Message::User(UserMessage::text(format!(
+                "seed message {message}"
+            ))));
+        }
+        let parent = session.transcript_revision().expect("parent revision");
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 132,
+                    end: 133,
+                },
+                vec![Message::User(UserMessage::text("edited question"))],
+                TranscriptRewriteReason::new("unit-test-edit"),
+                Some("unit-test".to_string()),
+                Some(parent),
+            )
+            .expect("rewrite should commit");
+
+        for turn in 0..762 {
+            session.push(Message::User(UserMessage::text(format!("turn {turn}"))));
+        }
+
+        let state = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("rewrite should create history state");
+        assert_eq!(session.messages().len(), 895);
+        assert_eq!(state.commits.len(), 1, "ordinary appends are not rewrites");
+        assert_eq!(
+            state.revisions.len(),
+            3,
+            "one real rewrite retains its two audited endpoints plus one live head"
+        );
+        let retained_message_entries = state
+            .revisions
+            .iter()
+            .map(|body| body.messages.len())
+            .sum::<usize>();
+        assert!(retained_message_entries <= 3 * session.messages().len());
+
+        let live_bytes = serde_json::to_vec(session.messages())
+            .expect("live transcript should serialize")
+            .len();
+        let snapshot_bytes = serde_json::to_vec(&session)
+            .expect("session snapshot should serialize")
+            .len();
+        assert!(
+            snapshot_bytes <= live_bytes.saturating_mul(5).saturating_add(64 * 1024),
+            "snapshot must remain linear in the live transcript: {snapshot_bytes} bytes for {live_bytes} live bytes"
+        );
+    }
+
+    #[test]
+    fn repeated_synthetic_notice_refreshes_do_not_mint_rewrite_commits() {
+        use crate::types::{SystemNoticeKind, SystemNoticeMessage};
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("before".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("after".to_string()))],
+                TranscriptRewriteReason::new("unit-test-edit"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("seed rewrite");
+
+        for refresh in 0..64 {
+            session
+                .replace_synthetic_notices(
+                    SystemNoticeKind::McpPending,
+                    vec![Message::SystemNotice(SystemNoticeMessage::new(
+                        SystemNoticeKind::McpPending,
+                        format!("refresh {refresh}"),
+                    ))],
+                )
+                .expect("mechanical refresh");
+        }
+
+        let state = session
+            .transcript_history_state()
+            .expect("history state")
+            .expect("seed rewrite history");
+        assert_eq!(state.commits.len(), 1);
+        assert_eq!(session.transcript_rewrite_generation().unwrap(), 1);
+        assert_eq!(state.revisions.len(), 3);
+    }
+
+    #[test]
+    fn legacy_append_head_chain_compacts_during_session_restore() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("seed".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text(
+                    "rewritten seed".to_string(),
+                ))],
+                TranscriptRewriteReason::new("unit-test-edit"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("seed rewrite");
+
+        let mut legacy = session
+            .transcript_history_state()
+            .expect("history state")
+            .expect("seed history");
+        let mut messages = session.messages().to_vec();
+        let mut previous_head = legacy.head.clone();
+        for append in 0..32 {
+            messages.push(Message::User(UserMessage::text(format!(
+                "legacy append {append}"
+            ))));
+            let revision = transcript_messages_digest(&messages).expect("revision digest");
+            legacy.revisions.push(TranscriptRevisionBody {
+                revision: revision.clone(),
+                parent_revision: Some(previous_head),
+                messages: messages.clone(),
+                created_at: SystemTime::now(),
+            });
+            previous_head = revision;
+        }
+        legacy.head = previous_head;
+        assert_eq!(legacy.revisions.len(), 34, "fixture matches old shape");
+
+        let mut envelope = serde_json::to_value(&session).expect("base envelope");
+        envelope["messages"] = serde_json::to_value(&messages).expect("legacy live messages");
+        envelope["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY] =
+            serde_json::to_value(&legacy).expect("legacy unbounded history");
+        for body in envelope["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
+            .as_array_mut()
+            .expect("legacy revisions")
+        {
+            body.as_object_mut()
+                .expect("legacy revision body")
+                .remove("parent_revision");
+        }
+        let raw = serde_json::to_vec(&envelope).expect("raw legacy bytes");
+
+        let restored: Session = serde_json::from_slice(&raw).expect("legacy restore");
+        let compact = restored
+            .transcript_history_state()
+            .expect("compacted state")
+            .expect("history retained");
+        assert_eq!(compact.commits, legacy.commits);
+        assert_eq!(compact.revisions.len(), 3);
+        validate_transcript_history_state(&compact).expect("compacted history remains valid");
+        let repaired = serde_json::to_vec(&restored).expect("repaired snapshot");
+        assert!(
+            repaired.len() * 4 < raw.len(),
+            "repair should shed old bodies"
+        );
+    }
+
+    #[test]
+    fn snapshot_compaction_does_not_launder_corrupt_old_body() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("seed".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("rewritten".to_string()))],
+                TranscriptRewriteReason::new("unit-test-edit"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("seed rewrite");
+        let mut state = session
+            .transcript_history_state()
+            .expect("state")
+            .expect("history");
+        state.revisions.push(TranscriptRevisionBody {
+            revision: "sha256:corrupt-old-body".to_string(),
+            parent_revision: Some(state.head.clone()),
+            messages: vec![Message::User(UserMessage::text("tampered".to_string()))],
+            created_at: SystemTime::now(),
+        });
+        session.set_metadata_unchecked_for_test(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state).expect("corrupt history value"),
+        );
+
+        assert!(
+            serde_json::to_vec(&session).is_err(),
+            "serialization must fail before pruning a corrupt old body"
+        );
+    }
+
+    #[test]
+    fn transcript_history_rejects_stale_branch_after_digest_recurrence() {
+        let mut restored = Session::new();
+        restored.push(Message::User(UserMessage::text("A".to_string())));
+        restored
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("B".to_string()))],
+                TranscriptRewriteReason::new("to-b"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("A to B");
+        let mut stale_branch = restored.clone();
+        restored
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("A".to_string()))],
+                TranscriptRewriteReason::new("restore-a"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("B back to A");
+        stale_branch
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("C".to_string()))],
+                TranscriptRewriteReason::new("stale-b-to-c"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("stale B to C is locally valid");
+
+        let stale_state = stale_branch
+            .transcript_history_state()
+            .expect("stale state")
+            .expect("stale history");
+        let stale_commit = stale_state.commits.last().expect("stale commit").clone();
+        let stale_body = stale_state
+            .revisions
+            .iter()
+            .find(|body| body.revision == stale_commit.revision)
+            .expect("stale revision body")
+            .clone();
+        let mut forged = restored
+            .transcript_history_state()
+            .expect("restored state")
+            .expect("restored history");
+        forged.commits.push(stale_commit);
+        forged.revisions.push(stale_body);
+        forged.head = forged
+            .commits
+            .last()
+            .expect("forged commit")
+            .revision
+            .clone();
+
+        assert!(
+            validate_transcript_history_state(&forged).is_err(),
+            "an old B<-A body edge cannot authorize stale B->C after B->A restored A"
+        );
+    }
+
+    #[test]
+    fn transcript_history_rejects_orphan_head_parent_cycle() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("P".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("Q".to_string()))],
+                TranscriptRewriteReason::new("valid"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("valid seed rewrite");
+        let mut state = session
+            .transcript_history_state()
+            .expect("state")
+            .expect("history");
+        let x_messages = vec![Message::User(UserMessage::text("X".to_string()))];
+        let y_messages = vec![Message::User(UserMessage::text("Y".to_string()))];
+        let x = transcript_messages_digest(&x_messages).expect("X digest");
+        let y = transcript_messages_digest(&y_messages).expect("Y digest");
+        state.revisions.push(TranscriptRevisionBody {
+            revision: x.clone(),
+            parent_revision: Some(y.clone()),
+            messages: x_messages,
+            created_at: SystemTime::now(),
+        });
+        state.revisions.push(TranscriptRevisionBody {
+            revision: y,
+            parent_revision: Some(x.clone()),
+            messages: y_messages,
+            created_at: SystemTime::now(),
+        });
+        state.head = x;
+        session.set_metadata_unchecked_for_test(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state).expect("cyclic state"),
+        );
+
+        assert!(
+            serde_json::to_vec(&session).is_err(),
+            "cyclic orphan head lineage must fail instead of looping"
+        );
+    }
+
+    #[test]
+    fn mechanical_append_can_recur_to_an_audited_digest_without_mutating_its_body() {
+        let a = Message::User(UserMessage::text("A".to_string()));
+        let b = Message::User(UserMessage::text("B".to_string()));
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("X".to_string())));
+        let first = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![a.clone(), b.clone()],
+                TranscriptRewriteReason::new("to-a-b"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("X to [A,B]");
+        let h_parent = session
+            .transcript_revision_body(&first.revision)
+            .expect("H body")
+            .expect("H retained")
+            .parent_revision;
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![a],
+                TranscriptRewriteReason::new("to-a"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("[A,B] to [A]");
+
+        session.push(b);
+
+        let state = session
+            .transcript_history_state()
+            .expect("state")
+            .expect("history");
+        assert_eq!(state.head, first.revision);
+        assert_eq!(session.transcript_revision().unwrap(), first.revision);
+        assert_eq!(
+            state
+                .revisions
+                .iter()
+                .find(|body| body.revision == first.revision)
+                .expect("recurred H body")
+                .parent_revision,
+            h_parent,
+            "reusing an audited digest must not rewrite its occurrence metadata"
+        );
+        validate_transcript_history_state(&state).expect("recurred mechanical head is valid");
+    }
+
     /// K4 invariant (fail-closed): an invalid replacement is rejected with a
     /// typed fault BEFORE any strip happens — the transcript is unchanged, so
     /// a fault can never strand a half-refreshed notice state.
@@ -6008,6 +6533,122 @@ mod tests {
             before.as_slice(),
             "fault must leave the transcript unchanged (no partial strip)"
         );
+    }
+
+    #[test]
+    fn replace_synthetic_notices_rejects_malformed_history_atomically() {
+        use crate::types::{SystemNoticeKind, SystemNoticeMessage};
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("before".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("after".to_string()))],
+                TranscriptRewriteReason::new("unit-test-edit"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("seed rewrite");
+        session.push(Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale",
+        )));
+        let mut state = session
+            .transcript_history_state()
+            .expect("state")
+            .expect("history");
+        state.revisions[0].messages[0] = Message::User(UserMessage::text("tampered".to_string()));
+        session.set_metadata_unchecked_for_test(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state).expect("corrupt state"),
+        );
+        let before_messages = session.messages.clone();
+        let before_metadata = session.metadata.clone();
+        let before_updated_at = session.updated_at;
+
+        assert!(
+            session
+                .replace_synthetic_notices(SystemNoticeKind::McpPending, Vec::new())
+                .is_err()
+        );
+        assert_eq!(session.messages, before_messages);
+        assert_eq!(session.metadata, before_metadata);
+        assert_eq!(session.updated_at, before_updated_at);
+    }
+
+    #[test]
+    fn replace_synthetic_notices_rejects_durable_notice_kinds() {
+        use crate::types::SystemNoticeKind;
+
+        let mut session = Session::new();
+        let before = session.messages().to_vec();
+        assert!(
+            session
+                .replace_synthetic_notices(SystemNoticeKind::Comms, Vec::new())
+                .is_err()
+        );
+        assert_eq!(session.messages(), before);
+    }
+
+    #[test]
+    fn replace_synthetic_notices_preserves_persisted_mcp_pending_notice() {
+        use crate::types::{SystemNoticeBlock, SystemNoticeKind, SystemNoticeMessage};
+
+        let mut session = Session::new();
+        session.push(Message::SystemNotice(SystemNoticeMessage::with_block(
+            SystemNoticeKind::McpPending,
+            Some("persisted pending fact".to_string()),
+            SystemNoticeBlock::Mcp {
+                server_id: Some("server".to_string()),
+                operation: None,
+                phase: None,
+                persisted: true,
+                detail: None,
+                pending_sources: Vec::new(),
+            },
+        )));
+        let before = session.messages().to_vec();
+
+        session
+            .replace_synthetic_notices(SystemNoticeKind::McpPending, Vec::new())
+            .expect("synthetic refresh must coexist with a durable notice of the same kind");
+        assert_eq!(session.messages(), before);
+    }
+
+    #[test]
+    fn replace_synthetic_notices_replaces_projection_beside_persisted_mcp_fact() {
+        use crate::types::{SystemNoticeBlock, SystemNoticeKind, SystemNoticeMessage};
+
+        let durable = Message::SystemNotice(SystemNoticeMessage::with_block(
+            SystemNoticeKind::McpPending,
+            Some("persisted pending fact".to_string()),
+            SystemNoticeBlock::Mcp {
+                server_id: Some("server".to_string()),
+                operation: None,
+                phase: None,
+                persisted: true,
+                detail: None,
+                pending_sources: Vec::new(),
+            },
+        ));
+        let stale = Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "stale synthetic projection",
+        ));
+        let fresh = Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::McpPending,
+            "fresh synthetic projection",
+        ));
+        let mut session = Session::new();
+        session.push(durable.clone());
+        session.push(stale);
+
+        session
+            .replace_synthetic_notices(SystemNoticeKind::McpPending, vec![fresh.clone()])
+            .expect("synthetic refresh beside durable fact");
+
+        assert_eq!(session.messages(), &[durable, fresh]);
     }
 
     #[test]
@@ -6637,18 +7278,24 @@ mod tests {
         session.push(Message::User(UserMessage::text(
             "notice-bearing turn".to_string(),
         )));
+        let retained = session
+            .messages()
+            .iter()
+            .filter(|message| {
+                !matches!(
+                    message,
+                    Message::User(user)
+                        if user.content.iter().any(|block| matches!(
+                            block,
+                            ContentBlock::Text { text } if text.contains("notice-bearing")
+                        ))
+                )
+            })
+            .cloned()
+            .collect();
         session
-            .retain_messages_internal(
-                |message| {
-                    !matches!(
-                        message,
-                        Message::User(user)
-                            if user.content.iter().any(|block| matches!(
-                                block,
-                                ContentBlock::Text { text } if text.contains("notice-bearing")
-                            ))
-                    )
-                },
+            .replace_messages_internal(
+                retained,
                 TranscriptRewriteReason::new("synthetic_notice_cleanup"),
             )
             .expect("retain should commit internal rewrite");

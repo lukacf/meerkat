@@ -3409,6 +3409,7 @@ impl MobBuilder {
                         generated_self_owned_operation_owner: Some(
                             generated_self_owned_operation_owner,
                         ),
+                        runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
                     })
                     .await
                 {
@@ -3552,6 +3553,7 @@ impl MobBuilder {
                 owner_bridge_session_id: None,
                 ops_registry: None,
                 generated_self_owned_operation_owner: None,
+                runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             };
             let admitted_bridge_session_id =
                 super::actor::admit_bridge_session_for_spawn(&mut provision_request.create_session);

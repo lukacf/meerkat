@@ -237,6 +237,18 @@ pub struct ProvisionMemberRequest {
     pub(crate) owner_bridge_session_id: Option<SessionId>,
     pub ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
     pub(crate) generated_self_owned_operation_owner: Option<SessionId>,
+    /// Internal proof that MobMachine authorized rebuilding a durable member
+    /// whose live session materialization is missing in this process. Only
+    /// that delivery-time revival may publish the missing-owner observation
+    /// and re-run same-session readmission before attaching its replacement.
+    pub(crate) runtime_revival_intent: RuntimeRevivalIntent,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RuntimeRevivalIntent {
+    #[default]
+    None,
+    MissingLiveMaterialization,
 }
 
 #[doc(hidden)]
@@ -396,6 +408,20 @@ fn stamp_eager_session_owned_initial_turn_metadata(req: &mut CreateSessionReques
 
 #[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
+    async fn replacement_runtime_session_state(
+        existing: Arc<RuntimeSessionState>,
+        preserve_missing_live_context: bool,
+    ) -> Arc<RuntimeSessionState> {
+        if preserve_missing_live_context {
+            existing
+        } else {
+            existing.clear_queued_turns().await;
+            Arc::new(RuntimeSessionState {
+                queued_turns: Mutex::new(RuntimeSessionQueue::default()),
+            })
+        }
+    }
+
     #[cfg(feature = "runtime-adapter")]
     pub(super) async fn restore_failed_resume_before_receipt(
         &self,
@@ -581,6 +607,7 @@ impl SessionBackend {
     async fn runtime_session_state(
         &self,
         session_id: &SessionId,
+        preserve_missing_live_context: bool,
     ) -> Result<Option<Arc<RuntimeSessionState>>, MobError> {
         let Some(adapter) = self.runtime_adapter.as_ref() else {
             return Ok(None);
@@ -603,10 +630,13 @@ impl SessionBackend {
             {
                 return Ok(Some(existing));
             }
-            existing.clear_queued_turns().await;
-            let state = Arc::new(RuntimeSessionState {
-                queued_turns: Mutex::new(RuntimeSessionQueue::default()),
-            });
+            // Missing executor materialization does not invalidate session-
+            // side turn ownership. Preserve that exact sidecar only for the
+            // machine-authorized intent; ordinary replacement keeps the prior
+            // clear-and-recreate behavior.
+            let state =
+                Self::replacement_runtime_session_state(existing, preserve_missing_live_context)
+                    .await;
             let executor = Box::new(MobSessionRuntimeExecutor::new(
                 self.session_service.clone(),
                 Arc::clone(adapter),
@@ -615,9 +645,9 @@ impl SessionBackend {
                 state.clone(),
                 Arc::clone(&self.runtime_sessions),
             ));
-            // Runtime session registrations are capability bindings. If the
-            // adapter lost this session, drop any queued bridge context from
-            // the stale binding before reattaching with a fresh sidecar.
+            // Runtime session registrations are capability bindings. Missing-
+            // live revival reuses the exact context selected above; ordinary
+            // replacement retains the prior fresh-sidecar behavior.
             #[cfg(target_arch = "wasm32")]
             {
                 let adapter = Arc::clone(adapter);
@@ -1136,7 +1166,7 @@ impl SessionBackend {
                 "runtime-backed turn requested without runtime adapter: {session_id}"
             ))
         })?;
-        let state = self.runtime_session_state(session_id).await?;
+        let state = self.runtime_session_state(session_id, false).await?;
         let adapter_session_id = session_id.clone();
         let requested_input_id = input.id().clone();
         let mut context_input_id = requested_input_id.clone();
@@ -1278,7 +1308,7 @@ impl SessionBackend {
                 "runtime-backed turn requested without runtime adapter: {session_id}"
             ))
         })?;
-        let state = self.runtime_session_state(session_id).await?;
+        let state = self.runtime_session_state(session_id, false).await?;
         let adapter_session_id = session_id.clone();
         let requested_input_id = input.id().clone();
         let (queued_event_tx, deferred_delivery) =
@@ -1675,6 +1705,37 @@ mod tests {
         assert!(
             result.is_none(),
             "deferred buffer must not fabricate events; channel should close empty"
+        );
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn missing_live_replacement_preserves_exact_queued_turn_sidecar() {
+        let state = std::sync::Arc::new(super::RuntimeSessionState::empty_for_test());
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        assert!(
+            state
+                .enqueue_turn_context(input_id.clone(), Some(event_tx))
+                .await
+        );
+
+        let replacement = super::SessionBackend::replacement_runtime_session_state(
+            std::sync::Arc::clone(&state),
+            true,
+        )
+        .await;
+
+        assert!(
+            std::sync::Arc::ptr_eq(&replacement, &state),
+            "MissingLive replacement must retain the exact sidecar owner"
+        );
+        assert!(
+            replacement
+                .take_turn_context_for_inputs(&[input_id])
+                .await
+                .is_some(),
+            "queued TurnEventTx context must survive executor replacement"
         );
     }
 
@@ -2103,6 +2164,8 @@ impl MobProvisioner for SessionBackend {
         mut req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError> {
         let mut session_origin = req.session_origin;
+        let missing_live_materialization =
+            req.runtime_revival_intent == RuntimeRevivalIntent::MissingLiveMaterialization;
         tracing::debug!(
             binding = ?req.binding,
             peer_name = %req.peer_name,
@@ -2187,6 +2250,86 @@ impl MobProvisioner for SessionBackend {
                     })
             {
                 reviving_retired_session = true;
+            }
+            if missing_live_materialization && !reviving_retired_session {
+                let observed_runtime_state = adapter
+                    .runtime_state(&member_bridge_session_id)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to inspect missing-live member runtime '{member_bridge_session_id}': {error}"
+                        ))
+                    })?;
+                let has_live_executor = adapter
+                    .session_has_executor(&member_bridge_session_id)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to inspect missing-live member executor '{member_bridge_session_id}': {error}"
+                        ))
+                    })?;
+                // Only exact Idle/Attached absence is a missing-owner proof.
+                // Stopped continues through ordinary stopped-session revival,
+                // while a genuinely live executor remains the exact owner and
+                // is reused by the rebuilt session.
+                if matches!(
+                    observed_runtime_state,
+                    meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
+                ) && !has_live_executor
+                {
+                    #[cfg(target_arch = "wasm32")]
+                    let redrive_result = {
+                        let adapter = Arc::clone(adapter);
+                        let bridge_session_id = member_bridge_session_id.clone();
+                        let authority = adapter.session_control_authority();
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        tokio::spawn(async move {
+                            let result = adapter
+                                .redrive_missing_executor_for_revival(&bridge_session_id, authority)
+                                .await;
+                            let _ = reply_tx.send(result);
+                        });
+                        reply_rx.await.map_err(|_| {
+                            MobError::Internal(
+                                "missing-live runtime re-drive task was canceled".to_string(),
+                            )
+                        })?
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let redrive_result = adapter
+                        .redrive_missing_executor_for_revival(
+                            &member_bridge_session_id,
+                            adapter.session_control_authority(),
+                        )
+                        .await;
+                    match redrive_result {
+                        Ok(()) => {}
+                        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+                            state: meerkat_runtime::RuntimeState::Stopped,
+                        }) => {
+                            tracing::debug!(
+                                bridge_session_id = %member_bridge_session_id,
+                                "missing-live revival raced canonical runtime stop; ordinary stopped-session revival now owns readmission"
+                            );
+                        }
+                        Err(error) => {
+                            if adapter
+                                .session_has_executor(&member_bridge_session_id)
+                                .await
+                                .is_ok_and(|present| present)
+                            {
+                                tracing::debug!(
+                                    bridge_session_id = %member_bridge_session_id,
+                                    "missing-live revival observed a concurrent executor materialization"
+                                );
+                            } else {
+                                return Err(MobError::Internal(format!(
+                                    "failed to re-drive missing-live member runtime '{member_bridge_session_id}': {error}"
+                                )));
+                            }
+                        }
+                    }
+                }
             }
             if let Some(ref mut build) = req.create_session.build {
                 build.runtime_build_mode =
@@ -2316,7 +2459,10 @@ impl MobProvisioner for SessionBackend {
                 bridge_session_id = %created_bridge_session_id,
                 "SessionBackend::provision_member checking runtime session state"
             );
-            self.runtime_session_state(&created_bridge_session_id)
+            self.runtime_session_state(
+                &created_bridge_session_id,
+                missing_live_materialization,
+            )
                 .await?;
             tracing::debug!(
                 bridge_session_id = %created_bridge_session_id,
@@ -2798,7 +2944,7 @@ impl MobProvisioner for SessionBackend {
 
     async fn ensure_runtime_session_state(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let bridge_session_id = Self::require_session(member_ref, "ensure runtime session for")?;
-        self.runtime_session_state(&bridge_session_id)
+        self.runtime_session_state(&bridge_session_id, false)
             .await?
             .ok_or_else(|| {
                 MobError::Internal(format!(
@@ -3547,6 +3693,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         ops_registry: req.ops_registry,
                         generated_self_owned_operation_owner: req
                             .generated_self_owned_operation_owner,
+                        runtime_revival_intent: req.runtime_revival_intent,
                     })
                     .await
             }

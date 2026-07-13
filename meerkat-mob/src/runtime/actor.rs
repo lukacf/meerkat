@@ -5792,6 +5792,8 @@ impl MobActor {
                 owner_bridge_session_id: None,
                 ops_registry: None,
                 generated_self_owned_operation_owner: Some(bridge_session_id.clone()),
+                runtime_revival_intent:
+                    super::provisioner::RuntimeRevivalIntent::MissingLiveMaterialization,
             })
             .await?;
         let revived_session_id =
@@ -10271,6 +10273,8 @@ impl MobActor {
                         owner_bridge_session_id: owner_bridge_session_id.clone(),
                         ops_registry: ops_registry.clone(),
                         generated_self_owned_operation_owner: None,
+                        runtime_revival_intent:
+                            super::provisioner::RuntimeRevivalIntent::None,
                     };
                     let resolved_labels = labels.unwrap_or_default();
                     return Ok((
@@ -10440,6 +10444,7 @@ impl MobActor {
                 owner_bridge_session_id: owner_bridge_session_id.clone(),
                 ops_registry: ops_registry.clone(),
                 generated_self_owned_operation_owner: None,
+                runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             };
             let resolved_labels = labels.unwrap_or_default();
             Ok((
@@ -11086,6 +11091,7 @@ impl MobActor {
             owner_bridge_session_id: None,
             ops_registry: None,
             generated_self_owned_operation_owner: None,
+            runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
         };
         let admitted_bridge_session_id =
             admit_bridge_session_for_spawn(&mut provision_request.create_session);
@@ -16346,6 +16352,7 @@ impl MobActor {
             owner_bridge_session_id: None,
             ops_registry: None,
             generated_self_owned_operation_owner: None,
+            runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
         };
         if let Some((owner_bridge_session_id, ops_registry)) = respawn_peer_only_owner_context {
             provision_request.owner_bridge_session_id = Some(owner_bridge_session_id);

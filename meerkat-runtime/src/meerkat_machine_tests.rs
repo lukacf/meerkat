@@ -5178,6 +5178,61 @@ fn revival_arms_preserve_identity_clear_epoch_binding_and_refuse_while_draining(
     .expect_err("executor revival must refuse while the unregister drain window is open");
 }
 
+/// `Queuing` is only the recovered registration default; it is not evidence
+/// that an exact authoritative binding is stale. Standard (non-Mob) recovery
+/// may reassert that tuple before attaching its executor, and generic ensure
+/// must preserve it.
+#[test]
+fn recovered_idle_exact_binding_survives_authoritative_prepare_then_executor_attach() {
+    use crate::meerkat_machine::dsl as mm_dsl;
+
+    let session_id = mm_dsl::SessionId("session-idle-current-binding".to_string());
+    let runtime_id = mm_dsl::AgentRuntimeId("runtime-current".to_string());
+    let fence = mm_dsl::FenceToken(51);
+    let generation = mm_dsl::Generation(9);
+    let epoch = mm_dsl::RuntimeEpochId("epoch-current".to_string());
+    let mut authority =
+        mm_dsl::MeerkatMachineAuthority::recover_from_state(mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+            session_id: Some(session_id.clone()),
+            registration_phase: mm_dsl::RegistrationPhase::Queuing,
+            active_runtime_id: Some(runtime_id.clone()),
+            active_fence_token: Some(fence),
+            active_runtime_generation: Some(generation),
+            active_runtime_epoch_id: Some(epoch.clone()),
+            ..Default::default()
+        })
+        .expect("an idle recovered runtime with an exact binding must be valid");
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: runtime_id.clone(),
+            fence_token: fence,
+            generation: Some(generation),
+            runtime_epoch_id: Some(epoch.clone()),
+            session_id: session_id.clone(),
+        },
+    )
+    .expect("exact authoritative binding reassertion must be idempotent");
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        mm_dsl::MeerkatMachineInput::EnsureSessionWithExecutor { session_id },
+    )
+    .expect("standard recovered runtime must attach its executor");
+
+    let attached = authority.state();
+    assert_eq!(attached.lifecycle_phase, mm_dsl::MeerkatPhase::Attached);
+    assert_eq!(
+        attached.registration_phase,
+        mm_dsl::RegistrationPhase::Active
+    );
+    assert_eq!(attached.active_runtime_id, Some(runtime_id));
+    assert_eq!(attached.active_fence_token, Some(fence));
+    assert_eq!(attached.active_runtime_generation, Some(generation));
+    assert_eq!(attached.active_runtime_epoch_id, Some(epoch));
+}
+
 #[tokio::test]
 async fn model_routing_status_proves_finite_turn_and_operation_precedence() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -8860,6 +8915,76 @@ mod stop_teardown_coordinator_class {
             .unregister_session(&session_id)
             .await
             .expect("test cleanup should remove the stopped session");
+    }
+
+    #[tokio::test]
+    async fn missing_executor_redrive_retires_completed_stop_receipt_after_readmission() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        machine
+            .prepare_local_session_bindings(session_id.clone())
+            .await
+            .expect("initial local bindings should register the runtime");
+        machine
+            .stop_runtime_executor(&session_id, "completed stop receipt before revival")
+            .await
+            .expect("ownerless runtime stop should complete");
+        {
+            let sessions = machine.sessions.read().await;
+            let coordinator = sessions
+                .get(&session_id)
+                .and_then(|entry| entry.runtime_stop_cleanup_coordinator.as_ref())
+                .expect("completed stop receipt remains installed until revival");
+            assert!(matches!(
+                coordinator.result_rx.borrow().clone(),
+                Some(Ok(()))
+            ));
+        }
+
+        machine
+            .prepare_local_session_bindings(session_id.clone())
+            .await
+            .expect("delivery-time preparation should readmit the stopped session");
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("readmitted session authority")
+                .lifecycle_phase,
+            mm_dsl::MeerkatPhase::Idle
+        );
+
+        machine
+            .redrive_missing_executor_for_revival(&session_id, machine.session_control_authority())
+            .await
+            .expect("missing-executor redrive should retire the completed exact stop receipt");
+        {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions
+                .get(&session_id)
+                .expect("redriven session remains registered");
+            assert!(entry.runtime_stop_cleanup_coordinator.is_none());
+            assert!(entry.runtime_loop_teardown.is_none());
+            assert!(matches!(
+                entry.attachment_slot,
+                RuntimeLoopAttachmentSlot::Empty
+            ));
+        }
+        let redriven = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("redriven session authority");
+        assert_eq!(redriven.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+        assert_eq!(
+            redriven.registration_phase,
+            mm_dsl::RegistrationPhase::Queuing
+        );
+
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("test cleanup should unregister the redriven session");
     }
 
     #[tokio::test]
@@ -24448,6 +24573,148 @@ async fn session_has_executor_follows_generated_registration_phase() {
 }
 
 #[tokio::test]
+async fn cancelled_executor_setup_before_atomic_claim_preserves_authority_and_retries() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let bindings = adapter
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect("prepare session-owned handles");
+    let (driver, mutation_gate) = {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("registered session entry");
+        (entry.driver.clone(), Arc::clone(&entry.mutation_gate))
+    };
+
+    // All awaitable setup happens before the generated claim. Hold the driver
+    // lock to park setup while the session mutation gate is owned, then prove
+    // a synchronous session handle can still advance unrelated authority and
+    // caller cancellation leaves both facts intact.
+    let driver_guard = driver.lock().await;
+    let registration = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            adapter
+                .ensure_session_with_executor(session_id, Box::new(NoopExecutor))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if Arc::clone(&mutation_gate).try_lock_owned().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("executor setup should own the mutation gate while blocked");
+
+    use meerkat_core::handles::SessionContextHandle as _;
+    assert!(
+        bindings
+            .session_context()
+            .context_advanced(77)
+            .expect("session-owned handle transition during executor setup")
+    );
+    let pending = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("pending session authority");
+    assert_eq!(pending.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+    assert_eq!(
+        pending.registration_phase,
+        mm_dsl::RegistrationPhase::Queuing
+    );
+    assert_eq!(pending.last_session_context_updated_at_ms, 77);
+
+    registration.abort();
+    assert!(
+        registration
+            .await
+            .expect_err("aborted registration task must not complete")
+            .is_cancelled()
+    );
+    drop(driver_guard);
+
+    let preserved = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("preserved session authority");
+    assert_eq!(preserved.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+    assert_eq!(
+        preserved.registration_phase,
+        mm_dsl::RegistrationPhase::Queuing
+    );
+    assert_eq!(preserved.last_session_context_updated_at_ms, 77);
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("session remains registered");
+        assert_eq!(entry.control_snapshot().phase, RuntimeState::Idle);
+        assert!(!entry.has_live_attachment());
+    }
+    assert!(
+        !adapter
+            .session_has_executor(&session_id)
+            .await
+            .expect("rolled-back executor query")
+    );
+
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect("a fresh executor claim must succeed after cancellation rollback");
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("retried session should unregister cleanly");
+}
+
+#[tokio::test]
 async fn ensure_session_with_executor_waits_for_startup_reconciliation() {
     struct GatedStartupExecutor {
         reconciliation_started: Arc<Notify>,
@@ -24539,6 +24806,150 @@ async fn ensure_session_with_executor_waits_for_startup_reconciliation() {
         .unregister_session(&session_id)
         .await
         .expect("ready test session should unregister cleanly");
+}
+
+#[tokio::test]
+async fn cancelled_registration_after_attachment_publication_keeps_runtime_owner() {
+    struct GatedStartupExecutor {
+        reconciliation_started: Arc<Notify>,
+        allow_reconciliation: Arc<Notify>,
+        apply_started: Arc<Notify>,
+        startup_reconciled: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for GatedStartupExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_one();
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn reconcile_committed_compaction_projections(
+            &mut self,
+            _intents: &[meerkat_core::CompactionProjectionIntent],
+        ) -> Result<(), CoreExecutorError> {
+            if !self.startup_reconciled {
+                self.startup_reconciled = true;
+                self.reconciliation_started.notify_one();
+                self.allow_reconciliation.notified().await;
+            }
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let reconciliation_started = Arc::new(Notify::new());
+    let allow_reconciliation = Arc::new(Notify::new());
+    let apply_started = Arc::new(Notify::new());
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register queued-work session");
+    let queued_input = Input::Prompt(crate::input::PromptInput::new(
+        "queued before executor publication",
+        None,
+    ));
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, queued_input)
+        .await
+        .expect("queue input before executor publication");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("queued input should install a completion waiter");
+    let registration = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        let reconciliation_started = Arc::clone(&reconciliation_started);
+        let allow_reconciliation = Arc::clone(&allow_reconciliation);
+        let apply_started = Arc::clone(&apply_started);
+        tokio::spawn(async move {
+            adapter
+                .ensure_session_with_executor(
+                    session_id,
+                    Box::new(GatedStartupExecutor {
+                        reconciliation_started,
+                        allow_reconciliation,
+                        apply_started,
+                        startup_reconciled: false,
+                    }),
+                )
+                .await
+        })
+    };
+
+    tokio::time::timeout(Duration::from_secs(1), reconciliation_started.notified())
+        .await
+        .expect("published runtime loop must enter startup reconciliation");
+    registration.abort();
+    assert!(
+        registration
+            .await
+            .expect_err("aborted registration task must not complete")
+            .is_cancelled()
+    );
+    allow_reconciliation.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("the publication-owned initial wake must run queued work after caller abort");
+    tokio::time::timeout(Duration::from_secs(1), completion.wait())
+        .await
+        .expect("queued completion must resolve after publication-owned wake")
+        .expect("queued completion waiter should remain valid");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if adapter
+                .session_has_executor(&session_id)
+                .await
+                .is_ok_and(|present| present)
+            {
+                let sessions = adapter.sessions.read().await;
+                if sessions
+                    .get(&session_id)
+                    .is_some_and(RuntimeSessionEntry::has_live_attachment)
+                {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("caller cancellation after publication must not roll back the runtime owner");
+
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("published runtime owner should unregister canonically");
 }
 
 #[tokio::test]

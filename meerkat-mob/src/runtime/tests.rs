@@ -26836,6 +26836,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
             owner_bridge_session_id: None,
             ops_registry: None,
             generated_self_owned_operation_owner: Some(bridge_session_id.clone()),
+            runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
         })
         .await
         .expect("member provision should install local runtime resources");
@@ -26905,6 +26906,7 @@ async fn test_retired_session_revival_failure_restores_archived_retired_pair() {
             owner_bridge_session_id: None,
             ops_registry: None,
             generated_self_owned_operation_owner: Some(session_id.clone()),
+            runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
         })
         .await
         .expect("seed session provision");
@@ -26962,6 +26964,7 @@ async fn test_retired_session_revival_failure_restores_archived_retired_pair() {
             owner_bridge_session_id: None,
             ops_registry: None,
             generated_self_owned_operation_owner: Some(mismatched_owner),
+            runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
         })
         .await
         .expect_err("post-attachment validation must fail");
@@ -38014,6 +38017,234 @@ async fn test_discarded_live_session_revived_by_machine_authorized_dispatch() {
         .await
         .expect("member status");
     assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Active);
+}
+
+/// Delivery-time MissingLive regression: the member and its durable session
+/// snapshot remain Active, but a completed runtime stop left the registered
+/// session with no executor. Delivery-time binding preparation readmits that
+/// ownerless runtime and a stale binding tuple advances it to Attached. The
+/// next turn must authorize the narrow MissingLiveMaterialization redrive,
+/// retire the completed stop receipt, rebuild the exact bridge session, and
+/// execute without classifying the member Broken.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_ownerless_stale_runtime_binding_is_redriven_by_missing_live_dispatch() {
+    use meerkat_runtime::SessionServiceRuntimeExt as _;
+    use meerkat_runtime::composition::{ConsumerSurface as _, OwnedFieldValue};
+    use meerkat_runtime::generated::meerkat_mob_seam as seam_facts;
+
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .expect("inline worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    let adapter = service.enable_runtime_adapter();
+    let receipt = handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-missing-live-redrive"),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let initial_status = handle
+        .member_status(&AgentIdentity::from("w-missing-live-redrive"))
+        .await
+        .expect("initial member status");
+    let (agent_runtime_id, fence_token) = initial_status
+        .runtime_identity_fields()
+        .expect("active member has runtime identity");
+    let agent_runtime_id = agent_runtime_id.clone();
+    let baseline_create_requests = service.recorded_create_requests().await.len();
+    let baseline_turn_calls = service.start_turn_call_count();
+
+    assert!(
+        adapter
+            .session_has_executor(&bridge_session_id)
+            .await
+            .expect("inspect initial executor"),
+        "spawn must publish the original runtime executor"
+    );
+    adapter
+        .stop_runtime_executor(&bridge_session_id, "completed limbo shutdown")
+        .await
+        .expect("canonically stop the original runtime executor");
+    assert!(
+        adapter.contains_session(&bridge_session_id).await,
+        "completed stop must retain the registered runtime entry"
+    );
+    assert!(
+        !service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("inspect live materialization after stop"),
+        "executor-owned cleanup must remove only the live materialization"
+    );
+    assert!(
+        service
+            .persisted_session_clone(&bridge_session_id)
+            .await
+            .is_some(),
+        "canonical stop must leave the durable mock session snapshot revivable"
+    );
+    let machine_after_stop = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine after runtime stop");
+    let machine_identity_after_stop = crate::machines::mob_machine::AgentIdentity::from_domain(
+        &AgentIdentity::from("w-missing-live-redrive"),
+    );
+    let lifecycle_after_stop =
+        machine_after_stop.member_lifecycle_for_identity(&machine_identity_after_stop);
+    assert_eq!(
+        lifecycle_after_stop.status,
+        crate::machines::mob_machine::MobMemberLifecycleStatus::Active,
+        "runtime loss must not terminalize the actor-owned member: {lifecycle_after_stop:?}"
+    );
+    assert!(lifecycle_after_stop.error.is_none());
+
+    adapter
+        .prepare_local_session_bindings(bridge_session_id.clone())
+        .await
+        .expect("delivery-time preparation must readmit the stopped runtime");
+    assert!(
+        !adapter
+            .session_has_executor(&bridge_session_id)
+            .await
+            .expect("inspect readmitted ownerless runtime"),
+        "delivery-time binding preparation must not fabricate an executor"
+    );
+
+    meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::pinned(
+        Arc::clone(&adapter),
+        bridge_session_id.clone(),
+    )
+    .apply_routed_input(
+        seam_facts::inputs::prepare_bindings(),
+        vec![
+            (
+                seam_facts::fields::agent_runtime_id(),
+                OwnedFieldValue::Str(agent_runtime_id.to_string()),
+            ),
+            (
+                seam_facts::fields::fence_token(),
+                OwnedFieldValue::U64(fence_token.get()),
+            ),
+            (
+                seam_facts::fields::generation(),
+                OwnedFieldValue::U64(agent_runtime_id.generation.get()),
+            ),
+            (
+                seam_facts::fields::session_id(),
+                OwnedFieldValue::Str(bridge_session_id.to_string()),
+            ),
+        ],
+    )
+    .await
+    .expect("public composition route must manufacture the stale binding tuple");
+    assert_eq!(
+        adapter
+            .runtime_state(&bridge_session_id)
+            .await
+            .expect("inspect stale ownerless runtime"),
+        meerkat_runtime::RuntimeState::Attached,
+        "PrepareBindings on the ownerless registration exposes the supported Attached shape"
+    );
+    assert!(
+        !adapter
+            .session_has_executor(&bridge_session_id)
+            .await
+            .expect("inspect stale ownerless executor"),
+        "binding projection must not fabricate a live executor"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        handle
+            .member(&AgentIdentity::from("w-missing-live-redrive"))
+            .await
+            .expect("member handle")
+            .internal_turn(ContentInput::from(
+                "execute after missing-live redrive".to_string(),
+            )),
+    )
+    .await
+    .expect("missing-live materialization must not wedge")
+    .expect("machine-authorized MissingLive revival and turn must succeed");
+
+    assert!(
+        service
+            .has_live_session(&bridge_session_id)
+            .await
+            .expect("inspect revived materialization"),
+        "MissingLive revival must rebuild the same bridge session"
+    );
+    assert_eq!(
+        service.recorded_create_requests().await.len(),
+        baseline_create_requests + 1,
+        "the missing live materialization must be rebuilt exactly once"
+    );
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_turn_calls + 1,
+        "the admitted turn must execute exactly once on the replacement runtime"
+    );
+    let turn_prompts = service.start_turn_prompts.read().await.clone();
+    assert!(
+        turn_prompts.iter().any(|(session_id, prompt)| {
+            session_id == &bridge_session_id
+                && prompt.contains("execute after missing-live redrive")
+        }),
+        "replacement executor must run the dispatched turn: {turn_prompts:?}"
+    );
+    assert!(
+        adapter
+            .session_has_executor(&bridge_session_id)
+            .await
+            .expect("inspect replacement executor"),
+        "successful materialization must publish a replacement executor"
+    );
+
+    let final_status = handle
+        .member_status(&AgentIdentity::from("w-missing-live-redrive"))
+        .await
+        .expect("final member status");
+    assert_eq!(final_status.status, crate::runtime::MobMemberStatus::Active);
+    assert!(!final_status.is_final);
+    let (final_runtime_id, final_fence_token) = final_status
+        .runtime_identity_fields()
+        .expect("revived member retains runtime identity");
+    assert_eq!(final_runtime_id, &agent_runtime_id);
+    assert_eq!(final_fence_token, fence_token);
+
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine after missing-live revival");
+    let machine_identity = crate::machines::mob_machine::AgentIdentity::from_domain(
+        &AgentIdentity::from("w-missing-live-redrive"),
+    );
+    let lifecycle = machine_state.member_lifecycle_for_identity(&machine_identity);
+    assert_eq!(
+        lifecycle.status,
+        crate::machines::mob_machine::MobMemberLifecycleStatus::Active,
+        "successful missing-live redrive must never classify the member Broken: {lifecycle:?}"
+    );
+    assert!(lifecycle.error.is_none());
+    assert!(
+        !machine_state
+            .member_revival_pending
+            .contains(&machine_identity),
+        "successful materialization must resolve the machine-owned revival obligation"
+    );
 }
 
 #[tokio::test]

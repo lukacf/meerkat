@@ -1070,6 +1070,52 @@ impl StagedSessionDslInput {
     }
 }
 
+/// Panic-safe owner for an executor-registration claim staged while the
+/// caller holds the shared authority mutex. There are no await points between
+/// construction and exact attachment publication, and session-owned handles
+/// cannot interleave because the mutex remains held. Drop restores directly
+/// through that locked authority until publication disarms the claim.
+#[must_use = "an unpublished executor claim must be rolled back or transferred to an attachment"]
+struct PendingExecutorRegistrationClaim<'a> {
+    authority: &'a mut dsl::MeerkatMachineAuthority,
+    previous_snapshot: Option<dsl::MeerkatMachineAuthoritySnapshot>,
+}
+
+impl<'a> PendingExecutorRegistrationClaim<'a> {
+    fn new(
+        authority: &'a mut dsl::MeerkatMachineAuthority,
+        staged: StagedSessionDslInput,
+    ) -> Result<(Self, bool), RuntimeDriverError> {
+        if staged.has_routed_signal_effect() {
+            authority.restore_snapshot(staged.previous_snapshot);
+            return Err(RuntimeDriverError::Internal(
+                "executor-registration claim unexpectedly carried a routed signal effect".into(),
+            ));
+        }
+        let revived_stopped_session = staged.revived_stopped_session();
+        Ok((
+            Self {
+                authority,
+                previous_snapshot: Some(staged.previous_snapshot),
+            },
+            revived_stopped_session,
+        ))
+    }
+
+    fn transfer_to_attachment(mut self, _published: RuntimeLoopAttachmentPublished) {
+        self.previous_snapshot = None;
+    }
+}
+
+impl Drop for PendingExecutorRegistrationClaim<'_> {
+    fn drop(&mut self) {
+        let Some(previous_snapshot) = self.previous_snapshot.take() else {
+            return;
+        };
+        self.authority.restore_snapshot(previous_snapshot);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CommittedEffectDispatchFailure {
     PreserveCommittedDslState,
@@ -1218,6 +1264,11 @@ struct RuntimeSessionEntry {
     /// Current epoch's single ordinary-stop cleanup owner. Unlike unregister,
     /// its successful terminal leaves this registration in generated Stopped.
     runtime_stop_cleanup_coordinator: Option<RuntimeStopCleanupCoordinator>,
+    /// A missing-executor re-drive repaired live authority while durable
+    /// publication belongs to the next exact loop owner.
+    /// Retaining this for the epoch makes every replacement retry persist the
+    /// repaired lifecycle before it reports startup ready.
+    pending_revival_lifecycle_persist: Arc<std::sync::atomic::AtomicBool>,
     /// Retry witness installed before the final generated UnregisterSession
     /// transition. If an owned saga panics after that transition changes the
     /// live projection to Queuing/session_id=None, the next saga resumes the
@@ -1263,6 +1314,11 @@ struct RuntimeLoopAttachment {
     interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
     loop_handle: tokio::task::JoinHandle<()>,
 }
+
+/// Proof that the exact runtime loop and its teardown handoff were installed
+/// into the authoritative session entry. Only this token can disarm an
+/// unpublished executor-registration claim.
+struct RuntimeLoopAttachmentPublished;
 
 /// Mechanical runtime-loop channel slot.
 enum RuntimeLoopAttachmentSlot {
@@ -1332,6 +1388,11 @@ impl RuntimeSessionEntry {
         }
     }
 
+    fn attachment_is_dead(&self) -> bool {
+        matches!(self.attachment_slot, RuntimeLoopAttachmentSlot::Attached(_))
+            && !self.attachment_is_live()
+    }
+
     fn generated_executor_registration_active(&self) -> bool {
         let authority = self
             .dsl_authority
@@ -1344,11 +1405,7 @@ impl RuntimeSessionEntry {
     }
 
     fn generated_executor_registration_has_viable_attachment(&self) -> bool {
-        self.generated_executor_registration_active()
-            && match &self.attachment_slot {
-                RuntimeLoopAttachmentSlot::Empty => true,
-                RuntimeLoopAttachmentSlot::Attached(_) => self.attachment_is_live(),
-            }
+        self.generated_executor_registration_active() && self.attachment_is_live()
     }
 
     fn close_handle_teardown_gate(&self) {
@@ -1377,32 +1434,23 @@ impl RuntimeSessionEntry {
         )
     }
 
-    fn generated_stop_deferred(&self) -> bool {
-        self.dsl_authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state()
-            .runtime_stop_deferred
-    }
-
-    fn stage_generated_executor_registration_claim(
-        &self,
+    fn stage_generated_executor_registration_claim_locked(
+        authority: &mut dsl::MeerkatMachineAuthority,
         session_id: &SessionId,
     ) -> Result<StagedSessionDslInput, String> {
-        let staged = MeerkatMachine::stage_dsl_transition_on_authority(
-            &self.dsl_authority,
+        let staged = MeerkatMachine::stage_dsl_transition_on_locked_authority(
+            authority,
             dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
                 session_id: dsl::SessionId::from_domain(session_id),
             },
             "EnsureSessionWithExecutor",
         )?;
-        if self.generated_executor_registration_active() {
+        if matches!(
+            authority.state().registration_phase,
+            dsl::RegistrationPhase::Active
+        ) {
             Ok(staged)
         } else {
-            let mut authority = self
-                .dsl_authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             authority.restore_snapshot(staged.previous_snapshot);
             Err("generated MeerkatMachine did not grant active executor registration".into())
         }
@@ -1428,7 +1476,7 @@ impl RuntimeSessionEntry {
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
         spawned_loop: crate::runtime_loop::SpawnedRuntimeLoop,
-    ) {
+    ) -> RuntimeLoopAttachmentPublished {
         let crate::runtime_loop::SpawnedRuntimeLoop {
             loop_handle,
             teardown_slot,
@@ -1447,6 +1495,7 @@ impl RuntimeSessionEntry {
             interrupt_handle,
             loop_handle,
         });
+        RuntimeLoopAttachmentPublished
     }
 
     /// Detach the runtime-loop channels, returning the loop's `JoinHandle` so a
@@ -1477,28 +1526,50 @@ impl RuntimeSessionEntry {
         &mut self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        if !matches!(self.attachment_slot, RuntimeLoopAttachmentSlot::Empty) {
-            return Err(RuntimeDriverError::Internal(format!(
-                "revived session {session_id} still carries a runtime-loop attachment"
-            )));
-        }
         match self.runtime_stop_cleanup_coordinator.as_ref() {
-            None if self.runtime_loop_teardown.is_none() => return Ok(()),
+            None if self.runtime_loop_teardown.is_none()
+                && matches!(self.attachment_slot, RuntimeLoopAttachmentSlot::Empty) =>
+            {
+                return Ok(());
+            }
             None => {
                 return Err(RuntimeDriverError::Internal(format!(
-                    "revived session {session_id} carries a teardown slot without its stop coordinator"
+                    "revived session {session_id} carries an attachment or teardown slot without its stop coordinator"
                 )));
             }
-            Some(coordinator) => match coordinator.result_rx.borrow().clone() {
-                Some(Ok(())) => {}
-                None => {
-                    return Err(RuntimeDriverError::RuntimeStopInProgress {
-                        runtime_id: self.runtime_id.clone(),
-                    });
+            Some(coordinator) => {
+                let coordinator_slot_is_current = match (
+                    coordinator.teardown_slot.as_ref(),
+                    self.runtime_loop_teardown.as_ref(),
+                ) {
+                    (Some(coordinator_slot), Some(current_slot)) => {
+                        Arc::ptr_eq(coordinator_slot, current_slot)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !coordinator_slot_is_current {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "revived session {session_id} carries a stale runtime-stop teardown owner"
+                    )));
                 }
-                Some(Err(error)) => return Err(error),
-            },
+                match coordinator.result_rx.borrow().clone() {
+                    Some(Ok(())) => {}
+                    None => {
+                        return Err(RuntimeDriverError::RuntimeStopInProgress {
+                            runtime_id: self.runtime_id.clone(),
+                        });
+                    }
+                    Some(Err(error)) => return Err(error),
+                }
+            }
         }
+        if self.attachment_is_live() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "revived session {session_id} still carries a live runtime-loop attachment"
+            )));
+        }
+        self.attachment_slot = RuntimeLoopAttachmentSlot::Empty;
         self.runtime_stop_cleanup_coordinator = None;
         self.runtime_loop_teardown = None;
         Ok(())

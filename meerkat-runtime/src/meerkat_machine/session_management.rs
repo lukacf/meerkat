@@ -690,6 +690,7 @@ impl MeerkatMachine {
             runtime_loop_teardown: None,
             unregister_coordinator: None,
             runtime_stop_cleanup_coordinator: None,
+            pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_unregister_finalization: None,
             unregister_teardown_observations: Arc::new(
                 UnregisterTeardownMechanicalObservations::new(),
@@ -834,6 +835,7 @@ impl MeerkatMachine {
             runtime_loop_teardown: None,
             unregister_coordinator: None,
             runtime_stop_cleanup_coordinator: None,
+            pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_unregister_finalization: None,
             unregister_teardown_observations: Arc::new(
                 UnregisterTeardownMechanicalObservations::new(),
@@ -1042,6 +1044,7 @@ impl MeerkatMachine {
             runtime_loop_teardown: None,
             unregister_coordinator: None,
             runtime_stop_cleanup_coordinator: None,
+            pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_unregister_finalization: None,
             unregister_teardown_observations: recovered_teardown_observations,
             provisional_interrupt_handle: None,
@@ -1267,10 +1270,14 @@ impl MeerkatMachine {
                 completions: SharedCompletionRegistry,
                 ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
                 dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
-                staged: Box<StagedSessionDslInput>,
-                repaired_dead_attachment: bool,
+                inserted_cold_entry: bool,
                 _gate_guard: crate::tokio::sync::OwnedMutexGuard<()>,
             },
+        }
+
+        enum ExecutorPublicationError {
+            DslRejected(String),
+            Internal(RuntimeDriverError),
         }
 
         let existing = loop {
@@ -1286,39 +1293,31 @@ impl MeerkatMachine {
                 if let Some(error) = entry.registration_blocked_by_unregister(&session_id) {
                     break ExistingExecutorClaim::Blocked(error);
                 }
-                let repaired_dead_attachment = entry.clear_dead_attachment();
-                let repaired_deferred_stop =
-                    repaired_dead_attachment && entry.generated_stop_deferred();
-                if repaired_dead_attachment
-                    && !repaired_deferred_stop
-                    && let Err(reason) = entry.stage_generated_executor_exit_observation()
-                {
-                    break ExistingExecutorClaim::Rejected(reason);
-                }
-                if entry.generated_executor_registration_active() && !repaired_deferred_stop {
+                if entry.has_live_attachment() && entry.generated_executor_registration_active() {
                     break ExistingExecutorClaim::AlreadyClaimed;
                 }
                 if entry.has_live_attachment() {
-                    match entry.stage_generated_executor_registration_claim(&session_id) {
+                    let mut authority = entry
+                        .dsl_authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match RuntimeSessionEntry::stage_generated_executor_registration_claim_locked(
+                        &mut authority,
+                        &session_id,
+                    ) {
                         Ok(_) => break ExistingExecutorClaim::AlreadyClaimed,
                         Err(reason) => break ExistingExecutorClaim::Rejected(reason),
                     }
                 }
-                match entry.stage_generated_executor_registration_claim(&session_id) {
-                    Ok(staged) => {
-                        break ExistingExecutorClaim::Claimed {
-                            gate,
-                            driver: entry.driver.clone(),
-                            completions: entry.completions.clone(),
-                            ops_lifecycle: entry.ops_lifecycle.clone(),
-                            dsl_authority: Arc::clone(&entry.dsl_authority),
-                            staged: Box::new(staged),
-                            repaired_dead_attachment,
-                            _gate_guard: gate_guard,
-                        };
-                    }
-                    Err(reason) => break ExistingExecutorClaim::Rejected(reason),
-                }
+                break ExistingExecutorClaim::Claimed {
+                    gate,
+                    driver: entry.driver.clone(),
+                    completions: entry.completions.clone(),
+                    ops_lifecycle: entry.ops_lifecycle.clone(),
+                    dsl_authority: Arc::clone(&entry.dsl_authority),
+                    inserted_cold_entry: false,
+                    _gate_guard: gate_guard,
+                };
             }
 
             let runtime_id = Self::logical_runtime_id(&session_id);
@@ -1448,6 +1447,9 @@ impl MeerkatMachine {
                     runtime_loop_teardown: None,
                     unregister_coordinator: None,
                     runtime_stop_cleanup_coordinator: None,
+                    pending_revival_lifecycle_persist: Arc::new(
+                        std::sync::atomic::AtomicBool::new(false),
+                    ),
                     pending_unregister_finalization: None,
                     unregister_teardown_observations: recovered_teardown_observations,
                     provisional_interrupt_handle: None,
@@ -1455,29 +1457,15 @@ impl MeerkatMachine {
                     drain_slot: CommsDrainSlot::new(),
                 },
             );
-            let Some(entry) = sessions.get_mut(&session_id) else {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "session {session_id} missing after executor recovery insert"
-                )));
+            break ExistingExecutorClaim::Claimed {
+                gate: mutation_gate,
+                driver,
+                completions,
+                ops_lifecycle: recovered_ops,
+                dsl_authority,
+                inserted_cold_entry: true,
+                _gate_guard: gate_guard,
             };
-            match entry.stage_generated_executor_registration_claim(&session_id) {
-                Ok(staged) => {
-                    break ExistingExecutorClaim::Claimed {
-                        gate: mutation_gate,
-                        driver,
-                        completions,
-                        ops_lifecycle: recovered_ops,
-                        dsl_authority,
-                        staged: Box::new(staged),
-                        repaired_dead_attachment: false,
-                        _gate_guard: gate_guard,
-                    };
-                }
-                Err(reason) => {
-                    sessions.remove(&session_id);
-                    break ExistingExecutorClaim::Rejected(reason);
-                }
-            }
         };
 
         let (
@@ -1485,9 +1473,8 @@ impl MeerkatMachine {
             completions,
             ops_lifecycle,
             dsl_authority,
-            staged_registration,
-            repaired_dead_attachment,
             registration_gate,
+            inserted_cold_entry,
             _gate_guard,
         ) = match existing {
             ExistingExecutorClaim::AlreadyClaimed => {
@@ -1512,39 +1499,21 @@ impl MeerkatMachine {
                 completions,
                 ops_lifecycle,
                 dsl_authority,
-                staged,
-                repaired_dead_attachment,
+                inserted_cold_entry,
                 _gate_guard,
             } => (
                 driver,
                 completions,
                 ops_lifecycle,
                 dsl_authority,
-                staged,
-                repaired_dead_attachment,
                 gate,
+                inserted_cold_entry,
                 _gate_guard,
             ),
         };
 
         let should_wake = {
-            let mut driver_guard = driver.lock().await;
-            driver_guard.sync_control_projection_from_dsl_authority();
-            if repaired_dead_attachment {
-                tracing::warn!(
-                    %session_id,
-                    "runtime driver registration was repaired by generated executor authority; publishing attachment"
-                );
-            }
-            if staged_registration.revived_stopped_session() {
-                // Machine-emitted revival (`EnsureSessionWithExecutorStopped`
-                // re-admitted a stopped session to Attached): refresh the
-                // durable lifecycle record so cross-process readers never
-                // observe a stale `Stopped` snapshot for a revived session.
-                driver_guard
-                    .persist_current_machine_lifecycle("resume")
-                    .await?;
-            }
+            let driver_guard = driver.lock().await;
             !driver_guard.as_driver().active_input_ids().is_empty()
         };
 
@@ -1598,84 +1567,197 @@ impl MeerkatMachine {
                 .get(&session_id)
                 .map(|e| Arc::clone(&e.cursor_state))
         };
-        let mut pending_loop = Some(crate::runtime_loop::spawn_runtime_loop_with_completions(
-            driver.clone(),
-            executor,
-            wake_rx,
-            effect_rx,
-            Some(completions.clone()),
-            Some(completion_feed),
-            Some(Arc::clone(&ops_lifecycle) as Arc<dyn meerkat_core::OpsLifecycleRegistry>),
-            entry_cursor_state,
-            Arc::downgrade(self),
-            session_id.clone(),
-        ));
-        let startup = pending_loop
-            .as_ref()
-            .map(crate::runtime_loop::SpawnedRuntimeLoop::startup_slot)
-            .ok_or_else(|| {
-                RuntimeDriverError::Internal("runtime loop startup handle missing".into())
-            })?;
-
-        let (published, detach_after_abort) = {
+        // Spawn, publish the exact teardown/attachment handoff, and transfer
+        // the generated claim inside one session-map critical section. There
+        // is deliberately no await between spawning the task and installing
+        // its watcher-visible teardown slot.
+        let publication = 'publication: {
             let mut sessions = self.sessions.write().await;
-            match sessions.get_mut(&session_id) {
-                None => (false, true),
-                Some(entry) => {
-                    entry.clear_dead_attachment();
-                    if entry.has_live_attachment() {
-                        (false, false)
-                    } else if !Arc::ptr_eq(&entry.mutation_gate, &registration_gate)
-                        || !Arc::ptr_eq(&entry.dsl_authority, &dsl_authority)
-                        || !Arc::ptr_eq(&entry.driver, &driver)
-                        || !Arc::ptr_eq(&entry.completions, &completions)
-                    {
-                        tracing::warn!(
-                            %session_id,
-                            "runtime session entry changed while wiring executor; aborting stale loop attachment"
-                        );
-                        (false, true)
-                    } else {
-                        match pending_loop.take() {
-                            Some(spawned_loop) => {
-                                entry.attach_runtime_loop(
-                                    wake_tx.clone(),
-                                    effect_tx,
-                                    boundary_handle,
-                                    interrupt_handle,
-                                    spawned_loop,
-                                );
-                                (true, false)
-                            }
-                            None => {
-                                tracing::error!(
-                                    %session_id,
-                                    "runtime loop handle missing during attachment publish"
-                                );
-                                (false, true)
-                            }
-                        }
-                    }
-                }
+            let entry = sessions.get_mut(&session_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "session {session_id} disappeared while wiring executor"
+                ))
+            })?;
+            if let Some(error) = entry.registration_blocked_by_unregister(&session_id) {
+                return Err(error);
             }
-        };
-
-        if !published {
-            if let Some(spawned_loop) = pending_loop.take() {
-                spawned_loop.loop_handle.abort();
+            if entry.runtime_stop_cleanup_coordinator.is_some() {
+                entry.retire_completed_runtime_stop_after_revival(&session_id)?;
             }
-            if detach_after_abort {
-                Self::restore_dsl_authority_snapshot(
-                    &dsl_authority,
-                    staged_registration.previous_snapshot,
+            if entry.attachment_is_dead() {
+                return Err(RuntimeDriverError::RuntimeStopInProgress {
+                    runtime_id: entry.runtime_id.clone(),
+                });
+            }
+            if !matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
+                || entry.runtime_loop_teardown.is_some()
+                || !Arc::ptr_eq(&entry.mutation_gate, &registration_gate)
+                || !Arc::ptr_eq(&entry.dsl_authority, &dsl_authority)
+                || !Arc::ptr_eq(&entry.driver, &driver)
+                || !Arc::ptr_eq(&entry.completions, &completions)
+            {
+                tracing::warn!(
+                    %session_id,
+                    "runtime session entry changed while wiring executor; refusing stale loop attachment"
                 );
-                let mut driver_guard = driver.lock().await;
-                driver_guard.sync_control_projection_from_dsl_authority();
                 return Err(RuntimeDriverError::Internal(
                     "runtime session entry changed while wiring executor".into(),
                 ));
             }
-            return Ok(());
+            let mut authority = dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let repaired_ownerless_claim = matches!(
+                (
+                    authority.state().lifecycle_phase,
+                    authority.state().registration_phase,
+                    authority.state().current_run_id.as_ref(),
+                ),
+                (
+                    dsl::MeerkatPhase::Idle | dsl::MeerkatPhase::Attached,
+                    dsl::RegistrationPhase::Active,
+                    None,
+                )
+            );
+            if repaired_ownerless_claim {
+                let exited = Self::stage_runtime_owner_dsl_transition_on_locked_authority(
+                    &mut authority,
+                    crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited,
+                )
+                .map_err(RuntimeDriverError::Internal)?;
+                if exited.has_routed_signal_effect() {
+                    authority.restore_snapshot(exited.previous_snapshot);
+                    return Err(RuntimeDriverError::Internal(
+                        "ownerless executor-exit repair unexpectedly emitted a routed signal"
+                            .into(),
+                    ));
+                }
+                let readmitted = Self::stage_dsl_transition_on_locked_authority(
+                    &mut authority,
+                    dsl::MeerkatMachineInput::RegisterSession {
+                        session_id: dsl::SessionId::from_domain(&session_id),
+                    },
+                    "OwnerlessExecutorClaimReadmit",
+                )
+                .map_err(RuntimeDriverError::Internal)?;
+                if readmitted.has_routed_signal_effect() {
+                    authority.restore_snapshot(readmitted.previous_snapshot);
+                    authority.restore_snapshot(exited.previous_snapshot);
+                    return Err(RuntimeDriverError::Internal(
+                        "ownerless executor readmission unexpectedly emitted a routed signal"
+                            .into(),
+                    ));
+                }
+                entry
+                    .pending_revival_lifecycle_persist
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            let staged_registration =
+                match RuntimeSessionEntry::stage_generated_executor_registration_claim_locked(
+                    &mut authority,
+                    &session_id,
+                ) {
+                    Ok(staged) => staged,
+                    Err(reason) => {
+                        break 'publication Err(ExecutorPublicationError::DslRejected(reason));
+                    }
+                };
+            let (pending_registration, revived_stopped_session) =
+                match PendingExecutorRegistrationClaim::new(&mut authority, staged_registration) {
+                    Ok(claim) => claim,
+                    Err(error) => {
+                        break 'publication Err(ExecutorPublicationError::Internal(error));
+                    }
+                };
+            let persist_revival_lifecycle = revived_stopped_session
+                || repaired_ownerless_claim
+                || entry
+                    .pending_revival_lifecycle_persist
+                    .load(std::sync::atomic::Ordering::Acquire);
+            let pending_revival_lifecycle_persist =
+                Arc::clone(&entry.pending_revival_lifecycle_persist);
+            let spawned_loop = crate::runtime_loop::spawn_runtime_loop_with_completions(
+                driver.clone(),
+                executor,
+                wake_rx,
+                effect_rx,
+                Some(completions.clone()),
+                Some(completion_feed),
+                Some(Arc::clone(&ops_lifecycle) as Arc<dyn meerkat_core::OpsLifecycleRegistry>),
+                entry_cursor_state,
+                Arc::downgrade(self),
+                session_id.clone(),
+                persist_revival_lifecycle,
+                Some(pending_revival_lifecycle_persist),
+            );
+            let startup = spawned_loop.startup_slot();
+            let published = entry.attach_runtime_loop(
+                wake_tx.clone(),
+                effect_tx,
+                boundary_handle,
+                interrupt_handle,
+                spawned_loop,
+            );
+            pending_registration.transfer_to_attachment(published);
+            drop(authority);
+            Ok::<_, ExecutorPublicationError>(startup)
+        };
+        let startup = match publication {
+            Ok(startup) => startup,
+            Err(ExecutorPublicationError::DslRejected(reason)) => {
+                let classified = self
+                    .classify_session_dsl_rejection(&session_id, reason)
+                    .await;
+                if inserted_cold_entry {
+                    let mut removed_entry = {
+                        let mut sessions = self.sessions.write().await;
+                        let exact_unpublished_entry =
+                            sessions.get(&session_id).is_some_and(|entry| {
+                                Arc::ptr_eq(&entry.mutation_gate, &registration_gate)
+                                    && Arc::ptr_eq(&entry.driver, &driver)
+                                    && Arc::ptr_eq(&entry.dsl_authority, &dsl_authority)
+                                    && Arc::ptr_eq(&entry.completions, &completions)
+                                    && matches!(
+                                        entry.attachment_slot,
+                                        RuntimeLoopAttachmentSlot::Empty
+                                    )
+                                    && entry.runtime_loop_teardown.is_none()
+                            });
+                        exact_unpublished_entry
+                            .then(|| sessions.remove(&session_id))
+                            .flatten()
+                    };
+                    if let Some(entry) = removed_entry.as_ref() {
+                        entry.close_handle_teardown_gate();
+                    }
+                    if let Some(entry) = removed_entry.as_mut()
+                        && let Some(worker) = entry.ops_lifecycle_persistence_worker.take()
+                    {
+                        match entry.ops_lifecycle.retire_owner_for_unregister(
+                            "cold executor attachment was rejected before publication".into(),
+                        ) {
+                            Ok(()) => join_ops_lifecycle_persistence_worker(worker).await?,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %session_id,
+                                    %error,
+                                    "failed to retire ops owner after cold executor attachment rejection"
+                                );
+                            }
+                        }
+                    }
+                }
+                drop(_gate_guard);
+                return Err(classified);
+            }
+            Err(ExecutorPublicationError::Internal(error)) => return Err(error),
+        };
+
+        // Buffer the initial backlog wake immediately after publication. The
+        // runtime loop owns startup from this point; cancellation of the
+        // caller waiting below must not leave recovered inputs dormant.
+        if should_wake {
+            let _ = wake_tx.try_send(());
         }
 
         // Publishing the attachment is not readiness. The exact executor must
@@ -1694,9 +1776,6 @@ impl MeerkatMachine {
             };
         }
 
-        if should_wake {
-            let _ = wake_tx.try_send(());
-        }
         Ok(())
     }
 
@@ -1711,6 +1790,142 @@ impl MeerkatMachine {
     ) -> Result<(), RuntimeDriverError> {
         self.join_or_start_unregister_teardown(session_id, None, UnregisterTeardownCaller::Explicit)
             .await
+    }
+
+    /// Re-drive the exact missing-executor shapes used by delivery-time Mob
+    /// revival: recovered Idle/Queuing authority, an ownerless binding at
+    /// Attached/Queuing, or an orphaned Active claim left without an
+    /// attachment or teardown owner. Same-session local preparation can
+    /// normalize Attached/Active to Idle/Active, so both shapes are admitted.
+    /// The generated executor-exit observation followed by same-session
+    /// readmission clears the full binding tuple. The already-recovered driver
+    /// ledger and queues are deliberately left verbatim.
+    ///
+    /// This is deliberately narrower than general executor replacement. A
+    /// live, dead, or teardown-owned attachment is refused because only its
+    /// exact owner may discharge it.
+    #[doc(hidden)]
+    pub async fn redrive_missing_executor_for_revival(
+        &self,
+        session_id: &SessionId,
+        _authority: MachineSessionControlAuthority,
+    ) -> Result<(), RuntimeDriverError> {
+        let _gate_guard = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+
+        let (driver, dsl_authority, pending_lifecycle_persist) = {
+            let mut sessions = self.sessions.write().await;
+            let entry = sessions
+                .get_mut(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            if entry.runtime_stop_cleanup_coordinator.is_some() {
+                // A completed exact stop receipt is compatible with revival;
+                // retire it exactly as executor publication does. Pending,
+                // failed, stale, or live-owned teardown remains fail-closed.
+                entry.retire_completed_runtime_stop_after_revival(session_id)?;
+            }
+            if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+                return Err(error);
+            }
+            if !matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
+                || entry.runtime_loop_teardown.is_some()
+                || entry.runtime_stop_cleanup_coordinator.is_some()
+                || entry.unregister_coordinator.is_some()
+            {
+                return Err(RuntimeDriverError::RuntimeStopInProgress {
+                    runtime_id: entry.runtime_id.clone(),
+                });
+            }
+            (
+                Arc::clone(&entry.driver),
+                Arc::clone(&entry.dsl_authority),
+                Arc::clone(&entry.pending_revival_lifecycle_persist),
+            )
+        };
+
+        let mut driver_guard = driver.lock().await;
+        // Every await is deliberately above this point. Once generated
+        // authority changes, projection realization and the publication
+        // marker complete synchronously under the same authority mutex.
+        // Caller cancellation therefore cannot expose a half-redriven session.
+        let mut authority = dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_snapshot = authority.snapshot();
+        let stage_result = (|| -> Result<(), RuntimeDriverError> {
+            let lifecycle_phase = authority.state().lifecycle_phase;
+            let registration_phase = authority.state().registration_phase;
+            let has_current_run = authority.state().current_run_id.is_some();
+            match (lifecycle_phase, registration_phase, has_current_run) {
+                (
+                    dsl::MeerkatPhase::Idle | dsl::MeerkatPhase::Attached,
+                    dsl::RegistrationPhase::Queuing | dsl::RegistrationPhase::Active,
+                    false,
+                ) => {
+                    let exited = Self::stage_runtime_owner_dsl_transition_on_locked_authority(
+                        &mut authority,
+                        crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited,
+                    )
+                    .map_err(RuntimeDriverError::Internal)?;
+                    if exited.has_routed_signal_effect() {
+                        return Err(RuntimeDriverError::Internal(
+                            "missing-executor exit observation unexpectedly emitted a routed signal"
+                                .into(),
+                        ));
+                    }
+                    let readmitted = Self::stage_dsl_transition_on_locked_authority(
+                        &mut authority,
+                        dsl::MeerkatMachineInput::RegisterSession {
+                            session_id: dsl::SessionId::from_domain(session_id),
+                        },
+                        "MissingExecutorRevivalReadmit",
+                    )
+                    .map_err(RuntimeDriverError::Internal)?;
+                    if readmitted.has_routed_signal_effect() {
+                        return Err(RuntimeDriverError::Internal(
+                            "missing-executor readmission unexpectedly emitted a routed signal"
+                                .into(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: dsl_authority::runtime_phase_from_authority(&authority),
+                    });
+                }
+            }
+            let repaired = authority.state();
+            if repaired.lifecycle_phase != dsl::MeerkatPhase::Idle
+                || repaired.registration_phase != dsl::RegistrationPhase::Queuing
+                || repaired.current_run_id.is_some()
+                || repaired.active_runtime_id.is_some()
+                || repaired.active_fence_token.is_some()
+                || repaired.active_runtime_generation.is_some()
+                || repaired.active_runtime_epoch_id.is_some()
+            {
+                return Err(RuntimeDriverError::Internal(
+                    "missing-executor revival did not produce cleared Idle/Queuing authority"
+                        .into(),
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = stage_result {
+            authority.restore_snapshot(original_snapshot);
+            return Err(error);
+        }
+        // Keep the mechanical projection coherent without re-locking the DSL
+        // authority we still hold. No queue or ledger mechanic is required:
+        // executor exit/readmission changes only runtime ownership.
+        driver_guard.set_control_projection(RuntimeState::Idle, None, None);
+        pending_lifecycle_persist.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 
     /// Start or join the one owned ordinary-stop operation for this epoch.
@@ -3562,9 +3777,10 @@ impl MeerkatMachine {
     /// Check whether a session has an active RuntimeLoop or attachment in
     /// progress.
     ///
-    /// `Ok(false)` means only `Queuing` (registered via `prepare_bindings()`
-    /// with no executor) or unknown. Driver faults are returned explicitly so
-    /// callers cannot accidentally treat a control-plane fault as absence.
+    /// `Ok(false)` means no viable live attachment: ordinary `Queuing`, an
+    /// orphaned generated `Active` claim whose attachment is Empty/dead, or an
+    /// unknown session. Driver faults are returned explicitly so callers
+    /// cannot accidentally treat a control-plane fault as absence.
     pub async fn session_has_executor(
         &self,
         session_id: &SessionId,

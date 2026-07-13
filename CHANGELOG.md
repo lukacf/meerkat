@@ -103,6 +103,15 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- Delivery-time Mob member revival now carries an explicit machine-authorized
+  missing-live-materialization intent. Exact ownerless `Idle` or `Attached`
+  records with `Queuing` or orphaned `Active` registration are re-driven
+  in-process through the generated
+  executor-exit observation and same-session resume intent, clearing the full
+  V3 runtime-binding tuple without touching queued inputs. Executor
+  publication is also cancellation-safe: the exact runtime-loop attachment,
+  its initial backlog wake, and startup projection/persistence belong to the
+  loop owner, preventing a false `Attached`/ready state without an executor.
 - Transcript revision history no longer retains a complete mechanical head
   snapshot after every ordinary append once any audited rewrite exists.
   Snapshots preserve genuine rewrite endpoints plus the live head, typed

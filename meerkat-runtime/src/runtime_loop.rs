@@ -1531,6 +1531,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
     machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
     session_id: meerkat_core::types::SessionId,
+    persist_revival_lifecycle: bool,
+    pending_revival_lifecycle_persist: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> SpawnedRuntimeLoop {
     let teardown_slot = RuntimeLoopTeardownSlot::pending();
     let startup = RuntimeLoopStartupSlot::pending();
@@ -1589,6 +1591,40 @@ pub(crate) fn spawn_runtime_loop_with_completions(
             };
         }
         let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
+
+        // The executor attachment now owns this claim. Projection sync and a
+        // stopped-session revival persist therefore run in this independently
+        // owned task, before startup readiness, so cancellation of the caller
+        // awaiting registration cannot strand Attached authority without an
+        // exact executor cleanup owner.
+        let projection_result = {
+            let mut driver_guard = driver.lock().await;
+            driver_guard.sync_control_projection_from_dsl_authority();
+            let persist_revival_lifecycle = persist_revival_lifecycle
+                || pending_revival_lifecycle_persist
+                    .as_ref()
+                    .is_some_and(|pending| pending.load(std::sync::atomic::Ordering::Acquire));
+            if persist_revival_lifecycle {
+                driver_guard
+                    .persist_current_machine_lifecycle("resume")
+                    .await
+            } else {
+                Ok(())
+            }
+        };
+        if let Err(error) = projection_result {
+            startup_guard.publish(Err(error.to_string()));
+            tracing::error!(
+                session_id = %authority_binding.session_id,
+                %error,
+                "runtime loop failed to publish revived lifecycle before accepting work"
+            );
+            return;
+        }
+        if let Some(pending) = pending_revival_lifecycle_persist {
+            pending.store(false, std::sync::atomic::Ordering::Release);
+        }
+
         // Feed-based idle wake state (local to this loop).
         // Seed from generated cursor authority when available. Even an
         // all-zero runtime-owned cursor must win over the feed watermark so a
@@ -3330,6 +3366,8 @@ mod tests {
             None,
             std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
             SessionId::new(),
+            false,
+            None,
         );
 
         effect_tx
@@ -3374,6 +3412,8 @@ mod tests {
             None,
             std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
             SessionId::new(),
+            false,
+            None,
         );
 
         drop(effect_tx);
@@ -3415,6 +3455,8 @@ mod tests {
             None,
             std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
             SessionId::new(),
+            false,
+            None,
         );
 
         drop(wake_tx);

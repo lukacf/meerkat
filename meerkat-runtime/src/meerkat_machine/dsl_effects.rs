@@ -94,6 +94,16 @@ impl MeerkatMachine {
         authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
         input: MeerkatMachineFieldlessRuntimeInternalInput,
     ) -> Result<StagedSessionDslInput, String> {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::stage_runtime_owner_dsl_transition_on_locked_authority(&mut authority, input)
+    }
+
+    pub(super) fn stage_runtime_owner_dsl_transition_on_locked_authority(
+        authority: &mut dsl::MeerkatMachineAuthority,
+        input: MeerkatMachineFieldlessRuntimeInternalInput,
+    ) -> Result<StagedSessionDslInput, String> {
         let variant = input.input_variant();
         if !canonical_meerkat_machine_runtime_internal_input_variant_manifest().contains(&variant) {
             return Err(format!(
@@ -115,7 +125,7 @@ impl MeerkatMachine {
                 input.authority()
             ));
         }
-        Self::stage_dsl_transition_on_authority_after_typed_gate(
+        Self::stage_dsl_transition_on_locked_authority_after_typed_gate(
             authority,
             input.dsl_input(),
             variant.as_str(),
@@ -161,6 +171,19 @@ impl MeerkatMachine {
         Self::stage_dsl_transition_on_authority_after_typed_gate(authority, input, context)
     }
 
+    /// Stage a transition while the caller retains the shared authority's
+    /// synchronous mutex. This is reserved for no-await publication handoffs
+    /// that must prevent session-owned handles from interleaving between a
+    /// generated claim and its exact shell attachment.
+    pub(super) fn stage_dsl_transition_on_locked_authority(
+        authority: &mut dsl::MeerkatMachineAuthority,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, String> {
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
+        Self::stage_dsl_transition_on_locked_authority_after_typed_gate(authority, input, context)
+    }
+
     fn stage_dsl_transition_on_authority_after_typed_gate(
         authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
         input: dsl::MeerkatMachineInput,
@@ -169,8 +192,20 @@ impl MeerkatMachine {
         let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::stage_dsl_transition_on_locked_authority_after_typed_gate(
+            &mut authority,
+            input,
+            context,
+        )
+    }
+
+    fn stage_dsl_transition_on_locked_authority_after_typed_gate(
+        authority: &mut dsl::MeerkatMachineAuthority,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, String> {
         let previous_snapshot = authority.snapshot();
-        let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+        let effects = dsl::MeerkatMachineMutator::apply(authority, input)
             .map(|transition| DslTransitionEffects::new(transition.into_effects()))
             .map_err(|err| dsl_authority::map_error(err, context))?;
         let committed_snapshot = authority.snapshot();

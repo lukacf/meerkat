@@ -3,6 +3,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::DispatchError;
 use async_trait::async_trait;
+use meerkat_core::AgentToolDispatcher;
 #[cfg(test)]
 use meerkat_core::ToolCallability;
 #[cfg(not(target_arch = "wasm32"))]
@@ -12,8 +13,9 @@ use meerkat_core::ops::ToolDispatchOutcome;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::types::ToolResult;
 use meerkat_core::types::{ToolCallView, ToolDef};
-use meerkat_core::{AgentToolDispatcher, ToolDispatchContext};
-use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry, ToolDispatchContext};
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]

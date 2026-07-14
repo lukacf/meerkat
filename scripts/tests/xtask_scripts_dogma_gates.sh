@@ -79,6 +79,13 @@ if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/d
 else
   bad "machine-authority-changed did not flag machine-authority docs"
 fi
+for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile scripts/machine-authority-changed scripts/tests/xtask_scripts_dogma_gates.sh xtask/tests/ci_gate_requires_rmat.rs; do
+  if scripts/machine-authority-changed -- "$gate_owner" >/dev/null; then
+    ok "machine-authority-changed protects its gate owner $gate_owner"
+  else
+    bad "machine-authority-changed ignored its gate owner $gate_owner"
+  fi
+done
 edge_out=$(printf 'xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_out" | grep -Fq 'changed=true'; then
   ok "buildbuddy-edge-changes marks rmat_policy.rs as changed"
@@ -243,10 +250,13 @@ fi
 echo "#221 machine-verify TLC lane fails closed without tlc:"
 if grep -Fq 'tlc not on PATH but this lane advertises TLC-backed verification' \
     xtask/tests/machine_verify_all_tlc_test.sh \
-  && grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' xtask/tests/machine_verify_all_tlc_test.sh; then
-  ok "TLC test fails closed (exit 1) unless MACHINE_VERIFY_TLC_DRIFT_ONLY=1"
+  && grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' xtask/tests/machine_verify_all_tlc_test.sh \
+  && grep -Fq 'JAVA_TOOL_OPTIONS' xtask/tests/machine_verify_all_tlc_test.sh \
+  && grep -Fq -- '-Xss256m' xtask/tests/machine_verify_all_tlc_test.sh \
+  && grep -Fq -- '-XX:+UseParallelGC' xtask/tests/machine_verify_all_tlc_test.sh; then
+  ok "TLC test fails closed unless explicitly downgraded and gives direct witnesses the canonical JVM policy"
 else
-  bad "TLC test still silently downgrades to drift-only when tlc is absent"
+  bad "TLC test silently downgrades without tlc or omits the canonical JVM policy for direct witnesses"
 fi
 if grep -Fq 'fails closed when tlc is absent' scripts/buildbuddy-doctor; then
   ok "buildbuddy-doctor no longer blesses the silent no-TLC fallback as TLC"
@@ -268,6 +278,45 @@ if ! command -v tlc >/dev/null 2>&1; then
   fi
 else
   ok "tlc present on PATH; fail-closed branch not exercised in this environment"
+fi
+
+# Behavioral: the bounded witness is launched directly rather than through
+# xtask, so the wrapper itself must preserve caller JVM options while supplying
+# the canonical stack/GC defaults. A fake tlc captures the child environment;
+# the host `true` binary stands in for the final xtask sweep after the witness
+# succeeds.
+tlc_env_tmp="$(mktemp -d "${TMPDIR:-/tmp}/machine-verify-java-options.XXXXXX")"
+trap 'rm -rf "$tlc_env_tmp"' EXIT
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
+  > "$tlc_env_tmp/tlc"
+chmod +x "$tlc_env_tmp/tlc"
+
+capture="$tlc_env_tmp/captured"
+true_bin="$(type -P true)"
+if PATH="$tlc_env_tmp:$PATH" \
+    TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+    JAVA_TOOL_OPTIONS='-Dmeerkat.sentinel=true' \
+    bash xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
+  && grep -Fqw -- '-Dmeerkat.sentinel=true' "$capture" \
+  && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-Xss256m')" -eq 1 ] \
+  && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-XX:+UseParallelGC')" -eq 1 ]; then
+  ok "direct TLC witness preserves caller JVM options and adds canonical stack/GC defaults"
+else
+  bad "direct TLC witness did not merge caller JVM options with canonical stack/GC defaults"
+fi
+
+if PATH="$tlc_env_tmp:$PATH" \
+    TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+    JAVA_TOOL_OPTIONS='-Dmeerkat.sentinel=true -Xss8m -XX:+UseParallelGC' \
+    bash xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
+  && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-Xss8m')" -eq 1 ] \
+  && ! grep -Fqw -- '-Xss256m' "$capture" \
+  && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-XX:+UseParallelGC')" -eq 1 ]; then
+  ok "direct TLC witness preserves explicit stack policy without duplicating JVM defaults"
+else
+  bad "direct TLC witness replaced explicit stack policy or duplicated JVM defaults"
 fi
 
 echo ""

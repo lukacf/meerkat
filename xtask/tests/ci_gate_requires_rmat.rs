@@ -10,10 +10,18 @@
 
 use std::path::{Path, PathBuf};
 
+fn repository_root() -> PathBuf {
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.pop();
+    root
+}
+
+fn repository_path(path: &str) -> PathBuf {
+    repository_root().join(path)
+}
+
 fn workflow_yml_path(name: &str) -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop();
-    path.push(".github/workflows");
+    let mut path = repository_path(".github/workflows");
     path.push(name);
     path
 }
@@ -63,6 +71,29 @@ fn ci_runs_a_single_free_cargo_lane() {
 }
 
 #[test]
+fn machine_authority_classifier_protects_required_gate_owners() {
+    let classifier_path = repository_path("scripts/machine-authority-changed");
+    let root = repository_root();
+
+    for owner in [
+        ".github/workflows/ci.yml",
+        "scripts/tests/xtask_scripts_dogma_gates.sh",
+    ] {
+        let output = std::process::Command::new(&classifier_path)
+            .current_dir(&root)
+            .args(["--", owner])
+            .output()
+            .unwrap_or_else(|e| panic!("run {}: {e}", classifier_path.display()));
+        assert!(
+            output.status.success(),
+            "machine-authority classifier must protect required gate owner `{owner}`: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
+#[test]
 fn cargo_workflow_covers_the_full_per_push_gate_set() {
     let cargo_yml = workflow_yml_path("cargo.yml");
     let cargo = std::fs::read_to_string(&cargo_yml)
@@ -80,6 +111,7 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
             "gate",
             "int-heavy",
             "int-rest",
+            "machine-verify",
             "ratchets",
             "sdk-web",
             "unit",
@@ -94,6 +126,7 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
         "make rmat-audit",
         "make seam-inventory",
         "make runtime-authority-bypass",
+        "make sync-meerkat-dogma-skill-docs",
         "make machine-authority-docs-gate",
         "make audit-generated-headers",
     ] {
@@ -102,6 +135,54 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
             "cargo lane must run `{gate}` on every push"
         );
     }
+
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("cargo workflow jobs mapping");
+    let fmt_governance = jobs
+        .get(serde_yaml::Value::String("fmt-governance".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("fmt-governance job");
+    assert!(
+        fmt_governance.get("if").is_none(),
+        "docs-only changes must not skip the always-run governance authority"
+    );
+
+    let machine_verify = jobs
+        .get(serde_yaml::Value::String("machine-verify".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("machine-verify job");
+    let machine_condition = machine_verify
+        .get("if")
+        .and_then(serde_yaml::Value::as_str)
+        .expect("machine-verify must have a path-gated condition");
+    assert!(machine_condition.contains("machine_authority_changed"));
+    let machine_steps = machine_verify
+        .get("steps")
+        .and_then(serde_yaml::Value::as_sequence)
+        .expect("machine-verify steps");
+    assert!(machine_steps.iter().any(|step| {
+        step.get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .is_some_and(|run| run.contains("make machine-verify"))
+    }));
+    assert!(cargo.contains("actions/setup-java@v5"));
+    assert!(cargo.contains("tlaplus/releases/download/v1.8.0/tla2tools.jar"));
+    assert!(cargo.contains("scripts/machine-authority-changed"));
+    assert!(cargo.contains("machine_authority_changed:"));
+
+    let gate_needs = jobs
+        .get(serde_yaml::Value::String("gate".to_string()))
+        .and_then(|gate| gate.get("needs"))
+        .and_then(serde_yaml::Value::as_sequence)
+        .expect("gate needs list");
+    assert!(
+        gate_needs
+            .iter()
+            .any(|need| need.as_str() == Some("machine-verify")),
+        "the required aggregate gate must bind bounded TLC verification"
+    );
 
     // Full-workspace verification (the changed-crates-only gate missed
     // dependent-crate breakage; do not reintroduce it as the only test gate).
@@ -116,6 +197,7 @@ fn cargo_workflow_covers_the_full_per_push_gate_set() {
         "make e2e-fast",
         "make verify-schema-freshness",
         "make verify-sdk-codegen-freshness",
+        "make machine-verify",
         "make audit",
     ] {
         assert!(cargo.contains(lane), "cargo lane must run `{lane}`");

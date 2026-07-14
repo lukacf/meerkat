@@ -38,7 +38,8 @@ use crate::lifecycle::run_primitive::ModelId;
 use crate::lifecycle::{InputId, RunId};
 use crate::ops::{AsyncOpRef, OperationId};
 use crate::peer_correlation::{
-    InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
+    InboundPeerRequestState, InteractionStreamAbandonReason, InteractionStreamState,
+    OutboundPeerRequestState, PeerCorrelationId,
 };
 use crate::retry::LlmRetrySchedule;
 use crate::tool_scope::{
@@ -2590,7 +2591,7 @@ impl SessionClaimHandle for DefaultSessionClaimRegistry {
 
 /// Interaction stream lifecycle DSL handle.
 ///
-/// Routes the reservation/attach/completion/expire/close-early lifecycle of
+/// Routes the reservation/attach/completion/expire/close-early/abandon lifecycle of
 /// a streamed interaction into the MeerkatMachine DSL's `interaction_streams`
 /// substate map. The shell-side `interaction_stream_registry` projects
 /// sender/receiver channels off this map; terminal transitions emit
@@ -2630,6 +2631,18 @@ pub trait InteractionStreamHandle: Send + Sync {
     /// Guard: state is `Attached`. Terminal — emits the cleanup effect.
     fn closed_early(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
+    /// Fire `InteractionStreamAbandoned { corr_id, reason }`.
+    ///
+    /// Guard: state is `Reserved` or `Attached`. Terminal — emits the cleanup
+    /// effect. This is the explicit failure path for send/admission/response
+    /// delivery failures; callers must not substitute `expired` or a peer
+    /// request timeout for these observations.
+    fn abandoned(
+        &self,
+        corr_id: PeerCorrelationId,
+        reason: InteractionStreamAbandonReason,
+    ) -> Result<(), DslTransitionError>;
+
     /// Read the DSL-owned state for a given correlation id, if any.
     ///
     /// Returns `None` when the entry has already been removed (terminal or
@@ -2654,12 +2667,18 @@ pub trait InteractionStreamHandle: Send + Sync {
 /// observer under the same authority lock as the transition that emitted
 /// the effect, then dispatch after releasing the lock.
 pub trait InteractionStreamCleanupObserver: Send + Sync {
-    /// Called once per emitted `InteractionStreamCleanup { corr_id }` effect.
+    /// Called once per emitted `InteractionStreamCleanup` effect. The optional
+    /// reason is present only for the generated `Abandoned` terminal and lets
+    /// the shell project that typed fault without reclassifying it.
     ///
     /// Idempotent in the well-formed case (terminal transitions remove the
     /// map entry so subsequent fires fail the guard), but observers should
     /// tolerate redundant calls defensively.
-    fn on_interaction_stream_cleanup(&self, corr_id: PeerCorrelationId);
+    fn on_interaction_stream_cleanup(
+        &self,
+        corr_id: PeerCorrelationId,
+        abandon_reason: Option<InteractionStreamAbandonReason>,
+    );
 }
 
 #[cfg(test)]

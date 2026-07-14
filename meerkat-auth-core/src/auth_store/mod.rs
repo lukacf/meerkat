@@ -30,8 +30,8 @@ pub use refresh::InMemoryCoordinator;
 
 // Re-exports from meerkat-core (trait + types moved there in B2 split).
 pub use meerkat_core::auth::token_store::{
-    PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
-    TokenStore, TokenStoreError,
+    CredentialMutationError, CredentialMutationFn, PersistedAuthMode, PersistedTokens,
+    RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore, TokenStoreError,
 };
 
 pub fn credential_source_uses_persisted_store(source: &CredentialSourceSpec) -> bool {
@@ -86,6 +86,22 @@ impl TokenStoreBackend {
         Ok(Self::File {
             root: base.join("meerkat").join("credentials"),
         })
+    }
+
+    /// Canonical cross-process refresh-lock directory for this persisted
+    /// credential backend. It is derived from the same backend root so callers
+    /// never reconstruct storage conventions independently.
+    pub fn refresh_lock_dir(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Self::File { root } | Self::Auto { root, .. } => Some(root.join("refresh-locks")),
+            #[cfg(feature = "keyring")]
+            Self::Keyring { .. } => dirs::config_dir().map(|base| {
+                base.join("meerkat")
+                    .join("credentials")
+                    .join("refresh-locks")
+            }),
+            Self::Ephemeral => None,
+        }
     }
 
     pub fn open(self) -> Result<Arc<dyn TokenStore>, TokenStoreError> {
@@ -153,10 +169,15 @@ mod tests {
     #[test]
     fn default_auto_uses_file_backend() {
         let backend = TokenStoreBackend::default_auto().expect("default token store path");
+        let expected_lock_dir = match &backend {
+            TokenStoreBackend::File { root } => root.join("refresh-locks"),
+            other => panic!("unexpected default token store backend: {other:?}"),
+        };
         assert!(
             matches!(backend, TokenStoreBackend::File { .. }),
             "default token store must not trigger OS keychain prompts"
         );
+        assert_eq!(backend.refresh_lock_dir(), Some(expected_lock_dir));
     }
 
     #[test]

@@ -2282,6 +2282,66 @@ impl std::fmt::Display for InputTerminalKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum InteractionStreamAbandonReason {
+    #[default]
+    #[serde(rename = "SendFailed")]
+    SendFailed,
+    #[serde(rename = "AdmissionRejected")]
+    AdmissionRejected,
+    #[serde(rename = "ResponseRejected")]
+    ResponseRejected,
+    #[serde(rename = "TerminalDeliveryFailed")]
+    TerminalDeliveryFailed,
+}
+impl InteractionStreamAbandonReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SendFailed => "SendFailed",
+            Self::AdmissionRejected => "AdmissionRejected",
+            Self::ResponseRejected => "ResponseRejected",
+            Self::TerminalDeliveryFailed => "TerminalDeliveryFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InteractionStreamAbandonReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SendFailed" => Ok(Self::SendFailed),
+            "AdmissionRejected" => Ok(Self::AdmissionRejected),
+            "ResponseRejected" => Ok(Self::ResponseRejected),
+            "TerminalDeliveryFailed" => Ok(Self::TerminalDeliveryFailed),
+            other => Err(format!(
+                "invalid InteractionStreamAbandonReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InteractionStreamAbandonReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InteractionStreamAbandonReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum InteractionStreamState {
     #[default]
     #[serde(rename = "Reserved")]
@@ -2294,6 +2354,8 @@ pub enum InteractionStreamState {
     Expired,
     #[serde(rename = "ClosedEarly")]
     ClosedEarly,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
 }
 impl InteractionStreamState {
     pub fn as_str(&self) -> &'static str {
@@ -2303,6 +2365,7 @@ impl InteractionStreamState {
             Self::Completed => "Completed",
             Self::Expired => "Expired",
             Self::ClosedEarly => "ClosedEarly",
+            Self::Abandoned => "Abandoned",
         }
     }
 }
@@ -2315,6 +2378,7 @@ impl std::convert::TryFrom<&str> for InteractionStreamState {
             "Completed" => Ok(Self::Completed),
             "Expired" => Ok(Self::Expired),
             "ClosedEarly" => Ok(Self::ClosedEarly),
+            "Abandoned" => Ok(Self::Abandoned),
             other => Err(format!("invalid InteractionStreamState value `{other}`")),
         }
     }
@@ -12366,6 +12430,11 @@ pub mod inputs {
         pub corr_id: PeerCorrelationId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct InteractionStreamAbandoned {
+        pub corr_id: PeerCorrelationId,
+        pub reason: InteractionStreamAbandonReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AttachSessionIngress {
         pub comms_runtime_id: CommsRuntimeId,
     }
@@ -12814,6 +12883,7 @@ pub enum Input {
     InteractionStreamCompleted(inputs::InteractionStreamCompleted),
     InteractionStreamExpired(inputs::InteractionStreamExpired),
     InteractionStreamClosedEarly(inputs::InteractionStreamClosedEarly),
+    InteractionStreamAbandoned(inputs::InteractionStreamAbandoned),
     AttachSessionIngress(inputs::AttachSessionIngress),
     AttachMobIngress(inputs::AttachMobIngress),
     DetachIngress(inputs::DetachIngress),
@@ -13174,6 +13244,7 @@ impl Input {
             Self::InteractionStreamCompleted(_) => InputKind::InteractionStreamCompleted,
             Self::InteractionStreamExpired(_) => InputKind::InteractionStreamExpired,
             Self::InteractionStreamClosedEarly(_) => InputKind::InteractionStreamClosedEarly,
+            Self::InteractionStreamAbandoned(_) => InputKind::InteractionStreamAbandoned,
             Self::AttachSessionIngress(_) => InputKind::AttachSessionIngress,
             Self::AttachMobIngress(_) => InputKind::AttachMobIngress,
             Self::DetachIngress(_) => InputKind::DetachIngress,
@@ -13485,6 +13556,7 @@ pub enum InputKind {
     InteractionStreamCompleted,
     InteractionStreamExpired,
     InteractionStreamClosedEarly,
+    InteractionStreamAbandoned,
     AttachSessionIngress,
     AttachMobIngress,
     DetachIngress,
@@ -14349,6 +14421,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InteractionStreamCleanup {
         pub corr_id: PeerCorrelationId,
+        pub abandon_reason: Option<InteractionStreamAbandonReason>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LocalEndpointChanged {
@@ -16669,6 +16742,11 @@ pub enum TransitionId {
     InteractionStreamClosedEarlyRunning,
     InteractionStreamClosedEarlyRetired,
     InteractionStreamClosedEarlyStopped,
+    InteractionStreamAbandonedIdle,
+    InteractionStreamAbandonedAttached,
+    InteractionStreamAbandonedRunning,
+    InteractionStreamAbandonedRetired,
+    InteractionStreamAbandonedStopped,
     NotifyDrainExitedAfterUnregister,
     McpServerConnectPendingAfterUnregister,
     McpServerConnectedAfterUnregister,
@@ -16688,6 +16766,7 @@ pub enum TransitionId {
     InteractionStreamCompletedAfterUnregister,
     InteractionStreamExpiredAfterUnregister,
     InteractionStreamClosedEarlyAfterUnregister,
+    InteractionStreamAbandonedAfterUnregister,
     AttachSessionIngressIdle,
     AttachSessionIngressAttached,
     AttachSessionIngressRunning,

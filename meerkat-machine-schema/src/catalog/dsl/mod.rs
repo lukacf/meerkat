@@ -1137,6 +1137,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Completed",
                     "Expired",
                     "ClosedEarly",
+                    "Abandoned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "InteractionStreamAbandonReason",
+                &[
+                    "SendFailed",
+                    "AdmissionRejected",
+                    "ResponseRejected",
+                    "TerminalDeliveryFailed",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -2109,6 +2119,7 @@ runtime_internal_inputs!(
         ForceCancelNoRun,
         IncrementAttemptCount,
         InterruptCurrentRun,
+        InteractionStreamAbandoned,
         InteractionStreamAttached,
         InteractionStreamClosedEarly,
         InteractionStreamCompleted,

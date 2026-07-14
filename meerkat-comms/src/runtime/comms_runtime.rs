@@ -55,20 +55,33 @@ use uuid::Uuid;
 /// Default reservation TTL (time from `Reserved` to `Expired` if not attached).
 const RESERVATION_TTL: meerkat_core::time_compat::Duration =
     meerkat_core::time_compat::Duration::from_secs(30);
+const ABANDONMENT_PROJECTION_CAPACITY: usize = 4096;
+
+type InteractionStreamAbandonmentSignal =
+    Arc<Mutex<Option<meerkat_core::InteractionStreamAbandonReason>>>;
+
+#[derive(Clone, Debug)]
+struct InteractionStreamAbandonmentProjection {
+    reason: meerkat_core::InteractionStreamAbandonReason,
+    recorded_at: Instant,
+}
+
+type InteractionStreamAbandonmentRegistry =
+    Arc<Mutex<HashMap<Uuid, InteractionStreamAbandonmentProjection>>>;
 
 /// Channels-only projection of an interaction stream.
 ///
-/// Semantic peer request streams store `Machine` and keep lifecycle truth
-/// (Reserved/Attached/Completed/Expired/ClosedEarly) in the MeerkatMachine DSL
-/// `interaction_streams` map (U6 / dogma #5). Local input streams store
-/// `LocalTransportOnly`, making their channel cleanup an explicit typed
-/// transport boundary with no semantic stream lifecycle twin.
+/// Streams store `Machine` whenever a MeerkatMachine interaction-stream handle
+/// is installed, keeping lifecycle truth in the generated authority. The
+/// `LocalTransportOnly` boundary exists only for standalone comms runtimes
+/// without semantic session authority.
 #[derive(Debug)]
 struct StreamRegistryEntry {
     _sender: mpsc::Sender<meerkat_core::AgentEvent>,
     receiver: Option<Receiver<meerkat_core::AgentEvent>>,
     created_at: Instant,
     lifecycle_authority: InteractionStreamLifecycleAuthority,
+    abandonment_signal: InteractionStreamAbandonmentSignal,
 }
 
 impl StreamRegistryEntry {
@@ -82,6 +95,7 @@ impl StreamRegistryEntry {
             receiver: Some(receiver),
             created_at: Instant::now(),
             lifecycle_authority,
+            abandonment_signal: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -91,6 +105,17 @@ type PeerRequestResponseAuthorityHandles = (
     Arc<dyn meerkat_core::handles::PeerInteractionHandle>,
     Arc<dyn meerkat_core::handles::InteractionStreamHandle>,
 );
+
+fn interaction_stream_abandon_reason_for_send_error(
+    error: &SendError,
+) -> meerkat_core::InteractionStreamAbandonReason {
+    match error {
+        SendError::AdmissionDropped { .. } => {
+            meerkat_core::InteractionStreamAbandonReason::AdmissionRejected
+        }
+        _ => meerkat_core::InteractionStreamAbandonReason::SendFailed,
+    }
+}
 
 #[derive(Clone)]
 pub struct PeerRequestResponseAuthority {
@@ -133,6 +158,8 @@ struct InteractionStream {
     /// transition. Without a handle, the stream is a local transport-only
     /// channel and owns direct cleanup.
     registry: InteractionStreamRegistry,
+    abandonment_signal: InteractionStreamAbandonmentSignal,
+    abandonment_registry: InteractionStreamAbandonmentRegistry,
     source: meerkat_core::EventSourceIdentity,
     seq: u64,
 }
@@ -355,6 +382,36 @@ impl InteractionStream {
                 self.registry.lock().remove(&self.id);
             }
         }
+        self.abandonment_registry.lock().remove(&self.id);
+    }
+
+    fn take_abandonment_event(&mut self) -> Option<meerkat_core::AgentEvent> {
+        let reason = self.abandonment_signal.lock().take()?;
+        self.abandonment_registry.lock().remove(&self.id);
+        Some(meerkat_core::AgentEvent::InteractionFailed {
+            interaction_id: meerkat_core::InteractionId(self.id),
+            reason: meerkat_core::event::InteractionFailureReason::InteractionStreamAbandoned {
+                reason,
+            },
+        })
+    }
+}
+
+fn is_terminal_interaction_event(event: &meerkat_core::AgentEvent, interaction_id: Uuid) -> bool {
+    match event {
+        meerkat_core::AgentEvent::InteractionComplete {
+            interaction_id: event_id,
+            ..
+        }
+        | meerkat_core::AgentEvent::InteractionCallbackPending {
+            interaction_id: event_id,
+            ..
+        }
+        | meerkat_core::AgentEvent::InteractionFailed {
+            interaction_id: event_id,
+            ..
+        } => event_id.0 == interaction_id,
+        _ => false,
     }
 }
 
@@ -385,10 +442,37 @@ impl Stream for InteractionStream {
         match this.receiver.as_mut() {
             Some(receiver) => match Pin::new(receiver).poll_recv(cx) {
                 Poll::Ready(None) => {
+                    if let Some(event) = this.take_abandonment_event() {
+                        this.receiver = None;
+                        this.seq = this.seq.saturating_add(1);
+                        return Poll::Ready(Some(meerkat_core::EventEnvelope::new_with_source(
+                            this.source.clone(),
+                            this.seq,
+                            None,
+                            event,
+                        )));
+                    }
                     this.finish();
                     Poll::Ready(None)
                 }
                 Poll::Ready(Some(event)) => {
+                    if is_terminal_interaction_event(&event, this.id) {
+                        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(this.id);
+                        match this.stream_handle.as_ref() {
+                            Some(handle) => {
+                                if let Err(err) = handle.completed(corr_id) {
+                                    tracing::trace!(
+                                        interaction_id = %this.id,
+                                        error = %err,
+                                        "InteractionStreamHandle::completed rejected while consuming terminal event"
+                                    );
+                                }
+                            }
+                            None => {
+                                this.registry.lock().remove(&this.id);
+                            }
+                        }
+                    }
                     this.seq = this.seq.saturating_add(1);
                     let envelope = meerkat_core::EventEnvelope::new_with_source(
                         this.source.clone(),
@@ -597,60 +681,74 @@ impl CoreCommsRuntime for CommsRuntime {
                 // `created_at` belongs with the channel (DSL state has no
                 // time). Inspect under the registry lock, then fire the typed
                 // cleanup path for the reservation authority that created it.
-                let (expired, lifecycle_authority) = {
+                let reservation = {
                     let registry = self.interaction_stream_registry.lock();
-                    match registry.get(&id) {
-                        Some(entry) => (
+                    registry.get(&id).map(|entry| {
+                        (
                             entry.created_at.elapsed() > RESERVATION_TTL,
                             entry.lifecycle_authority,
-                        ),
-                        None => return Err(StreamError::NotReserved(interaction_id)),
-                    }
+                        )
+                    })
                 };
-
-                if expired {
-                    match lifecycle_authority {
-                        InteractionStreamLifecycleAuthority::Machine => {
-                            if let Some(handle) = self.interaction_stream_handle() {
-                                // DSL fires expired → cleanup observer drops
-                                // the shell entry under the same authority
-                                // lock. Ignore guard rejections (state already
-                                // terminal): the shell still surfaces the
-                                // timeout to the caller.
-                                let _ = handle.expired(corr_id);
-                            }
-                        }
-                        InteractionStreamLifecycleAuthority::LocalTransportOnly => {
-                            // Transport-only local stream: no DSL twin exists,
-                            // so the channel projection owns timeout cleanup.
-                            self.interaction_stream_registry.lock().remove(&id);
-                        }
-                    }
-                    // W1-A: if the expired reservation corresponds to a
-                    // live outbound peer-request DSL entry, fire the
-                    // timeout transition so the peer-correlation authority
-                    // state matches reality.
-                    if let Some(handle) = self.peer_interaction_handle()
-                        && handle.outbound_state(corr_id).is_some()
-                    {
-                        let _ = handle.request_timed_out(corr_id);
-                    }
-                    return Err(StreamError::Timeout(format!(
-                        "reservation expired for interaction {}",
-                        interaction_id.0
-                    )));
-                }
+                let Some((expired, lifecycle_authority)) = reservation else {
+                    return Err(self.interaction_stream_terminal_or_not_reserved(interaction_id));
+                };
 
                 let stream_handle = match lifecycle_authority {
                     InteractionStreamLifecycleAuthority::Machine => {
-                        Some(self.interaction_stream_handle().ok_or_else(|| {
+                        let handle = self.interaction_stream_handle().ok_or_else(|| {
                             StreamError::Internal(
                                 "machine interaction stream authority missing for reserved stream"
                                     .to_string(),
                             )
-                        })?)
+                        })?;
+                        match handle.state(corr_id) {
+                            Some(meerkat_core::InteractionStreamState::Attached) => {
+                                return Err(StreamError::AlreadyAttached(interaction_id));
+                            }
+                            Some(meerkat_core::InteractionStreamState::Reserved) if expired => {
+                                if handle.expired(corr_id).is_ok() {
+                                    return Err(StreamError::Timeout(format!(
+                                        "reservation expired for interaction {}",
+                                        interaction_id.0
+                                    )));
+                                }
+                                return match handle.state(corr_id) {
+                                    Some(meerkat_core::InteractionStreamState::Attached) => {
+                                        Err(StreamError::AlreadyAttached(interaction_id))
+                                    }
+                                    _ => Err(self.interaction_stream_terminal_or_not_reserved(
+                                        interaction_id,
+                                    )),
+                                };
+                            }
+                            Some(meerkat_core::InteractionStreamState::Reserved) => {}
+                            _ => {
+                                return Err(self
+                                    .interaction_stream_terminal_or_not_reserved(interaction_id));
+                            }
+                        }
+                        Some(handle)
                     }
-                    InteractionStreamLifecycleAuthority::LocalTransportOnly => None,
+                    InteractionStreamLifecycleAuthority::LocalTransportOnly => {
+                        let mut registry = self.interaction_stream_registry.lock();
+                        let entry = registry
+                            .get_mut(&id)
+                            .ok_or(StreamError::NotReserved(interaction_id))?;
+                        if entry.receiver.is_none() {
+                            return Err(StreamError::AlreadyAttached(interaction_id));
+                        }
+                        if expired {
+                            registry.remove(&id);
+                            drop(registry);
+                            self.subscriber_registry.lock().remove(&id);
+                            return Err(StreamError::Timeout(format!(
+                                "reservation expired for interaction {}",
+                                interaction_id.0
+                            )));
+                        }
+                        None
+                    }
                 };
 
                 // Transition to Attached via the DSL handle only for
@@ -665,7 +763,9 @@ impl CoreCommsRuntime for CommsRuntime {
                             Some(meerkat_core::InteractionStreamState::Attached) => {
                                 StreamError::AlreadyAttached(interaction_id)
                             }
-                            None => StreamError::NotReserved(interaction_id),
+                            None => {
+                                self.interaction_stream_terminal_or_not_reserved(interaction_id)
+                            }
                             _ => StreamError::Internal(format!(
                                 "unexpected interaction stream state for {}: {err}",
                                 interaction_id.0
@@ -675,9 +775,11 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
 
                 let mut registry = self.interaction_stream_registry.lock();
-                let entry = registry
-                    .get_mut(&id)
-                    .ok_or(StreamError::NotReserved(interaction_id))?;
+                let Some(entry) = registry.get_mut(&id) else {
+                    drop(registry);
+                    return Err(self.interaction_stream_terminal_or_not_reserved(interaction_id));
+                };
+                let abandonment_signal = Arc::clone(&entry.abandonment_signal);
                 let receiver = entry.receiver.take().ok_or_else(|| {
                     // Transport-only local stream: no DSL guard ran, so
                     // double-attach surfaces here as a missing receiver.
@@ -694,6 +796,8 @@ impl CoreCommsRuntime for CommsRuntime {
                     receiver: Some(receiver),
                     stream_handle,
                     registry: self.interaction_stream_registry.clone(),
+                    abandonment_signal,
+                    abandonment_registry: Arc::clone(&self.interaction_stream_abandonments),
                     source: meerkat_core::EventSourceIdentity::interaction(
                         meerkat_core::InteractionId(id),
                     ),
@@ -860,7 +964,10 @@ impl CoreCommsRuntime for CommsRuntime {
                     Ok(outcome) => outcome.envelope_id,
                     Err(e) => {
                         if stream_reserved {
-                            self.expire_interaction_stream_on_send_failure(corr_id, interaction_id);
+                            self.abandon_interaction_stream(
+                                interaction_id,
+                                interaction_stream_abandon_reason_for_send_error(&e),
+                            );
                         }
                         // A send failure is NOT a timeout: the typed `SendError`
                         // `e` is returned to the caller verbatim (peer offline /
@@ -1085,7 +1192,10 @@ impl CoreCommsRuntime for CommsRuntime {
                 {
                     Ok(outcome) => outcome.envelope_id,
                     Err(e) => {
-                        self.expire_interaction_stream_on_send_failure(corr_id, interaction_id);
+                        self.abandon_interaction_stream(
+                            interaction_id,
+                            interaction_stream_abandon_reason_for_send_error(&e),
+                        );
                         // Send failure returns the typed `SendError` verbatim;
                         // it is never laundered into a timeout receipt. DSL
                         // cleanup removes the pending entry.
@@ -1142,42 +1252,22 @@ impl CoreCommsRuntime for CommsRuntime {
         &self,
         id: &meerkat_core::InteractionId,
     ) -> Option<tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>> {
-        let sender = self.subscriber_registry.lock().remove(&id.0);
-        sender.as_ref()?;
-
-        // If still Reserved (consumer never attached), expire the reservation
-        // through the same typed authority that created it.
-        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(id.0);
-        let lifecycle_authority = self
-            .interaction_stream_registry
-            .lock()
-            .get(&id.0)
-            .map(|entry| entry.lifecycle_authority);
-        match lifecycle_authority {
-            Some(InteractionStreamLifecycleAuthority::Machine) => {
-                if let Some(handle) = self.interaction_stream_handle()
-                    && handle.state(corr_id) == Some(meerkat_core::InteractionStreamState::Reserved)
-                {
-                    let _ = handle.expired(corr_id);
-                }
-            }
-            Some(InteractionStreamLifecycleAuthority::LocalTransportOnly) => {
-                // Transport-only local stream: expire the unclaimed channel
-                // directly because no semantic lifecycle was created.
-                let mut registry = self.interaction_stream_registry.lock();
-                if let Some(entry) = registry.get(&id.0)
-                    && entry.receiver.is_some()
-                {
-                    registry.remove(&id.0);
-                }
-            }
-            None => {}
-        }
-        sender
+        // One-shot sender extraction is transport mechanics only. A response
+        // arriving before the caller attaches does not prove TTL expiry and
+        // must leave the independent stream reservation claimable.
+        self.subscriber_registry.lock().remove(&id.0)
     }
 
     fn mark_interaction_complete(&self, id: &meerkat_core::InteractionId) {
         self.mark_interaction_complete(id.0);
+    }
+
+    fn abandon_interaction_stream(
+        &self,
+        id: &meerkat_core::InteractionId,
+        reason: meerkat_core::InteractionStreamAbandonReason,
+    ) {
+        self.abandon_interaction_stream(id.0, reason);
     }
 
     fn peer_interaction_handle(
@@ -1588,6 +1678,11 @@ pub struct CommsRuntime {
     require_peer_auth: bool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
+    /// Bounded, short-lived projection of machine-owned abandoned terminals.
+    /// It lets a two-step caller observe a typed reason when abandonment wins
+    /// before attach; attached streams carry the same reason on their shared
+    /// signal and emit a typed terminal event at EOF.
+    interaction_stream_abandonments: InteractionStreamAbandonmentRegistry,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
     meerkat_machine_trust_owner:
         parking_lot::RwLock<Option<meerkat_core::comms::GeneratedPeerCommsOwnerToken>>,
@@ -1732,6 +1827,7 @@ impl CommsRuntime {
             require_peer_auth: config.require_peer_auth,
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            interaction_stream_abandonments: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
             meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
             mob_machine_trust_owner: parking_lot::RwLock::new(None),
@@ -1847,6 +1943,7 @@ impl CommsRuntime {
             require_peer_auth: true,
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            interaction_stream_abandonments: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
             meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
             mob_machine_trust_owner: parking_lot::RwLock::new(None),
@@ -1965,6 +2062,7 @@ impl CommsRuntime {
             require_peer_auth: true,
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            interaction_stream_abandonments: Arc::new(Mutex::new(HashMap::new())),
             peer_comms_handle,
             meerkat_machine_trust_owner: parking_lot::RwLock::new(None),
             mob_machine_trust_owner: parking_lot::RwLock::new(None),
@@ -2653,20 +2751,16 @@ impl CommsRuntime {
         }
     }
 
-    /// Drop the registry entries for a correlation id unconditionally.
+    /// Drop the peer-response subscriber projection for a correlation id.
     ///
     /// Invoked from the `PeerInteractionCleanup` DSL effect observer
     /// (W1-A): the DSL has already decided the peer-interaction lifecycle
-    /// is terminal, so the shell-side projection unconditionally matches.
-    /// Callers that want the stream-lifecycle CAS (Reserved/Attached gate)
-    /// should use [`mark_interaction_complete`].
+    /// is terminal. The independently-owned interaction-stream registry is
+    /// deliberately untouched: it terminates only through an
+    /// `InteractionStream*` transition and its cleanup effect.
     fn drop_peer_interaction_projection(&self, interaction_id: Uuid) {
         let removed_sender = self.subscriber_registry.lock().remove(&interaction_id);
-        let removed_stream = self
-            .interaction_stream_registry
-            .lock()
-            .remove(&interaction_id);
-        if removed_sender.is_some() || removed_stream.is_some() {
+        if removed_sender.is_some() {
             tracing::debug!(
                 interaction_id = %interaction_id,
                 "peer interaction projection dropped via DSL cleanup effect"
@@ -2711,15 +2805,107 @@ impl CommsRuntime {
         }
     }
 
+    /// Abandon an active interaction stream for an observed typed failure.
+    ///
+    /// This is distinct from attach-TTL expiry and peer request timeout. The
+    /// machine-owned path drives the generated terminal transition; the
+    /// explicit transport-only boundary removes its local channel projection.
+    pub fn abandon_interaction_stream(
+        &self,
+        interaction_id: Uuid,
+        reason: meerkat_core::InteractionStreamAbandonReason,
+    ) {
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+        let lifecycle_authority = self
+            .interaction_stream_registry
+            .lock()
+            .get(&interaction_id)
+            .map(|entry| entry.lifecycle_authority);
+        match lifecycle_authority {
+            Some(InteractionStreamLifecycleAuthority::Machine) => {
+                if let Some(handle) = self.interaction_stream_handle()
+                    && let Err(err) = handle.abandoned(corr_id, reason)
+                {
+                    tracing::trace!(
+                        %interaction_id,
+                        ?reason,
+                        error = %err,
+                        "InteractionStreamHandle::abandoned rejected (another terminal won race)"
+                    );
+                }
+            }
+            Some(InteractionStreamLifecycleAuthority::LocalTransportOnly) => {
+                self.interaction_stream_registry
+                    .lock()
+                    .remove(&interaction_id);
+                self.subscriber_registry.lock().remove(&interaction_id);
+            }
+            None => {}
+        }
+    }
+
+    fn take_interaction_stream_abandonment(
+        &self,
+        interaction_id: Uuid,
+    ) -> Option<meerkat_core::InteractionStreamAbandonReason> {
+        let mut abandonments = self.interaction_stream_abandonments.lock();
+        let projection = abandonments.remove(&interaction_id)?;
+        (projection.recorded_at.elapsed() <= RESERVATION_TTL).then_some(projection.reason)
+    }
+
+    fn interaction_stream_terminal_or_not_reserved(
+        &self,
+        interaction_id: meerkat_core::InteractionId,
+    ) -> StreamError {
+        match self.take_interaction_stream_abandonment(interaction_id.0) {
+            Some(reason) => StreamError::Abandoned {
+                interaction_id,
+                reason,
+            },
+            None => StreamError::NotReserved(interaction_id),
+        }
+    }
+
+    fn record_interaction_stream_abandonment(
+        &self,
+        interaction_id: Uuid,
+        reason: meerkat_core::InteractionStreamAbandonReason,
+    ) {
+        if let Some(entry) = self.interaction_stream_registry.lock().get(&interaction_id) {
+            *entry.abandonment_signal.lock() = Some(reason);
+        }
+
+        let mut abandonments = self.interaction_stream_abandonments.lock();
+        abandonments.retain(|_, projection| projection.recorded_at.elapsed() <= RESERVATION_TTL);
+        if abandonments.len() >= ABANDONMENT_PROJECTION_CAPACITY
+            && let Some(oldest) = abandonments
+                .iter()
+                .min_by_key(|(_, projection)| projection.recorded_at)
+                .map(|(id, _)| *id)
+        {
+            abandonments.remove(&oldest);
+        }
+        abandonments.insert(
+            interaction_id,
+            InteractionStreamAbandonmentProjection {
+                reason,
+                recorded_at: Instant::now(),
+            },
+        );
+    }
+
     /// Reap expired reservations that were never attached within the TTL.
     ///
     /// TTL is shell-owned mechanics (`created_at` lives with the channel
     /// projection, not the DSL). Machine-authoritative reservations fire
     /// `InteractionStreamHandle::expired`; local transport-only reservations
-    /// remove the unclaimed channel projection directly. If the reservation
-    /// also corresponds to a live outbound peer-request DSL entry, fires
-    /// `PeerRequestTimedOut` so the peer-correlation lifecycle matches reality.
+    /// remove the unclaimed channel projection directly. Peer request response
+    /// deadlines are a separate lifecycle and are not inferred from this
+    /// attach-only TTL.
     pub fn reap_expired_reservations(&self) {
+        self.interaction_stream_abandonments
+            .lock()
+            .retain(|_, projection| projection.recorded_at.elapsed() <= RESERVATION_TTL);
         let candidates: Vec<(Uuid, InteractionStreamLifecycleAuthority)> = {
             let registry = self.interaction_stream_registry.lock();
             registry
@@ -2734,7 +2920,6 @@ impl CommsRuntime {
             return;
         }
         let stream_handle = self.interaction_stream_handle();
-        let peer_handle = self.peer_interaction_handle();
         for (id, lifecycle_authority) in candidates {
             let corr_id = meerkat_core::PeerCorrelationId::from_uuid(id);
             // Stream lifecycle: only `Reserved` reservations expire. The
@@ -2760,15 +2945,10 @@ impl CommsRuntime {
                     {
                         tracing::debug!(interaction_id = %id, "reservation expired (TTL)");
                         registry.remove(&id);
+                        drop(registry);
+                        self.subscriber_registry.lock().remove(&id);
                     }
                 }
-            }
-            // Mirror into the peer-interaction lifecycle when the
-            // correlation id names a live outbound entry.
-            if let Some(handle) = peer_handle.as_ref()
-                && handle.outbound_state(corr_id).is_some()
-            {
-                let _ = handle.request_timed_out(corr_id);
             }
         }
     }
@@ -2832,11 +3012,11 @@ impl CommsRuntime {
         handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<(), SendError> {
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
-        self.reserve_interaction_stream_channels(
-            corr_id,
-            interaction_id,
-            InteractionStreamReservationAuthority::LocalTransportOnly,
-        )?;
+        let authority = self
+            .interaction_stream_handle()
+            .map(InteractionStreamReservationAuthority::Machine)
+            .unwrap_or(InteractionStreamReservationAuthority::LocalTransportOnly);
+        self.reserve_interaction_stream_channels(corr_id, interaction_id, authority)?;
 
         if let crate::inbox::AdmissionOutcome::Dropped { reason } = self
             .router
@@ -2851,7 +3031,10 @@ impl CommsRuntime {
                 objective_id: None,
             })
         {
-            self.expire_interaction_stream_on_send_failure(corr_id, interaction_id);
+            self.abandon_interaction_stream(
+                interaction_id,
+                meerkat_core::InteractionStreamAbandonReason::AdmissionRejected,
+            );
             return Err(match reason {
                 crate::inbox::DropReason::InboxFull => {
                     SendError::Validation("input queue full".into())
@@ -2907,38 +3090,6 @@ impl CommsRuntime {
             StreamRegistryEntry::new(sender, receiver, lifecycle_authority),
         );
         Ok(())
-    }
-
-    /// Tear down an interaction stream reservation when the inbound send /
-    /// admission step fails.
-    ///
-    /// Machine-authoritative streams fire `InteractionStreamHandle::expired`
-    /// so the DSL transitions terminal and the cleanup observer drops the
-    /// channel/subscriber entries. Local transport-only streams remove the
-    /// projection directly.
-    fn expire_interaction_stream_on_send_failure(
-        &self,
-        corr_id: meerkat_core::PeerCorrelationId,
-        interaction_id: Uuid,
-    ) {
-        let lifecycle_authority = self
-            .interaction_stream_registry
-            .lock()
-            .get(&interaction_id)
-            .map(|entry| entry.lifecycle_authority);
-        match lifecycle_authority {
-            Some(InteractionStreamLifecycleAuthority::Machine) => {
-                if let Some(handle) = self.interaction_stream_handle() {
-                    let _ = handle.expired(corr_id);
-                }
-            }
-            Some(InteractionStreamLifecycleAuthority::LocalTransportOnly) | None => {
-                self.interaction_stream_registry
-                    .lock()
-                    .remove(&interaction_id);
-                self.subscriber_registry.lock().remove(&interaction_id);
-            }
-        }
     }
 
     pub async fn drain_messages(&self) -> Vec<CommsMessage> {
@@ -3048,12 +3199,20 @@ impl meerkat_core::handles::PeerInteractionCleanupObserver for CommsRuntime {
 }
 
 impl meerkat_core::handles::InteractionStreamCleanupObserver for CommsRuntime {
-    fn on_interaction_stream_cleanup(&self, corr_id: meerkat_core::PeerCorrelationId) {
+    fn on_interaction_stream_cleanup(
+        &self,
+        corr_id: meerkat_core::PeerCorrelationId,
+        abandon_reason: Option<meerkat_core::InteractionStreamAbandonReason>,
+    ) {
         // The DSL decided the stream lifecycle is terminal; drop both the
-        // channel entry and any paired subscriber sender. Same projection
-        // rule as `on_peer_interaction_cleanup` but driven by the
-        // independent stream-lifecycle effect.
+        // channel entry and any paired subscriber sender. When the generated
+        // terminal carries an abandonment reason, publish that typed fact to
+        // the attached stream signal / bounded late-attach projection before
+        // closing the channel. Only this machine effect owns the projection.
         let id = corr_id.as_uuid();
+        if let Some(reason) = abandon_reason {
+            self.record_interaction_stream_abandonment(id, reason);
+        }
         self.subscriber_registry.lock().remove(&id);
         self.interaction_stream_registry.lock().remove(&id);
     }
@@ -4720,9 +4879,13 @@ mod tests {
     }
 
     impl TestInteractionStreamHandle {
-        fn notify_cleanup(&self, corr_id: meerkat_core::PeerCorrelationId) {
+        fn notify_cleanup(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+            abandon_reason: Option<meerkat_core::InteractionStreamAbandonReason>,
+        ) {
             if let Some(observer) = self.cleanup_observer.lock().clone() {
-                observer.on_interaction_stream_cleanup(corr_id);
+                observer.on_interaction_stream_cleanup(corr_id, abandon_reason);
             }
         }
 
@@ -4740,11 +4903,12 @@ mod tests {
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
             context: &'static str,
+            abandon_reason: Option<meerkat_core::InteractionStreamAbandonReason>,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
             if self.states.lock().remove(&corr_id).is_none() {
                 return Err(Self::guard_rejected(context, corr_id));
             }
-            self.notify_cleanup(corr_id);
+            self.notify_cleanup(corr_id, abandon_reason);
             Ok(())
         }
     }
@@ -4786,21 +4950,29 @@ mod tests {
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-            self.terminal(corr_id, "InteractionStreamHandle::completed")
+            self.terminal(corr_id, "InteractionStreamHandle::completed", None)
         }
 
         fn expired(
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-            self.terminal(corr_id, "InteractionStreamHandle::expired")
+            self.terminal(corr_id, "InteractionStreamHandle::expired", None)
         }
 
         fn closed_early(
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-            self.terminal(corr_id, "InteractionStreamHandle::closed_early")
+            self.terminal(corr_id, "InteractionStreamHandle::closed_early", None)
+        }
+
+        fn abandoned(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+            reason: meerkat_core::InteractionStreamAbandonReason,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            self.terminal(corr_id, "InteractionStreamHandle::abandoned", Some(reason))
         }
 
         fn state(
@@ -6366,7 +6538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_input_stream_remains_transport_only_with_machine_stream_authority() {
+    async fn local_input_stream_uses_installed_machine_stream_authority() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = Arc::new(inproc_only_with_test_peer_authority(&format!(
             "local-transport-authority-{suffix}"
@@ -6401,15 +6573,15 @@ mod tests {
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
         assert_eq!(
             meerkat_core::handles::InteractionStreamHandle::state(stream_handle.as_ref(), corr_id),
-            None,
-            "local input streams must not create semantic stream DSL state"
+            Some(meerkat_core::InteractionStreamState::Attached),
+            "an installed machine handle must own local input stream lifecycle"
         );
 
         let duplicate =
             CoreCommsRuntime::stream(runtime.as_ref(), StreamScope::Interaction(interaction_id));
         assert!(
             matches!(duplicate, Err(StreamError::AlreadyAttached(_))),
-            "local input streams should keep transport-only duplicate attach semantics"
+            "machine-owned local input streams should reject duplicate attachment"
         );
     }
 
@@ -8251,6 +8423,271 @@ mod tests {
     }
 
     // --- M4: Reservation FSM + concurrency tests ---
+
+    #[tokio::test]
+    async fn terminal_subscriber_race_keeps_stream_claimable_and_attach_ttl_does_not_timeout_peer()
+    {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime =
+            Arc::new(CommsRuntime::inproc_only(&format!("terminal-attach-race-{suffix}")).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        let stream_handle = Arc::new(TestInteractionStreamHandle::default());
+        runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            stream_handle.clone(),
+        ));
+
+        let interaction_id = meerkat_core::InteractionId(Uuid::new_v4());
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
+        meerkat_core::handles::PeerInteractionHandle::request_sent(peer_handle.as_ref(), corr_id)
+            .unwrap();
+        runtime
+            .reserve_interaction_stream_channels(
+                corr_id,
+                interaction_id.0,
+                InteractionStreamReservationAuthority::Machine(stream_handle.clone()),
+            )
+            .unwrap();
+
+        // Model a terminal response winning the race with caller attachment:
+        // taking the one-shot sender is mechanics, not stream expiry.
+        assert!(
+            CoreCommsRuntime::interaction_subscriber(runtime.as_ref(), &interaction_id).is_some()
+        );
+        assert_eq!(
+            meerkat_core::handles::InteractionStreamHandle::state(stream_handle.as_ref(), corr_id),
+            Some(meerkat_core::InteractionStreamState::Reserved)
+        );
+
+        let stream =
+            CoreCommsRuntime::stream(runtime.as_ref(), StreamScope::Interaction(interaction_id))
+                .expect("response-before-attach must leave the stream claimable");
+        runtime
+            .interaction_stream_registry
+            .lock()
+            .get_mut(&interaction_id.0)
+            .unwrap()
+            .created_at = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+
+        runtime.reap_expired_reservations();
+        assert_eq!(
+            meerkat_core::handles::InteractionStreamHandle::state(stream_handle.as_ref(), corr_id),
+            Some(meerkat_core::InteractionStreamState::Attached),
+            "attach TTL must not expire an attached stream"
+        );
+        assert_eq!(
+            meerkat_core::handles::PeerInteractionHandle::outbound_state(
+                peer_handle.as_ref(),
+                corr_id
+            ),
+            Some(meerkat_core::OutboundPeerRequestState::Sent),
+            "attach TTL is not a peer response deadline"
+        );
+        assert!(matches!(
+            CoreCommsRuntime::stream(runtime.as_ref(), StreamScope::Interaction(interaction_id)),
+            Err(StreamError::AlreadyAttached(_))
+        ));
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn terminal_event_buffered_before_attach_completes_when_consumer_observes_it() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = Arc::new(
+            CommsRuntime::inproc_only(&format!("terminal-buffered-before-attach-{suffix}"))
+                .unwrap(),
+        );
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        let stream_handle = Arc::new(TestInteractionStreamHandle::default());
+        runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            stream_handle.clone(),
+        ));
+        let interaction_id = meerkat_core::InteractionId(Uuid::new_v4());
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
+        meerkat_core::handles::PeerInteractionHandle::request_sent(peer_handle.as_ref(), corr_id)
+            .unwrap();
+        runtime
+            .reserve_interaction_stream_channels(
+                corr_id,
+                interaction_id.0,
+                InteractionStreamReservationAuthority::Machine(stream_handle.clone()),
+            )
+            .unwrap();
+
+        let sender = CoreCommsRuntime::interaction_subscriber(runtime.as_ref(), &interaction_id)
+            .expect("terminal response takes the one-shot sender");
+        meerkat_core::handles::PeerInteractionHandle::response_terminal(
+            peer_handle.as_ref(),
+            corr_id,
+            meerkat_core::handles::PeerTerminalDisposition::Completed,
+        )
+        .unwrap();
+        sender
+            .send(meerkat_core::AgentEvent::InteractionComplete {
+                interaction_id,
+                result: "done".to_string(),
+                structured_output: None,
+            })
+            .await
+            .unwrap();
+
+        let mut stream =
+            CoreCommsRuntime::stream(runtime.as_ref(), StreamScope::Interaction(interaction_id))
+                .expect("buffered terminal response must remain attachable");
+        let terminal = stream.next().await.expect("buffered terminal event");
+        assert!(matches!(
+            terminal.payload,
+            meerkat_core::AgentEvent::InteractionComplete { result, .. } if result == "done"
+        ));
+        assert_eq!(
+            meerkat_core::handles::InteractionStreamHandle::state(stream_handle.as_ref(), corr_id),
+            None,
+            "terminal state commits when the attached consumer observes the event"
+        );
+        assert!(
+            !runtime
+                .interaction_stream_registry
+                .lock()
+                .contains_key(&interaction_id.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_stream_observes_typed_terminal_delivery_abandonment() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = Arc::new(
+            CommsRuntime::inproc_only(&format!("stream-attached-abandon-{suffix}")).unwrap(),
+        );
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        let stream_handle = Arc::new(TestInteractionStreamHandle::default());
+        runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle,
+            stream_handle.clone(),
+        ));
+        let interaction_id = meerkat_core::InteractionId(Uuid::new_v4());
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
+        runtime
+            .reserve_interaction_stream_channels(
+                corr_id,
+                interaction_id.0,
+                InteractionStreamReservationAuthority::Machine(stream_handle),
+            )
+            .unwrap();
+        let mut stream =
+            CoreCommsRuntime::stream(runtime.as_ref(), StreamScope::Interaction(interaction_id))
+                .unwrap();
+
+        runtime.abandon_interaction_stream(
+            interaction_id.0,
+            meerkat_core::InteractionStreamAbandonReason::TerminalDeliveryFailed,
+        );
+
+        let terminal = stream.next().await.expect("typed abandonment terminal");
+        assert!(matches!(
+            terminal.payload,
+            meerkat_core::AgentEvent::InteractionFailed {
+                reason: meerkat_core::event::InteractionFailureReason::InteractionStreamAbandoned {
+                    reason: meerkat_core::InteractionStreamAbandonReason::TerminalDeliveryFailed,
+                },
+                ..
+            }
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_unattached_stream_does_not_fabricate_peer_timeout() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = Arc::new(
+            CommsRuntime::inproc_only(&format!("stream-expiry-not-peer-timeout-{suffix}")).unwrap(),
+        );
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        let stream_handle = Arc::new(TestInteractionStreamHandle::default());
+        runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            stream_handle.clone(),
+        ));
+
+        let interaction_id = meerkat_core::InteractionId(Uuid::new_v4());
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
+        meerkat_core::handles::PeerInteractionHandle::request_sent(peer_handle.as_ref(), corr_id)
+            .unwrap();
+        runtime
+            .reserve_interaction_stream_channels(
+                corr_id,
+                interaction_id.0,
+                InteractionStreamReservationAuthority::Machine(stream_handle.clone()),
+            )
+            .unwrap();
+        runtime
+            .interaction_stream_registry
+            .lock()
+            .get_mut(&interaction_id.0)
+            .unwrap()
+            .created_at = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+
+        runtime.reap_expired_reservations();
+
+        assert_eq!(
+            meerkat_core::handles::InteractionStreamHandle::state(stream_handle.as_ref(), corr_id),
+            None,
+            "unattached reservation should expire"
+        );
+        assert_eq!(
+            meerkat_core::handles::PeerInteractionHandle::outbound_state(
+                peer_handle.as_ref(),
+                corr_id
+            ),
+            Some(meerkat_core::OutboundPeerRequestState::Sent),
+            "stream expiry must not claim that the peer response deadline elapsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_stream_abandonment_cleans_projection_without_expiry() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime =
+            Arc::new(CommsRuntime::inproc_only(&format!("stream-abandon-{suffix}")).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        let stream_handle = Arc::new(TestInteractionStreamHandle::default());
+        runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle,
+            stream_handle.clone(),
+        ));
+        let interaction_id = meerkat_core::InteractionId(Uuid::new_v4());
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
+        runtime
+            .reserve_interaction_stream_channels(
+                corr_id,
+                interaction_id.0,
+                InteractionStreamReservationAuthority::Machine(stream_handle.clone()),
+            )
+            .unwrap();
+
+        runtime.abandon_interaction_stream(
+            interaction_id.0,
+            meerkat_core::InteractionStreamAbandonReason::ResponseRejected,
+        );
+
+        assert_eq!(
+            meerkat_core::handles::InteractionStreamHandle::state(stream_handle.as_ref(), corr_id),
+            None
+        );
+        assert!(
+            !runtime
+                .interaction_stream_registry
+                .lock()
+                .contains_key(&interaction_id.0)
+        );
+        assert!(matches!(
+            CoreCommsRuntime::stream(runtime.as_ref(), StreamScope::Interaction(interaction_id)),
+            Err(StreamError::Abandoned {
+                reason: meerkat_core::InteractionStreamAbandonReason::ResponseRejected,
+                ..
+            })
+        ));
+    }
 
     #[tokio::test]
     async fn test_m4_duplicate_close_is_safe() {

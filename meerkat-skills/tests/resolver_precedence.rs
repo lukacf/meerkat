@@ -1,15 +1,11 @@
 //! Skill-resolver precedence tests (C-T §6 #14).
 //!
-//! The pre-wave-a resolver suite covered "defaults, mixed repos,
-//! explicit-roots precedence, no-roots-skips-filesystem-defaults". In
-//! wave-c the resolver is narrower: `resolve_repositories_with_roots`
+//! `resolve_repositories_with_roots`
 //! resolves **only the repositories declared in `SkillsConfig.repositories`**.
 //! There are no built-in "default" filesystem repos injected by the
 //! resolver — `SkillsConfig.default()` leaves `repositories` empty, so
-//! callers who want any source at all configure one explicitly. The
-//! user-vs-project config merge (which runs ahead of resolution via
-//! `SkillsConfig::load_from_paths`) is covered by in-file tests at
-//! `meerkat-core/src/skills_config.rs:620,679`.
+//! callers who want any source at all configure one explicitly through the
+//! realm's effective configuration.
 //!
 //! This file covers the resolver's narrow contract:
 //! - `enabled = false` → `Ok(None)` (skip resolution entirely).

@@ -7,14 +7,15 @@ use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{ProviderParamsOverride, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, StopReason,
-    ToolDef, Usage,
+    AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, Provider,
+    StopReason, ToolDef, Usage,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use crate::block_assembler::BlockAssembler;
+use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 
 /// Shared adapter for streaming LLM clients.
@@ -22,6 +23,12 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
 pub struct LlmClientAdapter {
     client: Arc<dyn LlmClient>,
     model: String,
+    /// Canonical provider identity selected by the owning factory/session.
+    ///
+    /// Raw clients are replaceable transport mechanics (including deterministic
+    /// test doubles); they must not fork the durable provider identity that
+    /// owns request policy and capability projection.
+    provider: Provider,
     /// Optional channel to emit streaming text deltas.
     event_tx: Option<mpsc::Sender<AgentEvent>>,
     /// Default typed per-request provider-specific knobs. Overridden on
@@ -38,10 +45,49 @@ pub struct LlmClientAdapter {
 
 impl LlmClientAdapter {
     pub fn new(client: Arc<dyn LlmClient>, model: String) -> Self {
+        let provider = client.provider();
+        Self::new_bound(client, model, provider, None)
+    }
+
+    /// Bind a raw transport client to the canonical provider identity selected
+    /// by the owning factory/session.
+    pub fn try_for_provider_identity(
+        client: Arc<dyn LlmClient>,
+        model: String,
+        provider: Provider,
+    ) -> Result<Self, LlmError> {
+        Self::validate_provider_binding(client.provider(), provider, &model)?;
+        Ok(Self::new_bound(client, model, provider, None))
+    }
+
+    fn validate_provider_binding(
+        client_provider: Provider,
+        provider: Provider,
+        model: &str,
+    ) -> Result<(), LlmError> {
+        if matches!(client_provider, Provider::Other) || client_provider == provider {
+            return Ok(());
+        }
+        Err(LlmError::InvalidRequest {
+            message: format!(
+                "raw LLM client provider '{}' cannot back canonical identity '{}:{model}'",
+                client_provider.as_str(),
+                provider.as_str(),
+            ),
+        })
+    }
+
+    fn new_bound(
+        client: Arc<dyn LlmClient>,
+        model: String,
+        provider: Provider,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Self {
         Self {
             client,
             model,
-            event_tx: None,
+            provider,
+            event_tx,
             provider_params: None,
             event_tap: meerkat_core::new_event_tap(),
             stream_output_observed: Arc::new(AtomicBool::new(false)),
@@ -54,14 +100,19 @@ impl LlmClientAdapter {
         model: String,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Self {
-        Self {
-            client,
-            model,
-            event_tx: Some(event_tx),
-            provider_params: None,
-            event_tap: meerkat_core::new_event_tap(),
-            stream_output_observed: Arc::new(AtomicBool::new(false)),
-        }
+        let provider = client.provider();
+        Self::new_bound(client, model, provider, Some(event_tx))
+    }
+
+    /// Create an identity-bound adapter with streaming event support.
+    pub fn try_with_event_channel_for_provider_identity(
+        client: Arc<dyn LlmClient>,
+        model: String,
+        provider: Provider,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<Self, LlmError> {
+        Self::validate_provider_binding(client.provider(), provider, &model)?;
+        Ok(Self::new_bound(client, model, provider, Some(event_tx)))
     }
 
     fn mark_visible_stream_output(&self, text: &str) {
@@ -129,8 +180,7 @@ impl LlmClientAdapter {
             return tag;
         };
 
-        use meerkat_core::Provider;
-        match self.client.provider() {
+        match self.provider {
             Provider::Anthropic if params.thinking_budget_tokens.is_some() => match tag {
                 Some(ProviderTag::Anthropic(mut tag)) => {
                     tag.thinking_budget_tokens = params.thinking_budget_tokens;
@@ -212,7 +262,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 .project_replay_messages(messages)
                 .map_err(|error| {
                     AgentError::llm(
-                        self.client.provider().as_str(),
+                        self.provider.as_str(),
                         error.failure_reason(),
                         error.to_string(),
                     )
@@ -363,7 +413,7 @@ impl AgentLlmClient for LlmClientAdapter {
                         }
                         LlmDoneOutcome::Error { error } => {
                             return Err(AgentError::llm(
-                                self.client.provider().as_str(),
+                                self.provider.as_str(),
                                 error.failure_reason(),
                                 error.to_string(),
                             ));
@@ -372,7 +422,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
-                        self.client.provider().as_str(),
+                        self.provider.as_str(),
                         e.failure_reason(),
                         e.to_string(),
                     ));
@@ -405,7 +455,7 @@ impl AgentLlmClient for LlmClientAdapter {
     }
 
     fn provider(&self) -> meerkat_core::Provider {
-        self.client.provider()
+        self.provider
     }
 
     fn model(&self) -> &str {
@@ -529,6 +579,35 @@ mod tests {
             revised_prompt: RevisedPromptDisposition::NotRequested,
             meta: ProviderImageMetadata::NotEmitted,
         }
+    }
+
+    #[test]
+    fn identity_bound_adapter_projects_canonical_provider() -> Result<(), String> {
+        let adapter = LlmClientAdapter::try_for_provider_identity(
+            Arc::new(ScriptedClient { events: Vec::new() }),
+            "claude-sonnet-4-5".to_string(),
+            Provider::Anthropic,
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(adapter.provider(), Provider::Anthropic);
+        assert_eq!(adapter.model(), "claude-sonnet-4-5");
+        Ok(())
+    }
+
+    #[test]
+    fn identity_bound_adapter_rejects_conflicting_fixed_provider() -> Result<(), String> {
+        let error = match LlmClientAdapter::try_for_provider_identity(
+            Arc::new(crate::TestClient::for_provider(Provider::OpenAI)),
+            "claude-sonnet-4-5".to_string(),
+            Provider::Anthropic,
+        ) {
+            Err(error) => error,
+            Ok(_) => return Err("fixed OpenAI client must not bind as Anthropic".to_string()),
+        };
+
+        assert!(error.to_string().contains("cannot back canonical identity"));
+        Ok(())
     }
 
     #[tokio::test]

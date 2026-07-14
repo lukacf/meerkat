@@ -66,6 +66,83 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// Capacity for session command channel.
 const COMMAND_CHANNEL_CAPACITY: usize = 8;
 
+fn lag_aware_session_event_stream(
+    session_id: SessionId,
+    rx: tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>>,
+) -> meerkat_core::comms::EventStream {
+    Box::pin(futures::stream::unfold(
+        (rx, session_id),
+        |(mut rx, stream_session_id)| async move {
+            match rx.recv().await {
+                Ok(event) => Some((event, (rx, stream_session_id))),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                    let marker = EventEnvelope::new_session(
+                        stream_session_id.clone(),
+                        0,
+                        None,
+                        AgentEvent::StreamTruncated {
+                            reason: meerkat_core::event::StreamTruncationReason::StreamLagged {
+                                dropped,
+                            },
+                        },
+                    );
+                    Some((marker, (rx, stream_session_id)))
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+            }
+        },
+    ))
+}
+
+#[cfg(test)]
+mod session_event_stream_tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn lagged_session_subscription_yields_typed_gap_before_retained_events()
+    -> Result<(), String> {
+        let session_id = SessionId::new();
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        let mut stream = lag_aware_session_event_stream(session_id.clone(), rx);
+
+        for seq in 1..=3 {
+            tx.send(EventEnvelope::new_session(
+                session_id.clone(),
+                seq,
+                None,
+                AgentEvent::StreamTruncated {
+                    reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+                },
+            ))
+            .map_err(|_| "test receiver unexpectedly closed".to_string())?;
+        }
+
+        let gap = stream
+            .next()
+            .await
+            .ok_or_else(|| "expected lag marker".to_string())?;
+        assert_eq!(gap.source_session_id(), Some(&session_id));
+        assert_eq!(
+            gap.seq, 0,
+            "synthetic gap marker is not a canonical sequence"
+        );
+        assert!(matches!(
+            gap.payload,
+            AgentEvent::StreamTruncated {
+                reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped: 1 }
+            }
+        ));
+
+        let retained = stream
+            .next()
+            .await
+            .ok_or_else(|| "expected first retained event".to_string())?;
+        assert_eq!(retained.seq, 2);
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session state
 // ---------------------------------------------------------------------------
@@ -2613,7 +2690,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     ///
     /// This stream is available as soon as the session is registered and emits
     /// all agent events produced by the session task, regardless of which
-    /// interaction triggered them.
+    /// interaction triggered them. If this bounded subscriber falls behind,
+    /// it emits an explicit `StreamTruncated(StreamLagged)` marker before
+    /// continuing with retained events; it never silently skips the gap.
     pub async fn subscribe_session_events(
         &self,
         id: &SessionId,
@@ -2623,15 +2702,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .get(id)
             .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
         let rx = handle.session_event_tx.subscribe();
-        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => return Some((event, rx)),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        })))
+        Ok(lag_aware_session_event_stream(id.clone(), rx))
     }
 
     /// Wait until the session summary reflects a mutation newer than `after`.

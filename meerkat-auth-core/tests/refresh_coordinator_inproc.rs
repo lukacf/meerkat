@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use meerkat_auth_core::auth_store::{
-    InMemoryCoordinator, PersistedTokens, RefreshCoordinator, RefreshError, TokenKey,
+    CredentialMutationError, InMemoryCoordinator, PersistedTokens, RefreshCoordinator,
+    RefreshError, TokenKey,
 };
 
 fn fresh_tokens() -> PersistedTokens {
@@ -158,4 +159,47 @@ async fn refreshes_for_distinct_keys_run_in_parallel() {
     res_b.unwrap();
     assert_eq!(counter_a.load(Ordering::SeqCst), 1);
     assert_eq!(counter_b.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn exclusive_mutations_serialize_without_coalescing() {
+    let coord = Arc::new(InMemoryCoordinator::new());
+    let key = TokenKey::parse("dev", "exclusive").expect("valid slugs");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
+
+    let mut tasks = Vec::new();
+    for index in 0..2 {
+        let coord = Arc::clone(&coord);
+        let key = key.clone();
+        let calls = Arc::clone(&calls);
+        let in_flight = Arc::clone(&in_flight);
+        let max_in_flight = Arc::clone(&max_in_flight);
+        tasks.push(tokio::spawn(async move {
+            coord
+                .with_exclusive_mutation(
+                    key,
+                    Box::new(move || {
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_in_flight.fetch_max(active, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            in_flight.fetch_sub(1, Ordering::SeqCst);
+                            Ok::<_, CredentialMutationError>(PersistedTokens::api_key(format!(
+                                "mutation-{index}"
+                            )))
+                        }
+                        .boxed()
+                    }),
+                )
+                .await
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
 }

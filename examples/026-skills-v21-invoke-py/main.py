@@ -11,17 +11,20 @@ Run:
 import asyncio
 import os
 from pathlib import Path
+
 from meerkat import MeerkatClient, SkillKey
 
-DEFAULT_SOURCE_UUID = "dc256086-0d2f-4f61-a307-320d4148107f"
+PROJECT_LOCAL_SOURCE_UUID = "00000000-0000-4b11-8111-000000000002"
 DEFAULT_SKILL_NAME = "shell-patterns"
 
-SKILL_BODY = """---
-name: shell-patterns
+
+def skill_body(skill_name: str) -> str:
+    return f"""---
+name: {skill_name}
 description: Review shell commands for safety and portability.
 ---
 
-# Shell Patterns
+# {skill_name}
 
 Review shell commands before execution. Flag destructive operations, missing
 quoting, non-portable flags, and places where a safer dry-run or explicit path
@@ -34,7 +37,9 @@ Respond with:
 """
 
 
-def prepare_local_skill_source(source_uuid: str, skill_name: str) -> tuple[Path, Path, Path]:
+def prepare_local_skill_source(
+    skill_name: str,
+) -> tuple[Path, Path, Path]:
     root = Path(__file__).resolve().parent
     work = root / ".work"
     context_root = work / "project"
@@ -44,29 +49,14 @@ def prepare_local_skill_source(source_uuid: str, skill_name: str) -> tuple[Path,
     skill_dir.mkdir(parents=True, exist_ok=True)
     state_root.mkdir(parents=True, exist_ok=True)
     user_config_root.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(SKILL_BODY, encoding="utf-8")
-    (context_root / ".rkat" / "skills.toml").write_text(
-        "\n".join(
-            [
-                "enabled = true",
-                "",
-                "[[repositories]]",
-                'name = "example-local"',
-                f'source_uuid = "{source_uuid}"',
-                'type = "filesystem"',
-                'path = ".rkat/skills"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    (skill_dir / "SKILL.md").write_text(skill_body(skill_name), encoding="utf-8")
     return context_root, state_root, user_config_root
 
 
 async def main() -> None:
-    source_uuid = os.environ.get("MEERKAT_SKILL_SOURCE_UUID", DEFAULT_SOURCE_UUID)
+    source_uuid = PROJECT_LOCAL_SOURCE_UUID
     skill_name = os.environ.get("MEERKAT_SKILL_NAME", DEFAULT_SKILL_NAME)
-    context_root, state_root, user_config_root = prepare_local_skill_source(source_uuid, skill_name)
+    context_root, state_root, user_config_root = prepare_local_skill_source(skill_name)
 
     client = MeerkatClient()
     await client.connect(

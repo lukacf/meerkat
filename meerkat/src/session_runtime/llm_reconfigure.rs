@@ -225,8 +225,13 @@ impl SessionRuntimeLlmReconfigureHost {
 
         let adapter = self
             .factory
-            .build_llm_adapter(raw_client, identity.model.clone())
-            .await;
+            .build_llm_adapter_for_identity(raw_client, identity)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "Failed to bind LLM client to session identity hot-swap: {error}"
+                ))
+            })?;
         let adapter = Arc::new(adapter) as Arc<dyn AgentLlmClient>;
         let decorator = self
             .agent_llm_client_decorator

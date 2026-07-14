@@ -5,17 +5,27 @@ use async_trait::async_trait;
 /// Simple test client that emits a deterministic response.
 pub struct TestClient {
     events: Vec<LlmEvent>,
+    provider: meerkat_core::Provider,
 }
 
 impl TestClient {
     pub fn new(events: Vec<LlmEvent>) -> Self {
-        Self { events }
+        Self {
+            events,
+            provider: meerkat_core::Provider::Other,
+        }
     }
-}
 
-impl Default for TestClient {
-    fn default() -> Self {
-        Self::new(vec![
+    /// Build the deterministic client bound to a canonical provider identity.
+    pub fn for_provider(provider: meerkat_core::Provider) -> Self {
+        Self {
+            events: Self::default_events(),
+            provider,
+        }
+    }
+
+    fn default_events() -> Vec<LlmEvent> {
+        vec![
             LlmEvent::TextDelta {
                 delta: "ok".to_string(),
                 meta: None,
@@ -25,7 +35,13 @@ impl Default for TestClient {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                 },
             },
-        ])
+        ]
+    }
+}
+
+impl Default for TestClient {
+    fn default() -> Self {
+        Self::new(Self::default_events())
     }
 }
 
@@ -47,7 +63,7 @@ impl LlmClient for TestClient {
     }
 
     fn provider(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::Other
+        self.provider
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

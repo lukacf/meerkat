@@ -7748,14 +7748,23 @@ fn new_cli_mcp_oauth_auth_lease() -> anyhow::Result<meerkat_core::handles::Gener
 fn open_mcp_oauth_authority(
     mode: CliMcpAuthMode,
 ) -> anyhow::Result<meerkat_auth_core::McpOAuthAuthority> {
-    let store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-        .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?
+    let backend = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+        .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
+    let refresh_lock_dir = backend.refresh_lock_dir().ok_or_else(|| {
+        anyhow::anyhow!("MCP OAuth persisted TokenStore has no refresh-lock authority")
+    })?;
+    let store = backend
         .open()
         .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
     let browser: Arc<dyn meerkat_auth_core::BrowserOpener> = Arc::new(CliMcpBrowserOpener { mode });
     let auth_lease = new_cli_mcp_oauth_auth_lease()?;
     Ok(meerkat_auth_core::McpOAuthAuthority::new(
-        store, browser, auth_lease,
+        store,
+        browser,
+        auth_lease,
+        Arc::new(meerkat_auth_core::FileLockCoordinator::new(
+            refresh_lock_dir,
+        )),
     ))
 }
 
@@ -12341,16 +12350,20 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
                 CliTransport::Http => McpTransportKind::StreamableHttp,
                 CliTransport::Sse => McpTransportKind::Sse,
             });
-            mcp::add_server(mcp::AddServerRequest {
-                name,
-                transport,
-                url,
-                positional_url,
-                headers,
-                command,
-                env,
-                project_scope: matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
-            })
+            mcp::add_server(
+                mcp::AddServerRequest {
+                    name,
+                    transport,
+                    url,
+                    positional_url,
+                    headers,
+                    command,
+                    env,
+                    project_scope: matches!(scope, CliMcpScope::Project | CliMcpScope::Local),
+                },
+                cli_scope.context_root.as_deref(),
+                cli_scope.user_config_root.as_deref(),
+            )
             .await
         }
         McpCommands::Login { name, scope } => {
@@ -12365,21 +12378,40 @@ async fn handle_mcp_command(command: McpCommands, cli_scope: &RuntimeScope) -> a
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            mcp::remove_server(name, scope).await
+            mcp::remove_server(
+                name,
+                scope,
+                cli_scope.context_root.as_deref(),
+                cli_scope.user_config_root.as_deref(),
+            )
+            .await
         }
         McpCommands::List { scope, json } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            mcp::list_servers(scope, json).await
+            mcp::list_servers(
+                scope,
+                json,
+                cli_scope.context_root.as_deref(),
+                cli_scope.user_config_root.as_deref(),
+            )
+            .await
         }
         McpCommands::Get { name, scope, json } => {
             let scope = scope.map(|s| match s {
                 CliMcpScope::User => McpScope::User,
                 CliMcpScope::Project | CliMcpScope::Local => McpScope::Project,
             });
-            mcp::get_server(name, scope, json).await
+            mcp::get_server(
+                name,
+                scope,
+                json,
+                cli_scope.context_root.as_deref(),
+                cli_scope.user_config_root.as_deref(),
+            )
+            .await
         }
     }
 }

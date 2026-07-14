@@ -58,6 +58,19 @@ if [[ -z "${tlc_workers}" ]]; then
   tlc_workers="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
 fi
 
+# `xtask machine-verify` gives every TLC child a deep JVM stack through
+# `merged_java_tool_options()`. The bounded adaptive witness below launches
+# `tlc` directly, so apply that same policy here; otherwise GitHub's Java 21
+# default stack overflows while evaluating the generated initial predicate.
+tlc_java_tool_options="${JAVA_TOOL_OPTIONS:-}"
+if [[ " ${tlc_java_tool_options} " != *" -Xss"* ]]; then
+  tlc_java_tool_options="-Xss256m${tlc_java_tool_options:+ ${tlc_java_tool_options}}"
+fi
+if [[ " ${tlc_java_tool_options} " != *" -XX:+UseParallelGC "* ]]; then
+  tlc_java_tool_options="-XX:+UseParallelGC${tlc_java_tool_options:+ ${tlc_java_tool_options}}"
+fi
+export JAVA_TOOL_OPTIONS="${tlc_java_tool_options}"
+
 # The full adaptive composition includes two complete MobMachine instances and
 # is too large for the CI TLC budget. Before applying that broad skip, prove the
 # generated route that matters for the adaptive bundle: terminal layer-mob

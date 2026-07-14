@@ -14,8 +14,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::auth::{
-    PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
-    RefreshFailureObservation, RefreshFn, TokenKey, TokenStore,
+    CredentialMutationError, CredentialMutationFn, PersistedAuthMode, PersistedTokens,
+    RefreshCoordinator, RefreshError, RefreshFailureObservation, RefreshFn, TokenKey, TokenStore,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
@@ -795,6 +795,14 @@ impl ManagedStoreOAuthRefreshFailureCoordinator {
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
+    async fn with_exclusive_mutation(
+        &self,
+        key: TokenKey,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<PersistedTokens, CredentialMutationError> {
+        self.inner.with_exclusive_mutation(key, mutation_fn).await
+    }
+
     async fn with_refresh(
         &self,
         key: TokenKey,
@@ -2997,6 +3005,14 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[async_trait::async_trait]
     impl RefreshCoordinator for RejectingRefreshCoordinator {
+        async fn with_exclusive_mutation(
+            &self,
+            _key: TokenKey,
+            _mutation_fn: CredentialMutationFn,
+        ) -> Result<PersistedTokens, CredentialMutationError> {
+            Err(CredentialMutationError::Cancelled)
+        }
+
         async fn with_refresh(
             &self,
             _key: TokenKey,

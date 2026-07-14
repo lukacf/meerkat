@@ -3,13 +3,11 @@
 //! Provides `rkat mcp add|remove|list|get` commands for managing MCP server configuration.
 
 use meerkat_core::mcp_config::{
-    McpConfig, McpScope, McpServerConfig, McpTransportConfig, McpTransportKind, find_project_mcp,
-    project_mcp_path, user_mcp_path,
+    McpConfig, McpConfigMutationAuthority, McpScope, McpServerConfig, McpTransportConfig,
+    McpTransportKind,
 };
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
-use toml_edit::{Array, DocumentMut, Item, Table};
 
 /// Truncate a string to max_chars, adding "..." if truncated (Unicode-safe)
 fn truncate_str(s: &str, max_chars: usize) -> String {
@@ -141,7 +139,11 @@ pub struct AddServerRequest {
 }
 
 /// Add an MCP server to the configuration
-pub async fn add_server(request: AddServerRequest) -> anyhow::Result<()> {
+pub async fn add_server(
+    request: AddServerRequest,
+    context_root: Option<&Path>,
+    user_config_root: Option<&Path>,
+) -> anyhow::Result<()> {
     let scope = if request.project_scope {
         McpScope::Project
     } else {
@@ -149,8 +151,8 @@ pub async fn add_server(request: AddServerRequest) -> anyhow::Result<()> {
     };
 
     // Check if server already exists in this scope
-    let name = &request.name;
-    if McpConfig::server_exists(name, scope).await? {
+    let name = request.name.clone();
+    if McpConfig::server_exists_from_roots(&name, scope, context_root, user_config_root).await? {
         anyhow::bail!(
             "MCP server '{name}' already exists in {scope} scope. Remove it first with: rkat mcp remove {name} --scope {scope}"
         );
@@ -166,23 +168,13 @@ pub async fn add_server(request: AddServerRequest) -> anyhow::Result<()> {
         request.env,
     )?;
 
-    // Get the file path for this scope
-    let path = match scope {
-        McpScope::User => {
-            user_mcp_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-        }
-        McpScope::Project => project_mcp_path()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine project directory"))?,
-    };
-
-    // Add to file using toml_edit to preserve formatting
-    {
-        let path = path.clone();
-        let server = server.clone();
-        tokio::task::spawn_blocking(move || add_server_to_file(&path, &server))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {e}"))??;
-    }
+    let authority = McpConfigMutationAuthority::for_scope(
+        scope,
+        context_root.map(Path::to_path_buf),
+        user_config_root.map(Path::to_path_buf),
+    );
+    let path = authority.resolved_path()?;
+    McpConfig::persist_add_with_rollback(&authority, server.clone()).await?;
 
     let (kind, target) = format_server_target(&server);
     println!(
@@ -223,23 +215,28 @@ fn parse_headers(headers: &[String]) -> anyhow::Result<HashMap<String, String>> 
 }
 
 /// Remove an MCP server from the configuration
-pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Result<()> {
-    // Find which scopes contain this server
-    let scopes = McpConfig::find_server_scopes(&name).await?;
-
-    if scopes.is_empty() {
-        anyhow::bail!("MCP server '{name}' not found");
-    }
-
-    // If scope not specified and exists in multiple, error
+pub async fn remove_server(
+    name: String,
+    scope: Option<McpScope>,
+    context_root: Option<&Path>,
+    user_config_root: Option<&Path>,
+) -> anyhow::Result<()> {
     let target_scope = match scope {
         Some(s) => {
-            if !scopes.contains(&s) {
+            if !McpConfig::server_exists_from_roots(&name, s, context_root, user_config_root)
+                .await?
+            {
                 anyhow::bail!("MCP server '{name}' not found in {s} scope");
             }
             s
         }
         None => {
+            let scopes =
+                McpConfig::find_server_scopes_from_roots(&name, context_root, user_config_root)
+                    .await?;
+            if scopes.is_empty() {
+                anyhow::bail!("MCP server '{name}' not found");
+            }
             if scopes.len() > 1 {
                 anyhow::bail!(
                     "MCP server '{}' exists in multiple scopes: {:?}. Specify --scope to remove from a specific scope.",
@@ -254,24 +251,13 @@ pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Res
         }
     };
 
-    // Get the file path for this scope
-    let path = match target_scope {
-        McpScope::User => {
-            user_mcp_path().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-        }
-        McpScope::Project => {
-            find_project_mcp().ok_or_else(|| anyhow::anyhow!("No project mcp.toml found"))?
-        }
-    };
-
-    // Remove from file
-    {
-        let path = path.clone();
-        let name = name.clone();
-        tokio::task::spawn_blocking(move || remove_server_from_file(&path, &name))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update mcp.toml: {e}"))??;
-    }
+    let authority = McpConfigMutationAuthority::for_scope(
+        target_scope,
+        context_root.map(Path::to_path_buf),
+        user_config_root.map(Path::to_path_buf),
+    );
+    let path = authority.resolved_path()?;
+    McpConfig::persist_remove_with_rollback(&authority, &name).await?;
 
     println!(
         "Removed MCP server '{}' from {} config: {}",
@@ -283,17 +269,23 @@ pub async fn remove_server(name: String, scope: Option<McpScope>) -> anyhow::Res
 }
 
 /// List configured MCP servers
-pub async fn list_servers(scope: Option<McpScope>, json_output: bool) -> anyhow::Result<()> {
+pub async fn list_servers(
+    scope: Option<McpScope>,
+    json_output: bool,
+    context_root: Option<&Path>,
+    user_config_root: Option<&Path>,
+) -> anyhow::Result<()> {
     let servers = match scope {
         Some(s) => {
-            let config = McpConfig::load_scope(s).await?;
+            let config =
+                McpConfig::load_scope_from_roots(s, context_root, user_config_root).await?;
             config
                 .servers
                 .into_iter()
                 .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope: s })
                 .collect()
         }
-        None => McpConfig::load_with_scopes().await?,
+        None => McpConfig::load_with_scopes_from_roots(context_root, user_config_root).await?,
     };
 
     if json_output {
@@ -354,10 +346,13 @@ pub async fn get_server(
     name: String,
     scope: Option<McpScope>,
     json_output: bool,
+    context_root: Option<&Path>,
+    user_config_root: Option<&Path>,
 ) -> anyhow::Result<()> {
     let servers = match scope {
         Some(s) => {
-            let config = McpConfig::load_scope(s).await?;
+            let config =
+                McpConfig::load_scope_from_roots(s, context_root, user_config_root).await?;
             config
                 .servers
                 .into_iter()
@@ -365,7 +360,7 @@ pub async fn get_server(
                 .map(|server| meerkat_core::mcp_config::McpServerWithScope { server, scope: s })
                 .collect::<Vec<_>>()
         }
-        None => McpConfig::load_with_scopes()
+        None => McpConfig::load_with_scopes_from_roots(context_root, user_config_root)
             .await?
             .into_iter()
             .filter(|s| s.server.name == name)
@@ -455,250 +450,156 @@ pub async fn get_server(
     Ok(())
 }
 
-// === File editing helpers ===
-
-fn add_server_to_file(path: &Path, server: &McpServerConfig) -> anyhow::Result<()> {
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // Read or create document
-    let mut doc = if path.exists() {
-        let contents = fs::read_to_string(path)?;
-        contents.parse::<DocumentMut>()?
-    } else {
-        DocumentMut::new()
-    };
-
-    // Ensure [[servers]] array exists
-    if !doc.contains_key("servers") {
-        doc["servers"] = Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
-    }
-
-    let servers = doc["servers"]
-        .as_array_of_tables_mut()
-        .ok_or_else(|| anyhow::anyhow!("Invalid mcp.toml: 'servers' is not an array of tables"))?;
-
-    // Check for duplicate
-    if servers
-        .iter()
-        .any(|t| t.get("name").and_then(|v| v.as_str()) == Some(&server.name))
-    {
-        anyhow::bail!("MCP server '{}' already exists in this file", server.name);
-    }
-
-    let mut table = Table::new();
-    table["name"] = toml_edit::value(&server.name);
-
-    match &server.transport {
-        McpTransportConfig::Stdio(stdio) => {
-            table["command"] = toml_edit::value(&stdio.command);
-
-            if !stdio.args.is_empty() {
-                let mut args = Array::new();
-                for arg in &stdio.args {
-                    args.push(arg.as_str());
-                }
-                table["args"] = toml_edit::value(args);
-            }
-
-            if !stdio.env.is_empty() {
-                let mut env_table = toml_edit::InlineTable::new();
-                for (k, v) in &stdio.env {
-                    env_table.insert(k, v.as_str().into());
-                }
-                table["env"] = toml_edit::value(env_table);
-            }
-        }
-        McpTransportConfig::Http(http) => {
-            table["url"] = toml_edit::value(&http.url);
-            if !http.headers.is_empty() {
-                let mut header_table = toml_edit::InlineTable::new();
-                for (k, v) in &http.headers {
-                    header_table.insert(k, v.as_str().into());
-                }
-                table["headers"] = toml_edit::value(header_table);
-            }
-            if matches!(server.transport_kind(), McpTransportKind::Sse) {
-                table["transport"] = toml_edit::value("sse");
-            }
-        }
-    }
-
-    servers.push(table);
-
-    // Write back
-    fs::write(path, doc.to_string())?;
-    Ok(())
-}
-
-fn remove_server_from_file(path: &Path, name: &str) -> anyhow::Result<()> {
-    if !path.exists() {
-        anyhow::bail!("Config file does not exist: {}", path.display());
-    }
-
-    let contents = fs::read_to_string(path)?;
-    let mut doc = contents.parse::<DocumentMut>()?;
-
-    let servers = doc["servers"]
-        .as_array_of_tables_mut()
-        .ok_or_else(|| anyhow::anyhow!("Invalid mcp.toml: 'servers' is not an array of tables"))?;
-
-    // Find and remove the server
-    let initial_len = servers.len();
-    servers.retain(|t| t.get("name").and_then(|v| v.as_str()) != Some(name));
-
-    if servers.len() == initial_len {
-        anyhow::bail!("MCP server '{}' not found in {}", name, path.display());
-    }
-
-    // Write back
-    fs::write(path, doc.to_string())?;
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn create_test_server(name: &str, cmd: &str, args: Vec<&str>) -> McpServerConfig {
-        McpServerConfig::stdio(
-            name,
-            cmd,
-            args.into_iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
-            HashMap::new(),
+    #[tokio::test]
+    async fn test_offline_mutations_use_explicit_convention_roots() {
+        let temp = TempDir::new().unwrap();
+        let context_root = temp.path().join("context");
+        let user_root = temp.path().join("user");
+
+        add_server(
+            AddServerRequest {
+                name: "user-server".to_string(),
+                transport: Some(McpTransportKind::Stdio),
+                url: None,
+                positional_url: None,
+                headers: Vec::new(),
+                command: vec!["echo".to_string(), "hello".to_string()],
+                env: Vec::new(),
+                project_scope: false,
+            },
+            Some(&context_root),
+            Some(&user_root),
         )
+        .await
+        .unwrap();
+
+        let user_path = user_root.join(".rkat/mcp.toml");
+        let project_path = context_root.join(".rkat/mcp.toml");
+        assert!(user_path.exists());
+        assert!(!project_path.exists());
+
+        remove_server(
+            "user-server".to_string(),
+            Some(McpScope::User),
+            Some(&context_root),
+            Some(&user_root),
+        )
+        .await
+        .unwrap();
+        let user =
+            McpConfig::load_scope_from_roots(McpScope::User, Some(&context_root), Some(&user_root))
+                .await
+                .unwrap();
+        assert!(user.servers.is_empty());
     }
 
-    #[test]
-    fn test_add_server_to_new_file() {
+    #[tokio::test]
+    async fn test_offline_mutations_preserve_operator_owned_toml() {
         let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
+        let context_root = temp.path().join("context");
+        let user_root = temp.path().join("user");
+        let user_path = user_root.join(".rkat/mcp.toml");
+        tokio::fs::create_dir_all(user_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &user_path,
+            r#"# operator note
+future_config = "preserve"
 
-        let server = create_test_server("test-server", "npx", vec!["-y", "@test/server"]);
-        add_server_to_file(&file, &server).unwrap();
-
-        // Verify file was created and contains the server
-        let contents = fs::read_to_string(&file).unwrap();
-        assert!(contents.contains("[[servers]]"));
-        assert!(contents.contains(r#"name = "test-server""#));
-        assert!(contents.contains(r#"command = "npx""#));
-        assert!(contents.contains(r#"args = ["-y", "@test/server"]"#));
-    }
-
-    #[test]
-    fn test_add_server_to_existing_file() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        // Create initial file with a server
-        fs::write(
-            &file,
-            r#"# My MCP config
 [[servers]]
 name = "existing"
-command = "existing-cmd"
+command = "existing-command"
+future_server_key = "preserve-too"
 "#,
         )
+        .await
         .unwrap();
 
-        let server = create_test_server("new-server", "new-cmd", vec![]);
-        add_server_to_file(&file, &server).unwrap();
-
-        let contents = fs::read_to_string(&file).unwrap();
-        // Should preserve comment
-        assert!(contents.contains("# My MCP config"));
-        // Should have both servers
-        assert!(contents.contains(r#"name = "existing""#));
-        assert!(contents.contains(r#"name = "new-server""#));
-    }
-
-    #[test]
-    fn test_add_server_with_env() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        let mut env = HashMap::new();
-        env.insert("API_KEY".to_string(), "secret123".to_string());
-        let server = McpServerConfig::stdio("env-server", "cmd", vec![], env);
-        add_server_to_file(&file, &server).unwrap();
-
-        let contents = fs::read_to_string(&file).unwrap();
-        assert!(contents.contains(r#"env = { API_KEY = "secret123" }"#));
-    }
-
-    #[test]
-    fn test_add_duplicate_server_fails() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        let server = create_test_server("dup-server", "cmd", vec![]);
-        add_server_to_file(&file, &server).unwrap();
-
-        // Adding same name again should fail
-        let result = add_server_to_file(&file, &server);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists"));
-    }
-
-    #[test]
-    fn test_remove_server_from_file() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        // Create file with two servers
-        fs::write(
-            &file,
-            r#"[[servers]]
-name = "keep-me"
-command = "keep"
-
-[[servers]]
-name = "remove-me"
-command = "remove"
-"#,
+        add_server(
+            AddServerRequest {
+                name: "added".to_string(),
+                transport: Some(McpTransportKind::Stdio),
+                url: None,
+                positional_url: None,
+                headers: Vec::new(),
+                command: vec!["echo".to_string()],
+                env: Vec::new(),
+                project_scope: false,
+            },
+            Some(&context_root),
+            Some(&user_root),
         )
+        .await
         .unwrap();
-
-        remove_server_from_file(&file, "remove-me").unwrap();
-
-        let contents = fs::read_to_string(&file).unwrap();
-        assert!(contents.contains(r#"name = "keep-me""#));
-        assert!(!contents.contains(r#"name = "remove-me""#));
-    }
-
-    #[test]
-    fn test_remove_nonexistent_server_fails() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        fs::write(
-            &file,
-            r#"[[servers]]
-name = "only-server"
-command = "cmd"
-"#,
+        remove_server(
+            "added".to_string(),
+            Some(McpScope::User),
+            Some(&context_root),
+            Some(&user_root),
         )
+        .await
         .unwrap();
 
-        let result = remove_server_from_file(&file, "nonexistent");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        let persisted = tokio::fs::read_to_string(&user_path).await.unwrap();
+        assert!(persisted.contains("# operator note"));
+        assert!(persisted.contains("future_config = \"preserve\""));
+        assert!(persisted.contains("future_server_key = \"preserve-too\""));
+        assert!(persisted.contains("name = \"existing\""));
+        assert!(!persisted.contains("name = \"added\""));
     }
 
-    #[test]
-    fn test_remove_from_missing_file_fails() {
+    #[tokio::test]
+    async fn test_explicit_remove_scope_does_not_parse_unrelated_scope() {
         let temp = TempDir::new().unwrap();
-        let file = temp.path().join("nonexistent.toml");
+        let context_root = temp.path().join("context");
+        let user_root = temp.path().join("user");
+        tokio::fs::create_dir_all(context_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            context_root.join(".rkat/mcp.toml"),
+            "[[servers]]\nname = \"target\"\ncommand = \"echo\"\n",
+        )
+        .await
+        .unwrap();
+        let malformed_user = "servers = \"not-an-array-of-tables\"\n";
+        tokio::fs::write(user_root.join(".rkat/mcp.toml"), malformed_user)
+            .await
+            .unwrap();
 
-        let result = remove_server_from_file(&file, "any");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not exist"));
+        remove_server(
+            "target".to_string(),
+            Some(McpScope::Project),
+            Some(&context_root),
+            Some(&user_root),
+        )
+        .await
+        .unwrap();
+
+        let project = McpConfig::load_scope_from_roots(
+            McpScope::Project,
+            Some(&context_root),
+            Some(&user_root),
+        )
+        .await
+        .unwrap();
+        assert!(project.servers.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(user_root.join(".rkat/mcp.toml"))
+                .await
+                .unwrap(),
+            malformed_user
+        );
     }
 
     #[test]
@@ -733,62 +634,6 @@ command = "cmd"
     fn test_mask_secret_unicode() {
         // "密码很长的" is 5 chars, so shows first 2 and last 2
         assert_eq!(mask_secret("密码很长的"), "密码...长的");
-    }
-
-    // HTTP/SSE transport tests
-
-    #[test]
-    fn test_add_http_server_to_file() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        let server = McpServerConfig::streamable_http(
-            "http-server",
-            "https://api.example.com/mcp",
-            HashMap::new(),
-        );
-        add_server_to_file(&file, &server).unwrap();
-
-        let contents = fs::read_to_string(&file).unwrap();
-        assert!(contents.contains("[[servers]]"));
-        assert!(contents.contains(r#"name = "http-server""#));
-        assert!(contents.contains(r#"url = "https://api.example.com/mcp""#));
-        assert!(!contents.contains("command")); // Should not have stdio fields
-    }
-
-    #[test]
-    fn test_add_sse_server_to_file() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        let server =
-            McpServerConfig::sse("sse-server", "https://api.example.com/sse", HashMap::new());
-        add_server_to_file(&file, &server).unwrap();
-
-        let contents = fs::read_to_string(&file).unwrap();
-        assert!(contents.contains("[[servers]]"));
-        assert!(contents.contains(r#"name = "sse-server""#));
-        assert!(contents.contains(r#"url = "https://api.example.com/sse""#));
-        assert!(contents.contains(r#"transport = "sse""#));
-    }
-
-    #[test]
-    fn test_add_http_server_with_headers() {
-        let temp = TempDir::new().unwrap();
-        let file = temp.path().join("mcp.toml");
-
-        let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), "Bearer token123".to_string());
-        headers.insert("X-Custom".to_string(), "value".to_string());
-        let server =
-            McpServerConfig::streamable_http("auth-server", "https://api.example.com/mcp", headers);
-        add_server_to_file(&file, &server).unwrap();
-
-        let contents = fs::read_to_string(&file).unwrap();
-        assert!(contents.contains(r#"name = "auth-server""#));
-        assert!(contents.contains("headers"));
-        assert!(contents.contains("Authorization"));
-        assert!(contents.contains("Bearer token123"));
     }
 
     #[test]

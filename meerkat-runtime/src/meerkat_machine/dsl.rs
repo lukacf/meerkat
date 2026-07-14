@@ -863,7 +863,8 @@ impl From<meerkat_core::handles::PeerTerminalDisposition> for PeerTerminalDispos
 /// (`Reserved`), live with an attached consumer (`Attached`), or terminal
 /// (`Completed` after a terminal event won, `Expired` after the TTL elapsed
 /// without an attach, `ClosedEarly` after the consumer dropped the stream
-/// before terminal). Mirror of [`meerkat_core::InteractionStreamState`].
+/// before terminal, `Abandoned` after an explicit typed failure). Mirror of
+/// [`meerkat_core::InteractionStreamState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InteractionStreamState {
     #[default]
@@ -872,6 +873,7 @@ pub enum InteractionStreamState {
     Completed,
     Expired,
     ClosedEarly,
+    Abandoned,
 }
 
 impl From<meerkat_core::InteractionStreamState> for InteractionStreamState {
@@ -883,6 +885,7 @@ impl From<meerkat_core::InteractionStreamState> for InteractionStreamState {
             meerkat_core::InteractionStreamState::Completed => Self::Completed,
             meerkat_core::InteractionStreamState::Expired => Self::Expired,
             meerkat_core::InteractionStreamState::ClosedEarly => Self::ClosedEarly,
+            meerkat_core::InteractionStreamState::Abandoned => Self::Abandoned,
             _ => panic!(
                 "unsupported InteractionStreamState variant; update generated MeerkatMachine mirror"
             ),
@@ -898,6 +901,49 @@ impl From<InteractionStreamState> for meerkat_core::InteractionStreamState {
             InteractionStreamState::Completed => Self::Completed,
             InteractionStreamState::Expired => Self::Expired,
             InteractionStreamState::ClosedEarly => Self::ClosedEarly,
+            InteractionStreamState::Abandoned => Self::Abandoned,
+        }
+    }
+}
+
+/// Typed reason carried by `InteractionStreamAbandoned`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InteractionStreamAbandonReason {
+    #[default]
+    SendFailed,
+    AdmissionRejected,
+    ResponseRejected,
+    TerminalDeliveryFailed,
+}
+
+impl From<meerkat_core::InteractionStreamAbandonReason> for InteractionStreamAbandonReason {
+    #[allow(clippy::panic)]
+    fn from(reason: meerkat_core::InteractionStreamAbandonReason) -> Self {
+        match reason {
+            meerkat_core::InteractionStreamAbandonReason::SendFailed => Self::SendFailed,
+            meerkat_core::InteractionStreamAbandonReason::AdmissionRejected => {
+                Self::AdmissionRejected
+            }
+            meerkat_core::InteractionStreamAbandonReason::ResponseRejected => {
+                Self::ResponseRejected
+            }
+            meerkat_core::InteractionStreamAbandonReason::TerminalDeliveryFailed => {
+                Self::TerminalDeliveryFailed
+            }
+            _ => panic!(
+                "unsupported InteractionStreamAbandonReason variant; update generated MeerkatMachine mirror"
+            ),
+        }
+    }
+}
+
+impl From<InteractionStreamAbandonReason> for meerkat_core::InteractionStreamAbandonReason {
+    fn from(reason: InteractionStreamAbandonReason) -> Self {
+        match reason {
+            InteractionStreamAbandonReason::SendFailed => Self::SendFailed,
+            InteractionStreamAbandonReason::AdmissionRejected => Self::AdmissionRejected,
+            InteractionStreamAbandonReason::ResponseRejected => Self::ResponseRejected,
+            InteractionStreamAbandonReason::TerminalDeliveryFailed => Self::TerminalDeliveryFailed,
         }
     }
 }

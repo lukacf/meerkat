@@ -78,6 +78,11 @@ fi
 machine_authority_path() {
   local path="${1#./}"
   case "${path}" in
+    .github/workflows/ci.yml|.github/workflows/cargo.yml|Makefile|scripts/machine-authority-changed|scripts/tests/xtask_scripts_dogma_gates.sh|xtask/tests/ci_gate_requires_rmat.rs)
+      # The required merge gate, canonical Make target, classifier, and its
+      # pinning tests are themselves part of machine-verification authority.
+      return 0
+      ;;
     specs/machines/*|specs/compositions/*)
       return 0
       ;;

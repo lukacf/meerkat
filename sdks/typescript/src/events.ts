@@ -998,45 +998,112 @@ function parseSkillResolutionFailureReason(
  * as a `malformed_event` {@link MalformedEvent}.
  */
 export function parseEvent(raw: Record<string, unknown>): StreamEvent {
-  const normalizeScopePath = (value: unknown): StreamScopeFrame[] => {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    return value.map((entry) => {
-      if (!entry || typeof entry !== "object") {
-        return { scope: "primary", session_id: "" } as StreamScopeFrame;
-      }
-      const frame = entry as Record<string, unknown>;
-      if (frame.scope === "mob_member") {
-        return {
-          scope: "mob_member",
-          flow_run_id: String(frame.flow_run_id ?? ""),
-          agent_identity: String(frame.agent_identity ?? ""),
-        } as StreamScopeFrame;
-      }
-      return {
-        scope: "primary",
-        session_id: String(frame.session_id ?? ""),
-      } as StreamScopeFrame;
-    });
-  };
+  const hasScopedEnvelopeKey = Object.hasOwn(raw, "event") ||
+    Object.hasOwn(raw, "scope_id") ||
+    Object.hasOwn(raw, "scope_path");
 
-  if (
-    raw.event &&
-    (typeof raw.scope_id === "string" || Array.isArray(raw.scope_path))
-  ) {
-    const innerRaw = typeof raw.event === "object" && raw.event !== null
-      ? (raw.event as Record<string, unknown>)
-      : { type: "unknown" };
+  if (hasScopedEnvelopeKey) {
+    if (raw.type !== undefined) {
+      throw invalidScopedEvent(raw, "outer `type` must be absent");
+    }
+    if (typeof raw.scope_id !== "string" || raw.scope_id.length === 0) {
+      throw invalidScopedEvent(raw, "`scope_id` must be a non-empty string");
+    }
+    if (!Array.isArray(raw.scope_path)) {
+      throw invalidScopedEvent(raw, "`scope_path` must be an array");
+    }
+    if (
+      typeof raw.event !== "object" ||
+      raw.event === null ||
+      Array.isArray(raw.event)
+    ) {
+      throw invalidScopedEvent(raw, "`event` must be an object");
+    }
+
+    const scopePath = parseScopePath(raw.scope_path, raw);
+    const canonicalScopeId = scopeIdFromPath(scopePath);
+    if (raw.scope_id !== canonicalScopeId) {
+      throw invalidScopedEvent(
+        raw,
+        `\`scope_id\` ${JSON.stringify(raw.scope_id)} does not match canonical ${JSON.stringify(canonicalScopeId)}`,
+      );
+    }
+
     return {
       type: "scoped_agent_event",
-      scopeId: String(raw.scope_id ?? ""),
-      scopePath: normalizeScopePath(raw.scope_path),
-      event: parseCoreEvent(innerRaw),
+      scopeId: canonicalScopeId,
+      scopePath,
+      event: parseCoreEvent(raw.event as Record<string, unknown>),
     };
   }
 
   return parseCoreEvent(raw);
+}
+
+function invalidScopedEvent(raw: Record<string, unknown>, reason: string): MeerkatError {
+  return new MeerkatError(
+    "INVALID_RESPONSE",
+    `invalid scoped agent event: ${reason}`,
+    raw,
+  );
+}
+
+function requiredScopeString(
+  frame: Record<string, unknown>,
+  field: string,
+  frameIndex: number,
+  raw: Record<string, unknown>,
+): string {
+  const value = frame[field];
+  if (typeof value !== "string" || value.length === 0) {
+    throw invalidScopedEvent(
+      raw,
+      `\`scope_path[${frameIndex}].${field}\` must be a non-empty string`,
+    );
+  }
+  return value;
+}
+
+function parseScopePath(
+  value: readonly unknown[],
+  raw: Record<string, unknown>,
+): StreamScopeFrame[] {
+  return value.map((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw invalidScopedEvent(raw, `\`scope_path[${index}]\` must be an object`);
+    }
+
+    const frame = entry as Record<string, unknown>;
+    switch (frame.scope) {
+      case "primary":
+        return {
+          scope: "primary",
+          session_id: requiredScopeString(frame, "session_id", index, raw),
+        };
+      case "mob_member":
+        return {
+          scope: "mob_member",
+          flow_run_id: requiredScopeString(frame, "flow_run_id", index, raw),
+          agent_identity: requiredScopeString(frame, "agent_identity", index, raw),
+        };
+      default:
+        throw invalidScopedEvent(
+          raw,
+          `\`scope_path[${index}].scope\` has unknown value ${JSON.stringify(frame.scope)}`,
+        );
+    }
+  });
+}
+
+function scopeIdFromPath(path: readonly StreamScopeFrame[]): string {
+  if (path.length === 0) {
+    return "primary";
+  }
+  return path
+    .map((frame) =>
+      frame.scope === "primary" ? "primary" : `mob:${frame.agent_identity}`
+    )
+    .join("/");
 }
 
 const KNOWN_AGENT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(KNOWN_AGENT_EVENT_TYPES);

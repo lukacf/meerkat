@@ -2431,8 +2431,10 @@ impl AgentFactory {
                 ));
             }
         };
-        let adapted: Arc<dyn AgentLlmClient> =
-            Arc::new(LlmClientAdapter::new(client, model.clone()));
+        let adapted: Arc<dyn AgentLlmClient> = Arc::new(
+            LlmClientAdapter::try_for_provider_identity(client, model.clone(), search_provider)
+                .map_err(|error| BuildAgentError::Config(error.to_string()))?,
+        );
 
         let executor: Arc<dyn meerkat_llm_core::WebSearchExecutor> = match search_provider {
             #[cfg(feature = "openai")]
@@ -3142,6 +3144,21 @@ impl AgentFactory {
         LlmClientAdapter::new(client, model.into())
     }
 
+    /// Build an adapter whose facade identity is owned by the canonical
+    /// session identity rather than by replaceable raw transport mechanics.
+    pub async fn build_llm_adapter_for_identity(
+        &self,
+        client: Arc<dyn LlmClient>,
+        identity: &SessionLlmIdentity,
+    ) -> Result<LlmClientAdapter, BuildAgentError> {
+        LlmClientAdapter::try_for_provider_identity(
+            client,
+            identity.model.clone(),
+            identity.provider,
+        )
+        .map_err(|error| BuildAgentError::Config(error.to_string()))
+    }
+
     /// Build an LLM adapter, optionally wiring an event channel for streaming.
     pub async fn build_llm_adapter_with_events(
         &self,
@@ -3200,7 +3217,9 @@ impl AgentFactory {
         // Test-mode shim: hot-swap never needs real credentials under
         // RKAT_TEST_CLIENT=1.
         if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
-            return Ok(Arc::new(meerkat_client::TestClient::default()));
+            return Ok(Arc::new(meerkat_client::TestClient::for_provider(
+                identity.provider,
+            )));
         }
 
         let (realm, _binding_id, auth_binding) = Self::resolve_realm_binding_for_provider(
@@ -4134,6 +4153,28 @@ impl AgentFactory {
             .and_then(|metadata| metadata.self_hosted_server_id.clone());
         let (provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
+        if let Some(client) = build_config.llm_client_override.as_ref() {
+            let claimed_provider = client.provider();
+            if !matches!(claimed_provider, Provider::Other) && claimed_provider != provider {
+                return Err(BuildAgentError::Config(format!(
+                    "raw LLM client override claims provider '{}' but canonical model '{}' belongs to '{}'",
+                    claimed_provider.as_str(),
+                    build_config.model,
+                    provider.as_str(),
+                )));
+            }
+        }
+        if let Some(client) = build_config.agent_llm_client_override.as_ref()
+            && (client.provider() != provider || client.model() != build_config.model)
+        {
+            return Err(BuildAgentError::Config(format!(
+                "agent LLM client override identity '{}:{}' does not match canonical session identity '{}:{}'",
+                client.provider().as_str(),
+                client.model(),
+                provider.as_str(),
+                build_config.model,
+            )));
+        }
         let self_hosted_server_id = if matches!(provider, Provider::SelfHosted) {
             build_config
                 .self_hosted_server_id
@@ -4161,7 +4202,7 @@ impl AgentFactory {
                     // Test shim: when RKAT_TEST_CLIENT=1 is set by integration
                     // tests, short-circuit to an in-process TestClient so tests
                     // don't need real provider credentials.
-                    Arc::new(meerkat_client::TestClient::default())
+                    Arc::new(meerkat_client::TestClient::for_provider(provider))
                 }
                 None => {
                     if matches!(provider, Provider::SelfHosted) {
@@ -4519,32 +4560,42 @@ impl AgentFactory {
         let event_tap = meerkat_core::new_event_tap();
         let agent_llm_client_was_overridden = build_config.agent_llm_client_override.is_some();
         let raw_llm_client_was_overridden = build_config.llm_client_override.is_some();
-        let llm_adapter: Arc<dyn AgentLlmClient> =
-            if let Some(agent_client) = build_config.agent_llm_client_override.take() {
-                agent_client
-            } else {
-                let llm_client = llm_client.ok_or_else(|| {
-                    BuildAgentError::Config(
-                        "internal error: missing LLM client for adapter build".to_string(),
-                    )
-                })?;
-                let mut llm_adapter_inner = match build_config.event_tx.clone() {
-                    Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
-                    None => LlmClientAdapter::new(llm_client, model.clone()),
-                };
-                llm_adapter_inner = llm_adapter_inner.with_event_tap(event_tap.clone());
-                // K2: the build config carries the typed `ProviderParamsOverride`
-                // end-to-end; the adapter default is its provider tag (no legacy
-                // JSON-bag projection at this seam).
-                if let Some(typed_tag) = build_config
-                    .provider_params
-                    .as_ref()
-                    .and_then(|params| params.provider_tag.clone())
-                {
-                    llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(typed_tag));
+        let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
+            build_config.agent_llm_client_override.take()
+        {
+            agent_client
+        } else {
+            let llm_client = llm_client.ok_or_else(|| {
+                BuildAgentError::Config(
+                    "internal error: missing LLM client for adapter build".to_string(),
+                )
+            })?;
+            let mut llm_adapter_inner = match build_config.event_tx.clone() {
+                Some(tx) => LlmClientAdapter::try_with_event_channel_for_provider_identity(
+                    llm_client,
+                    model.clone(),
+                    provider,
+                    tx,
+                )
+                .map_err(|error| BuildAgentError::Config(error.to_string()))?,
+                None => {
+                    LlmClientAdapter::try_for_provider_identity(llm_client, model.clone(), provider)
+                        .map_err(|error| BuildAgentError::Config(error.to_string()))?
                 }
-                Arc::new(llm_adapter_inner)
             };
+            llm_adapter_inner = llm_adapter_inner.with_event_tap(event_tap.clone());
+            // K2: the build config carries the typed `ProviderParamsOverride`
+            // end-to-end; the adapter default is its provider tag (no legacy
+            // JSON-bag projection at this seam).
+            if let Some(typed_tag) = build_config
+                .provider_params
+                .as_ref()
+                .and_then(|params| params.provider_tag.clone())
+            {
+                llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(typed_tag));
+            }
+            Arc::new(llm_adapter_inner)
+        };
         let llm_adapter = Self::decorate_agent_llm_client(
             llm_adapter,
             build_config.agent_llm_client_decorator.as_ref(),
@@ -4617,10 +4668,19 @@ impl AgentFactory {
                     }
                 };
                 let mut adapter = match build_config.event_tx.clone() {
-                    Some(tx) => {
-                        LlmClientAdapter::with_event_channel(raw_client, identity.model.clone(), tx)
-                    }
-                    None => LlmClientAdapter::new(raw_client, identity.model.clone()),
+                    Some(tx) => LlmClientAdapter::try_with_event_channel_for_provider_identity(
+                        raw_client,
+                        identity.model.clone(),
+                        identity.provider,
+                        tx,
+                    )
+                    .map_err(|error| BuildAgentError::Config(error.to_string()))?,
+                    None => LlmClientAdapter::try_for_provider_identity(
+                        raw_client,
+                        identity.model.clone(),
+                        identity.provider,
+                    )
+                    .map_err(|error| BuildAgentError::Config(error.to_string()))?,
                 };
                 adapter = adapter.with_event_tap(event_tap.clone());
                 let decorated = Self::decorate_agent_llm_client(

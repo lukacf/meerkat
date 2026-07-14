@@ -1976,6 +1976,11 @@ pub enum StreamError {
     NotFound(String),
     #[error("already attached: {0}")]
     AlreadyAttached(InteractionId),
+    #[error("interaction stream {interaction_id} abandoned: {reason}")]
+    Abandoned {
+        interaction_id: InteractionId,
+        reason: crate::InteractionStreamAbandonReason,
+    },
     #[error("stream closed")]
     Closed,
     #[error("permission denied: {0}")]

@@ -81,7 +81,7 @@ impl LlmClient for MockLlmClient {
     }
 
     fn provider(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::Other
+        meerkat_core::Provider::Anthropic
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {

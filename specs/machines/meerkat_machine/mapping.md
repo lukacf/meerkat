@@ -4577,6 +4577,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InteractionStreamClosedEarlyStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `InteractionStreamAbandonedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamAbandonedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamAbandonedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamAbandonedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamAbandonedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NotifyDrainExitedAfterUnregister`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4632,6 +4647,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `InteractionStreamClosedEarlyAfterUnregister`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `InteractionStreamAbandonedAfterUnregister`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AttachSessionIngressIdle`

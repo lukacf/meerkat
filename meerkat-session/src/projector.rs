@@ -416,7 +416,9 @@ pub enum ProjectionError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::event_store::{EVENT_SCHEMA_VERSION, EventStoreError, StoredEvent};
+    use crate::event_store::{
+        EVENT_SCHEMA_VERSION, EventProjectionHaltMarker, EventStoreError, StoredEvent,
+    };
     use meerkat_core::event::EventSourceIdentity;
     use meerkat_core::types::{
         AssistantBlock, BlockAssistantMessage, Message, StopReason, Usage, UserMessage,
@@ -434,12 +436,14 @@ mod tests {
     /// Simple in-memory event store for testing the projector.
     struct MemEventStore {
         events: Mutex<HashMap<String, Vec<StoredEvent>>>,
+        projection_halts: Mutex<HashMap<String, EventProjectionHaltMarker>>,
     }
 
     impl MemEventStore {
         fn new() -> Self {
             Self {
                 events: Mutex::new(HashMap::new()),
+                projection_halts: Mutex::new(HashMap::new()),
             }
         }
 
@@ -471,6 +475,34 @@ mod tests {
             let events: Vec<AgentEvent> = envelopes.iter().map(|env| env.payload.clone()).collect();
             self.add_events(session_id, &events);
             self.last_seq(session_id).await
+        }
+
+        async fn record_projection_halt(
+            &self,
+            session_id: &SessionId,
+            reason: &str,
+        ) -> Result<(), EventStoreError> {
+            self.projection_halts.lock().unwrap().insert(
+                session_id.to_string(),
+                EventProjectionHaltMarker {
+                    session_id: session_id.clone(),
+                    reason: reason.to_string(),
+                    recorded_at: SystemTime::now(),
+                },
+            );
+            Ok(())
+        }
+
+        async fn projection_halt(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<EventProjectionHaltMarker>, EventStoreError> {
+            Ok(self
+                .projection_halts
+                .lock()
+                .unwrap()
+                .get(&session_id.to_string())
+                .cloned())
         }
 
         async fn read_from(

@@ -14,15 +14,16 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_SOURCE_UUID = "dc256086-0d2f-4f61-a307-320d4148107f";
+const PROJECT_LOCAL_SOURCE_UUID = "00000000-0000-4b11-8111-000000000002";
 const DEFAULT_SKILL_NAME = "shell-patterns";
 
-const SKILL_BODY = `---
-name: shell-patterns
+function skillBody(skillName: string): string {
+  return `---
+name: ${skillName}
 description: Review shell commands for safety and portability.
 ---
 
-# Shell Patterns
+# ${skillName}
 
 Review shell commands before execution. Flag destructive operations, missing
 quoting, non-portable flags, and places where a safer dry-run or explicit path
@@ -33,8 +34,9 @@ Respond with:
 - Specific concern
 - Safer command or mitigation
 `;
+}
 
-function prepareLocalSkillSource(sourceUuid: string, skillName: string) {
+function prepareLocalSkillSource(skillName: string) {
   const root = dirname(fileURLToPath(import.meta.url));
   const work = join(root, ".work");
   const contextRoot = join(work, "project");
@@ -44,28 +46,14 @@ function prepareLocalSkillSource(sourceUuid: string, skillName: string) {
   mkdirSync(skillDir, { recursive: true });
   mkdirSync(stateRoot, { recursive: true });
   mkdirSync(userConfigRoot, { recursive: true });
-  writeFileSync(join(skillDir, "SKILL.md"), SKILL_BODY, "utf8");
-  writeFileSync(
-    join(contextRoot, ".rkat", "skills.toml"),
-    [
-      "enabled = true",
-      "",
-      "[[repositories]]",
-      'name = "example-local"',
-      `source_uuid = "${sourceUuid}"`,
-      'type = "filesystem"',
-      'path = ".rkat/skills"',
-      "",
-    ].join("\n"),
-    "utf8",
-  );
+  writeFileSync(join(skillDir, "SKILL.md"), skillBody(skillName), "utf8");
   return { contextRoot, stateRoot, userConfigRoot };
 }
 
 async function main() {
-  const sourceUuid = process.env.MEERKAT_SKILL_SOURCE_UUID ?? DEFAULT_SOURCE_UUID;
+  const sourceUuid = PROJECT_LOCAL_SOURCE_UUID;
   const skillName = process.env.MEERKAT_SKILL_NAME ?? DEFAULT_SKILL_NAME;
-  const roots = prepareLocalSkillSource(sourceUuid, skillName);
+  const roots = prepareLocalSkillSource(skillName);
 
   const client = new MeerkatClient();
   await client.connect({ isolated: true, ...roots });

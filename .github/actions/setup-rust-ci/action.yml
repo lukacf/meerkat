@@ -5,7 +5,7 @@ runs:
   using: composite
   steps:
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@1.94.0
+      uses: dtolnay/rust-toolchain@1.94.1
       with:
         # The CI lanes run fmt/clippy directly; the dtolnay action installs a
         # minimal profile, so name the components explicitly.

@@ -147,7 +147,8 @@ pub use model_registry::{
     UnsupportedModelCapabilityEvidence, UnsupportedModelCapabilityReason,
 };
 pub use peer_correlation::{
-    InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
+    InboundPeerRequestState, InteractionStreamAbandonReason, InteractionStreamState,
+    OutboundPeerRequestState, PeerCorrelationId,
 };
 pub use peer_meta::PeerMeta;
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};

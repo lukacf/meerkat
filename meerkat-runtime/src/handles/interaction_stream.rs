@@ -1,7 +1,7 @@
 //! Runtime impl of [`meerkat_core::handles::InteractionStreamHandle`] (U6).
 //!
 //! Routes the interaction-stream lifecycle (`Reserved` / `Attached` /
-//! `Completed` / `Expired` / `ClosedEarly`) into the session's MeerkatMachine
+//! `Completed` / `Expired` / `ClosedEarly` / `Abandoned`) into the session's MeerkatMachine
 //! DSL `interaction_streams` substate map and fans the emitted
 //! `InteractionStreamCleanup` effects out to the installed shell-side
 //! observer, so the comms runtime's `interaction_stream_registry` becomes a
@@ -76,7 +76,13 @@ impl RuntimeInteractionStreamHandle {
     ) -> Result<(), DslTransitionError> {
         // Sample observer UNDER the DSL lock, dispatch OUTSIDE — same
         // race-closing pattern as `session_context.rs`.
-        type CleanupTarget = Result<PeerCorrelationId, String>;
+        type CleanupTarget = Result<
+            (
+                PeerCorrelationId,
+                Option<meerkat_core::InteractionStreamAbandonReason>,
+            ),
+            String,
+        >;
         let dispatch: Option<(
             Arc<dyn InteractionStreamCleanupObserver>,
             Vec<CleanupTarget>,
@@ -93,12 +99,13 @@ impl RuntimeInteractionStreamHandle {
                 let targets: Vec<CleanupTarget> = effects
                     .iter()
                     .filter_map(|effect| match effect {
-                        mm_dsl::MeerkatMachineEffect::InteractionStreamCleanup { corr_id } => {
-                            Some(match dsl_corr_id_to_core(corr_id.clone()) {
-                                Some(core_id) => Ok(core_id),
-                                None => Err(corr_id.0.clone()),
-                            })
-                        }
+                        mm_dsl::MeerkatMachineEffect::InteractionStreamCleanup {
+                            corr_id,
+                            abandon_reason,
+                        } => Some(match dsl_corr_id_to_core(corr_id.clone()) {
+                            Some(core_id) => Ok((core_id, (*abandon_reason).map(Into::into))),
+                            None => Err(corr_id.0.clone()),
+                        }),
                         _ => None,
                     })
                     .collect();
@@ -107,7 +114,9 @@ impl RuntimeInteractionStreamHandle {
         if let Some((observer, targets)) = dispatch {
             for target in targets {
                 match target {
-                    Ok(core_id) => observer.on_interaction_stream_cleanup(core_id),
+                    Ok((core_id, abandon_reason)) => {
+                        observer.on_interaction_stream_cleanup(core_id, abandon_reason);
+                    }
                     Err(raw) => tracing::error!(
                         raw = %raw,
                         context = context,
@@ -172,12 +181,27 @@ impl InteractionStreamHandle for RuntimeInteractionStreamHandle {
         )
     }
 
+    fn abandoned(
+        &self,
+        corr_id: PeerCorrelationId,
+        reason: meerkat_core::InteractionStreamAbandonReason,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_input_and_dispatch_cleanup(
+            mm_dsl::MeerkatMachineInput::InteractionStreamAbandoned {
+                corr_id: corr_id.into(),
+                reason: reason.into(),
+            },
+            "InteractionStreamHandle::abandoned",
+        )
+    }
+
     fn state(&self, corr_id: PeerCorrelationId) -> Option<CoreInteractionStreamState> {
         let dsl_key: mm_dsl::PeerCorrelationId = corr_id.into();
         let snapshot = self.dsl.snapshot_state();
         // Disjoint-set encoding (matches the DSL `interaction_stream_disjoint`
         // discipline): a corr_id is in at most one of the two active sets.
-        // Terminal states (`Completed` / `Expired` / `ClosedEarly`) leave both
+        // Terminal states (`Completed` / `Expired` / `ClosedEarly` /
+        // `Abandoned`) leave both
         // sets and are never observable here — they surface only via the
         // `InteractionStreamStateChanged` effect, like the peer-correlation
         // sibling enums.
@@ -195,5 +219,92 @@ impl InteractionStreamHandle for RuntimeInteractionStreamHandle {
             .cleanup_observer
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(&observer));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn new_handle() -> RuntimeInteractionStreamHandle {
+        let mut authority = mm_dsl::MeerkatMachineAuthority::new();
+        authority
+            .apply_signal(mm_dsl::MeerkatMachineSignal::Initialize)
+            .unwrap();
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            mm_dsl::MeerkatMachineInput::RegisterSession {
+                session_id: mm_dsl::SessionId::from("interaction-stream-test".to_string()),
+            },
+        )
+        .unwrap();
+        let dsl = Arc::new(HandleDslAuthority::from_shared(Arc::new(Mutex::new(
+            authority,
+        ))));
+        RuntimeInteractionStreamHandle::new(dsl)
+    }
+
+    struct CleanupRecorder(
+        Mutex<
+            Vec<(
+                PeerCorrelationId,
+                Option<meerkat_core::InteractionStreamAbandonReason>,
+            )>,
+        >,
+    );
+
+    impl InteractionStreamCleanupObserver for CleanupRecorder {
+        fn on_interaction_stream_cleanup(
+            &self,
+            corr_id: PeerCorrelationId,
+            abandon_reason: Option<meerkat_core::InteractionStreamAbandonReason>,
+        ) {
+            self.0.lock().unwrap().push((corr_id, abandon_reason));
+        }
+    }
+
+    #[test]
+    fn abandoned_is_typed_terminal_from_reserved_or_attached() {
+        let handle = new_handle();
+        let recorder = Arc::new(CleanupRecorder(Mutex::new(Vec::new())));
+        handle.install_cleanup_observer(
+            recorder.clone() as Arc<dyn InteractionStreamCleanupObserver>
+        );
+
+        let reserved = PeerCorrelationId::new();
+        handle.reserved(reserved).unwrap();
+        handle
+            .abandoned(
+                reserved,
+                meerkat_core::InteractionStreamAbandonReason::SendFailed,
+            )
+            .unwrap();
+        assert_eq!(handle.state(reserved), None);
+
+        let attached = PeerCorrelationId::new();
+        handle.reserved(attached).unwrap();
+        handle.attached(attached).unwrap();
+        handle
+            .abandoned(
+                attached,
+                meerkat_core::InteractionStreamAbandonReason::TerminalDeliveryFailed,
+            )
+            .unwrap();
+        assert_eq!(handle.state(attached), None);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![
+                (
+                    reserved,
+                    Some(meerkat_core::InteractionStreamAbandonReason::SendFailed),
+                ),
+                (
+                    attached,
+                    Some(meerkat_core::InteractionStreamAbandonReason::TerminalDeliveryFailed,),
+                ),
+            ]
+        );
     }
 }

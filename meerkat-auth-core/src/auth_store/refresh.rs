@@ -19,7 +19,10 @@ use async_trait::async_trait;
 use futures::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::Mutex;
 
-use super::{PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey};
+use super::{
+    CredentialMutationError, CredentialMutationFn, PersistedTokens, RefreshCoordinator,
+    RefreshError, RefreshFn, TokenKey,
+};
 
 // ---------------------------------------------------------------------
 // InMemoryCoordinator
@@ -45,11 +48,24 @@ struct InFlightRefreshKey {
 #[derive(Clone, Default)]
 pub struct InMemoryCoordinator {
     in_flight: Arc<Mutex<HashMap<InFlightRefreshKey, SharedRefresh>>>,
+    mutation_gates: Arc<Mutex<HashMap<TokenKey, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 impl InMemoryCoordinator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn mutation_gate(&self, key: &TokenKey) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.mutation_gates.lock();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(key).and_then(std::sync::Weak::upgrade) {
+            gate
+        } else {
+            let gate = Arc::new(tokio::sync::Mutex::new(()));
+            gates.insert(key.clone(), Arc::downgrade(&gate));
+            gate
+        }
     }
 
     async fn with_refresh_intent(
@@ -72,24 +88,40 @@ impl InMemoryCoordinator {
                 map.insert(in_flight_key.clone(), shared.clone());
                 let in_flight = Arc::clone(&self.in_flight);
                 let cleanup_key = in_flight_key.clone();
+                let mutation_gate = self.mutation_gate(&in_flight_key.token);
                 tokio::spawn(async move {
+                    let _mutation_guard = mutation_gate.lock_owned().await;
                     let result = refresh_fn().await;
-                    let _ = tx.send(result);
+                    // Retire this exact in-flight owner before waking waiters.
+                    // Waiters never remove map entries: doing so after wake can
+                    // delete a newer refresh inserted for the same key.
                     in_flight.lock().remove(&cleanup_key);
+                    let _ = tx.send(result);
                 });
                 shared
             }
         };
-        let result = fut.await;
-        // Remove from the in-flight map so subsequent refreshes are not
-        // short-circuited by the terminal result.
-        self.in_flight.lock().remove(&in_flight_key);
-        result
+        fut.await
     }
 }
 
 #[async_trait]
 impl RefreshCoordinator for InMemoryCoordinator {
+    async fn with_exclusive_mutation(
+        &self,
+        key: TokenKey,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<PersistedTokens, CredentialMutationError> {
+        let mutation_gate = self.mutation_gate(&key);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _mutation_guard = mutation_gate.lock_owned().await;
+            let result = mutation_fn().await;
+            let _ = tx.send(result);
+        });
+        rx.await.unwrap_or(Err(CredentialMutationError::Cancelled))
+    }
+
     async fn with_refresh(
         &self,
         key: TokenKey,
@@ -124,7 +156,10 @@ mod file_lock {
     use async_trait::async_trait;
     use fs4::fs_std::FileExt;
 
-    use super::{InMemoryCoordinator, RefreshCoordinator, RefreshError, RefreshFn};
+    use super::{
+        CredentialMutationError, CredentialMutationFn, InMemoryCoordinator, RefreshCoordinator,
+        RefreshError, RefreshFn,
+    };
     use crate::auth_store::{PersistedTokens, TokenKey};
 
     /// Wraps `InMemoryCoordinator` with an OS-level lockfile per binding.
@@ -163,7 +198,8 @@ mod file_lock {
                     let file = tokio::task::spawn_blocking(move || -> std::io::Result<File> {
                         let f = OpenOptions::new()
                             .create(true)
-                            .truncate(true)
+                            .truncate(false)
+                            .read(true)
                             .write(true)
                             .open(&lock_path)?;
                         f.lock_exclusive()?;
@@ -185,10 +221,61 @@ mod file_lock {
                 })
             })
         }
+
+        fn with_locking_mutation(
+            &self,
+            key: &TokenKey,
+            mutation_fn: CredentialMutationFn,
+        ) -> CredentialMutationFn {
+            let lock_dir = self.lock_dir.clone();
+            let lock_path = self.lock_path_for(key);
+            Box::new(move || {
+                Box::pin(async move {
+                    tokio::fs::create_dir_all(&lock_dir)
+                        .await
+                        .map_err(|error| CredentialMutationError::LockFailed(error.to_string()))?;
+
+                    let file = tokio::task::spawn_blocking(move || -> std::io::Result<File> {
+                        let file = OpenOptions::new()
+                            .create(true)
+                            .truncate(false)
+                            .read(true)
+                            .write(true)
+                            .open(&lock_path)?;
+                        file.lock_exclusive()?;
+                        Ok(file)
+                    })
+                    .await
+                    .map_err(|error| {
+                        CredentialMutationError::LockFailed(format!("spawn_blocking: {error}"))
+                    })?
+                    .map_err(|error| CredentialMutationError::LockFailed(error.to_string()))?;
+
+                    let result = mutation_fn().await;
+
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = FileExt::unlock(&file);
+                        drop(file);
+                    })
+                    .await;
+
+                    result
+                })
+            })
+        }
     }
 
     #[async_trait]
     impl RefreshCoordinator for FileLockCoordinator {
+        async fn with_exclusive_mutation(
+            &self,
+            key: TokenKey,
+            mutation_fn: CredentialMutationFn,
+        ) -> Result<PersistedTokens, CredentialMutationError> {
+            let mutation_fn = self.with_locking_mutation(&key, mutation_fn);
+            self.inner.with_exclusive_mutation(key, mutation_fn).await
+        }
+
         async fn with_refresh(
             &self,
             key: TokenKey,
@@ -219,6 +306,7 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::Duration;
     use tokio::sync::oneshot;
 
     fn key() -> TokenKey {
@@ -270,20 +358,41 @@ mod tests {
         };
         normal_started_rx.await.expect("normal refresh started");
 
-        let forced = coordinator
-            .with_forced_refresh(key, Box::new(|| Box::pin(async { Ok(tokens("forced")) })))
-            .await
-            .expect("forced refresh should run its own refresh closure");
-        assert_eq!(forced.primary_secret.as_deref(), Some("forced"));
+        let (forced_started_tx, mut forced_started_rx) = oneshot::channel();
+        let forced = tokio::spawn(async move {
+            coordinator
+                .with_forced_refresh(
+                    key,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            let _ = forced_started_tx.send(());
+                            Ok(tokens("forced"))
+                        })
+                    }),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut forced_started_rx)
+                .await
+                .is_err(),
+            "forced refresh must remain a distinct call but share the key mutation gate"
+        );
 
         normal_release_tx
             .send(())
-            .expect("normal refresh still waiting separately");
+            .expect("normal refresh is still waiting");
         let normal = normal
             .await
             .expect("normal task joins")
             .expect("normal refresh succeeds");
         assert_eq!(normal.primary_secret.as_deref(), Some("normal"));
+        forced_started_rx.await.expect("forced refresh starts next");
+        let forced = forced
+            .await
+            .expect("forced task joins")
+            .expect("forced refresh should run its own refresh closure");
+        assert_eq!(forced.primary_secret.as_deref(), Some("forced"));
     }
 
     #[tokio::test]

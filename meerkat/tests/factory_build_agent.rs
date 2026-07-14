@@ -647,6 +647,52 @@ async fn agent_llm_client_decorator_wraps_agent_llm_client_override() {
     assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn raw_llm_override_rejects_conflicting_fixed_provider_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let build = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(meerkat_client::TestClient::for_provider(
+            meerkat_core::Provider::OpenAI,
+        ))),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let error = match factory.build_agent(build, &Config::default()).await {
+        Err(error) => error,
+        Ok(_) => panic!("a raw client claiming OpenAI cannot back Anthropic identity"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("raw LLM client override claims provider 'openai'"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn agent_llm_override_rejects_conflicting_model_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let build = AgentBuildConfig {
+        agent_llm_client_override: Some(Arc::new(MockAgentLlmClient {
+            model: "different-model".to_string(),
+        })),
+        ..AgentBuildConfig::new("agent-override-model")
+    };
+
+    let error = match factory.build_agent(build, &Config::default()).await {
+        Err(error) => error,
+        Ok(_) => panic!("typed agent override model must match canonical identity"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not match canonical session identity"),
+        "unexpected error: {error}"
+    );
+}
+
 /// 2. `build_agent` without LLM override fails when no API key is set.
 ///
 /// Superseded by `build_agent_without_auth_binding_rejects_ambient_realm_config_api_key`
@@ -3125,12 +3171,18 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
 struct ParamsCaptureClient {
     /// Captured provider_params (empty object if None was passed).
     captured: Mutex<serde_json::Value>,
+    provider: meerkat_core::Provider,
 }
 
 impl ParamsCaptureClient {
     fn new() -> Self {
+        Self::for_provider(meerkat_core::Provider::Anthropic)
+    }
+
+    fn for_provider(provider: meerkat_core::Provider) -> Self {
         Self {
             captured: Mutex::new(serde_json::json!(null)),
+            provider,
         }
     }
 
@@ -3172,7 +3224,7 @@ impl LlmClient for ParamsCaptureClient {
         ]))
     }
     fn provider(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::Anthropic
+        self.provider
     }
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
         Ok(())
@@ -3290,7 +3342,9 @@ async fn explicit_meerkat_tool_policy_preserves_provider_search_defaults() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
-    let client = Arc::new(ParamsCaptureClient::new());
+    let client = Arc::new(ParamsCaptureClient::for_provider(
+        meerkat_core::Provider::OpenAI,
+    ));
     let build_config = AgentBuildConfig {
         llm_client_override: Some(client.clone()),
         override_builtins: ToolCategoryOverride::Disable,
@@ -3311,7 +3365,9 @@ async fn explicit_provider_search_param_can_reenable_search_under_tool_policy() 
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
-    let client = Arc::new(ParamsCaptureClient::new());
+    let client = Arc::new(ParamsCaptureClient::for_provider(
+        meerkat_core::Provider::OpenAI,
+    ));
     let build_config = AgentBuildConfig {
         llm_client_override: Some(client.clone()),
         override_builtins: ToolCategoryOverride::Disable,
@@ -3568,11 +3624,11 @@ async fn factory_built_agent_honors_config_tools_timeout() {
         }
 
         fn provider(&self) -> meerkat_core::Provider {
-            meerkat_core::Provider::Other
+            meerkat_core::Provider::Anthropic
         }
 
         fn model(&self) -> &'static str {
-            "mock-slow-tool-model"
+            "claude-sonnet-4-5"
         }
     }
 

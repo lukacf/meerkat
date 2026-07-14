@@ -78,6 +78,7 @@ pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -
             | PersistedAuthMode::ClaudeAiOauth
             | PersistedAuthMode::OauthToApiKey
             | PersistedAuthMode::GoogleOauth
+            | PersistedAuthMode::McpOauth
     )
 }
 
@@ -505,6 +506,7 @@ mod tests {
             PersistedAuthMode::ClaudeAiOauth,
             PersistedAuthMode::OauthToApiKey,
             PersistedAuthMode::GoogleOauth,
+            PersistedAuthMode::McpOauth,
         ] {
             assert!(
                 !persisted_auth_mode_is_directly_creatable(mode),

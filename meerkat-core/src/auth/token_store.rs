@@ -269,6 +269,11 @@ pub enum RefreshError {
     Cancelled,
     #[error("cross-process lock acquisition failed: {0}")]
     LockFailed(String),
+    #[error("durable credential terminal commit failed: {message}")]
+    DurableTerminalCommit {
+        message: String,
+        observation: RefreshFailureObservation,
+    },
 }
 
 /// Typed boundary evidence reported to AuthMachine after a refresh failure.
@@ -351,7 +356,8 @@ impl RefreshFailureObservation {
 impl RefreshError {
     pub fn observation(&self) -> RefreshFailureObservation {
         match self {
-            Self::Observed { observation, .. } => observation.clone(),
+            Self::Observed { observation, .. }
+            | Self::DurableTerminalCommit { observation, .. } => observation.clone(),
             Self::Refresh(_) | Self::Cancelled | Self::LockFailed(_) => {
                 RefreshFailureObservation::transient()
             }
@@ -363,10 +369,47 @@ impl RefreshError {
 pub type RefreshFn =
     Box<dyn FnOnce() -> BoxFuture<'static, Result<PersistedTokens, RefreshError>> + Send + 'static>;
 
+/// Errors raised while serializing one durable credential mutation.
+///
+/// Refresh classification remains [`RefreshError`]-owned. This error only
+/// describes the mechanics of entering and completing the shared mutation
+/// transaction used by refresh and interactive credential replacement.
+#[derive(Clone, Debug, Error)]
+pub enum CredentialMutationError {
+    #[error("credential mutation failed: {0}")]
+    Operation(String),
+    #[error("credential token-store mutation failed: {0}")]
+    TokenStore(String),
+    #[error("credential lifecycle mutation failed: {0}")]
+    AuthLifecycle(String),
+    #[error("credential mutation was cancelled")]
+    Cancelled,
+    #[error("cross-process credential mutation lock acquisition failed: {0}")]
+    LockFailed(String),
+}
+
+/// Boxed non-coalescing credential mutation closure.
+pub type CredentialMutationFn = Box<
+    dyn FnOnce() -> BoxFuture<'static, Result<PersistedTokens, CredentialMutationError>>
+        + Send
+        + 'static,
+>;
+
 /// Coordinator for token-refresh calls. Implementations coalesce
 /// concurrent calls for the same `TokenKey`.
 #[async_trait]
 pub trait RefreshCoordinator: Send + Sync {
+    /// Run one per-key credential mutation under the coordinator's in-process
+    /// and, when configured, cross-process exclusion boundary.
+    ///
+    /// Unlike refresh calls, distinct mutations are never coalesced: every
+    /// closure runs exactly once after the prior transaction releases the key.
+    async fn with_exclusive_mutation(
+        &self,
+        key: TokenKey,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<PersistedTokens, CredentialMutationError>;
+
     async fn with_refresh(
         &self,
         key: TokenKey,

@@ -292,6 +292,15 @@ impl meerkat_core::handles::InteractionStreamHandle for TestInteractionStreamHan
         Ok(())
     }
 
+    fn abandoned(
+        &self,
+        corr_id: PeerCorrelationId,
+        _reason: meerkat_core::InteractionStreamAbandonReason,
+    ) -> Result<(), DslTransitionError> {
+        self.states.lock().remove(&corr_id);
+        Ok(())
+    }
+
     fn state(&self, corr_id: PeerCorrelationId) -> Option<InteractionStreamState> {
         self.states.lock().get(&corr_id).copied()
     }

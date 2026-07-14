@@ -1553,6 +1553,12 @@ pub enum InteractionFailureReason {
         /// Display projection of the abandonment detail.
         detail: String,
     },
+    /// The machine-owned interaction stream terminal rejected or could not
+    /// deliver the peer response. Unlike generic runtime abandonment, the
+    /// typed reason is preserved for stream consumers.
+    InteractionStreamAbandoned {
+        reason: crate::InteractionStreamAbandonReason,
+    },
     /// The interaction's main run completed but turn finalization failed.
     FinalizationFailed {
         /// Display projection of the finalization error.
@@ -1581,6 +1587,7 @@ impl std::fmt::Display for InteractionFailureReason {
         match self {
             Self::Cancelled => write!(f, "cancelled"),
             Self::Abandoned { detail } => write!(f, "{detail}"),
+            Self::InteractionStreamAbandoned { reason } => reason.fmt(f),
             Self::FinalizationFailed { detail } => write!(f, "{detail}"),
         }
     }

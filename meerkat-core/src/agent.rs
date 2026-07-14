@@ -1254,6 +1254,17 @@ pub trait CommsRuntime: Send + Sync {
     /// terminal events to the tap.
     fn mark_interaction_complete(&self, _id: &crate::interaction::InteractionId) {}
 
+    /// Signal that an interaction stream became unusable for an explicit,
+    /// typed reason. Implementations with machine-owned stream lifecycle must
+    /// drive `InteractionStreamAbandoned`; transport-only implementations may
+    /// clean up their local projection directly.
+    fn abandon_interaction_stream(
+        &self,
+        _id: &crate::interaction::InteractionId,
+        _reason: crate::InteractionStreamAbandonReason,
+    ) {
+    }
+
     /// Access the session's peer-interaction DSL handle (W1-A).
     ///
     /// Returns `None` for transport-only comms runtimes. A runtime that emits

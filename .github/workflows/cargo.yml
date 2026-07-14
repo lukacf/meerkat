@@ -6,9 +6,9 @@ name: Cargo CI
 # work scales with what actually changed.
 #
 # Per-push jobs:
-#   changes         — path classification (docs-only skips Rust; SDK-relevant
-#                     paths enable the full Web SDK suite)
-#   fmt-governance  — fmt + surface gates + typed governance gates
+#   changes         — path classification (docs-only skips build/test jobs;
+#                     SDK-relevant paths enable the full Web SDK suite)
+#   fmt-governance  — always-run fmt + surface + typed governance gates
 #   clippy          — workspace clippy, all features, lib/bin targets
 #                     (--all-targets multiplies build volume several-fold for
 #                     test-only lint yield; it runs nightly)
@@ -19,6 +19,7 @@ name: Cargo CI
 #                     group is the complement of the named ones
 #   e2e-fast        — deterministic end-to-end lane (real binaries)
 #   ratchets        — version/schema/SDK/surface generation ratchets
+#   machine-verify  — canonical bounded TLC lane; machine-authority changes
 #   wasm-check      — wasm32 cargo check (every code change)
 #   wasm-contract   — wasm-pack browser contract test in headless Chrome;
 #                     only when wasm contract surfaces changed
@@ -56,7 +57,7 @@ env:
   # reuse (rust-cache + sccache) requires registry source paths that do not
   # change between runs.
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.0
+  RUSTUP_TOOLCHAIN: 1.94.1
   # Keep repo-cargo's per-worktree redirection out of CI: pin the target dir
   # where Swatinem/rust-cache caches it (scripts/repo-cargo respects a
   # pre-set CARGO_TARGET_DIR).
@@ -81,6 +82,7 @@ jobs:
       code_changed: ${{ steps.classify.outputs.code_changed }}
       sdk_changed: ${{ steps.classify.outputs.sdk_changed }}
       wasm_changed: ${{ steps.classify.outputs.wasm_changed }}
+      machine_authority_changed: ${{ steps.classify.outputs.machine_authority_changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -96,12 +98,13 @@ jobs:
           code_changed=true
           sdk_changed=true
           wasm_changed=true
+          machine_authority_changed=true
           if [[ -n "${BASE_SHA}" && "${BASE_SHA}" != "0000000000000000000000000000000000000000" ]] \
             && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
             changed=$(git diff --name-only "${BASE_SHA}...HEAD")
-            # Docs-only changes (docs trees, markdown, agent config) skip the
-            # Rust jobs entirely. Anything else — or an unknown base — runs
-            # the full lane (fail open into MORE CI, never less).
+            # Docs-only changes skip the build/test jobs. Governance still
+            # runs on every invocation below. Anything else — or an unknown
+            # base — runs the full lane (fail open into MORE CI, never less).
             if ! grep -qvE '^(docs/|docs-internal/|\.claude/|CHANGELOG\.md|README\.md|.*\.md$)' <<<"${changed}"; then
               code_changed=false
             fi
@@ -120,16 +123,28 @@ jobs:
             if ! grep -qE '^(meerkat-web-runtime/|meerkat-contracts/|sdks/web/|\.github/workflows/cargo\.yml)' <<<"${changed}"; then
               wasm_changed=false
             fi
+            mapfile -t changed_paths <<<"${changed}"
+            if scripts/machine-authority-changed -- "${changed_paths[@]}"; then
+              machine_authority_changed=true
+            else
+              classifier_status=$?
+              if [[ "${classifier_status}" -eq 1 ]]; then
+                machine_authority_changed=false
+              else
+                echo "::warning::machine-authority classifier failed; running bounded TLC fail-closed"
+                machine_authority_changed=true
+              fi
+            fi
           fi
           echo "code_changed=${code_changed}" >> "$GITHUB_OUTPUT"
           echo "sdk_changed=${sdk_changed}" >> "$GITHUB_OUTPUT"
           echo "wasm_changed=${wasm_changed}" >> "$GITHUB_OUTPUT"
-          echo "code_changed=${code_changed} sdk_changed=${sdk_changed} wasm_changed=${wasm_changed}"
+          echo "machine_authority_changed=${machine_authority_changed}" >> "$GITHUB_OUTPUT"
+          echo "code_changed=${code_changed} sdk_changed=${sdk_changed} wasm_changed=${wasm_changed} machine_authority_changed=${machine_authority_changed}"
 
   fmt-governance:
     name: Format + governance gates
     needs: changes
-    if: ${{ needs.changes.outputs.code_changed == 'true' }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
@@ -515,6 +530,56 @@ jobs:
       # 4-core runner. It is release hygiene, re-verified by release_validate
       # at release time, and runs nightly instead of per push.
 
+  machine-verify:
+    name: Bounded TLC machine verification
+    needs: changes
+    if: ${{ needs.changes.outputs.machine_authority_changed == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      # A dedicated runner has no Cargo lock contention, so keep xtask under
+      # the standard cached target root instead of the local /tmp isolation.
+      XTASK_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-machine-verify
+
+      - name: Install pinned TLC
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
+            --output "$HOME/.local/lib/tla2tools.jar"
+          printf '#!/bin/sh\nexec java -jar "%s/tla2tools.jar" "$@"\n' \
+            "$HOME/.local/lib" > "$HOME/.local/bin/tlc"
+          chmod +x "$HOME/.local/bin/tlc"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Canonical bounded machine verification
+        run: make machine-verify
+
   wasm-check:
     name: wasm32 check
     needs: changes
@@ -671,6 +736,7 @@ jobs:
       - int-rest
       - e2e-fast
       - ratchets
+      - machine-verify
       - wasm-check
       - wasm-contract
       - sdk-web
@@ -689,6 +755,7 @@ jobs:
             ${{ needs.int-rest.result }}
             ${{ needs.e2e-fast.result }}
             ${{ needs.ratchets.result }}
+            ${{ needs.machine-verify.result }}
             ${{ needs.wasm-check.result }}
             ${{ needs.wasm-contract.result }}
             ${{ needs.sdk-web.result }}

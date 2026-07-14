@@ -3339,10 +3339,9 @@ impl MobBuilder {
                 if let Some(ref auth_binding) = restore_spec.auth_binding {
                     resumed_config.auth_binding = Some(auth_binding.clone());
                 }
-                let reconcile_client: Arc<dyn LlmClient> = default_llm_client
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
-                resumed_config.llm_client_override = Some(reconcile_client);
+                if let Some(reconcile_client) = default_llm_client.clone() {
+                    resumed_config.llm_client_override = Some(reconcile_client);
+                }
                 let prompt = format!(
                     "You have been spawned as '{}' (role: {}) in mob '{}'.",
                     entry.agent_identity, entry.role, definition.id
@@ -3527,14 +3526,13 @@ impl MobBuilder {
             if let Some(ref auth_binding) = restore_spec.auth_binding {
                 config.auth_binding = Some(auth_binding.clone());
             }
-            // Resume reconciliation needs live comms runtimes, but this path is
-            // infrastructure restoration and should not consume provider quota.
-            // If no explicit override is configured, use the local test client
-            // for deterministic, no-network bootstrap turns.
-            let reconcile_client: Arc<dyn LlmClient> = default_llm_client
-                .clone()
-                .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
-            config.llm_client_override = Some(reconcile_client);
+            // An explicitly supplied host client remains a mechanical test or
+            // embedding override. Otherwise restoration re-enters the
+            // canonical factory/provider path; it must never install a
+            // long-lived synthetic client as provider identity.
+            if let Some(reconcile_client) = default_llm_client.clone() {
+                config.llm_client_override = Some(reconcile_client);
+            }
             let prompt = format!(
                 "You have been spawned as '{}' (role: {}) in mob '{}'.",
                 entry.agent_identity, entry.role, definition.id

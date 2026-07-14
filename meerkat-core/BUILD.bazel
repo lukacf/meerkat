@@ -405,6 +405,65 @@ rust_test(
 )
 
 rust_test(
+    name = "mcp_config_crossproc_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mcp_config_crossproc",
+    crate_root = "tests/mcp_config_crossproc.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "jsonschema",
+        "schema",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+    ],
+    srcs = [
+        "tests/mcp_config_crossproc.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.31",
+        "CARGO_BIN_NAME": "mcp_config_crossproc",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "ops_lifecycle_integration_test",
     aliases = aliases(
         package_name = "meerkat-core",
@@ -766,6 +825,7 @@ test_suite(
         ":fork_at_rotates_session_id_test",
         ":hooks_contracts_test",
         ":image_generation_contracts_test",
+        ":mcp_config_crossproc_test",
         ":meerkat_core_unit_test",
         ":rct_contracts_test",
         ":realm_connection_config_test",

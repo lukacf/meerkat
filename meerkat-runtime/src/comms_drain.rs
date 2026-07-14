@@ -318,12 +318,14 @@ pub fn spawn_comms_drain(
                             // W1-A ordering: pull the subscriber FIRST (it
                             // is the one-shot the completion bridge hands
                             // the terminal event to), THEN fire the DSL
-                            // terminal transition. The transition emits
-                            // `PeerInteractionCleanup`; the observer drops
-                            // the now-idle stream registry entry. Without a
-                            // peer-interaction handle, this drain path is
-                            // transport-only for lifecycle purposes and does
-                            // not synthesize semantic cleanup.
+                            // terminal transition. `PeerInteractionCleanup`
+                            // owns only peer-correlation mechanics; the
+                            // independent stream remains claimable when this
+                            // response wins the race with caller attachment.
+                            // Stream completion is committed when its consumer
+                            // observes the terminal event. Without a
+                            // peer-interaction handle, this drain path remains
+                            // transport-only for lifecycle purposes.
                             let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
                             let peer_interaction_handle = comms_runtime.peer_interaction_handle();
                             let dsl_installed = peer_interaction_handle.is_some();
@@ -358,7 +360,12 @@ pub fn spawn_comms_drain(
                                         interaction_id = %interaction_id,
                                         "comms_drain: rejected malformed terminal peer ingress"
                                     );
-                                    if !dsl_installed {
+                                    if dsl_installed {
+                                        comms_runtime.abandon_interaction_stream(
+                                            &interaction_id,
+                                            meerkat_core::InteractionStreamAbandonReason::ResponseRejected,
+                                        );
+                                    } else {
                                         comms_runtime.mark_interaction_complete(&interaction_id);
                                     }
                                     continue;
@@ -385,7 +392,12 @@ pub fn spawn_comms_drain(
                                         error = %err,
                                         "comms_drain: failed to inject terminal response"
                                     );
-                                    if !dsl_installed {
+                                    if dsl_installed {
+                                        comms_runtime.abandon_interaction_stream(
+                                            &interaction_id,
+                                            meerkat_core::InteractionStreamAbandonReason::ResponseRejected,
+                                        );
+                                    } else {
                                         comms_runtime.mark_interaction_complete(&interaction_id);
                                     }
                                 }
@@ -471,7 +483,10 @@ pub fn spawn_comms_drain(
                                     class = ?candidate_class,
                                     "comms_drain: rejected inbound peer request without complete peer request authority"
                                 );
-                                comms_runtime.mark_interaction_complete(&interaction_id);
+                                comms_runtime.abandon_interaction_stream(
+                                    &interaction_id,
+                                    meerkat_core::InteractionStreamAbandonReason::AdmissionRejected,
+                                );
                                 continue;
                             };
                             let corr_id =
@@ -485,7 +500,10 @@ pub fn spawn_comms_drain(
                                     corr_id = %corr_id,
                                     "PeerInteractionHandle::request_received rejected"
                                 );
-                                comms_runtime.mark_interaction_complete(&interaction_id);
+                                comms_runtime.abandon_interaction_stream(
+                                    &interaction_id,
+                                    meerkat_core::InteractionStreamAbandonReason::AdmissionRejected,
+                                );
                                 continue;
                             }
                         }
@@ -502,7 +520,10 @@ pub fn spawn_comms_drain(
                                     interaction_id = %interaction_id,
                                     "comms_drain: rejected malformed peer ingress"
                                 );
-                                comms_runtime.mark_interaction_complete(&interaction_id);
+                                comms_runtime.abandon_interaction_stream(
+                                    &interaction_id,
+                                    meerkat_core::InteractionStreamAbandonReason::AdmissionRejected,
+                                );
                                 continue;
                             }
                         };
@@ -528,7 +549,10 @@ pub fn spawn_comms_drain(
                                     error = %err,
                                     "comms_drain: failed to accept peer input"
                                 );
-                                comms_runtime.mark_interaction_complete(&interaction_id);
+                                comms_runtime.abandon_interaction_stream(
+                                    &interaction_id,
+                                    meerkat_core::InteractionStreamAbandonReason::AdmissionRejected,
+                                );
                             }
                         }
                     }
@@ -569,7 +593,12 @@ fn reject_peer_response_observation_via_authority(
             interaction_id = %candidate.interaction.id,
             "PeerInteractionHandle::response_rejected rejected malformed peer response observation"
         );
+        return;
     }
+    comms_runtime.abandon_interaction_stream(
+        in_reply_to,
+        meerkat_core::InteractionStreamAbandonReason::ResponseRejected,
+    );
 }
 
 fn bridge_peer_identity(
@@ -4471,6 +4500,8 @@ mod tests {
         peer_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
         peer_request_response_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
         completed_count: std::sync::atomic::AtomicUsize,
+        abandonments:
+            std::sync::Mutex<Vec<(InteractionId, meerkat_core::InteractionStreamAbandonReason)>>,
     }
 
     impl OneShotPeerRequestRuntime {
@@ -4484,6 +4515,7 @@ mod tests {
                 peer_handle,
                 peer_request_response_handle: None,
                 completed_count: std::sync::atomic::AtomicUsize::new(0),
+                abandonments: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -4497,12 +4529,22 @@ mod tests {
                 peer_handle: Some(peer_handle.clone()),
                 peer_request_response_handle: Some(peer_handle),
                 completed_count: std::sync::atomic::AtomicUsize::new(0),
+                abandonments: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn completed_count(&self) -> usize {
             self.completed_count
                 .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn abandonment_reasons(&self) -> Vec<meerkat_core::InteractionStreamAbandonReason> {
+            self.abandonments
+                .lock()
+                .expect("abandonments mutex")
+                .iter()
+                .map(|(_, reason)| *reason)
+                .collect()
         }
     }
 
@@ -4550,6 +4592,17 @@ mod tests {
         fn mark_interaction_complete(&self, _id: &InteractionId) {
             self.completed_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn abandon_interaction_stream(
+            &self,
+            id: &InteractionId,
+            reason: meerkat_core::InteractionStreamAbandonReason,
+        ) {
+            self.abandonments
+                .lock()
+                .expect("abandonments mutex")
+                .push((*id, reason));
         }
     }
 
@@ -4955,10 +5008,11 @@ mod tests {
                 snapshot.ledger.input_count, 0,
                 "rejected PeerRequestReceived must not admit {class:?} into machine work"
             );
+            assert_eq!(runtime.completed_count(), 0);
             assert_eq!(
-                runtime.completed_count(),
-                1,
-                "rejected {class:?} should be closed at the comms boundary"
+                runtime.abandonment_reasons(),
+                vec![meerkat_core::InteractionStreamAbandonReason::AdmissionRejected],
+                "rejected {class:?} must use the typed abandonment path"
             );
         }
     }
@@ -5009,10 +5063,11 @@ mod tests {
                 snapshot.ledger.input_count, 0,
                 "partial authority must not admit {class:?} into machine work"
             );
+            assert_eq!(runtime.completed_count(), 0);
             assert_eq!(
-                runtime.completed_count(),
-                1,
-                "rejected {class:?} should be closed at the comms boundary"
+                runtime.abandonment_reasons(),
+                vec![meerkat_core::InteractionStreamAbandonReason::AdmissionRejected],
+                "rejected {class:?} must use the typed abandonment path"
             );
         }
     }
@@ -5055,10 +5110,11 @@ mod tests {
                 snapshot.ledger.input_count, 0,
                 "missing authority must not admit {class:?} into machine work"
             );
+            assert_eq!(runtime.completed_count(), 0);
             assert_eq!(
-                runtime.completed_count(),
-                1,
-                "rejected {class:?} should be closed at the comms boundary"
+                runtime.abandonment_reasons(),
+                vec![meerkat_core::InteractionStreamAbandonReason::AdmissionRejected],
+                "rejected {class:?} must use the typed abandonment path"
             );
         }
     }
@@ -10131,25 +10187,40 @@ fn spawn_completion_bridge(
     handle: Option<crate::completion::CompletionHandle>,
 ) {
     crate::tokio::spawn(async move {
-        let authorized_terminal = if let Some(handle) = handle {
+        let delivered_terminal = if let Some(handle) = handle {
             match handle.try_wait().await {
                 Ok(outcome) => {
                     if let Some(tx) = subscriber {
                         let event = interaction_terminal_event(interaction_id, outcome);
-                        if crate::tokio::time::timeout(
+                        match crate::tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             tx.send(event),
                         )
                         .await
-                        .is_err()
                         {
-                            tracing::warn!(
-                                %interaction_id,
-                                "completion bridge dropped terminal event: subscriber send timed out after 5s"
-                            );
+                            Ok(Ok(())) => true,
+                            Ok(Err(_)) => {
+                                tracing::warn!(
+                                    %interaction_id,
+                                    "completion bridge could not deliver terminal event: subscriber closed"
+                                );
+                                false
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    %interaction_id,
+                                    "completion bridge could not deliver terminal event: subscriber send timed out after 5s"
+                                );
+                                false
+                            }
                         }
+                    } else {
+                        tracing::warn!(
+                            %interaction_id,
+                            "completion bridge has no interaction subscriber for terminal event"
+                        );
+                        false
                     }
-                    true
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -10168,8 +10239,11 @@ fn spawn_completion_bridge(
             false
         };
 
-        if authorized_terminal && let Some(runtime) = comms_runtime {
-            runtime.mark_interaction_complete(&interaction_id);
+        if !delivered_terminal && let Some(runtime) = comms_runtime {
+            runtime.abandon_interaction_stream(
+                &interaction_id,
+                meerkat_core::InteractionStreamAbandonReason::TerminalDeliveryFailed,
+            );
         }
     });
 }

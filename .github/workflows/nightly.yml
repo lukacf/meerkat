@@ -32,7 +32,7 @@ env:
   # reuse (rust-cache + sccache) requires registry source paths that do not
   # change between runs.
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.0
+  RUSTUP_TOOLCHAIN: 1.94.1
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"

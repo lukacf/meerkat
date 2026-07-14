@@ -39,7 +39,7 @@ The canonical identity is the pair of `source_uuid` and `skill_name`. Two source
 Configured in skills settings (typically in realm `config.toml`). Uses the system `git` executable:
 
 ```toml
-[[repositories]]
+[[skills.repositories]]
 name = "company"
 source_uuid = "11111111-1111-1111-1111-111111111111"
 type = "git"
@@ -55,7 +55,7 @@ depth = 1              # shallow clone depth
 ### HTTP sources
 
 ```toml
-[[repositories]]
+[[skills.repositories]]
 name = "remote"
 source_uuid = "22222222-2222-2222-2222-222222222222"
 type = "http"
@@ -68,13 +68,13 @@ timeout_seconds = 15
 ### Filesystem and stdio sources
 
 ```toml
-[[repositories]]
+[[skills.repositories]]
 name = "local-shared"
 source_uuid = "33333333-3333-3333-3333-333333333333"
 type = "filesystem"
 path = "/opt/meerkat-skills"
 
-[[repositories]]
+[[skills.repositories]]
 name = "generated"
 source_uuid = "44444444-4444-4444-4444-444444444444"
 type = "stdio"
@@ -417,22 +417,23 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await? {
 
 ## Configuration
 
-Skills are configured via `SkillsConfig` (realm-scoped at runtime, with optional user/project layering when those files are present):
+Skills are configured through the realm's `SkillsConfig`. Realm configuration
+composition is the single authority; the skills resolver consumes the resulting
+repository list with the realm's explicit convention roots.
 
 ```toml
-# realm config (or ~/.rkat/skills.toml and .rkat/skills.toml in layered compatibility mode)
+# realm config
+[skills]
 enabled = true
 max_injection_bytes = 32768    # max size of injected skill content
 inventory_threshold = 12       # flat listing below, collection mode above
 
-[[repositories]]
+[[skills.repositories]]
 name = "company"
 source_uuid = "55555555-5555-5555-5555-555555555555"
 type = "git"
 url = "https://github.com/company/skills.git"
 ```
-
-When layered user/project files are used, project settings override user settings and repositories are merged by name.
 
 ## See also
 

@@ -15,8 +15,8 @@ use std::sync::Arc;
 use chrono::{Duration as ChronoDuration, Utc};
 
 use meerkat_auth_core::auth_store::{
-    EphemeralTokenStore, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
-    RefreshFn, TokenKey, TokenStore,
+    CredentialMutationError, CredentialMutationFn, EphemeralTokenStore, PersistedAuthMode,
+    PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeaseTransition, GeneratedAuthLeaseHandle, LeaseKey,
@@ -254,6 +254,14 @@ struct StaticRefreshCoordinator {
 
 #[async_trait::async_trait]
 impl RefreshCoordinator for StaticRefreshCoordinator {
+    async fn with_exclusive_mutation(
+        &self,
+        _key: TokenKey,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<PersistedTokens, CredentialMutationError> {
+        mutation_fn().await
+    }
+
     async fn with_refresh(
         &self,
         _key: TokenKey,
@@ -269,6 +277,14 @@ struct FailingRefreshCoordinator {
 
 #[async_trait::async_trait]
 impl RefreshCoordinator for FailingRefreshCoordinator {
+    async fn with_exclusive_mutation(
+        &self,
+        _key: TokenKey,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<PersistedTokens, CredentialMutationError> {
+        mutation_fn().await
+    }
+
     async fn with_refresh(
         &self,
         _key: TokenKey,

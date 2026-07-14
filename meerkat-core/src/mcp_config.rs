@@ -1,17 +1,25 @@
 //! MCP server configuration loading and management
 //!
 //! Provides file-based MCP server configuration with two scopes:
-//! - `project`: `.rkat/mcp.toml` (searched upward from cwd) - local, shared in repo
+//! - `project`: `<context-root>/.rkat/mcp.toml` (or cwd when ambient) - local, shared in repo
 //! - `user`: `~/.rkat/mcp.toml` - global, personal
 //!
 //! Precedence: project > user (project wins on name collision)
 
+#[cfg(not(target_arch = "wasm32"))]
+use fs4::fs_std::FileExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs::{File, OpenOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use toml_edit::{Array, DocumentMut, Item, Table};
 
 /// MCP configuration containing server definitions
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -161,7 +169,7 @@ impl McpServerConfig {
 pub enum McpScope {
     /// User-level config: ~/.rkat/mcp.toml
     User,
-    /// Project-level config: .rkat/mcp.toml (searched upward)
+    /// Project-level config: `<context-root>/.rkat/mcp.toml` (or cwd when ambient)
     Project,
 }
 
@@ -185,16 +193,29 @@ pub struct McpConfigMutationAuthority {
 }
 
 impl McpConfigMutationAuthority {
-    pub fn project(context_root: Option<PathBuf>, user_config_root: Option<PathBuf>) -> Self {
+    /// Bind a mutation to a canonical scope and explicit convention roots.
+    pub fn for_scope(
+        scope: McpScope,
+        context_root: Option<PathBuf>,
+        user_config_root: Option<PathBuf>,
+    ) -> Self {
         Self {
-            scope: McpScope::Project,
+            scope,
             context_root,
             user_config_root,
         }
     }
 
+    pub fn project(context_root: Option<PathBuf>, user_config_root: Option<PathBuf>) -> Self {
+        Self::for_scope(McpScope::Project, context_root, user_config_root)
+    }
+
+    /// Resolve the canonical persisted path selected by this authority.
+    ///
+    /// Explicit convention roots win. Ambient CWD/HOME lookup remains only
+    /// for callers that deliberately construct an authority without roots.
     #[cfg(not(target_arch = "wasm32"))]
-    fn path(&self) -> Result<PathBuf, McpConfigError> {
+    pub fn resolved_path(&self) -> Result<PathBuf, McpConfigError> {
         match self.scope {
             McpScope::Project => Ok(self
                 .context_root
@@ -222,12 +243,30 @@ impl McpConfigMutationAuthority {
 pub struct McpConfigRollback {
     path: PathBuf,
     previous_bytes: Option<Vec<u8>>,
+    committed_bytes: Vec<u8>,
+    committed_revision: uuid::Uuid,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl McpConfigRollback {
     pub async fn rollback(self) -> Result<(), McpConfigError> {
-        restore_mcp_file(&self.path, self.previous_bytes.as_deref()).await
+        let lock = acquire_mcp_config_lock(&self.path).await?;
+        let current = read_existing_bytes(&self.path).await?;
+        if lock.revision != Some(self.committed_revision)
+            || current.as_deref() != Some(self.committed_bytes.as_slice())
+        {
+            return Err(McpConfigError::RollbackConflict {
+                path: self.path.display().to_string(),
+            });
+        }
+
+        // Fence the rollback before touching the config bytes. A process crash
+        // after this durable revision reservation can leave the committed file
+        // in place, but the stale rollback token can never be replayed.
+        let (lock, _) = reserve_mcp_config_revision(lock).await?;
+        let result = restore_mcp_file(&self.path, self.previous_bytes.as_deref()).await;
+        drop(lock);
+        result
     }
 }
 
@@ -244,6 +283,10 @@ pub enum McpConfigError {
     ServerNotFound(String),
     #[error("Server '{name}' exists in multiple scopes. Specify --scope: {scopes:?}")]
     AmbiguousServer { name: String, scopes: Vec<McpScope> },
+    #[error("MCP config rollback conflict at {path}: config changed after this mutation")]
+    RollbackConflict { path: String },
+    #[error("MCP config revision sidecar is corrupt at {path}: {message}")]
+    RevisionCorrupt { path: String, message: String },
     #[error("Could not determine MCP config path for {scope} scope")]
     PathUnavailable { scope: McpScope },
     #[error("Missing environment variable '{var}' referenced in {field}")]
@@ -384,6 +427,21 @@ impl McpConfig {
         Ok(config.servers.iter().any(|s| s.name == name))
     }
 
+    /// Check a scope using the caller's explicit convention roots.
+    pub async fn server_exists_from_roots(
+        name: &str,
+        scope: McpScope,
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<bool, McpConfigError> {
+        let authority = McpConfigMutationAuthority::for_scope(
+            scope,
+            context_root.map(Path::to_path_buf),
+            user_config_root.map(Path::to_path_buf),
+        );
+        document_contains_server(&authority.resolved_path()?, name).await
+    }
+
     /// Find which scopes contain a server with the given name
     pub async fn find_server_scopes(name: &str) -> Result<Vec<McpScope>, McpConfigError> {
         let mut scopes = Vec::new();
@@ -398,6 +456,28 @@ impl McpConfig {
         Ok(scopes)
     }
 
+    /// Find every scope containing a server using explicit convention roots.
+    pub async fn find_server_scopes_from_roots(
+        name: &str,
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<Vec<McpScope>, McpConfigError> {
+        let mut scopes = Vec::new();
+
+        if Self::server_exists_from_roots(name, McpScope::Project, context_root, user_config_root)
+            .await?
+        {
+            scopes.push(McpScope::Project);
+        }
+        if Self::server_exists_from_roots(name, McpScope::User, context_root, user_config_root)
+            .await?
+        {
+            scopes.push(McpScope::User);
+        }
+
+        Ok(scopes)
+    }
+
     /// Persist a server addition under an explicit mutation authority.
     ///
     /// The write is atomic at the file level and returns a rollback token for
@@ -406,21 +486,28 @@ impl McpConfig {
         authority: &McpConfigMutationAuthority,
         server: McpServerConfig,
     ) -> Result<McpConfigRollback, McpConfigError> {
-        let path = authority.path()?;
+        let path = authority.resolved_path()?;
+        let lock = acquire_mcp_config_lock(&path).await?;
         let previous = read_existing_bytes(&path).await?;
-        let mut config = read_mcp_file_raw(Some(&path)).await?;
-        if config
-            .servers
-            .iter()
-            .any(|existing| existing.name == server.name)
-        {
-            return Err(McpConfigError::ServerExists(server.name));
+        let mut document = read_mcp_document(&path).await?;
+        let servers = servers_array_mut(&mut document, &path)?;
+        for existing in servers.iter() {
+            if document_server_name(existing, &path)? == server.name.as_str() {
+                return Err(McpConfigError::ServerExists(server.name));
+            }
         }
-        config.servers.push(server);
-        write_mcp_file_atomic(&path, &config).await?;
+        servers.push(server_table(&server));
+        // Reserve and fsync a fresh cross-process revision before mutating the
+        // config file. If the process crashes after this point, older rollback
+        // tokens fail closed instead of overwriting the uncertain result.
+        let (lock, committed_revision) = reserve_mcp_config_revision(lock).await?;
+        let committed_bytes = write_mcp_document_atomic(&path, &document).await?;
+        drop(lock);
         Ok(McpConfigRollback {
             path,
             previous_bytes: previous,
+            committed_bytes,
+            committed_revision,
         })
     }
 
@@ -432,20 +519,188 @@ impl McpConfig {
         authority: &McpConfigMutationAuthority,
         server_name: &str,
     ) -> Result<McpConfigRollback, McpConfigError> {
-        let path = authority.path()?;
+        let path = authority.resolved_path()?;
+        let lock = acquire_mcp_config_lock(&path).await?;
         let previous = read_existing_bytes(&path).await?;
-        let mut config = read_mcp_file_raw(Some(&path)).await?;
-        let initial_len = config.servers.len();
-        config.servers.retain(|server| server.name != server_name);
-        if config.servers.len() == initial_len {
+        let mut document = read_mcp_document(&path).await?;
+        let servers = servers_array_mut(&mut document, &path)?;
+        for server in servers.iter() {
+            document_server_name(server, &path)?;
+        }
+        let initial_len = servers.len();
+        servers.retain(|server| {
+            server.get("name").and_then(|value| value.as_str()) != Some(server_name)
+        });
+        if servers.len() == initial_len {
             return Err(McpConfigError::ServerNotFound(server_name.to_string()));
         }
-        write_mcp_file_atomic(&path, &config).await?;
+        let (lock, committed_revision) = reserve_mcp_config_revision(lock).await?;
+        let committed_bytes = write_mcp_document_atomic(&path, &document).await?;
+        drop(lock);
         Ok(McpConfigRollback {
             path,
             previous_bytes: previous,
+            committed_bytes,
+            committed_revision,
         })
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct McpConfigFileLock {
+    file: File,
+    revision: Option<uuid::Uuid>,
+    valid_revision_bytes: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for McpConfigFileLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mcp_config_lock_path(path: &Path) -> PathBuf {
+    path.with_extension(format!(
+        "{}.lock",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("toml")
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn acquire_mcp_config_lock(path: &Path) -> Result<McpConfigFileLock, McpConfigError> {
+    let lock_path = mcp_config_lock_path(path);
+    tokio::task::spawn_blocking(move || -> Result<McpConfigFileLock, McpConfigError> {
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                McpConfigError::Io(format!("create MCP config lock directory failed: {error}"))
+            })?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| McpConfigError::Io(format!("open MCP config lock failed: {error}")))?;
+        FileExt::lock_exclusive(&file)
+            .map_err(|error| McpConfigError::Io(format!("MCP config lock failed: {error}")))?;
+        let (revision, valid_revision_bytes) = read_mcp_config_revision(&mut file, &lock_path)?;
+        Ok(McpConfigFileLock {
+            file,
+            revision,
+            valid_revision_bytes,
+        })
+    })
+    .await
+    .map_err(|error| McpConfigError::Io(format!("MCP config lock task failed: {error}")))?
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const MCP_CONFIG_REVISION_PREFIX: &str = "rkat-mcp-config-revision-v1 ";
+
+/// Read the append-only revision log stored in the already-locked sidecar.
+///
+/// A trailing partial record can only come from a crash before a reservation
+/// was durably acknowledged. The next reservation truncates that tail while
+/// still holding the same cross-process lock. Complete malformed records fail
+/// closed so mutation cannot proceed on ambiguous revision state.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_mcp_config_revision(
+    file: &mut File,
+    lock_path: &Path,
+) -> Result<(Option<uuid::Uuid>, u64), McpConfigError> {
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map(|_| bytes)
+        })
+        .map_err(|error| McpConfigError::Io(format!("read MCP config revision failed: {error}")))
+        .and_then(|bytes| {
+            let valid_len = bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |index| index.saturating_add(1));
+            let mut revision = None;
+            for raw_line in bytes[..valid_len].split(|byte| *byte == b'\n') {
+                if raw_line.is_empty() {
+                    continue;
+                }
+                let line = std::str::from_utf8(raw_line).map_err(|error| {
+                    McpConfigError::RevisionCorrupt {
+                        path: lock_path.display().to_string(),
+                        message: format!("record is not UTF-8: {error}"),
+                    }
+                })?;
+                let value = line
+                    .strip_prefix(MCP_CONFIG_REVISION_PREFIX)
+                    .ok_or_else(|| McpConfigError::RevisionCorrupt {
+                        path: lock_path.display().to_string(),
+                        message: "record has an unknown format".to_string(),
+                    })?;
+                revision = Some(uuid::Uuid::parse_str(value).map_err(|error| {
+                    McpConfigError::RevisionCorrupt {
+                        path: lock_path.display().to_string(),
+                        message: format!("record has an invalid UUID: {error}"),
+                    }
+                })?);
+            }
+            let valid_revision_bytes =
+                u64::try_from(valid_len).map_err(|_| McpConfigError::RevisionCorrupt {
+                    path: lock_path.display().to_string(),
+                    message: "revision log length exceeds the supported range".to_string(),
+                })?;
+            Ok((revision, valid_revision_bytes))
+        })
+}
+
+/// Append and fsync a fresh revision while retaining the exclusive sidecar
+/// lock. Callers must complete their config write/restore before dropping the
+/// returned guard.
+#[cfg(not(target_arch = "wasm32"))]
+async fn reserve_mcp_config_revision(
+    lock: McpConfigFileLock,
+) -> Result<(McpConfigFileLock, uuid::Uuid), McpConfigError> {
+    tokio::task::spawn_blocking(move || {
+        let mut lock = lock;
+        let revision = fresh_mcp_config_revision(lock.revision)?;
+        lock.file
+            .set_len(lock.valid_revision_bytes)
+            .and_then(|()| lock.file.seek(SeekFrom::End(0)).map(|_| ()))
+            .and_then(|()| writeln!(lock.file, "{MCP_CONFIG_REVISION_PREFIX}{revision}"))
+            .and_then(|()| lock.file.sync_all())
+            .map_err(|error| {
+                McpConfigError::Io(format!("reserve MCP config revision failed: {error}"))
+            })?;
+        lock.valid_revision_bytes = lock.file.stream_position().map_err(|error| {
+            McpConfigError::Io(format!("read MCP config revision position failed: {error}"))
+        })?;
+        lock.revision = Some(revision);
+        Ok((lock, revision))
+    })
+    .await
+    .map_err(|error| McpConfigError::Io(format!("MCP config revision task failed: {error}")))?
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fresh_mcp_config_revision(current: Option<uuid::Uuid>) -> Result<uuid::Uuid, McpConfigError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        McpConfigError::Io(format!(
+            "generate MCP config revision entropy failed: {error}"
+        ))
+    })?;
+    let mut revision = uuid::Builder::from_random_bytes(bytes).into_uuid();
+    if Some(revision) == current {
+        // Preserve the fallible, panic-free RNG path while making freshness
+        // deterministic even in the astronomically unlikely repeated draw.
+        bytes[15] ^= 1;
+        revision = uuid::Builder::from_random_bytes(bytes).into_uuid();
+    }
+    Ok(revision)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -490,28 +745,149 @@ async fn read_existing_bytes(path: &Path) -> Result<Option<Vec<u8>>, McpConfigEr
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn write_mcp_file_atomic(path: &Path, config: &McpConfig) -> Result<(), McpConfigError> {
+async fn read_mcp_document(path: &Path) -> Result<DocumentMut, McpConfigError> {
+    if !tokio::fs::try_exists(path)
+        .await
+        .map_err(|err| McpConfigError::Io(err.to_string()))?
+    {
+        return Ok(DocumentMut::new());
+    }
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|err| McpConfigError::Io(err.to_string()))?;
+    contents
+        .parse::<DocumentMut>()
+        .map_err(|err| McpConfigError::Parse {
+            path: path.display().to_string(),
+            message: err.to_string(),
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn document_contains_server(path: &Path, name: &str) -> Result<bool, McpConfigError> {
+    let document = read_mcp_document(path).await?;
+    let Some(servers) = document.get("servers") else {
+        return Ok(false);
+    };
+    let servers = servers
+        .as_array_of_tables()
+        .ok_or_else(|| McpConfigError::Parse {
+            path: path.display().to_string(),
+            message: "'servers' must be an array of tables".to_string(),
+        })?;
+    for server in servers {
+        if document_server_name(server, path)? == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn document_server_name<'a>(server: &'a Table, path: &Path) -> Result<&'a str, McpConfigError> {
+    server
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| McpConfigError::Parse {
+            path: path.display().to_string(),
+            message: "each [[servers]] table must contain a string 'name'".to_string(),
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn servers_array_mut<'a>(
+    document: &'a mut DocumentMut,
+    path: &Path,
+) -> Result<&'a mut toml_edit::ArrayOfTables, McpConfigError> {
+    if !document.contains_key("servers") {
+        document["servers"] = Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    document["servers"]
+        .as_array_of_tables_mut()
+        .ok_or_else(|| McpConfigError::Parse {
+            path: path.display().to_string(),
+            message: "'servers' must be an array of tables".to_string(),
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn string_array(values: &[String]) -> Array {
+    let mut array = Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    array
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn string_map(values: &HashMap<String, String>) -> toml_edit::InlineTable {
+    let mut table = toml_edit::InlineTable::new();
+    let mut entries = values.iter().collect::<Vec<_>>();
+    entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, value) in entries {
+        table.insert(key, value.as_str().into());
+    }
+    table
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn server_table(server: &McpServerConfig) -> Table {
+    let mut table = Table::new();
+    table["name"] = toml_edit::value(&server.name);
+    match &server.transport {
+        McpTransportConfig::Stdio(stdio) => {
+            table["command"] = toml_edit::value(&stdio.command);
+            if !stdio.args.is_empty() {
+                table["args"] = toml_edit::value(string_array(&stdio.args));
+            }
+            if !stdio.env.is_empty() {
+                table["env"] = toml_edit::value(string_map(&stdio.env));
+            }
+        }
+        McpTransportConfig::Http(http) => {
+            table["url"] = toml_edit::value(&http.url);
+            if !http.headers.is_empty() {
+                table["headers"] = toml_edit::value(string_map(&http.headers));
+            }
+            if let Some(transport) = http.transport {
+                table["transport"] = toml_edit::value(match transport {
+                    McpHttpTransport::StreamableHttp => "streamable-http",
+                    McpHttpTransport::Sse => "sse",
+                });
+            }
+        }
+    }
+    if let Some(timeout) = server.connect_timeout_secs {
+        table["connect_timeout_secs"] = toml_edit::value(i64::from(timeout));
+    }
+    table
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn write_mcp_document_atomic(
+    path: &Path,
+    document: &DocumentMut,
+) -> Result<Vec<u8>, McpConfigError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|err| McpConfigError::Io(err.to_string()))?;
     }
 
-    let contents =
-        toml::to_string_pretty(config).map_err(|err| McpConfigError::Io(err.to_string()))?;
+    let contents = document.to_string().into_bytes();
     let tmp_path = path.with_extension(format!(
         "{}.tmp",
         path.extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("toml")
     ));
-    tokio::fs::write(&tmp_path, contents.as_bytes())
+    tokio::fs::write(&tmp_path, &contents)
         .await
         .map_err(|err| McpConfigError::Io(err.to_string()))?;
     tokio::fs::rename(&tmp_path, path)
         .await
         .map_err(|err| McpConfigError::Io(err.to_string()))?;
-    Ok(())
+    Ok(contents)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1090,6 +1466,64 @@ command = "user-cmd"
     }
 
     #[tokio::test]
+    async fn test_find_server_scopes_from_roots_never_reads_ambient_paths() {
+        let temp = TempDir::new().unwrap();
+        let context_root = temp.path().join("context");
+        let user_root = temp.path().join("user");
+        tokio::fs::create_dir_all(context_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .unwrap();
+        let shared = r#"
+[[servers]]
+name = "shared"
+command = "echo"
+"#;
+        tokio::fs::write(context_root.join(".rkat/mcp.toml"), shared)
+            .await
+            .unwrap();
+        tokio::fs::write(user_root.join(".rkat/mcp.toml"), shared)
+            .await
+            .unwrap();
+
+        let scopes = McpConfig::find_server_scopes_from_roots(
+            "shared",
+            Some(&context_root),
+            Some(&user_root),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scopes, vec![McpScope::Project, McpScope::User]);
+    }
+
+    #[test]
+    fn test_mutation_authority_resolves_each_explicit_convention_root() {
+        let context_root = PathBuf::from("/explicit/context");
+        let user_root = PathBuf::from("/explicit/user");
+        let project = McpConfigMutationAuthority::for_scope(
+            McpScope::Project,
+            Some(context_root.clone()),
+            Some(user_root.clone()),
+        );
+        let user = McpConfigMutationAuthority::for_scope(
+            McpScope::User,
+            Some(context_root.clone()),
+            Some(user_root.clone()),
+        );
+
+        assert_eq!(
+            project.resolved_path().unwrap(),
+            context_root.join(".rkat/mcp.toml")
+        );
+        assert_eq!(
+            user.resolved_path().unwrap(),
+            user_root.join(".rkat/mcp.toml")
+        );
+    }
+
+    #[tokio::test]
     async fn test_persist_add_uses_project_authority_and_rolls_back_new_file() {
         let temp = TempDir::new().unwrap();
         let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
@@ -1111,6 +1545,166 @@ command = "user-cmd"
     }
 
     #[tokio::test]
+    async fn test_persist_add_preserves_comments_and_forward_compatible_keys() {
+        let temp = TempDir::new().unwrap();
+        tokio::fs::create_dir_all(temp.path().join(".rkat"))
+            .await
+            .unwrap();
+        let path = temp.path().join(".rkat/mcp.toml");
+        let original = r#"# operator-owned heading
+future_config = "leave-me"
+
+[[servers]]
+# server note
+name = "existing"
+command = "existing-cmd"
+future_server_key = "leave-this-too"
+"#;
+        tokio::fs::write(&path, original).await.unwrap();
+
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        assert!(
+            McpConfig::server_exists_from_roots(
+                "existing",
+                McpScope::Project,
+                Some(temp.path()),
+                None,
+            )
+            .await
+            .unwrap(),
+            "scope discovery must tolerate forward-compatible document fields"
+        );
+        let server = McpServerConfig::stdio("added", "echo", vec!["ok".into()], HashMap::new());
+        McpConfig::persist_add_with_rollback(&authority, server)
+            .await
+            .unwrap();
+
+        let persisted = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(persisted.contains("# operator-owned heading"));
+        assert!(persisted.contains("future_config = \"leave-me\""));
+        assert!(persisted.contains("# server note"));
+        assert!(persisted.contains("future_server_key = \"leave-this-too\""));
+        assert!(persisted.contains("name = \"added\""));
+    }
+
+    #[tokio::test]
+    async fn test_persist_add_serializes_sse_headers_and_timeout() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer token".to_string());
+        let mut server = McpServerConfig::sse("remote", "https://example.test/sse", headers);
+        server.connect_timeout_secs = Some(42);
+
+        McpConfig::persist_add_with_rollback(&authority, server.clone())
+            .await
+            .unwrap();
+
+        let path = temp.path().join(".rkat/mcp.toml");
+        let config = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+        assert_eq!(config.servers, vec![server]);
+        let persisted = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(persisted.contains("transport = \"sse\""));
+        assert!(persisted.contains("connect_timeout_secs = 42"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_distinct_adds_both_survive() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let first_authority = authority.clone();
+        let second_authority = authority.clone();
+
+        let (first, second) = tokio::join!(
+            McpConfig::persist_add_with_rollback(
+                &first_authority,
+                McpServerConfig::stdio("first", "echo", Vec::new(), HashMap::new()),
+            ),
+            McpConfig::persist_add_with_rollback(
+                &second_authority,
+                McpServerConfig::stdio("second", "echo", Vec::new(), HashMap::new()),
+            ),
+        );
+        first.unwrap();
+        second.unwrap();
+
+        let path = temp.path().join(".rkat/mcp.toml");
+        let mut names = McpConfig::load_from_paths(None, Some(&path))
+            .await
+            .unwrap()
+            .servers
+            .into_iter()
+            .map(|server| server.name)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, vec!["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn test_stale_rollback_preserves_intervening_add() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let stale_rollback = McpConfig::persist_add_with_rollback(
+            &authority,
+            McpServerConfig::stdio("first", "echo", Vec::new(), HashMap::new()),
+        )
+        .await
+        .unwrap();
+        McpConfig::persist_add_with_rollback(
+            &authority,
+            McpServerConfig::stdio("later", "echo", Vec::new(), HashMap::new()),
+        )
+        .await
+        .unwrap();
+
+        let error = stale_rollback.rollback().await.unwrap_err();
+        assert!(matches!(error, McpConfigError::RollbackConflict { .. }));
+
+        let path = temp.path().join(".rkat/mcp.toml");
+        let mut names = McpConfig::load_from_paths(None, Some(&path))
+            .await
+            .unwrap()
+            .servers
+            .into_iter()
+            .map(|server| server.name)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, vec!["first", "later"]);
+    }
+
+    #[tokio::test]
+    async fn test_revision_fence_rejects_byte_identical_aba_rollback() {
+        let temp = TempDir::new().unwrap();
+        let authority = McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+        let server = McpServerConfig::stdio("same", "echo", Vec::new(), HashMap::new());
+
+        let stale_rollback = McpConfig::persist_add_with_rollback(&authority, server.clone())
+            .await
+            .unwrap();
+        let originally_committed = stale_rollback.committed_bytes.clone();
+
+        McpConfig::persist_remove_with_rollback(&authority, "same")
+            .await
+            .unwrap();
+        McpConfig::persist_add_with_rollback(&authority, server)
+            .await
+            .unwrap();
+
+        let path = temp.path().join(".rkat/mcp.toml");
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            originally_committed,
+            "exercise an exact byte-level ABA, not merely a semantic rewrite"
+        );
+
+        let error = stale_rollback.rollback().await.unwrap_err();
+        assert!(matches!(error, McpConfigError::RollbackConflict { .. }));
+        let config = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].name, "same");
+    }
+
+    #[tokio::test]
     async fn test_persist_remove_rolls_back_previous_bytes() {
         let temp = TempDir::new().unwrap();
         tokio::fs::create_dir_all(temp.path().join(".rkat"))
@@ -1118,9 +1712,13 @@ command = "user-cmd"
             .unwrap();
         let path = temp.path().join(".rkat/mcp.toml");
         let original = r#"
+# preserve this file-level comment
+future_config = "leave-me"
+
 [[servers]]
 name = "keep"
 command = "keep-cmd"
+future_server_key = "leave-this-too"
 
 [[servers]]
 name = "remove"
@@ -1132,9 +1730,11 @@ command = "remove-cmd"
         let rollback = McpConfig::persist_remove_with_rollback(&authority, "remove")
             .await
             .unwrap();
-        let config = McpConfig::load_from_paths(None, Some(&path)).await.unwrap();
-        assert_eq!(config.servers.len(), 1);
-        assert_eq!(config.servers[0].name, "keep");
+        let persisted = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(persisted.contains("# preserve this file-level comment"));
+        assert!(persisted.contains("future_config = \"leave-me\""));
+        assert!(persisted.contains("future_server_key = \"leave-this-too\""));
+        assert!(!persisted.contains("name = \"remove\""));
 
         rollback.rollback().await.unwrap();
         let restored = tokio::fs::read_to_string(&path).await.unwrap();

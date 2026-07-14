@@ -160,19 +160,15 @@ pub trait EventStore: Send + Sync {
     /// Persist a fail-closed marker after detached event projection halts.
     async fn record_projection_halt(
         &self,
-        _session_id: &SessionId,
-        _reason: &str,
-    ) -> Result<(), EventStoreError> {
-        Ok(())
-    }
+        session_id: &SessionId,
+        reason: &str,
+    ) -> Result<(), EventStoreError>;
 
-    /// Read a durable projection-halt marker, if this store supports one.
+    /// Read a durable projection-halt marker.
     async fn projection_halt(
         &self,
-        _session_id: &SessionId,
-    ) -> Result<Option<EventProjectionHaltMarker>, EventStoreError> {
-        Ok(None)
-    }
+        session_id: &SessionId,
+    ) -> Result<Option<EventProjectionHaltMarker>, EventStoreError>;
 
     /// Read events from a given sequence number onward.
     async fn read_from(

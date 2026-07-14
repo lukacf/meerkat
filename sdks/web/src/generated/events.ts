@@ -187,11 +187,16 @@ export type InteractionFailureReason = {
   detail: string;
   kind: "abandoned";
 } | {
+  kind: "interaction_stream_abandoned";
+  reason: InteractionStreamAbandonReason;
+} | {
   detail: string;
   kind: "finalization_failed";
 };
 
 export type InteractionId = string;
+
+export type InteractionStreamAbandonReason = "send_failed" | "admission_rejected" | "response_rejected" | "terminal_delivery_failed";
 
 export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response";
 

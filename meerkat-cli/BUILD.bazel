@@ -895,6 +895,98 @@ rust_test(
 )
 
 rust_test(
+    name = "mcp_convention_roots_test",
+    aliases = aliases(
+        package_name = "meerkat-cli",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mcp_convention_roots",
+    crate_root = "tests/mcp_convention_roots.rs",
+    crate_features = [
+        "anthropic",
+        "comms",
+        "gemini",
+        "integration-real-tests",
+        "jsonl-store",
+        "mcp",
+        "meerkat-rpc?/comms",
+        "meerkat-rpc?/mcp",
+        "meerkat-rpc?/openai-realtime",
+        "meerkat-rpc?/schedule",
+        "meerkat-rpc?/workgraph",
+        "memory-store",
+        "mob",
+        "openai",
+        "openai-realtime",
+        "rpc-surface",
+        "schedule",
+        "session-store",
+        "skills",
+        "workgraph",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "src/main.rs",
+    ],
+    srcs = [
+        "tests/mcp_convention_roots.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.31",
+        "CARGO_BIN_NAME": "mcp_convention_roots",
+        "CARGO_MANIFEST_DIR": "./meerkat-cli",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+        "//meerkat-cli:rkat",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+        "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-cli",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat-rpc:meerkat_rpc_with_runtime_test_support",
+        "//meerkat:meerkat_anthropic_agent_factory_build",
+        "//meerkat:meerkat_auth_core_agent_factory_build",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_gemini_agent_factory_build",
+        "//meerkat:meerkat_llm_core_agent_factory_build",
+        "//meerkat:meerkat_mcp_agent_factory_build_test_support",
+        "//meerkat:meerkat_models_agent_factory_build",
+        "//meerkat:meerkat_openai_agent_factory_build",
+        "//meerkat:meerkat_providers_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-cli",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "runtime_backed_ingress_test",
     aliases = aliases(
         package_name = "meerkat-cli",
@@ -1744,6 +1836,7 @@ test_suite(
     tests = [
         ":auth_binding_single_parser_test",
         ":cli_auth_flow_test",
+        ":mcp_convention_roots_test",
         ":runtime_backed_ingress_test",
         ":slim_feature_graph_test",
         ":sqlite_tools_full_reuse_test",

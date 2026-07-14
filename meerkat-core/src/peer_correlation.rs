@@ -148,7 +148,7 @@ impl InboundPeerRequestState {
 ///
 /// Authoritative truth for whether a reserved stream channel is still
 /// claimable (`Reserved`), live with an attached consumer (`Attached`), or
-/// terminal (`Completed`, `Expired`, `ClosedEarly`). Lives in the
+/// terminal (`Completed`, `Expired`, `ClosedEarly`, `Abandoned`). Lives in the
 /// MeerkatMachine DSL's `interaction_streams` substate; the comms runtime's
 /// `interaction_stream_registry` projects sender/receiver channels off it,
 /// with the invariant "channel live iff `corr_id ∈ interaction_streams`"
@@ -173,13 +173,58 @@ pub enum InteractionStreamState {
     Expired,
     /// Terminal: consumer dropped the stream before a terminal event.
     ClosedEarly,
+    /// Terminal: an explicit typed failure made the stream impossible to use.
+    Abandoned,
 }
 
 impl InteractionStreamState {
     /// Is this a terminal state — i.e., the stream lifecycle is done and the
     /// shell should drop the associated channel projection?
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Expired | Self::ClosedEarly)
+        matches!(
+            self,
+            Self::Completed | Self::Expired | Self::ClosedEarly | Self::Abandoned
+        )
+    }
+}
+
+/// Typed reason an interaction stream was abandoned before normal terminal
+/// delivery. This is intentionally distinct from [`InteractionStreamState::Expired`]:
+/// expiry proves that the attach TTL elapsed while the stream was still
+/// reserved, whereas abandonment records an observed failure.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InteractionStreamAbandonReason {
+    /// The outbound transport could not send the interaction.
+    #[default]
+    SendFailed,
+    /// A local or remote admission boundary rejected the interaction.
+    AdmissionRejected,
+    /// A peer response could not be admitted as a valid response observation.
+    ResponseRejected,
+    /// A terminal event could not be delivered to the interaction stream.
+    TerminalDeliveryFailed,
+}
+
+impl InteractionStreamAbandonReason {
+    /// Stable public code for this terminal reason.
+    pub fn as_code(self) -> &'static str {
+        match self {
+            Self::SendFailed => "send_failed",
+            Self::AdmissionRejected => "admission_rejected",
+            Self::ResponseRejected => "response_rejected",
+            Self::TerminalDeliveryFailed => "terminal_delivery_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for InteractionStreamAbandonReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
     }
 }
 

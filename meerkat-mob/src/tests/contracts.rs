@@ -564,15 +564,14 @@ async fn contract_mob_002_peer_request_response_round_trip() {
 
 // ---------------------------------------------------------------------------
 // CONTRACT-MOB-002b (W1-A): terminal DSL transition → PeerInteractionCleanup
-//                           effect → subscriber / stream registry drop.
+//                           without cross-owning interaction-stream cleanup.
 //
 // Proves the full causal chain: installing a `PeerInteractionHandle` on the
 // sender's `CommsRuntime` registers the runtime as a cleanup observer; the
 // outbound `send` fires `PeerRequestSent` (populating `pending_peer_requests`);
 // calling `response_terminal` through the handle emits
-// `PeerInteractionCleanup`, and the observer drops both registry entries
-// WITHOUT any `mark_interaction_complete` call. That's what proves the
-// registries are a real projection of DSL truth, not shadow state.
+// `PeerInteractionCleanup`, but the independently machine-owned stream remains
+// claimable WITHOUT any `mark_interaction_complete` call.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -680,17 +679,11 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
             .is_some(),
         "subscriber should be live after reserve"
     );
-    // Put the subscriber back via a second send? No — `interaction_subscriber`
-    // is one-shot and we just consumed it. Re-install by firing a fresh
-    // PeerRequest to prove the causal path cleanly. Easier: re-register
-    // the subscriber channel manually by repeating the reserve path.
-    // Simplest: we have already verified the subscriber existed; now we
-    // prove the effect removes the stream registry entry.
-
     // Drive the DSL terminal transition directly through the handle (the
     // exact thing comms_drain does when a Completed response arrives).
-    // This MUST fire `PeerInteractionCleanup`, and the observer installed by
-    // `install_peer_request_response_authority` MUST drop the registry entry.
+    // This fires `PeerInteractionCleanup`, which owns the peer-correlation
+    // projection only. It must not destroy the independent stream reservation:
+    // a response is allowed to win the race with caller attachment.
     handle
         .response_terminal(corr_id, PeerTerminalDisposition::Completed)
         .expect("terminal transition must succeed");
@@ -701,14 +694,12 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
         "terminal transition removes the outbound entry"
     );
 
-    // Projection causally dropped via the effect observer. NO call to
-    // `mark_interaction_complete` in this test — that's the point: the
-    // DSL effect is what drives cleanup.
-    assert!(
-        CoreCommsRuntime::interaction_subscriber(sender.as_ref(), &request_interaction_id)
-            .is_none(),
-        "subscriber registry entry must be dropped by the DSL cleanup effect"
-    );
+    let stream = CoreCommsRuntime::stream(
+        sender.as_ref(),
+        meerkat_core::StreamScope::Interaction(request_interaction_id),
+    )
+    .expect("peer terminal cleanup must leave the response stream claimable");
+    drop(stream);
 
     // Drain the receiver's inbox so no test-wide notifies leak.
     let _ = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;

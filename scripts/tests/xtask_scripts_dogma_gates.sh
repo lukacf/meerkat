@@ -79,6 +79,13 @@ if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/d
 else
   bad "machine-authority-changed did not flag machine-authority docs"
 fi
+for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile scripts/machine-authority-changed scripts/tests/xtask_scripts_dogma_gates.sh xtask/tests/ci_gate_requires_rmat.rs; do
+  if scripts/machine-authority-changed -- "$gate_owner" >/dev/null; then
+    ok "machine-authority-changed protects its gate owner $gate_owner"
+  else
+    bad "machine-authority-changed ignored its gate owner $gate_owner"
+  fi
+done
 edge_out=$(printf 'xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_out" | grep -Fq 'changed=true'; then
   ok "buildbuddy-edge-changes marks rmat_policy.rs as changed"

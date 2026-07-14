@@ -11,8 +11,7 @@ Invoke a skill using canonical refs with
 ## Optional Environment
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-# Optional: override the default local example skill identity.
-# export MEERKAT_SKILL_SOURCE_UUID=dc256086-0d2f-4f61-a307-320d4148107f
+# Optional: override the project-local skill name.
 # export MEERKAT_SKILL_NAME=shell-patterns
 ```
 
@@ -26,5 +25,6 @@ export ANTHROPIC_API_KEY=sk-...
 npx tsx main.ts
 ```
 
-The example writes a tiny local filesystem-backed skill source under `.work/`
-and starts the RPC runtime with isolated state rooted there.
+The example writes a tiny conventional project-local skill under
+`.work/project/.rkat/skills/`, addresses it with the canonical project-local
+source UUID, and starts the RPC runtime with isolated state rooted there.

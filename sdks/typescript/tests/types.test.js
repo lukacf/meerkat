@@ -841,6 +841,94 @@ describe("Typed Events", () => {
     }
   });
 
+  it("derives and verifies canonical scoped attribution", () => {
+    const event = parseEvent({
+      scope_id: "primary/mob:writer",
+      scope_path: [
+        { scope: "primary", session_id: "session_1" },
+        { scope: "mob_member", flow_run_id: "run_1", agent_identity: "writer" },
+      ],
+      event: { type: "text_delta", delta: "hello" },
+    });
+
+    assert.equal(event.type, "scoped_agent_event");
+    if (event.type === "scoped_agent_event") {
+      assert.equal(event.scopeId, "primary/mob:writer");
+      assert.equal(event.scopePath.length, 2);
+    }
+  });
+
+  it("rejects incomplete scoped wrappers instead of laundering them as core events", () => {
+    const inner = { type: "text_delta", delta: "hello" };
+    for (const raw of [
+      { scope_path: [], event: inner },
+      { scope_id: "primary", event: inner },
+      { scope_id: "primary", scope_path: [] },
+      { scope_id: "primary", scope_path: [], event: "not-an-object" },
+    ]) {
+      assert.throws(
+        () => parseEvent(raw),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
+  });
+
+  it("rejects scoped envelope keys even when an outer event type is present", () => {
+    for (const scopedField of [
+      { event: { type: "text_delta", delta: "inner" } },
+      { scope_id: "primary" },
+      { scope_path: [] },
+    ]) {
+      assert.throws(
+        () => parseEvent({ type: "text_delta", delta: "hello", ...scopedField }),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("outer `type` must be absent"),
+      );
+    }
+  });
+
+  it("rejects malformed or unknown scope frames instead of fabricating primary attribution", () => {
+    const wrapped = (scopePath) => ({
+      scope_id: "primary",
+      scope_path: scopePath,
+      event: { type: "text_delta", delta: "hello" },
+    });
+
+    for (const scopePath of [
+      [null],
+      ["primary"],
+      [{ scope: "future_scope", session_id: "session_1" }],
+      [{ scope: "primary" }],
+      [{ scope: "primary", session_id: "" }],
+      [{ scope: "mob_member", flow_run_id: "run_1" }],
+      [{ scope: "mob_member", flow_run_id: "", agent_identity: "writer" }],
+      [{ scope: "mob_member", flow_run_id: "run_1", agent_identity: "" }],
+    ]) {
+      assert.throws(
+        () => parseEvent(wrapped(scopePath)),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
+  });
+
+  it("rejects a scoped wrapper whose claimed scope id disagrees with its path", () => {
+    assert.throws(
+      () => parseEvent({
+        scope_id: "primary",
+        scope_path: [
+          { scope: "mob_member", flow_run_id: "run_1", agent_identity: "writer" },
+        ],
+        event: { type: "text_delta", delta: "hello" },
+      }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("does not match canonical"),
+    );
+  });
+
   it("should parse tool_config_changed payload", () => {
     const event = parseEvent({
       type: "tool_config_changed",

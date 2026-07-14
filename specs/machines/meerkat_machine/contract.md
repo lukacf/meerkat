@@ -582,6 +582,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InteractionStreamCompleted`(corr_id: PeerCorrelationId)
 - `InteractionStreamExpired`(corr_id: PeerCorrelationId)
 - `InteractionStreamClosedEarly`(corr_id: PeerCorrelationId)
+- `InteractionStreamAbandoned`(corr_id: PeerCorrelationId, reason: InteractionStreamAbandonReason)
 - `AttachSessionIngress`(comms_runtime_id: CommsRuntimeId)
 - `AttachMobIngress`(comms_runtime_id: CommsRuntimeId, mob_id: MobId)
 - `DetachIngress`
@@ -765,7 +766,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InboundPeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: InboundPeerRequestState)
 - `SessionContextAdvanced`(updated_at_ms: u64)
 - `InteractionStreamStateChanged`(corr_id: PeerCorrelationId, new_state: InteractionStreamState)
-- `InteractionStreamCleanup`(corr_id: PeerCorrelationId)
+- `InteractionStreamCleanup`(corr_id: PeerCorrelationId, abandon_reason: Option<InteractionStreamAbandonReason>)
 - `LocalEndpointChanged`(endpoint: Option<PeerEndpoint>)
 - `SupervisorBindAdmissionResolved`(result: SupervisorBindAdmissionResultKind, rejection: Option<SupervisorBindRejectionKind>)
 - `SupervisorBindMaterialAdmissionResolved`(verdict: SupervisorBindMaterialAdmissionKind)
@@ -15679,6 +15680,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Stopped`
 
+### `InteractionStreamAbandonedIdle`
+- From: `Idle`
+- On: `InteractionStreamAbandoned`(corr_id, reason)
+- Guards:
+  - `session_registered`
+  - `is_active`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Idle`
+
+### `InteractionStreamAbandonedAttached`
+- From: `Attached`
+- On: `InteractionStreamAbandoned`(corr_id, reason)
+- Guards:
+  - `session_registered`
+  - `is_active`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Attached`
+
+### `InteractionStreamAbandonedRunning`
+- From: `Running`
+- On: `InteractionStreamAbandoned`(corr_id, reason)
+- Guards:
+  - `session_registered`
+  - `is_active`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Running`
+
+### `InteractionStreamAbandonedRetired`
+- From: `Retired`
+- On: `InteractionStreamAbandoned`(corr_id, reason)
+- Guards:
+  - `session_registered`
+  - `is_active`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Retired`
+
+### `InteractionStreamAbandonedStopped`
+- From: `Stopped`
+- On: `InteractionStreamAbandoned`(corr_id, reason)
+- Guards:
+  - `session_registered`
+  - `is_active`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Stopped`
+
 ### `NotifyDrainExitedAfterUnregister`
 - From: `Idle`
 - On: `NotifyDrainExited`(reason)
@@ -15808,6 +15854,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `InteractionStreamClosedEarlyAfterUnregister`
 - From: `Idle`
 - On: `InteractionStreamClosedEarly`(corr_id)
+- Guards:
+  - `session_unregistered`
+- To: `Idle`
+
+### `InteractionStreamAbandonedAfterUnregister`
+- From: `Idle`
+- On: `InteractionStreamAbandoned`(corr_id, reason)
 - Guards:
   - `session_unregistered`
 - To: `Idle`

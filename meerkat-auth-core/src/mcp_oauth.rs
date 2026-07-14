@@ -20,11 +20,15 @@ use crate::auth_oauth::{
     bind_loopback_callback, exchange_authorization_code_with_state, exchange_refresh_token,
     oauth_refresh_observation,
 };
-use crate::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
-use meerkat_core::connection::{BindingId, RealmId};
+use crate::auth_store::{
+    CredentialMutationError, EphemeralTokenStore, InMemoryCoordinator, PersistedAuthMode,
+    PersistedTokens, RefreshCoordinator, RefreshError, TokenKey, TokenStore,
+};
+use meerkat_core::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
+use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 use meerkat_core::handles::{
-    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, CredentialUseDisposition, GeneratedAuthLeaseHandle,
-    LeaseKey, OAuthLoginCredentialFacts,
+    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
+    CredentialUseDisposition, CredentialUseIntent, GeneratedAuthLeaseHandle, LeaseKey,
 };
 
 const MCP_TOKEN_REALM: &str = "mcp-oauth";
@@ -94,9 +98,23 @@ impl McpServerIdentity {
         }
     }
 
+    /// The one typed auth binding from which both durable token identity and
+    /// AuthMachine lifecycle identity are projected.
+    pub fn auth_binding_ref(&self) -> Result<AuthBindingRef, McpOAuthError> {
+        let realm = RealmId::parse(MCP_TOKEN_REALM).map_err(|error| self.key_error(error))?;
+        let binding =
+            BindingId::parse(self.binding_slug()).map_err(|error| self.key_error(error))?;
+        Ok(AuthBindingRef {
+            realm,
+            binding,
+            profile: None,
+            origin: BindingOrigin::Configured,
+        })
+    }
+
     /// The durable token-store key for this server's credentials.
     pub fn token_key(&self) -> Result<TokenKey, McpOAuthError> {
-        TokenKey::parse(MCP_TOKEN_REALM, self.binding_slug()).map_err(|error| self.key_error(error))
+        Ok(TokenKey::from_auth_binding(&self.auth_binding_ref()?))
     }
 
     /// The per-binding `AuthMachine` lease key for this MCP server, structurally
@@ -105,10 +123,7 @@ impl McpServerIdentity {
     /// decision for MCP-OAuth bearer tokens is owned by the `AuthMachine` keyed
     /// on this lease — the authority never re-derives expiry policy.
     pub fn lease_key(&self) -> Result<LeaseKey, McpOAuthError> {
-        let realm = RealmId::parse(MCP_TOKEN_REALM).map_err(|error| self.key_error(error))?;
-        let binding =
-            BindingId::parse(self.binding_slug()).map_err(|error| self.key_error(error))?;
-        Ok(LeaseKey::new(realm, binding, None))
+        Ok(LeaseKey::from_auth_binding(&self.auth_binding_ref()?))
     }
 }
 
@@ -192,6 +207,10 @@ pub struct McpOAuthAuthority {
     /// below `meerkat-runtime` in the dep graph and cannot mint a certified
     /// handle itself.
     auth_lease: GeneratedAuthLeaseHandle,
+    /// Owns same-key refresh serialization. General construction requires this
+    /// authority explicitly; only the concrete ephemeral constructors install
+    /// process-local coordination on the caller's behalf.
+    refresh_coordinator: Arc<dyn RefreshCoordinator>,
 }
 
 impl McpOAuthAuthority {
@@ -199,6 +218,7 @@ impl McpOAuthAuthority {
         token_store: Arc<dyn TokenStore>,
         browser: Arc<dyn BrowserOpener>,
         auth_lease: GeneratedAuthLeaseHandle,
+        refresh_coordinator: Arc<dyn RefreshCoordinator>,
     ) -> Self {
         Self {
             http: Client::new(),
@@ -206,14 +226,32 @@ impl McpOAuthAuthority {
             browser,
             login_timeout: MCP_INTERACTIVE_LOGIN_TIMEOUT,
             auth_lease,
+            refresh_coordinator,
         }
     }
 
-    pub fn with_http(
+    /// Construct an explicitly ephemeral authority with process-local refresh
+    /// coordination. Persisted stores cannot reach this constructor because the
+    /// concrete [`EphemeralTokenStore`] type is part of the signature.
+    pub fn new_ephemeral(
+        token_store: Arc<EphemeralTokenStore>,
+        browser: Arc<dyn BrowserOpener>,
+        auth_lease: GeneratedAuthLeaseHandle,
+    ) -> Self {
+        Self::new(
+            token_store,
+            browser,
+            auth_lease,
+            Arc::new(InMemoryCoordinator::new()),
+        )
+    }
+
+    pub fn with_http_and_refresh_coordinator(
         token_store: Arc<dyn TokenStore>,
         browser: Arc<dyn BrowserOpener>,
         http: Client,
         auth_lease: GeneratedAuthLeaseHandle,
+        refresh_coordinator: Arc<dyn RefreshCoordinator>,
     ) -> Self {
         Self {
             http,
@@ -221,12 +259,39 @@ impl McpOAuthAuthority {
             browser,
             login_timeout: MCP_INTERACTIVE_LOGIN_TIMEOUT,
             auth_lease,
+            refresh_coordinator,
         }
+    }
+
+    /// HTTP-injected counterpart to [`Self::new_ephemeral`].
+    pub fn with_http_ephemeral(
+        token_store: Arc<EphemeralTokenStore>,
+        browser: Arc<dyn BrowserOpener>,
+        http: Client,
+        auth_lease: GeneratedAuthLeaseHandle,
+    ) -> Self {
+        Self::with_http_and_refresh_coordinator(
+            token_store,
+            browser,
+            http,
+            auth_lease,
+            Arc::new(InMemoryCoordinator::new()),
+        )
+    }
+
+    #[cfg(test)]
+    fn with_http(
+        token_store: Arc<EphemeralTokenStore>,
+        browser: Arc<dyn BrowserOpener>,
+        http: Client,
+        auth_lease: GeneratedAuthLeaseHandle,
+    ) -> Self {
+        Self::with_http_ephemeral(token_store, browser, http, auth_lease)
     }
 
     #[cfg(test)]
     fn with_http_and_login_timeout(
-        token_store: Arc<dyn TokenStore>,
+        token_store: Arc<EphemeralTokenStore>,
         browser: Arc<dyn BrowserOpener>,
         http: Client,
         login_timeout: Duration,
@@ -238,6 +303,7 @@ impl McpOAuthAuthority {
             browser,
             login_timeout,
             auth_lease,
+            refresh_coordinator: Arc::new(InMemoryCoordinator::new()),
         }
     }
 
@@ -246,22 +312,47 @@ impl McpOAuthAuthority {
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
         let key = target.token_key()?;
-        let Some(tokens) = self
-            .token_store
-            .load(&key)
-            .await
-            .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?
-        else {
+        let lease_key = target.lease_key()?;
+        let admitted = {
+            let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+            self.load_admitted_stored_credential(target, &key).await?
+        };
+        let Some(admitted) = admitted else {
             return Ok(None);
         };
-        if tokens.auth_mode != PersistedAuthMode::McpOauth {
-            return Ok(None);
+        match admitted.disposition {
+            CredentialUseDisposition::Authorized => Ok(admitted.tokens.primary_secret),
+            CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::AlreadyRefreshing => {
+                let authority = self.clone();
+                let refresh_target = target.clone();
+                let error_target = refresh_target.clone();
+                let refresh_key = key.clone();
+                let refreshed = self
+                    .refresh_coordinator
+                    .with_refresh(
+                        key,
+                        Box::new(move || {
+                            Box::pin(async move {
+                                authority
+                                    .refresh_stored_credential_under_coordinator(
+                                        &refresh_target,
+                                        &refresh_key,
+                                    )
+                                    .await
+                            })
+                        }),
+                    )
+                    .await
+                    .map_err(|error| map_coordinated_refresh_error(&error_target, error))?;
+                Ok(refreshed.primary_secret)
+            }
+            CredentialUseDisposition::ReauthRequired
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::LeaseAbsent => Err(McpOAuthError::ReauthRequired {
+                server_name: target.server_name().to_string(),
+            }),
         }
-        let metadata = stored_metadata_for_target(target, &tokens)?;
-        let tokens = self
-            .refresh_if_needed(target, &key, tokens, metadata)
-            .await?;
-        Ok(tokens.primary_secret)
     }
 
     pub async fn require_stored_bearer_token(
@@ -329,28 +420,116 @@ impl McpOAuthAuthority {
         let persisted =
             persisted_tokens_from_result(&token, &discovery, &client, target, Utc::now())?;
         let key = target.token_key()?;
-        // Fold the post-exchange durable token write into an AuthMachine
-        // lease-publish transition so the credential write is owned by the
-        // machine, not a bare `store.save`. Fail closed if the transition is
-        // rejected — no token is persisted without a committed lease.
-        //
-        // Acquire-first ordering: the lease is acquired and the durable
-        // lifecycle marker stamped BEFORE the single `save` below, so a crash
-        // can never leave an unmarked orphan token (the marker is the durable
-        // proof-of-acquisition; unmarked tokens are rejected at every read).
-        // If the save fails, the acquired lease is released eagerly — the
-        // same failure shape as the REST/CLI/RPC token-commit surfaces — so
-        // no in-memory lease ever points at a credential that durable truth
-        // does not hold.
-        let published = self.publish_login_tokens_via_lease(target, &key, &persisted)?;
-        if let Err(error) = self.token_store.save(&key, &published).await {
-            let lease_key = target.lease_key()?;
-            let _ = self.auth_lease.release_lease(&lease_key);
-            return Err(McpOAuthError::TokenStore(format!(
-                "{error}; acquired lease rolled back"
+        let authority = self.clone();
+        let commit_target = target.clone();
+        let commit_key = key.clone();
+        let committed = self
+            .refresh_coordinator
+            .with_exclusive_mutation(
+                key,
+                Box::new(move || {
+                    Box::pin(async move {
+                        authority
+                            .commit_interactive_login_under_coordinator(
+                                &commit_target,
+                                &commit_key,
+                                &persisted,
+                            )
+                            .await
+                    })
+                }),
+            )
+            .await
+            .map_err(|error| map_coordinated_login_error(target, error))?;
+        committed
+            .primary_secret
+            .ok_or_else(|| McpOAuthError::AuthLifecycle {
+                server_name: target.server_name().to_string(),
+                reason: "committed MCP OAuth credential has no bearer token".to_string(),
+            })
+    }
+
+    /// Final interactive-login commit transaction. OAuth discovery, browser
+    /// interaction, and token exchange intentionally happen before entering the
+    /// per-key mutation boundary; only the durable read/publish/save transaction
+    /// is serialized with refresh and other login commits.
+    async fn commit_interactive_login_under_coordinator(
+        &self,
+        target: &McpServerIdentity,
+        key: &TokenKey,
+        persisted: &PersistedTokens,
+    ) -> Result<PersistedTokens, CredentialMutationError> {
+        let lease_key = target
+            .lease_key()
+            .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+        let mut previous_tokens = self
+            .token_store
+            .load(key)
+            .await
+            .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?;
+
+        // A newly opened CLI authority has no in-memory AuthMachine projection.
+        // Restore a valid durable predecessor before capturing compensation so
+        // rollback returns token material and lifecycle to the same publication.
+        if let Some(tokens) = previous_tokens.as_ref()
+            && tokens.auth_mode == PersistedAuthMode::McpOauth
+            && tokens.primary_secret.is_some()
+            && durable_marker::marker_payload_valid_for_tokens(tokens, key)
+            && stored_metadata_for_target(target, tokens).is_ok()
+        {
+            let auth_binding = target
+                .auth_binding_ref()
+                .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
+            previous_tokens = meerkat_core::rehydrate_marked_tokens_for_status(
+                self.token_store.as_ref(),
+                &self.auth_lease,
+                &auth_binding,
+                PersistedAuthMode::McpOauth,
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?;
+        }
+        let previous_snapshot = self
+            .auth_lease
+            .capture_auth_lifecycle_restore_snapshot(&lease_key);
+
+        // Acquire-first: the AuthMachine transition stamps the durable marker
+        // before the single save. Any later failure restores the predecessor
+        // captured under this same cross-process transaction.
+        let published = match self.publish_login_tokens_via_lease(target, key, persisted) {
+            Ok(published) => published,
+            Err(error) => {
+                let rollback_errors = self
+                    .rollback_login_publication(
+                        key,
+                        &lease_key,
+                        previous_tokens.as_ref(),
+                        &previous_snapshot,
+                    )
+                    .await;
+                return Err(CredentialMutationError::AuthLifecycle(format!(
+                    "{error}{}",
+                    rollback_error_suffix(&rollback_errors)
+                )));
+            }
+        };
+        if let Err(error) = self.token_store.save(key, &published).await {
+            let rollback_errors = self
+                .rollback_login_publication(
+                    key,
+                    &lease_key,
+                    previous_tokens.as_ref(),
+                    &previous_snapshot,
+                )
+                .await;
+            return Err(CredentialMutationError::TokenStore(format!(
+                "{error}{}",
+                rollback_error_suffix(&rollback_errors)
             )));
         }
-        Ok(token.access_token)
+        Ok(published)
     }
 
     /// Wrap the post-login durable token write in an `AuthMachine` lease-publish
@@ -372,10 +551,12 @@ impl McpOAuthAuthority {
                 server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             };
-        // The handle is shared across servers; clear any prior lease state for
-        // this key before publishing the freshly minted credential. An
-        // untracked key has nothing to release.
-        let _ = self.auth_lease.release_lease(&lease_key);
+        // Clear the credential side before publishing the freshly minted
+        // credential. This transition is fallible and therefore participates
+        // in the caller's snapshot-backed transaction; it is never ignored.
+        self.auth_lease
+            .release_credential_lifecycle(&lease_key)
+            .map_err(lifecycle_err)?;
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(tokens);
         let transition = self
             .auth_lease
@@ -388,117 +569,476 @@ impl McpOAuthAuthority {
             })
     }
 
-    async fn refresh_if_needed(
+    /// Compensate a failed interactive-login publication back to the exact
+    /// durable/token-lifecycle state captured before replacement began.
+    async fn rollback_login_publication(
+        &self,
+        key: &TokenKey,
+        lease_key: &LeaseKey,
+        previous_tokens: Option<&PersistedTokens>,
+        previous_snapshot: &AuthLeaseRestoreSnapshot,
+    ) -> Vec<String> {
+        let mut rollback_errors = Vec::new();
+        if let Err(error) = self.auth_lease.release_credential_lifecycle(lease_key) {
+            rollback_errors.push(format!("AuthMachine rollback release failed: {error}"));
+        }
+
+        let restored_transition = match meerkat_core::restore_token_lifecycle_snapshot(
+            &self.auth_lease,
+            previous_snapshot,
+        ) {
+            Ok(transition) => transition,
+            Err(error) => {
+                rollback_errors.push(format!("AuthMachine snapshot restore failed: {error}"));
+                None
+            }
+        };
+
+        match previous_tokens {
+            Some(previous_tokens) => {
+                let mut restored_tokens = previous_tokens.clone();
+                if let Some(transition) = restored_transition {
+                    match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                        key,
+                        previous_tokens,
+                        &transition,
+                    ) {
+                        Ok(marked) => restored_tokens = marked,
+                        Err(error) => {
+                            rollback_errors.push(format!("marker restore failed: {error}"));
+                        }
+                    }
+                }
+                if let Err(error) = self.token_store.save(key, &restored_tokens).await {
+                    rollback_errors.push(format!("TokenStore rollback save failed: {error}"));
+                }
+            }
+            None => {
+                if let Err(error) = self.token_store.clear(key).await {
+                    rollback_errors.push(format!("TokenStore rollback clear failed: {error}"));
+                }
+            }
+        }
+        rollback_errors
+    }
+
+    /// Load one durable MCP credential through its marker, AuthMachine
+    /// projection, freshness observation, and generated use-admission gate.
+    /// The caller holds the per-binding lifecycle guard for this whole read.
+    async fn load_admitted_stored_credential(
         &self,
         target: &McpServerIdentity,
         key: &TokenKey,
-        tokens: PersistedTokens,
-        metadata: StoredMcpOAuthMetadata,
-    ) -> Result<PersistedTokens, McpOAuthError> {
-        let Some(expires_at) = tokens.expires_at else {
-            return Ok(tokens);
+    ) -> Result<Option<AdmittedMcpCredential>, McpOAuthError> {
+        let Some(mut tokens) = self
+            .token_store
+            .load(key)
+            .await
+            .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?
+        else {
+            let lease_key = target.lease_key()?;
+            let snapshot = self.auth_lease.snapshot(&lease_key);
+            if snapshot.credential_present
+                && snapshot
+                    .phase
+                    .is_some_and(|phase| phase != meerkat_core::handles::AuthLeasePhase::Released)
+            {
+                self.auth_lease
+                    .release_credential_lifecycle(&lease_key)
+                    .map_err(|error| McpOAuthError::AuthLifecycle {
+                        server_name: target.server_name().to_string(),
+                        reason: format!(
+                            "durable MCP OAuth credential is absent but lifecycle reconciliation failed: {error}"
+                        ),
+                    })?;
+            }
+            return Ok(None);
         };
-
-        // Route the cached-vs-refresh-vs-reauth decision through the injected
-        // per-binding `AuthMachine` lease for the `mcp-oauth` realm. The machine
-        // owns the freshness policy (observed expiry vs the canonical refresh
-        // window); this authority only feeds it the expiry and the pure
-        // OAuth-login facts, then mirrors the verdict. No local skew comparison.
-        let auth_lease = &self.auth_lease;
-        let lease_key = target.lease_key()?;
-        let now_secs = epoch_secs(Utc::now());
+        if tokens.auth_mode != PersistedAuthMode::McpOauth {
+            return Ok(None);
+        }
+        if tokens.primary_secret.is_none()
+            || !durable_marker::marker_payload_valid_for_tokens(&tokens, key)
+        {
+            return Err(McpOAuthError::ReauthRequired {
+                server_name: target.server_name().to_string(),
+            });
+        }
+        let mut metadata = stored_metadata_for_target(target, &tokens)?;
+        let auth_binding = target.auth_binding_ref()?;
+        let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let lifecycle_err =
             |error: meerkat_core::handles::DslTransitionError| McpOAuthError::AuthLifecycle {
                 server_name: target.server_name().to_string(),
                 reason: error.to_string(),
             };
-        // The handle is shared across calls and servers; reset this key's prior
-        // lease state, then record the current credential's expiry so the
-        // freshness verdict reflects THIS token. Release is best-effort: an
-        // untracked key has nothing to clear.
-        let _ = auth_lease.release_lease(&lease_key);
-        auth_lease
-            .acquire_lease(&lease_key, epoch_secs(expires_at))
+
+        let snapshot = self.auth_lease.snapshot(&lease_key);
+        let restore_from_durable_marker = lifecycle_snapshot_is_absent(&snapshot)
+            || matches!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(&tokens, &snapshot, key),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
+            );
+        if restore_from_durable_marker {
+            tokens = meerkat_core::rehydrate_marked_tokens_for_status(
+                self.token_store.as_ref(),
+                &self.auth_lease,
+                &auth_binding,
+                PersistedAuthMode::McpOauth,
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| McpOAuthError::AuthLifecycle {
+                server_name: target.server_name().to_string(),
+                reason: error.to_string(),
+            })?
+            .ok_or_else(|| McpOAuthError::ReauthRequired {
+                server_name: target.server_name().to_string(),
+            })?;
+            if tokens.primary_secret.is_none()
+                || !durable_marker::marker_payload_valid_for_tokens(&tokens, key)
+            {
+                return Err(McpOAuthError::ReauthRequired {
+                    server_name: target.server_name().to_string(),
+                });
+            }
+            metadata = stored_metadata_for_target(target, &tokens)?;
+        }
+
+        self.auth_lease
+            .observe_credential_freshness(
+                &lease_key,
+                epoch_secs(Utc::now()),
+                AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+            )
             .map_err(lifecycle_err)?;
-        auth_lease
-            .observe_credential_freshness(&lease_key, now_secs, AUTH_LEASE_TTL_REFRESH_WINDOW_SECS)
-            .map_err(lifecycle_err)?;
-        let facts = OAuthLoginCredentialFacts {
-            credential_present: tokens.primary_secret.is_some(),
-            force_refresh: false,
-            refresh_allowed: tokens.refresh_token.is_some(),
-        };
-        let disposition = auth_lease
-            .resolve_oauth_login_credential_disposition(&lease_key, facts)
+        let restore_snapshot = self
+            .auth_lease
+            .capture_auth_lifecycle_restore_snapshot(&lease_key);
+        let snapshot = restore_snapshot.snapshot().clone();
+        if durable_marker::marker_relation_for_tokens_and_snapshot(&tokens, &snapshot, key)
+            != durable_marker::AuthLeaseDurableMarkerRelation::Matches
+        {
+            return Err(McpOAuthError::ReauthRequired {
+                server_name: target.server_name().to_string(),
+            });
+        }
+        let disposition = self
+            .auth_lease
+            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
             .map_err(lifecycle_err)?;
         match disposition {
-            // The machine authorizes the cached credential as fresh.
-            CredentialUseDisposition::Authorized => Ok(tokens),
-            // The machine asks for a refresh: run the OAuth refresh exchange.
-            CredentialUseDisposition::RefreshRequired => {
-                let Some(refresh_token) = tokens.refresh_token.clone() else {
-                    return Err(McpOAuthError::ReauthRequired {
-                        server_name: target.server_name().to_string(),
-                    });
-                };
-                let endpoints = OAuthEndpoints {
-                    client_id: metadata.client.client_id.clone(),
-                    authorize_url: metadata.discovery.authorization_endpoint.clone(),
-                    token_url: metadata.discovery.token_endpoint.clone(),
-                    device_code_url: None,
-                    redirect_uri: metadata.client.redirect_uri.clone(),
-                    scopes: metadata.discovery.scopes.clone(),
-                    extra_authorize_params: Vec::new(),
-                    token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
-                    include_state_in_token_exchange: false,
-                    extra_token_params: vec![(
-                        "resource".to_string(),
-                        metadata.discovery.resource.clone(),
-                    )],
-                    refresh_scopes: metadata.discovery.scopes.clone(),
-                    extra_headers: Vec::new(),
-                };
-                let refreshed = exchange_refresh_token(
-                    &self.http,
-                    &endpoints,
-                    &refresh_token,
-                    metadata.client.client_secret.as_deref(),
-                )
-                .await
-                .map_err(|error| map_refresh_error(target, error))?;
-                let mut persisted = persisted_tokens_from_result(
-                    &refreshed,
-                    &metadata.discovery,
-                    &metadata.client,
-                    target,
-                    Utc::now(),
-                )?;
-                if persisted.refresh_token.is_none() {
-                    persisted.refresh_token = Some(refresh_token);
-                }
-                // Mirror the login path: the post-refresh durable token write
-                // is owned by an AuthMachine lease-publish transition at the
-                // refreshed credential's own expiry, so refreshed tokens never
-                // lose the machine-stamped lifecycle marker. Fail closed — no
-                // refreshed token is persisted without a committed lease.
-                let published = self.publish_login_tokens_via_lease(target, key, &persisted)?;
-                self.token_store
-                    .save(key, &published)
-                    .await
-                    .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?;
-                Ok(published)
-            }
-            // Refresh is not permitted or the credential is otherwise unusable:
-            // the user must reauthenticate. (`LeaseAbsent`/`AlreadyRefreshing`
-            // cannot arise for a freshly acquired single-shot lease, but are
-            // handled exhaustively and fail closed to reauth.)
-            CredentialUseDisposition::RefreshDisallowed
-            | CredentialUseDisposition::ReauthRequired
-            | CredentialUseDisposition::LeaseAbsent
-            | CredentialUseDisposition::AlreadyRefreshing => Err(McpOAuthError::ReauthRequired {
+            CredentialUseDisposition::Authorized
+            | CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::AlreadyRefreshing => Ok(Some(AdmittedMcpCredential {
+                tokens,
+                metadata,
+                restore_snapshot,
+                disposition,
+            })),
+            CredentialUseDisposition::ReauthRequired
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::LeaseAbsent => Err(McpOAuthError::ReauthRequired {
                 server_name: target.server_name().to_string(),
             }),
         }
+    }
+
+    /// Coordinator closure. It deliberately reloads and re-admits after the
+    /// coordinator lock is held so a waiter observes a winner's durable token
+    /// instead of issuing a second refresh or overwriting that result.
+    async fn refresh_stored_credential_under_coordinator(
+        &self,
+        target: &McpServerIdentity,
+        key: &TokenKey,
+    ) -> Result<PersistedTokens, RefreshError> {
+        let lease_key = target
+            .lease_key()
+            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+        let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+        let admitted = self
+            .load_admitted_stored_credential(target, key)
+            .await
+            .map_err(refresh_error_from_mcp)?
+            .ok_or_else(|| RefreshError::Observed {
+                message: "stored MCP OAuth credential disappeared before refresh".to_string(),
+                observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(),
+            })?;
+        if admitted.disposition == CredentialUseDisposition::Authorized {
+            return Ok(admitted.tokens);
+        }
+        if admitted.disposition == CredentialUseDisposition::AlreadyRefreshing {
+            return Err(RefreshError::Refresh(
+                "AuthMachine reports an MCP OAuth refresh already in flight".to_string(),
+            ));
+        }
+
+        let begin_disposition = self
+            .auth_lease
+            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::BeginRefresh)
+            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+        match begin_disposition {
+            CredentialUseDisposition::RefreshRequired => self
+                .auth_lease
+                .begin_refresh(&lease_key)
+                .map_err(|error| RefreshError::Refresh(error.to_string()))?,
+            CredentialUseDisposition::AlreadyRefreshing => {
+                return Err(RefreshError::Refresh(
+                    "AuthMachine reports an MCP OAuth refresh already in flight".to_string(),
+                ));
+            }
+            CredentialUseDisposition::ReauthRequired => {
+                return Err(RefreshError::Observed {
+                    message: "MCP OAuth credential requires reauthentication".to_string(),
+                    observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(
+                    ),
+                });
+            }
+            CredentialUseDisposition::Authorized
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::LeaseAbsent => {
+                return Err(RefreshError::Refresh(format!(
+                    "AuthMachine rejected MCP OAuth BeginRefresh admission: {begin_disposition:?}"
+                )));
+            }
+        }
+        let refreshing_snapshot = self.auth_lease.snapshot(&lease_key);
+
+        let Some(refresh_token) = admitted.tokens.refresh_token.clone() else {
+            let observation = meerkat_core::RefreshFailureObservation::local_credential_unusable();
+            self.close_refresh_failure(key, &lease_key, &observation)
+                .await?;
+            return Err(RefreshError::Observed {
+                message: "stored MCP OAuth credential has no refresh token".to_string(),
+                observation,
+            });
+        };
+        let metadata = &admitted.metadata;
+        let endpoints = OAuthEndpoints {
+            client_id: metadata.client.client_id.clone(),
+            authorize_url: metadata.discovery.authorization_endpoint.clone(),
+            token_url: metadata.discovery.token_endpoint.clone(),
+            device_code_url: None,
+            redirect_uri: metadata.client.redirect_uri.clone(),
+            scopes: metadata.discovery.scopes.clone(),
+            extra_authorize_params: Vec::new(),
+            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+            include_state_in_token_exchange: false,
+            extra_token_params: vec![("resource".to_string(), metadata.discovery.resource.clone())],
+            refresh_scopes: metadata.discovery.scopes.clone(),
+            extra_headers: Vec::new(),
+        };
+        let refreshed = match exchange_refresh_token(
+            &self.http,
+            &endpoints,
+            &refresh_token,
+            metadata.client.client_secret.as_deref(),
+        )
+        .await
+        {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                let observation = oauth_refresh_observation(&error);
+                self.close_refresh_failure(key, &lease_key, &observation)
+                    .await?;
+                return Err(RefreshError::Observed {
+                    message: error.to_string(),
+                    observation,
+                });
+            }
+        };
+        let refreshed_at = Utc::now();
+        let mut persisted = match persisted_tokens_from_result(
+            &refreshed,
+            &metadata.discovery,
+            &metadata.client,
+            target,
+            refreshed_at,
+        ) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                let observation = meerkat_core::RefreshFailureObservation::transient();
+                self.auth_lease
+                    .refresh_failed(&lease_key, observation)
+                    .map_err(|transition_error| {
+                        RefreshError::Refresh(format!(
+                            "{error}; AuthMachine refresh_failed rejected closure: {transition_error}"
+                        ))
+                    })?;
+                return Err(RefreshError::Refresh(error.to_string()));
+            }
+        };
+        if persisted.refresh_token.is_none() {
+            persisted.refresh_token = Some(refresh_token);
+        }
+
+        let current_tokens = match self.token_store.load(key).await {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                let observation = meerkat_core::RefreshFailureObservation::transient();
+                self.auth_lease
+                    .refresh_failed(&lease_key, observation)
+                    .map_err(|transition_error| {
+                        RefreshError::Refresh(format!(
+                            "{error}; AuthMachine refresh_failed rejected closure: {transition_error}"
+                        ))
+                    })?;
+                return Err(RefreshError::Refresh(error.to_string()));
+            }
+        };
+        let current_snapshot = self.auth_lease.snapshot(&lease_key);
+        if current_tokens.as_ref() != Some(&admitted.tokens)
+            || current_snapshot != refreshing_snapshot
+        {
+            let observation = meerkat_core::RefreshFailureObservation::transient();
+            self.auth_lease
+                .refresh_failed(&lease_key, observation)
+                .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+            return Err(RefreshError::Refresh(
+                "MCP OAuth token or AuthMachine lifecycle changed during refresh; stale result discarded"
+                    .to_string(),
+            ));
+        }
+
+        let transition = match self.auth_lease.complete_refresh(
+            &lease_key,
+            meerkat_core::persisted_token_expires_at_epoch_secs(&persisted),
+            epoch_secs(refreshed_at),
+        ) {
+            Ok(transition) => transition,
+            Err(error) => {
+                let observation = meerkat_core::RefreshFailureObservation::transient();
+                self.auth_lease
+                    .refresh_failed(&lease_key, observation)
+                    .map_err(|transition_error| {
+                        RefreshError::Refresh(format!(
+                            "{error}; AuthMachine refresh_failed rejected closure: {transition_error}"
+                        ))
+                    })?;
+                return Err(RefreshError::Refresh(error.to_string()));
+            }
+        };
+        let published = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            key,
+            &persisted,
+            &transition,
+        ) {
+            Ok(published) => published,
+            Err(error) => {
+                return Err(self
+                    .rollback_refresh_publication(
+                        key,
+                        &lease_key,
+                        &admitted.tokens,
+                        &admitted.restore_snapshot,
+                        format!("failed to mark refreshed MCP OAuth token: {error}"),
+                    )
+                    .await);
+            }
+        };
+        if let Err(error) = self.token_store.save(key, &published).await {
+            return Err(self
+                .rollback_refresh_publication(
+                    key,
+                    &lease_key,
+                    &admitted.tokens,
+                    &admitted.restore_snapshot,
+                    format!("failed to save refreshed MCP OAuth token: {error}"),
+                )
+                .await);
+        }
+        Ok(published)
+    }
+
+    /// Close every begun refresh through AuthMachine. Permanently unusable
+    /// credentials are also removed from the durable store, so a new process
+    /// cannot resurrect and retry bytes that the token endpoint rejected.
+    async fn close_refresh_failure(
+        &self,
+        key: &TokenKey,
+        lease_key: &LeaseKey,
+        observation: &meerkat_core::RefreshFailureObservation,
+    ) -> Result<(), RefreshError> {
+        if observation.requires_reauth() {
+            // Durable terminality commits first. If the process dies after this
+            // clear, a new authority observes no credential and cannot restore
+            // the permanently rejected marker. The coordinator-owned task then
+            // closes the in-memory Refreshing phase without a cancellation gap.
+            if let Err(error) = self.token_store.clear(key).await {
+                let closure = self
+                    .auth_lease
+                    .refresh_failed(lease_key, observation.clone())
+                    .map_err(|transition_error| transition_error.to_string());
+                let closure_suffix = closure
+                    .err()
+                    .map(|error| format!("; AuthMachine refresh closure also failed: {error}"))
+                    .unwrap_or_default();
+                return Err(RefreshError::DurableTerminalCommit {
+                    message: format!(
+                        "permanently rejected MCP OAuth credential removal failed: {error}{closure_suffix}"
+                    ),
+                    observation: observation.clone(),
+                });
+            }
+            if let Err(error) = self
+                .auth_lease
+                .refresh_failed(lease_key, observation.clone())
+            {
+                let reconciliation = self
+                    .auth_lease
+                    .release_credential_lifecycle(lease_key)
+                    .err()
+                    .map(|release_error| {
+                        format!("; credential lifecycle release also failed: {release_error}")
+                    })
+                    .unwrap_or_default();
+                return Err(RefreshError::Refresh(format!(
+                    "durable credential was removed but AuthMachine refresh closure failed: {error}{reconciliation}"
+                )));
+            }
+            return Ok(());
+        }
+        self.auth_lease
+            .refresh_failed(lease_key, observation.clone())
+            .map_err(|error| RefreshError::Refresh(error.to_string()))
+    }
+
+    async fn rollback_refresh_publication(
+        &self,
+        key: &TokenKey,
+        lease_key: &LeaseKey,
+        previous_tokens: &PersistedTokens,
+        previous_snapshot: &AuthLeaseRestoreSnapshot,
+        reason: String,
+    ) -> RefreshError {
+        let mut rollback_errors = Vec::new();
+        if let Err(error) = self.auth_lease.release_credential_lifecycle(lease_key) {
+            rollback_errors.push(format!("AuthMachine release failed: {error}"));
+        }
+        let mut restored_tokens = previous_tokens.clone();
+        match meerkat_core::restore_token_lifecycle_snapshot(&self.auth_lease, previous_snapshot) {
+            Ok(Some(transition)) => {
+                match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    key,
+                    previous_tokens,
+                    &transition,
+                ) {
+                    Ok(marked) => restored_tokens = marked,
+                    Err(error) => rollback_errors.push(format!("marker restore failed: {error}")),
+                }
+            }
+            Ok(None) => {}
+            Err(error) => rollback_errors.push(format!("AuthMachine restore failed: {error}")),
+        }
+        if let Err(error) = self.token_store.save(key, &restored_tokens).await {
+            rollback_errors.push(format!("TokenStore restore failed: {error}"));
+        }
+        let suffix = if rollback_errors.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", rollback_errors.join("; "))
+        };
+        RefreshError::Refresh(format!("{reason}{suffix}"))
     }
 
     async fn discover(
@@ -774,19 +1314,65 @@ fn map_oauth_exchange_error(target: &McpServerIdentity, error: OAuthError) -> Mc
     }
 }
 
-fn map_refresh_error(target: &McpServerIdentity, error: OAuthError) -> McpOAuthError {
-    // Route the OAuth error through the canonical boundary-observation
-    // classifier the AuthMachine + lease lifecycle already consume, then ask
-    // the typed observation whether reauth is required. One owner of the
-    // reauth-vs-retry decision instead of a substring match on the raw body.
-    if oauth_refresh_observation(&error).requires_reauth() {
-        return McpOAuthError::ReauthRequired {
+fn map_coordinated_login_error(
+    target: &McpServerIdentity,
+    error: CredentialMutationError,
+) -> McpOAuthError {
+    match error {
+        CredentialMutationError::TokenStore(reason) => McpOAuthError::TokenStore(reason),
+        CredentialMutationError::AuthLifecycle(reason)
+        | CredentialMutationError::Operation(reason)
+        | CredentialMutationError::LockFailed(reason) => McpOAuthError::AuthLifecycle {
             server_name: target.server_name().to_string(),
-        };
+            reason,
+        },
+        CredentialMutationError::Cancelled => McpOAuthError::AuthLifecycle {
+            server_name: target.server_name().to_string(),
+            reason: "credential mutation coordinator cancelled the login commit".to_string(),
+        },
     }
-    McpOAuthError::RefreshFailed {
-        server_name: target.server_name().to_string(),
-        reason: error.to_string(),
+}
+
+fn lifecycle_snapshot_is_absent(snapshot: &AuthLeaseSnapshot) -> bool {
+    snapshot.phase.is_none()
+        && !snapshot.credential_present
+        && snapshot.generation == 0
+        && snapshot.credential_published_at_millis.is_none()
+}
+
+fn rollback_error_suffix(errors: &[String]) -> String {
+    if errors.is_empty() {
+        "; previous credential and lifecycle restored".to_string()
+    } else {
+        format!("; rollback faults: {}", errors.join("; "))
+    }
+}
+
+fn refresh_error_from_mcp(error: McpOAuthError) -> RefreshError {
+    match error {
+        McpOAuthError::ReauthRequired { .. }
+        | McpOAuthError::MissingStoredToken { .. }
+        | McpOAuthError::MissingStoredMetadata { .. } => RefreshError::Observed {
+            message: error.to_string(),
+            observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(),
+        },
+        other => RefreshError::Refresh(other.to_string()),
+    }
+}
+
+fn map_coordinated_refresh_error(target: &McpServerIdentity, error: RefreshError) -> McpOAuthError {
+    if let RefreshError::DurableTerminalCommit { message, .. } = &error {
+        return McpOAuthError::TokenStore(message.clone());
+    }
+    if error.observation().requires_reauth() {
+        McpOAuthError::ReauthRequired {
+            server_name: target.server_name().to_string(),
+        }
+    } else {
+        McpOAuthError::RefreshFailed {
+            server_name: target.server_name().to_string(),
+            reason: error.to_string(),
+        }
     }
 }
 
@@ -958,6 +1544,13 @@ struct StoredMcpOAuthMetadata {
     client: StoredMcpOAuthClient,
 }
 
+struct AdmittedMcpCredential {
+    tokens: PersistedTokens,
+    metadata: StoredMcpOAuthMetadata,
+    restore_snapshot: AuthLeaseRestoreSnapshot,
+    disposition: CredentialUseDisposition,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -971,7 +1564,9 @@ mod tests {
     use parking_lot::Mutex;
     use serde_json::Value;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
+    use tokio::sync::Notify;
 
     /// A certified `AuthMachine` lease handle for tests. `meerkat-runtime` is a
     /// dev-dependency, so tests can mint the same generated lease the CLI
@@ -1005,6 +1600,10 @@ mod tests {
         issuer_override: Mutex<Option<String>>,
         authorize_outcome: Mutex<AuthorizeOutcome>,
         token_fails: Mutex<bool>,
+        token_transiently_fails: Mutex<bool>,
+        pause_refresh: AtomicBool,
+        refresh_started: Notify,
+        refresh_release: Notify,
     }
 
     struct RecordingBrowser {
@@ -1023,6 +1622,122 @@ mod tests {
 
     struct NoCallbackBrowser {
         state: Arc<TestState>,
+    }
+
+    struct FailNextSaveStore {
+        inner: Arc<EphemeralTokenStore>,
+        fail_next_save: AtomicBool,
+    }
+
+    struct FailNextSaveDynStore {
+        inner: Arc<dyn TokenStore>,
+        fail_next_save: AtomicBool,
+    }
+
+    struct FailClearStore {
+        inner: Arc<EphemeralTokenStore>,
+    }
+
+    #[async_trait]
+    impl TokenStore for FailClearStore {
+        async fn load(
+            &self,
+            key: &TokenKey,
+        ) -> Result<Option<PersistedTokens>, crate::auth_store::TokenStoreError> {
+            self.inner.load(key).await
+        }
+
+        async fn save(
+            &self,
+            key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), crate::auth_store::TokenStoreError> {
+            self.inner.save(key, tokens).await
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), crate::auth_store::TokenStoreError> {
+            Err(crate::auth_store::TokenStoreError::Io(
+                "injected clear failure".to_string(),
+            ))
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, crate::auth_store::TokenStoreError> {
+            self.inner.list().await
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "fail-clear"
+        }
+    }
+
+    #[async_trait]
+    impl TokenStore for FailNextSaveDynStore {
+        async fn load(
+            &self,
+            key: &TokenKey,
+        ) -> Result<Option<PersistedTokens>, crate::auth_store::TokenStoreError> {
+            self.inner.load(key).await
+        }
+
+        async fn save(
+            &self,
+            key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), crate::auth_store::TokenStoreError> {
+            if self.fail_next_save.swap(false, Ordering::SeqCst) {
+                return Err(crate::auth_store::TokenStoreError::Io(
+                    "injected save failure".to_string(),
+                ));
+            }
+            self.inner.save(key, tokens).await
+        }
+
+        async fn clear(&self, key: &TokenKey) -> Result<(), crate::auth_store::TokenStoreError> {
+            self.inner.clear(key).await
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, crate::auth_store::TokenStoreError> {
+            self.inner.list().await
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "fail-next-save-dyn"
+        }
+    }
+
+    #[async_trait]
+    impl TokenStore for FailNextSaveStore {
+        async fn load(
+            &self,
+            key: &TokenKey,
+        ) -> Result<Option<PersistedTokens>, crate::auth_store::TokenStoreError> {
+            self.inner.load(key).await
+        }
+
+        async fn save(
+            &self,
+            key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), crate::auth_store::TokenStoreError> {
+            if self.fail_next_save.swap(false, Ordering::SeqCst) {
+                return Err(crate::auth_store::TokenStoreError::Io(
+                    "injected save failure".to_string(),
+                ));
+            }
+            self.inner.save(key, tokens).await
+        }
+
+        async fn clear(&self, key: &TokenKey) -> Result<(), crate::auth_store::TokenStoreError> {
+            self.inner.clear(key).await
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, crate::auth_store::TokenStoreError> {
+            self.inner.list().await
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "fail-next-save"
+        }
     }
 
     #[async_trait]
@@ -1174,6 +1889,16 @@ mod tests {
         State(state): State<Arc<TestState>>,
         Form(body): Form<HashMap<String, String>>,
     ) -> impl IntoResponse {
+        state
+            .token_requests
+            .lock()
+            .push(serde_json::to_value(&body).unwrap());
+        if body.get("grant_type").map(String::as_str) == Some("refresh_token")
+            && state.pause_refresh.load(Ordering::SeqCst)
+        {
+            state.refresh_started.notify_one();
+            state.refresh_release.notified().await;
+        }
         if *state.token_fails.lock() {
             // RFC 6749 §5.2 error response: a JSON body carrying the typed
             // `error` code. The refresh-failure classifier parses this `error`
@@ -1184,10 +1909,13 @@ mod tests {
             )
                 .into_response();
         }
-        state
-            .token_requests
-            .lock()
-            .push(serde_json::to_value(body).unwrap());
+        if *state.token_transiently_fails.lock() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "temporarily_unavailable" })),
+            )
+                .into_response();
+        }
         Json(serde_json::json!({
             "access_token": "access-token",
             "refresh_token": "refresh-token",
@@ -1248,8 +1976,9 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
+        let auth_lease = test_auth_lease();
         let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), auth_lease.clone());
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
@@ -1288,9 +2017,10 @@ mod tests {
             .await
             .expect("initial login succeeds");
         let key = target.token_key().unwrap();
-        let mut stored = store.load(&key).await.unwrap().unwrap();
-        stored.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
-        store.save(&key, &stored).await.unwrap();
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
 
         let token = authority
             .stored_bearer_token(&target)
@@ -1316,6 +2046,412 @@ mod tests {
         assert_eq!(refreshed.metadata["client"]["client_id"], "client-123");
     }
 
+    #[tokio::test]
+    async fn unmarked_non_expiring_stored_token_is_dead_data() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let auth_lease = test_auth_lease();
+        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            auth_lease.clone(),
+            Arc::new(InMemoryCoordinator::new()),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+
+        authority.interactive_login(&target, None).await.unwrap();
+        let key = target.token_key().unwrap();
+        let mut stored = store.load(&key).await.unwrap().unwrap();
+        let metadata = stored_metadata_for_target(&target, &stored).unwrap();
+        stored.expires_at = None;
+        stored.metadata = serde_json::to_value(metadata).unwrap();
+        store.save(&key, &stored).await.unwrap();
+        auth_lease
+            .release_lease(&target.lease_key().unwrap())
+            .unwrap();
+
+        let error = authority
+            .stored_bearer_token(&target)
+            .await
+            .expect_err("unmarked persisted bytes must never be admitted");
+        assert!(matches!(error, McpOAuthError::ReauthRequired { .. }));
+        assert_eq!(
+            state.token_requests.lock().len(),
+            1,
+            "dead stored bytes must not reach the refresh endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn marked_non_expiring_stored_token_restores_and_is_admitted() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let auth_lease = test_auth_lease();
+        let authority = McpOAuthAuthority::with_http_ephemeral(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            auth_lease.clone(),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+
+        authority.interactive_login(&target, None).await.unwrap();
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = None;
+        })
+        .await;
+        let lease_key = target.lease_key().unwrap();
+        let stored = store
+            .load(&target.token_key().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(durable_marker::marker_payload_valid_for_tokens(
+            &stored,
+            &target.token_key().unwrap()
+        ));
+        let restored_auth_lease = test_auth_lease();
+        let restored_authority = McpOAuthAuthority::with_http(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            restored_auth_lease.clone(),
+        );
+
+        let token = restored_authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .expect("marked token is present");
+        assert_eq!(token, "access-token");
+        let snapshot = restored_auth_lease.snapshot(&lease_key);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid)
+        );
+        assert!(snapshot.credential_present);
+        assert_eq!(state.token_requests.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_expired_reads_share_one_refresh_transaction() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let authority = McpOAuthAuthority::with_http_ephemeral(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            test_auth_lease(),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        authority.interactive_login(&target, None).await.unwrap();
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+
+        let mut reads = Vec::new();
+        for _ in 0..8 {
+            let authority = authority.clone();
+            let target = target.clone();
+            reads.push(tokio::spawn(async move {
+                authority.stored_bearer_token(&target).await
+            }));
+        }
+        for read in reads {
+            assert_eq!(
+                read.await.unwrap().unwrap().as_deref(),
+                Some("access-token")
+            );
+        }
+        let requests = state.token_requests.lock();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["grant_type"] == "refresh_token")
+                .count(),
+            1,
+            "same-key readers must share one OAuth refresh"
+        );
+    }
+
+    #[cfg(feature = "file-lock")]
+    #[tokio::test]
+    async fn interactive_login_commit_waits_for_cross_process_refresh_transaction() {
+        use crate::auth_store::{FileLockCoordinator, FileTokenStore};
+
+        let (base, state) = spawn_oauth_fixture().await;
+        let temp = tempfile::tempdir().unwrap();
+        let lock_dir = temp.path().join("locks");
+        let store: Arc<dyn TokenStore> =
+            Arc::new(FileTokenStore::new(temp.path().join("credentials")));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        let seed = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            Arc::clone(&store),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            test_auth_lease(),
+            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+        );
+        seed.interactive_login(&target, None).await.unwrap();
+        republish_stored_tokens(&seed, store.as_ref(), &target, |tokens| {
+            tokens.primary_secret = Some("stale-access-token".to_string());
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+
+        state.pause_refresh.store(true, Ordering::SeqCst);
+        let refresh = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            Arc::clone(&store),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            test_auth_lease(),
+            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+        );
+        let refresh_target = target.clone();
+        let refresh_task =
+            tokio::spawn(async move { refresh.stored_bearer_token(&refresh_target).await });
+        state.refresh_started.notified().await;
+
+        let login_lease = test_auth_lease();
+        let login = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            Arc::clone(&store),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            login_lease.clone(),
+            Arc::new(FileLockCoordinator::new(lock_dir)),
+        );
+        let login_target = target.clone();
+        let mut login_task =
+            tokio::spawn(async move { login.interactive_login(&login_target, None).await });
+        wait_for_token_grant_count(&state, "authorization_code", 2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut login_task)
+                .await
+                .is_err(),
+            "login commit must wait behind the refresh mutation lock"
+        );
+
+        state.refresh_release.notify_one();
+        assert_eq!(
+            refresh_task.await.unwrap().unwrap().as_deref(),
+            Some("access-token")
+        );
+        assert_eq!(login_task.await.unwrap().unwrap(), "access-token");
+
+        let key = target.token_key().unwrap();
+        let committed = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(committed.primary_secret.as_deref(), Some("access-token"));
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &committed,
+                &login_lease.snapshot(&target.lease_key().unwrap()),
+                &key,
+            ),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches
+        );
+    }
+
+    #[cfg(feature = "file-lock")]
+    #[tokio::test]
+    async fn failed_login_after_paused_refresh_restores_refresh_winner() {
+        use crate::auth_store::{FileLockCoordinator, FileTokenStore};
+
+        let (base, state) = spawn_oauth_fixture().await;
+        let temp = tempfile::tempdir().unwrap();
+        let lock_dir = temp.path().join("locks");
+        let durable_store: Arc<dyn TokenStore> =
+            Arc::new(FileTokenStore::new(temp.path().join("credentials")));
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        let seed = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            Arc::clone(&durable_store),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            test_auth_lease(),
+            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+        );
+        seed.interactive_login(&target, None).await.unwrap();
+        republish_stored_tokens(&seed, durable_store.as_ref(), &target, |tokens| {
+            tokens.primary_secret = Some("stale-access-token".to_string());
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+
+        state.pause_refresh.store(true, Ordering::SeqCst);
+        let refresh = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            Arc::clone(&durable_store),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            test_auth_lease(),
+            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+        );
+        let refresh_target = target.clone();
+        let refresh_task =
+            tokio::spawn(async move { refresh.stored_bearer_token(&refresh_target).await });
+        state.refresh_started.notified().await;
+
+        let failing_store = Arc::new(FailNextSaveDynStore {
+            inner: Arc::clone(&durable_store),
+            fail_next_save: AtomicBool::new(true),
+        });
+        let login_lease = test_auth_lease();
+        let login = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            failing_store,
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            login_lease.clone(),
+            Arc::new(FileLockCoordinator::new(lock_dir)),
+        );
+        let login_target = target.clone();
+        let mut login_task =
+            tokio::spawn(async move { login.interactive_login(&login_target, None).await });
+        wait_for_token_grant_count(&state, "authorization_code", 2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut login_task)
+                .await
+                .is_err(),
+            "failed login transaction must still wait behind refresh"
+        );
+
+        state.refresh_release.notify_one();
+        assert_eq!(
+            refresh_task.await.unwrap().unwrap().as_deref(),
+            Some("access-token")
+        );
+        assert!(matches!(
+            login_task.await.unwrap(),
+            Err(McpOAuthError::TokenStore(_))
+        ));
+
+        let key = target.token_key().unwrap();
+        let restored = durable_store.load(&key).await.unwrap().unwrap();
+        assert_eq!(
+            restored.primary_secret.as_deref(),
+            Some("access-token"),
+            "login rollback must not restore the stale pre-refresh credential"
+        );
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &restored,
+                &login_lease.snapshot(&target.lease_key().unwrap()),
+                &key,
+            ),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_save_failure_restores_previous_token_and_machine_snapshot() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let inner = Arc::new(EphemeralTokenStore::new());
+        let store = Arc::new(FailNextSaveStore {
+            inner: Arc::clone(&inner),
+            fail_next_save: AtomicBool::new(false),
+        });
+        let auth_lease = test_auth_lease();
+        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            auth_lease.clone(),
+            Arc::new(InMemoryCoordinator::new()),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        authority.interactive_login(&target, None).await.unwrap();
+        let previous = republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+        store.fail_next_save.store(true, Ordering::SeqCst);
+
+        let error = authority
+            .stored_bearer_token(&target)
+            .await
+            .expect_err("injected refresh commit failure must surface");
+        assert!(matches!(error, McpOAuthError::RefreshFailed { .. }));
+        let key = target.token_key().unwrap();
+        let restored = inner.load(&key).await.unwrap().unwrap();
+        assert_eq!(restored.primary_secret, previous.primary_secret);
+        assert_eq!(restored.expires_at, previous.expires_at);
+        let snapshot = auth_lease.snapshot(&target.lease_key().unwrap());
+        assert_ne!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Refreshing),
+            "failed persistence must not strand AuthMachine in Refreshing"
+        );
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(&restored, &snapshot, &key),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches,
+            "compensation must restore token and machine as one lifecycle publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_relogin_save_failure_restores_previous_token_and_machine_snapshot() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let inner = Arc::new(EphemeralTokenStore::new());
+        let store = Arc::new(FailNextSaveStore {
+            inner: Arc::clone(&inner),
+            fail_next_save: AtomicBool::new(false),
+        });
+        let seed_authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            test_auth_lease(),
+            Arc::new(InMemoryCoordinator::new()),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        seed_authority
+            .interactive_login(&target, None)
+            .await
+            .unwrap();
+        let previous =
+            republish_stored_tokens(&seed_authority, store.as_ref(), &target, |tokens| {
+                tokens.primary_secret = Some("previous-access-token".to_string());
+                tokens.refresh_token = Some("previous-refresh-token".to_string());
+            })
+            .await;
+        let auth_lease = test_auth_lease();
+        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            auth_lease.clone(),
+            Arc::new(InMemoryCoordinator::new()),
+        );
+        store.fail_next_save.store(true, Ordering::SeqCst);
+
+        let error = authority
+            .interactive_login(&target, None)
+            .await
+            .expect_err("injected relogin commit failure must surface");
+        assert!(matches!(&error, McpOAuthError::TokenStore(_)));
+
+        let key = target.token_key().unwrap();
+        let restored = inner.load(&key).await.unwrap().unwrap();
+        assert_eq!(restored.primary_secret, previous.primary_secret);
+        assert_eq!(restored.refresh_token, previous.refresh_token);
+        assert_eq!(restored.expires_at, previous.expires_at);
+        assert_eq!(restored.metadata["client"], previous.metadata["client"]);
+        let snapshot = auth_lease.snapshot(&target.lease_key().unwrap());
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(&restored, &snapshot, &key),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches,
+            "failed relogin must restore one admitted token/lifecycle publication"
+        );
+        assert_eq!(
+            authority
+                .stored_bearer_token(&target)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("previous-access-token"),
+            "the previously usable credential must remain usable after rollback"
+        );
+    }
+
     #[test]
     fn parses_resource_metadata_from_www_authenticate() {
         let header = r#"Bearer error="invalid_request", resource_metadata="/.well-known/oauth-protected-resource/mcp""#;
@@ -1333,6 +2469,41 @@ mod tests {
                 .build()
                 .unwrap(),
         })
+    }
+
+    async fn wait_for_token_grant_count(state: &TestState, grant_type: &str, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let observed = state
+                    .token_requests
+                    .lock()
+                    .iter()
+                    .filter(|request| request["grant_type"] == grant_type)
+                    .count();
+                if observed >= expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expected OAuth token request was not observed");
+    }
+
+    async fn republish_stored_tokens(
+        authority: &McpOAuthAuthority,
+        store: &dyn TokenStore,
+        target: &McpServerIdentity,
+        mutate: impl FnOnce(&mut PersistedTokens),
+    ) -> PersistedTokens {
+        let key = target.token_key().unwrap();
+        let mut tokens = store.load(&key).await.unwrap().unwrap();
+        mutate(&mut tokens);
+        let published = authority
+            .publish_login_tokens_via_lease(target, &key, &tokens)
+            .unwrap();
+        store.save(&key, &published).await.unwrap();
+        published
     }
 
     async fn assert_login_fails_closed(
@@ -1459,18 +2630,19 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
+        let auth_lease = test_auth_lease();
         let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), auth_lease.clone());
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
             .interactive_login(&target, None)
             .await
             .expect("initial login succeeds");
-        let key = target.token_key().unwrap();
-        let mut stored = store.load(&key).await.unwrap().unwrap();
-        stored.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
-        store.save(&key, &stored).await.unwrap();
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
         *state.token_fails.lock() = true;
 
         let error = authority
@@ -1479,11 +2651,170 @@ mod tests {
             .expect_err("invalid refresh grant should require reauth");
 
         assert!(matches!(error, McpOAuthError::ReauthRequired { .. }));
-        let token_requests = state.token_requests.lock();
         assert_eq!(
-            token_requests.last().unwrap()["resource"],
-            format!("{base}/mcp"),
-            "refresh exchange should carry the MCP resource indicator"
+            auth_lease.snapshot(&target.lease_key().unwrap()).phase,
+            Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
+            "invalid_grant must close Refreshing through AuthRefreshFailed"
+        );
+        assert!(
+            store
+                .load(&target.token_key().unwrap())
+                .await
+                .unwrap()
+                .is_none(),
+            "permanently rejected credentials must remain dead across processes"
+        );
+        let requests_before_restart = {
+            let token_requests = state.token_requests.lock();
+            assert_eq!(
+                token_requests.last().unwrap()["grant_type"],
+                "refresh_token"
+            );
+            assert_eq!(
+                token_requests.last().unwrap()["resource"],
+                format!("{base}/mcp"),
+                "refresh exchange should carry the MCP resource indicator"
+            );
+            token_requests.len()
+        };
+        let restarted = McpOAuthAuthority::with_http(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            test_auth_lease(),
+        );
+        assert!(
+            restarted
+                .stored_bearer_token(&target)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state.token_requests.lock().len(),
+            requests_before_restart,
+            "a restarted authority must not retry a durably cleared permanent credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_refresh_clear_failure_is_typed_and_closes_machine() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let inner = Arc::new(EphemeralTokenStore::new());
+        let store = Arc::new(FailClearStore {
+            inner: Arc::clone(&inner),
+        });
+        let auth_lease = test_auth_lease();
+        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            auth_lease.clone(),
+            Arc::new(InMemoryCoordinator::new()),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        authority.interactive_login(&target, None).await.unwrap();
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+        *state.token_fails.lock() = true;
+
+        let error = authority
+            .stored_bearer_token(&target)
+            .await
+            .expect_err("durable clear failure must surface");
+        assert!(matches!(&error, McpOAuthError::TokenStore(_)));
+        assert!(error.to_string().contains("injected clear failure"));
+        assert_eq!(
+            auth_lease.snapshot(&target.lease_key().unwrap()).phase,
+            Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
+            "even a failed durable clear must close the begun refresh"
+        );
+        assert!(
+            inner
+                .load(&target.token_key().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_clear_crash_point_reconciles_stranded_refreshing_lifecycle() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let auth_lease = test_auth_lease();
+        let authority = McpOAuthAuthority::with_http(
+            store.clone(),
+            recording_browser(state),
+            Client::new(),
+            auth_lease.clone(),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        authority.interactive_login(&target, None).await.unwrap();
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+        let lease_key = target.lease_key().unwrap();
+        auth_lease
+            .observe_credential_freshness(
+                &lease_key,
+                epoch_secs(Utc::now()),
+                AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+            )
+            .unwrap();
+        auth_lease.begin_refresh(&lease_key).unwrap();
+        store.clear(&target.token_key().unwrap()).await.unwrap();
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
+        );
+
+        assert!(
+            authority
+                .stored_bearer_token(&target)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let reconciled = auth_lease.snapshot(&lease_key);
+        assert!(
+            reconciled.phase.is_none(),
+            "released lifecycle projects no active phase"
+        );
+        assert!(!reconciled.credential_present);
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_closes_machine_back_to_expiring() {
+        let (base, state) = spawn_oauth_fixture().await;
+        let store = Arc::new(EphemeralTokenStore::new());
+        let auth_lease = test_auth_lease();
+        let authority = McpOAuthAuthority::with_http(
+            store.clone(),
+            recording_browser(Arc::clone(&state)),
+            Client::new(),
+            auth_lease.clone(),
+        );
+        let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
+        authority.interactive_login(&target, None).await.unwrap();
+        republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        })
+        .await;
+        *state.token_transiently_fails.lock() = true;
+
+        let error = authority
+            .stored_bearer_token(&target)
+            .await
+            .expect_err("transient refresh failure must surface");
+        assert!(matches!(error, McpOAuthError::RefreshFailed { .. }));
+        assert_eq!(
+            auth_lease.snapshot(&target.lease_key().unwrap()).phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Expiring),
+            "transient boundary evidence must close Refreshing through AuthRefreshFailed"
         );
     }
 

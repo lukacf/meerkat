@@ -412,70 +412,6 @@ rust_test(
 )
 
 rust_test(
-    name = "dispatcher_access_denied_distinct_test",
-    aliases = aliases(
-        package_name = "meerkat-tools",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "dispatcher_access_denied_distinct",
-    crate_root = "tests/dispatcher_access_denied_distinct.rs",
-    crate_features = [
-        "comms",
-        "mcp",
-        "skills",
-        "sqlite",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "skills/builtin-utilities-workflow/SKILL.md",
-        "skills/shell-patterns/SKILL.md",
-        "skills/skill-discovery-workflow/SKILL.md",
-        "skills/task-workflow/SKILL.md",
-    ],
-    srcs = [
-        "tests/dispatcher_access_denied_distinct.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.7.31",
-        "CARGO_BIN_NAME": "dispatcher_access_denied_distinct",
-        "CARGO_MANIFEST_DIR": "./meerkat-tools",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-tools",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-capabilities:meerkat_capabilities",
-        "//meerkat-comms:meerkat_comms",
-        "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
-        "//meerkat-llm-core:meerkat_llm_core",
-        "//meerkat-mcp:meerkat_mcp_test_support",
-        "//meerkat-runtime:meerkat_runtime_test_support",
-        "//meerkat-skills:meerkat_skills",
-        "//meerkat-tools:meerkat_tools_with_runtime_test_support",
-    ] + all_crate_deps(
-        package_name = "meerkat-tools",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
     name = "integration_shell_jobs_test",
     aliases = aliases(
         package_name = "meerkat-tools",
@@ -677,7 +613,6 @@ test_suite(
     tests = [
         ":browse_load_surface_test",
         ":builtin_skill_canonical_key_test",
-        ":dispatcher_access_denied_distinct_test",
         ":meerkat_tools_unit_test",
         ":rct_contracts_test",
     ],

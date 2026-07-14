@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use meerkat_auth_core::auth_store::{
-    FileLockCoordinator, PersistedTokens, RefreshCoordinator, RefreshError, TokenKey,
+    CredentialMutationError, FileLockCoordinator, PersistedTokens, RefreshCoordinator,
+    RefreshError, TokenKey,
 };
 
 const CHILD_ENV: &str = "MEERKAT_REFRESH_CROSSPROC_CHILD";
@@ -153,7 +154,7 @@ async fn in_process_two_coordinators_share_lock_dir() {
         let max_in_flight = Arc::clone(&max_in_flight);
         handles.push(tokio::spawn(async move {
             coord
-                .with_refresh(
+                .with_exclusive_mutation(
                     key,
                     Box::new(move || {
                         async move {
@@ -163,7 +164,7 @@ async fn in_process_two_coordinators_share_lock_dir() {
                             tokio::time::sleep(Duration::from_millis(30)).await;
                             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                            Ok::<_, RefreshError>(PersistedTokens::api_key("ok"))
+                            Ok::<_, CredentialMutationError>(PersistedTokens::api_key("ok"))
                         }
                         .boxed()
                     }),

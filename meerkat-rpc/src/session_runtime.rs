@@ -13646,6 +13646,94 @@ mod tests {
         assert_eq!(loaded.status, meerkat_core::ApprovalStatus::Pending);
     }
 
+    #[tokio::test]
+    async fn event_cursor_and_snapshot_fail_closed_on_projection_halt_same_process_and_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let realm_id = "halted-event-replay";
+        let (_manifest, bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .expect("open persistence");
+        let (event_store, _projector) = bundle
+            .event_projection()
+            .expect("realm persistence must install event replay");
+        let runtime = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-a")),
+            Config::default(),
+            10,
+            bundle,
+            crate::router::NotificationSink::noop(),
+        );
+        let session_id = SessionId::new();
+        event_store
+            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .await
+            .expect("seed replay log");
+        event_store
+            .record_projection_halt(&session_id, "injected projection gap")
+            .await
+            .expect("persist projection halt");
+        let scope = meerkat_contracts::EventReplayScope::Session {
+            session_id: session_id.clone(),
+        };
+
+        let latest_error = runtime
+            .event_latest_cursor(scope.clone())
+            .await
+            .expect_err("latest cursor must not cross a same-process projection halt");
+        assert!(
+            latest_error.message.contains("event projection halted"),
+            "unexpected latest-cursor error: {latest_error:?}"
+        );
+        let snapshot_error = runtime
+            .event_snapshot(scope.clone())
+            .await
+            .expect_err("snapshot must not cross a same-process projection halt");
+        assert!(
+            snapshot_error.message.contains("event projection halted"),
+            "unexpected snapshot error: {snapshot_error:?}"
+        );
+        drop(runtime);
+        drop(event_store);
+
+        let (_manifest, reopened_bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .expect("reopen persistence");
+        let reopened = SessionRuntime::new(
+            AgentFactory::new(temp.path().join("agent-sessions-b")),
+            Config::default(),
+            10,
+            reopened_bundle,
+            crate::router::NotificationSink::noop(),
+        );
+
+        let latest_error = reopened
+            .event_latest_cursor(scope.clone())
+            .await
+            .expect_err("latest cursor must not cross a durable halt after restart");
+        assert!(
+            latest_error.message.contains("event projection halted"),
+            "unexpected restarted latest-cursor error: {latest_error:?}"
+        );
+        let snapshot_error = reopened
+            .event_snapshot(scope)
+            .await
+            .expect_err("snapshot must not cross a durable halt after restart");
+        assert!(
+            snapshot_error.message.contains("event projection halted"),
+            "unexpected restarted snapshot error: {snapshot_error:?}"
+        );
+    }
+
     /// Jsonl sibling of the sqlite reopen test above: reopen-from-realm-
     /// persistence must also carry pending approvals across runtime
     /// reconstruction when the realm runs the jsonl runtime companion.

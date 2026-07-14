@@ -60,9 +60,9 @@ pub use builtin::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use builtin::{FileTaskStore, ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
 pub use control_plane::{CatalogControlDispatcher, CatalogControlVisibilityProvider};
+pub use dispatcher::EmptyToolDispatcher;
 #[cfg(not(target_arch = "wasm32"))]
 pub use dispatcher::ToolDispatcher;
-pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
 #[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher};

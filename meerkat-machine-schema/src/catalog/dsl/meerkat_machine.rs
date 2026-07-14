@@ -384,7 +384,8 @@ pub enum PeerTerminalDisposition {
 /// (`Reserved`), live with an attached consumer (`Attached`), or terminal
 /// (`Completed` after a terminal event won, `Expired` after the TTL elapsed
 /// without an attach, `ClosedEarly` after the consumer dropped the stream
-/// before terminal). Mirror of [`meerkat_core::InteractionStreamState`].
+/// before terminal, `Abandoned` after an explicit typed failure). Mirror of
+/// [`meerkat_core::InteractionStreamState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InteractionStreamState {
     #[default]
@@ -393,6 +394,18 @@ pub enum InteractionStreamState {
     Completed,
     Expired,
     ClosedEarly,
+    Abandoned,
+}
+
+/// Typed failure that makes a reserved or attached interaction stream
+/// unusable. This must never be laundered into TTL expiry or peer timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InteractionStreamAbandonReason {
+    #[default]
+    SendFailed,
+    AdmissionRejected,
+    ResponseRejected,
+    TerminalDeliveryFailed,
 }
 
 /// Per-server MCP connection lifecycle state. Matches the catalog copy;
@@ -4269,6 +4282,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             InteractionStreamCompleted { corr_id: PeerCorrelationId },
             InteractionStreamExpired { corr_id: PeerCorrelationId },
             InteractionStreamClosedEarly { corr_id: PeerCorrelationId },
+            InteractionStreamAbandoned {
+                corr_id: PeerCorrelationId,
+                reason: Enum<InteractionStreamAbandonReason>,
+            },
             // Peer-ingress transport capability ownership (W2-G).
             //
             // `AttachSessionIngress` only succeeds from `Unattached`:
@@ -5067,7 +5084,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // cleanup variant is the authoritative signal to drop the
             // shell-side channel projection.
             InteractionStreamStateChanged { corr_id: PeerCorrelationId, new_state: InteractionStreamState },
-            InteractionStreamCleanup { corr_id: PeerCorrelationId },
+            InteractionStreamCleanup {
+                corr_id: PeerCorrelationId,
+                abandon_reason: Option<InteractionStreamAbandonReason>,
+            },
             // Track-B (R5) peer-projection effects.
             LocalEndpointChanged { endpoint: Option<PeerEndpoint> },
             SupervisorBindAdmissionResolved {
@@ -20330,7 +20350,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::Completed }
-            emit InteractionStreamCleanup { corr_id: corr_id }
+            emit InteractionStreamCleanup { corr_id: corr_id, abandon_reason: None }
         }
 
         transition InteractionStreamExpired {
@@ -20343,7 +20363,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::Expired }
-            emit InteractionStreamCleanup { corr_id: corr_id }
+            emit InteractionStreamCleanup { corr_id: corr_id, abandon_reason: None }
         }
 
         transition InteractionStreamClosedEarly {
@@ -20356,7 +20376,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::ClosedEarly }
-            emit InteractionStreamCleanup { corr_id: corr_id }
+            emit InteractionStreamCleanup { corr_id: corr_id, abandon_reason: None }
+        }
+
+        transition InteractionStreamAbandoned {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input InteractionStreamAbandoned { corr_id, reason }
+            guard "session_registered" { self.session_id != None }
+            guard "is_active" {
+                self.reserved_interaction_streams.contains(corr_id)
+                || self.attached_interaction_streams.contains(corr_id)
+            }
+            update {
+                self.reserved_interaction_streams.remove(corr_id);
+                self.attached_interaction_streams.remove(corr_id);
+            }
+            to Idle
+            emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::Abandoned }
+            emit InteractionStreamCleanup { corr_id: corr_id, abandon_reason: Some(reason) }
         }
 
         // =====================================================================
@@ -20526,6 +20563,14 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition InteractionStreamClosedEarlyAfterUnregister {
             on input InteractionStreamClosedEarly { corr_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_unregistered" { self.session_id == None }
+            update {}
+            to Idle
+        }
+
+        transition InteractionStreamAbandonedAfterUnregister {
+            on input InteractionStreamAbandoned { corr_id, reason }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_unregistered" { self.session_id == None }
             update {}

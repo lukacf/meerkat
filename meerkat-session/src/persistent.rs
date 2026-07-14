@@ -126,6 +126,11 @@ fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<Sess
 /// hole.
 type EventProjectionFaultRegistry = Arc<Mutex<HashMap<SessionId, Arc<SessionError>>>>;
 
+/// Per-session serialization boundary shared by projection admission, durable
+/// append, and terminal fault publication. Once a fault is latched under this
+/// gate, no later append for the same session can cross it.
+type EventProjectionGateRegistry = Arc<Mutex<HashMap<SessionId, Arc<Mutex<()>>>>>;
+
 /// Typed error surfaced by replay APIs after the session's event-projection
 /// task halted on a durable event-log append failure. The canonical log has a
 /// sequence hole from the halt point onward, so replay must not be served as
@@ -146,6 +151,19 @@ pub struct DurableEventProjectionHaltMarker {
     reason: String,
 }
 
+/// Typed terminal fault raised when the bounded live event subscription used
+/// by the durable projector reports a gap. Appending later envelopes would
+/// renumber them into a falsely contiguous durable log, so projection halts
+/// before the marker or any later event is appended.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "session event projection lagged for session {session_id}: {dropped} canonical events were dropped"
+)]
+pub struct SessionEventProjectionLagged {
+    session_id: SessionId,
+    dropped: u64,
+}
+
 fn event_projection_halted_error(session_id: &SessionId, cause: Arc<SessionError>) -> SessionError {
     SessionError::Store(Box::new(EventProjectionHalted {
         session_id: session_id.clone(),
@@ -153,13 +171,88 @@ fn event_projection_halted_error(session_id: &SessionId, cause: Arc<SessionError
     }))
 }
 
-async fn record_event_projection_fault(
+async fn latch_event_projection_fault(
+    faults: &EventProjectionFaultRegistry,
+    session_id: &SessionId,
+    error: SessionError,
+) -> Arc<SessionError> {
+    let mut faults = faults.lock().await;
+    Arc::clone(
+        faults
+            .entry(session_id.clone())
+            .or_insert_with(|| Arc::new(error)),
+    )
+}
+
+async fn event_projection_gate(
+    gates: &EventProjectionGateRegistry,
+    session_id: &SessionId,
+) -> Arc<Mutex<()>> {
+    Arc::clone(
+        gates
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
+/// Resolve projector admission against both the process-local latch and the
+/// durable halt marker. Marker lookup failures are themselves latched terminal
+/// faults: admitting projection when the store cannot prove the absence of a
+/// persisted gap would reopen the very hole this fence owns.
+async fn event_projection_admission_fault(
+    faults: &EventProjectionFaultRegistry,
+    gates: &EventProjectionGateRegistry,
+    event_store: &Arc<dyn EventStore>,
+    session_id: &SessionId,
+) -> Option<Arc<SessionError>> {
+    if let Some(cause) = faults.lock().await.get(session_id).cloned() {
+        return Some(cause);
+    }
+
+    let gate = event_projection_gate(gates, session_id).await;
+    let _guard = gate.lock().await;
+    if let Some(cause) = faults.lock().await.get(session_id).cloned() {
+        return Some(cause);
+    }
+
+    match event_store.projection_halt(session_id).await {
+        Ok(Some(marker)) => {
+            let cause = SessionError::Store(Box::new(DurableEventProjectionHaltMarker {
+                session_id: marker.session_id,
+                reason: marker.reason,
+            }));
+            Some(latch_event_projection_fault(faults, session_id, cause).await)
+        }
+        Ok(None) => faults.lock().await.get(session_id).cloned(),
+        Err(error) => {
+            tracing::error!(
+                session_id = %session_id,
+                error = %error,
+                "event projection admission failed closed: durable halt marker unreadable"
+            );
+            Some(
+                latch_event_projection_fault(
+                    faults,
+                    session_id,
+                    SessionError::Store(Box::new(error)),
+                )
+                .await,
+            )
+        }
+    }
+}
+
+async fn record_event_projection_fault_under_gate(
     faults: &EventProjectionFaultRegistry,
     event_store: &Arc<dyn EventStore>,
     session_id: &SessionId,
     error: SessionError,
-) {
-    let cause = Arc::new(error);
+) -> Arc<SessionError> {
+    // Publish the terminal latch before any fallible or blocking durable work.
+    // Concurrent replay checks this registry before waiting on the gate.
+    let cause = latch_event_projection_fault(faults, session_id, error).await;
     if let Err(marker_error) = event_store
         .record_projection_halt(session_id, &cause.to_string())
         .await
@@ -170,11 +263,19 @@ async fn record_event_projection_fault(
             "failed to persist durable event projection halt marker"
         );
     }
-    faults
-        .lock()
-        .await
-        .entry(session_id.clone())
-        .or_insert(cause);
+    cause
+}
+
+async fn record_event_projection_fault(
+    faults: &EventProjectionFaultRegistry,
+    gates: &EventProjectionGateRegistry,
+    event_store: &Arc<dyn EventStore>,
+    session_id: &SessionId,
+    error: SessionError,
+) {
+    let gate = event_projection_gate(gates, session_id).await;
+    let _guard = gate.lock().await;
+    record_event_projection_fault_under_gate(faults, event_store, session_id, error).await;
 }
 
 async fn append_and_project_event(
@@ -182,12 +283,33 @@ async fn append_and_project_event(
     projector: &Arc<SessionProjector>,
     session_id: &SessionId,
     envelope: meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
+    projection_faults: &EventProjectionFaultRegistry,
+    projection_gates: &EventProjectionGateRegistry,
 ) -> Result<u64, SessionError> {
     let envelopes = [envelope];
-    let seq = event_store
-        .append_envelopes(session_id, &envelopes)
-        .await
-        .map_err(|err| SessionError::Store(Box::new(err)))?;
+    let seq = {
+        let gate = event_projection_gate(projection_gates, session_id).await;
+        let _guard = gate.lock().await;
+        if let Some(cause) = projection_faults.lock().await.get(session_id).cloned() {
+            return Err(event_projection_halted_error(session_id, cause));
+        }
+        match event_store.append_envelopes(session_id, &envelopes).await {
+            Ok(seq) => seq,
+            Err(error) => {
+                // The append failure and its absorbing latch are one critical
+                // section. No competing projector can append after the hole
+                // but before terminal publication.
+                let cause = record_event_projection_fault_under_gate(
+                    projection_faults,
+                    event_store,
+                    session_id,
+                    SessionError::Store(Box::new(error)),
+                )
+                .await;
+                return Err(event_projection_halted_error(session_id, cause));
+            }
+        }
+    };
 
     if let Err(error) = projector
         .project(event_store.as_ref(), session_id, seq)
@@ -204,14 +326,105 @@ async fn append_and_project_event(
     Ok(seq)
 }
 
+async fn project_session_event_stream(
+    event_store: Arc<dyn EventStore>,
+    projector: Arc<SessionProjector>,
+    session_id: SessionId,
+    mut stream: meerkat_core::comms::EventStream,
+    projection_faults: EventProjectionFaultRegistry,
+    projection_gates: EventProjectionGateRegistry,
+) {
+    if let Some(cause) = event_projection_admission_fault(
+        &projection_faults,
+        &projection_gates,
+        &event_store,
+        &session_id,
+    )
+    .await
+    {
+        tracing::error!(
+            session_id = %session_id,
+            error = %cause,
+            "event projection rejected before subscription drain: session is terminally halted"
+        );
+        return;
+    }
+
+    while let Some(envelope) = stream.next().await {
+        if let Some(cause) = projection_faults.lock().await.get(&session_id).cloned() {
+            tracing::error!(
+                session_id = %session_id,
+                error = %cause,
+                "event projection stopped before append: session acquired a terminal halt"
+            );
+            break;
+        }
+        if let meerkat_core::event::AgentEvent::StreamTruncated {
+            reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped },
+        } = &envelope.payload
+        {
+            let error = SessionError::Store(Box::new(SessionEventProjectionLagged {
+                session_id: session_id.clone(),
+                dropped: *dropped,
+            }));
+            tracing::error!(
+                session_id = %session_id,
+                dropped = *dropped,
+                "event projection halted: canonical live event subscription lagged"
+            );
+            record_event_projection_fault(
+                &projection_faults,
+                &projection_gates,
+                &event_store,
+                &session_id,
+                error,
+            )
+            .await;
+            break;
+        }
+
+        if let Err(error) = append_and_project_event(
+            &event_store,
+            &projector,
+            &session_id,
+            envelope,
+            &projection_faults,
+            &projection_gates,
+        )
+        .await
+        {
+            // Terminal durability fault: the canonical event log append
+            // failed, leaving a sequence hole. Stop draining the stream
+            // rather than appending past the hole and compounding it, and
+            // record the typed fault so replay reads fail closed.
+            tracing::error!(
+                session_id = %session_id,
+                error = %error,
+                "event projection halted: durable event append failed"
+            );
+            break;
+        }
+    }
+}
+
 async fn flush_projected_events(
     event_store: &Arc<dyn EventStore>,
     projector: &Arc<SessionProjector>,
     session_id: &SessionId,
     pending: &mut Vec<meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>>,
+    projection_faults: &EventProjectionFaultRegistry,
+    projection_gates: &EventProjectionGateRegistry,
 ) -> Result<(), SessionError> {
     for envelope in pending.drain(..) {
-        append_and_project_event(event_store, projector, session_id, envelope).await?;
+        append_and_project_event(
+            event_store,
+            projector,
+            session_id,
+            envelope,
+            projection_faults,
+            projection_gates,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -227,8 +440,10 @@ async fn project_create_time_events(
         mpsc::Sender<meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>>,
     >,
     projection_faults: EventProjectionFaultRegistry,
+    projection_gates: EventProjectionGateRegistry,
 ) {
     let mut session_id = session_rx.borrow().clone();
+    let mut projection_admitted = false;
     let mut pending = Vec::new();
 
     loop {
@@ -240,6 +455,26 @@ async fn project_create_time_events(
                 if session_id.is_none() {
                     session_id = session_id_from_event(&envelope.payload);
                 }
+                if let Some(session_id) = session_id.as_ref()
+                    && !projection_admitted
+                {
+                    if let Some(cause) = event_projection_admission_fault(
+                        &projection_faults,
+                        &projection_gates,
+                        &event_store,
+                        session_id,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %cause,
+                            "create-time event projection rejected before first append: session is terminally halted"
+                        );
+                        return;
+                    }
+                    projection_admitted = true;
+                }
                 // Preserve the canonical envelope identity (typed source,
                 // mob_id, original stream seq) on the durable log; the caller
                 // stream receives the same envelope.
@@ -250,9 +485,24 @@ async fn project_create_time_events(
                     tracing::warn!("session event stream receiver dropped; continuing event projection");
                 }
                 if let Some(session_id) = session_id.as_ref() {
+                    if let Some(cause) = projection_faults.lock().await.get(session_id).cloned() {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %cause,
+                            "create-time event projection stopped before append: session acquired a terminal halt"
+                        );
+                        return;
+                    }
                     pending.push(durable_envelope);
-                    if let Err(error) =
-                        flush_projected_events(&event_store, &projector, session_id, &mut pending).await
+                    if let Err(error) = flush_projected_events(
+                        &event_store,
+                        &projector,
+                        session_id,
+                        &mut pending,
+                        &projection_faults,
+                        &projection_gates,
+                    )
+                    .await
                     {
                         // Terminal durability fault: the canonical event log
                         // append failed, leaving a sequence hole. Stop the
@@ -265,14 +515,7 @@ async fn project_create_time_events(
                             error = %error,
                             "create-time event projection halted: durable event append failed"
                         );
-                        record_event_projection_fault(
-                            &projection_faults,
-                            &event_store,
-                            session_id,
-                            error,
-                        )
-                        .await;
-                        break;
+                        return;
                     }
                 } else {
                     pending.push(durable_envelope);
@@ -283,38 +526,83 @@ async fn project_create_time_events(
                     break;
                 }
                 session_id = session_rx.borrow().clone();
-                if let Some(session_id) = session_id.as_ref()
-                    && let Err(error) =
-                        flush_projected_events(&event_store, &projector, session_id, &mut pending).await
-                {
-                    tracing::error!(
-                        session_id = %session_id,
-                        error = %error,
-                        "create-time event projection halted: durable event append failed"
-                    );
-                    record_event_projection_fault(
-                        &projection_faults,
+                if let Some(session_id) = session_id.as_ref() {
+                    if !projection_admitted {
+                        if let Some(cause) = event_projection_admission_fault(
+                            &projection_faults,
+                            &projection_gates,
+                            &event_store,
+                            session_id,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                session_id = %session_id,
+                                error = %cause,
+                                "create-time event projection rejected before pending flush: session is terminally halted"
+                            );
+                            return;
+                        }
+                        projection_admitted = true;
+                    }
+                    if let Some(cause) = projection_faults.lock().await.get(session_id).cloned() {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %cause,
+                            "create-time event projection stopped before pending flush: session acquired a terminal halt"
+                        );
+                        return;
+                    }
+                    if let Err(error) = flush_projected_events(
                         &event_store,
+                        &projector,
                         session_id,
-                        error,
+                        &mut pending,
+                        &projection_faults,
+                        &projection_gates,
                     )
-                    .await;
-                    break;
+                    .await
+                    {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %error,
+                            "create-time event projection halted: durable event append failed"
+                        );
+                        return;
+                    }
                 }
             }
         }
     }
 
     if let Some(session_id) = session_id.as_ref()
-        && let Err(error) =
-            flush_projected_events(&event_store, &projector, session_id, &mut pending).await
+        && let Some(cause) = projection_faults.lock().await.get(session_id).cloned()
+    {
+        tracing::error!(
+            session_id = %session_id,
+            error = %cause,
+            "create-time event projection skipped final flush: session acquired a terminal halt"
+        );
+        return;
+    }
+
+    if let Some(session_id) = session_id.as_ref()
+        && projection_admitted
+        && let Err(error) = flush_projected_events(
+            &event_store,
+            &projector,
+            session_id,
+            &mut pending,
+            &projection_faults,
+            &projection_gates,
+        )
+        .await
     {
         tracing::error!(
             session_id = %session_id,
             error = %error,
             "final create-time event projection flush failed: durable event append failed"
         );
-        record_event_projection_fault(&projection_faults, &event_store, session_id, error).await;
     }
 }
 
@@ -1888,6 +2176,8 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// a durable append failure. Replay reads fail closed on these instead of
     /// serving an event stream with a silent sequence hole.
     event_projection_faults: EventProjectionFaultRegistry,
+    /// Same-session atomic fence across admission, append, and terminal latch.
+    event_projection_gates: EventProjectionGateRegistry,
 }
 
 #[derive(Debug, Clone)]
@@ -2463,14 +2753,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<Option<Vec<meerkat_core::TranscriptRewriteRecord>>, SessionError> {
-        let Some(event_store) = self.event_store.as_ref() else {
+        if self.event_store.is_none() {
+            return Ok(None);
+        }
+        let Some(events) = self.event_log_read_from(id, 1).await? else {
             return Ok(None);
         };
-        let events = event_store.read_from(id, 1).await.map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to read transcript rewrite events for session {id}: {err}"
-            )))
-        })?;
         let records = events
             .into_iter()
             .filter_map(|stored| match stored.event {
@@ -4503,6 +4791,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             checkpointer_gates: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
             event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
+            event_projection_gates: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -4775,6 +5064,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(event_store) = self.event_store.as_ref() else {
             return Ok(None);
         };
+        if let Some(cause) = event_projection_admission_fault(
+            &self.event_projection_faults,
+            &self.event_projection_gates,
+            event_store,
+            id,
+        )
+        .await
+        {
+            return Err(event_projection_halted_error(id, cause));
+        }
+        let gate = event_projection_gate(&self.event_projection_gates, id).await;
+        let _guard = gate.lock().await;
+        if let Some(cause) = self.event_projection_faults.lock().await.get(id).cloned() {
+            return Err(event_projection_halted_error(id, cause));
+        }
         event_store
             .last_seq(id)
             .await
@@ -4790,26 +5094,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(event_store) = self.event_store.as_ref() else {
             return Ok(None);
         };
-        if let Some(marker) = event_store
-            .projection_halt(id)
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))?
+        if let Some(cause) = event_projection_admission_fault(
+            &self.event_projection_faults,
+            &self.event_projection_gates,
+            event_store,
+            id,
+        )
+        .await
         {
-            return Err(event_projection_halted_error(
-                id,
-                Arc::new(SessionError::Store(Box::new(
-                    DurableEventProjectionHaltMarker {
-                        session_id: marker.session_id,
-                        reason: marker.reason,
-                    },
-                ))),
-            ));
+            return Err(event_projection_halted_error(id, cause));
         }
-        // Fail closed if this session's projection task halted on a durable
-        // append failure: the log has a sequence hole from the halt point, so
-        // serving it as replay truth would launder the recorded typed fault.
-        if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
-            return Err(event_projection_halted_error(id, Arc::clone(cause)));
+        let gate = event_projection_gate(&self.event_projection_gates, id).await;
+        let _guard = gate.lock().await;
+        if let Some(cause) = self.event_projection_faults.lock().await.get(id).cloned() {
+            return Err(event_projection_halted_error(id, cause));
         }
         event_store
             .read_from(id, from_seq)
@@ -4829,23 +5127,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(event_store) = self.event_store.as_ref() else {
             return Ok(None);
         };
-        if let Some(marker) = event_store
-            .projection_halt(id)
-            .await
-            .map_err(|err| SessionError::Store(Box::new(err)))?
+        if let Some(cause) = event_projection_admission_fault(
+            &self.event_projection_faults,
+            &self.event_projection_gates,
+            event_store,
+            id,
+        )
+        .await
         {
-            return Err(event_projection_halted_error(
-                id,
-                Arc::new(SessionError::Store(Box::new(
-                    DurableEventProjectionHaltMarker {
-                        session_id: marker.session_id,
-                        reason: marker.reason,
-                    },
-                ))),
-            ));
+            return Err(event_projection_halted_error(id, cause));
         }
-        if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
-            return Err(event_projection_halted_error(id, Arc::clone(cause)));
+        let gate = event_projection_gate(&self.event_projection_gates, id).await;
+        let _guard = gate.lock().await;
+        if let Some(cause) = self.event_projection_faults.lock().await.get(id).cloned() {
+            return Err(event_projection_halted_error(id, cause));
         }
         event_store
             .read_page(id, from_seq, limit)
@@ -4880,50 +5175,53 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             session_rx,
             caller_event_tx,
             Arc::clone(&self.event_projection_faults),
+            Arc::clone(&self.event_projection_gates),
         ));
 
         Some(session_tx)
     }
 
-    async fn spawn_event_projection_task(&self, id: &SessionId) {
+    async fn ensure_event_projection_admitted(&self, id: &SessionId) -> Result<(), SessionError> {
+        let Some(event_store) = self.event_store.as_ref() else {
+            return Ok(());
+        };
+        if let Some(cause) = event_projection_admission_fault(
+            &self.event_projection_faults,
+            &self.event_projection_gates,
+            event_store,
+            id,
+        )
+        .await
+        {
+            return Err(event_projection_halted_error(id, cause));
+        }
+        Ok(())
+    }
+
+    async fn spawn_event_projection_task(&self, id: &SessionId) -> Result<(), SessionError> {
         let (Some(event_store), Some(projector)) =
             (self.event_store.clone(), self.projector.clone())
         else {
-            return;
+            return Ok(());
         };
+        self.ensure_event_projection_admitted(id).await?;
         let session_id = id.clone();
         let stream = self.inner.subscribe_session_events(&session_id).await;
-        let Ok(mut stream) = stream else {
-            return;
+        let Ok(stream) = stream else {
+            return Ok(());
         };
 
         let projection_faults = Arc::clone(&self.event_projection_faults);
-        tokio::spawn(async move {
-            while let Some(envelope) = stream.next().await {
-                if let Err(error) =
-                    append_and_project_event(&event_store, &projector, &session_id, envelope).await
-                {
-                    // Terminal durability fault: the canonical event log append
-                    // failed, leaving a sequence hole. Stop draining the stream
-                    // rather than appending past the hole and compounding it,
-                    // and record the typed fault so replay reads fail closed
-                    // instead of serving a stream with a silent hole.
-                    tracing::error!(
-                        session_id = %session_id,
-                        error = %error,
-                        "event projection halted: durable event append failed"
-                    );
-                    record_event_projection_fault(
-                        &projection_faults,
-                        &event_store,
-                        &session_id,
-                        error,
-                    )
-                    .await;
-                    break;
-                }
-            }
-        });
+        let projection_gates = Arc::clone(&self.event_projection_gates);
+        tokio::spawn(project_session_event_stream(
+            event_store,
+            projector,
+            session_id,
+            stream,
+            projection_faults,
+            projection_gates,
+        ));
+        Ok(())
     }
 
     async fn normalized_session_for_persistence(
@@ -6498,6 +6796,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         } else {
             None
         };
+        if let Some(resume_session_id) = resume_session_id.as_ref() {
+            // A durable projector halt is an absorbing session terminal. Fence
+            // resumed execution before the inner service can materialize a
+            // runtime or execute the first resumed turn.
+            self.ensure_event_projection_admitted(resume_session_id)
+                .await?;
+        }
         let create_projection_session_tx = self.install_create_time_event_projection(&mut req);
         let callback_session_id = resume_session_id.clone();
         let result = match self
@@ -6527,7 +6832,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if let Some(session_tx) = create_projection_session_tx {
             let _ = session_tx.send(Some(result.session_id.clone()));
         }
-        self.spawn_event_projection_task(&result.session_id).await;
+        if let Err(error) = self.spawn_event_projection_task(&result.session_id).await {
+            let _ = self.discard_live_session(&result.session_id).await;
+            return Err(error);
+        }
 
         // Persist the full session snapshot (messages + metadata) after first
         // turn and seed the checkpointer so the next keep-alive checkpoint is
@@ -8091,6 +8399,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let projector = Arc::new(SessionProjector::new(dir.path().join(".rkat")));
         let session_id = SessionId::new();
+        let projection_faults: EventProjectionFaultRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let projection_gates: EventProjectionGateRegistry = Arc::new(Mutex::new(HashMap::new()));
 
         let started = || {
             meerkat_core::event::EventEnvelope::new_session(
@@ -8109,9 +8419,16 @@ mod tests {
         // A failing durable append must surface a typed SessionError::Store,
         // not a fabricated success.
         event_store.fail_appends();
-        let err = append_and_project_event(&event_store_trait, &projector, &session_id, started())
-            .await
-            .expect_err("durable append failure must surface a typed terminal error");
+        let err = append_and_project_event(
+            &event_store_trait,
+            &projector,
+            &session_id,
+            started(),
+            &projection_faults,
+            &projection_gates,
+        )
+        .await
+        .expect_err("durable append failure must surface a typed terminal error");
         assert!(
             matches!(err, SessionError::Store(_)),
             "unexpected error: {err}"
@@ -8120,15 +8437,24 @@ mod tests {
         // Replay shows no hole: nothing was committed to the canonical log.
         assert_eq!(event_store.last_seq(&session_id).await?, 0);
 
-        // Once appends are allowed, the seq is returned and replay is contiguous.
+        // The terminal latch remains absorbing even if the backing store later
+        // becomes writable again.
         event_store.allow_appends();
-        let seq = append_and_project_event(&event_store_trait, &projector, &session_id, started())
-            .await
-            .expect("durable append should succeed once allowed");
-        assert_eq!(seq, 1);
+        let second = append_and_project_event(
+            &event_store_trait,
+            &projector,
+            &session_id,
+            started(),
+            &projection_faults,
+            &projection_gates,
+        )
+        .await;
+        assert!(
+            second.is_err(),
+            "an append failure is absorbing even if the backing store later recovers"
+        );
         let replayed = event_store.read_from(&session_id, 0).await?;
-        assert_eq!(replayed.len(), 1);
-        assert_eq!(replayed[0].seq, 1);
+        assert!(replayed.is_empty());
         Ok(())
     }
 
@@ -8168,6 +8494,7 @@ mod tests {
             session_rx,
             None,
             Arc::clone(&service.event_projection_faults),
+            Arc::clone(&service.event_projection_gates),
         ));
         projection_tx
             .send(meerkat_core::event::EventEnvelope::new_session(
@@ -8185,6 +8512,16 @@ mod tests {
         drop(projection_tx);
         drop(session_tx);
         task.await?;
+
+        let latest_err = service
+            .event_log_latest_seq(&session_id)
+            .await
+            .expect_err("latest cursor after a halted projection must fail closed");
+        assert!(
+            matches!(&latest_err, SessionError::Store(source)
+                if source.downcast_ref::<EventProjectionHalted>().is_some()),
+            "expected typed EventProjectionHalted latest-cursor fault, got: {latest_err}"
+        );
 
         let err = service
             .event_log_read_from(&session_id, 0)
@@ -8212,6 +8549,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lagged_event_projection_persists_halt_before_renumbering_later_events()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let dir = tempfile::tempdir()?;
+        let session_id = SessionId::new();
+        let concrete_store = Arc::new(crate::event_store::FileEventStore::new(
+            dir.path().join("events"),
+        ));
+        let event_store: Arc<dyn EventStore> = concrete_store.clone();
+        let projector = Arc::new(SessionProjector::new(dir.path().join(".rkat")));
+        let faults: EventProjectionFaultRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let gates: EventProjectionGateRegistry = Arc::new(Mutex::new(HashMap::new()));
+
+        let gap = meerkat_core::event::EventEnvelope::new_session(
+            session_id.clone(),
+            0,
+            None,
+            AgentEvent::StreamTruncated {
+                reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped: 17 },
+            },
+        );
+        let later = meerkat_core::event::EventEnvelope::new_session(
+            session_id.clone(),
+            99,
+            None,
+            AgentEvent::StreamTruncated {
+                reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+            },
+        );
+        let stream: meerkat_core::comms::EventStream =
+            Box::pin(futures::stream::iter(vec![gap, later]));
+
+        project_session_event_stream(
+            event_store,
+            projector,
+            session_id.clone(),
+            stream,
+            Arc::clone(&faults),
+            gates,
+        )
+        .await;
+
+        let marker = concrete_store
+            .projection_halt(&session_id)
+            .await?
+            .expect("lag must persist a durable projection halt");
+        assert!(marker.reason.contains("17 canonical events were dropped"));
+        assert!(
+            concrete_store.read_from(&session_id, 0).await?.is_empty(),
+            "neither the synthetic marker nor later events may be renumbered into the durable log"
+        );
+        let faults = faults.lock().await;
+        let cause = faults.get(&session_id).expect("typed in-process fault");
+        assert!(matches!(
+            cause.as_ref(),
+            SessionError::Store(source)
+                if source.downcast_ref::<SessionEventProjectionLagged>().is_some()
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn durable_event_projection_halt_marker_fails_replay_after_restart()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Gate: the replay stop condition must not be only process-local. A
@@ -8222,13 +8620,81 @@ mod tests {
         let session_id = SessionId::new();
         let initial_store = crate::event_store::FileEventStore::new(&event_root);
         initial_store
+            .append(
+                &session_id,
+                &[AgentEvent::StreamTruncated {
+                    reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+                }],
+            )
+            .await?;
+        initial_store
             .record_projection_halt(&session_id, "injected durable append failure")
             .await?;
+        assert_eq!(initial_store.last_seq(&session_id).await?, 1);
 
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let restarted_event_store: Arc<dyn EventStore> =
-            Arc::new(crate::event_store::FileEventStore::new(&event_root));
+        let restarted_concrete = Arc::new(crate::event_store::FileEventStore::new(&event_root));
+        let restarted_event_store: Arc<dyn EventStore> = restarted_concrete.clone();
         let projector = Arc::new(SessionProjector::new(dir.path().join(".rkat")));
+
+        let stream_faults: EventProjectionFaultRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let stream_gates: EventProjectionGateRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let later_stream: meerkat_core::comms::EventStream = Box::pin(futures::stream::iter(vec![
+            meerkat_core::event::EventEnvelope::new_session(
+                session_id.clone(),
+                2,
+                None,
+                AgentEvent::StreamTruncated {
+                    reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+                },
+            ),
+        ]));
+        project_session_event_stream(
+            restarted_event_store.clone(),
+            projector.clone(),
+            session_id.clone(),
+            later_stream,
+            stream_faults,
+            stream_gates,
+        )
+        .await;
+        assert_eq!(
+            restarted_concrete.last_seq(&session_id).await?,
+            1,
+            "restart projector appended past a durable terminal marker"
+        );
+
+        let create_faults: EventProjectionFaultRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let create_gates: EventProjectionGateRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let (projection_tx, projection_rx) = mpsc::channel(1);
+        let (_session_tx, session_rx) = watch::channel(Some(session_id.clone()));
+        let create_task = tokio::spawn(project_create_time_events(
+            restarted_event_store.clone(),
+            projector.clone(),
+            projection_rx,
+            session_rx,
+            None,
+            create_faults,
+            create_gates,
+        ));
+        projection_tx
+            .send(meerkat_core::event::EventEnvelope::new_session(
+                session_id.clone(),
+                3,
+                None,
+                AgentEvent::StreamTruncated {
+                    reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+                },
+            ))
+            .await?;
+        drop(projection_tx);
+        create_task.await?;
+        assert_eq!(
+            restarted_concrete.last_seq(&session_id).await?,
+            1,
+            "restart create-time projector appended past a durable terminal marker"
+        );
+
         let restarted = PersistentSessionService::new(
             DummyBuilder,
             4,
@@ -8237,6 +8703,16 @@ mod tests {
             memory_blob_store(),
         )
         .with_event_projection(restarted_event_store, projector);
+
+        let latest_err = restarted
+            .event_log_latest_seq(&session_id)
+            .await
+            .expect_err("durable halt marker must fail latest cursor after restart");
+        assert!(
+            matches!(&latest_err, SessionError::Store(source)
+                if source.downcast_ref::<EventProjectionHalted>().is_some()),
+            "expected typed EventProjectionHalted latest-cursor fault after restart, got: {latest_err}"
+        );
 
         let err = restarted
             .event_log_read_from(&session_id, 0)
@@ -8259,8 +8735,139 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn projection_latch_precedes_blocking_marker_and_fences_concurrent_append()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let concrete_store = Arc::new(BlockingProjectionHaltStore::default());
+        let event_store: Arc<dyn EventStore> = concrete_store.clone();
+        let dir = tempfile::tempdir()?;
+        let projector = Arc::new(SessionProjector::new(dir.path().join(".rkat")));
+        let service = Arc::new(
+            PersistentSessionService::new(
+                DummyBuilder,
+                4,
+                session_store,
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            )
+            .with_event_projection(event_store.clone(), projector.clone()),
+        );
+        let session_id = SessionId::new();
+
+        let record_faults = Arc::clone(&service.event_projection_faults);
+        let record_gates = Arc::clone(&service.event_projection_gates);
+        let record_store = event_store.clone();
+        let record_session_id = session_id.clone();
+        let record_task = tokio::spawn(async move {
+            record_event_projection_fault(
+                &record_faults,
+                &record_gates,
+                &record_store,
+                &record_session_id,
+                SessionError::Store(Box::new(EventStoreError::Store(
+                    "synthetic projection gap".to_string(),
+                ))),
+            )
+            .await;
+        });
+
+        concrete_store.wait_for_marker_write().await;
+
+        // The marker store is deliberately blocked, yet replay must observe
+        // the process-local terminal latch immediately rather than waiting for
+        // durable I/O to finish.
+        let replay = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            service.event_log_read_from(&session_id, 0),
+        )
+        .await
+        .expect("replay waited on the blocked marker write")
+        .expect_err("replay crossed an already-published terminal latch");
+        assert!(matches!(replay, SessionError::Store(_)));
+
+        let append_store = event_store.clone();
+        let append_projector = projector.clone();
+        let append_faults = Arc::clone(&service.event_projection_faults);
+        let append_gates = Arc::clone(&service.event_projection_gates);
+        let append_session_id = session_id.clone();
+        let append_task = tokio::spawn(async move {
+            append_and_project_event(
+                &append_store,
+                &append_projector,
+                &append_session_id,
+                meerkat_core::event::EventEnvelope::new_session(
+                    append_session_id.clone(),
+                    1,
+                    None,
+                    AgentEvent::StreamTruncated {
+                        reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+                    },
+                ),
+                &append_faults,
+                &append_gates,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !append_task.is_finished(),
+            "same-session append must wait behind latch+marker publication"
+        );
+
+        concrete_store.release_marker_write();
+        record_task.await?;
+        assert!(
+            append_task.await?.is_err(),
+            "append admitted after the terminal latch"
+        );
+        assert_eq!(concrete_store.last_seq(&session_id).await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_projection_halt_rejects_resume_before_agent_build()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let dir = tempfile::tempdir()?;
+        let session_id = SessionId::new();
+        let event_store = Arc::new(crate::event_store::FileEventStore::new(
+            dir.path().join("events"),
+        ));
+        event_store
+            .record_projection_halt(&session_id, "restart projection gap")
+            .await?;
+        let event_store: Arc<dyn EventStore> = event_store;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let service = PersistentSessionService::new(
+            CountingBuilder {
+                builds: Arc::clone(&builds),
+            },
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        )
+        .with_event_projection(
+            event_store,
+            Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+        );
+
+        let error = service
+            .create_session(resume_request(Session::with_id(session_id)))
+            .await
+            .expect_err("resume crossed an absorbing projection halt");
+        assert!(matches!(error, SessionError::Store(_)));
+        assert_eq!(
+            builds.load(Ordering::Acquire),
+            0,
+            "resume reached the inner agent builder before projector admission"
+        );
+        Ok(())
+    }
+
     struct RecordingEventStore {
         events: Mutex<HashMap<SessionId, Vec<StoredEvent>>>,
+        projection_halts: Mutex<HashMap<SessionId, crate::event_store::EventProjectionHaltMarker>>,
         notify: tokio::sync::Notify,
         fail_appends: AtomicBool,
         rewrite_append_calls: AtomicUsize,
@@ -8271,6 +8878,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 events: Mutex::new(HashMap::new()),
+                projection_halts: Mutex::new(HashMap::new()),
                 notify: tokio::sync::Notify::new(),
                 fail_appends: AtomicBool::new(false),
                 rewrite_append_calls: AtomicUsize::new(0),
@@ -8366,6 +8974,30 @@ mod tests {
             Ok(last_seq)
         }
 
+        async fn record_projection_halt(
+            &self,
+            session_id: &SessionId,
+            reason: &str,
+        ) -> Result<(), EventStoreError> {
+            self.projection_halts.lock().await.insert(
+                session_id.clone(),
+                crate::event_store::EventProjectionHaltMarker {
+                    session_id: session_id.clone(),
+                    reason: reason.to_string(),
+                    recorded_at: meerkat_core::time_compat::SystemTime::now(),
+                },
+            );
+            Ok(())
+        }
+
+        async fn projection_halt(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<crate::event_store::EventProjectionHaltMarker>, EventStoreError>
+        {
+            Ok(self.projection_halts.lock().await.get(session_id).cloned())
+        }
+
         async fn read_from(
             &self,
             session_id: &SessionId,
@@ -8386,6 +9018,78 @@ mod tests {
             Ok(all_events
                 .get(session_id)
                 .map_or(0, |events| events.len() as u64))
+        }
+    }
+
+    struct BlockingProjectionHaltStore {
+        inner: RecordingEventStore,
+        marker_entered: tokio::sync::Notify,
+        release_marker: tokio::sync::Notify,
+    }
+
+    impl Default for BlockingProjectionHaltStore {
+        fn default() -> Self {
+            Self {
+                inner: RecordingEventStore::default(),
+                marker_entered: tokio::sync::Notify::new(),
+                release_marker: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    impl BlockingProjectionHaltStore {
+        async fn wait_for_marker_write(&self) {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.marker_entered.notified(),
+            )
+            .await
+            .expect("projection halt marker write did not block");
+        }
+
+        fn release_marker_write(&self) {
+            self.release_marker.notify_one();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventStore for BlockingProjectionHaltStore {
+        async fn append_envelopes(
+            &self,
+            session_id: &SessionId,
+            envelopes: &[meerkat_core::event::EventEnvelope<AgentEvent>],
+        ) -> Result<u64, EventStoreError> {
+            self.inner.append_envelopes(session_id, envelopes).await
+        }
+
+        async fn record_projection_halt(
+            &self,
+            session_id: &SessionId,
+            reason: &str,
+        ) -> Result<(), EventStoreError> {
+            self.marker_entered.notify_one();
+            self.release_marker.notified().await;
+            self.inner.record_projection_halt(session_id, reason).await
+        }
+
+        async fn projection_halt(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<crate::event_store::EventProjectionHaltMarker>, EventStoreError>
+        {
+            self.inner.projection_halt(session_id).await
+        }
+
+        async fn read_from(
+            &self,
+            session_id: &SessionId,
+            from_seq: u64,
+        ) -> Result<Vec<StoredEvent>, EventStoreError> {
+            self.inner.read_from(session_id, from_seq).await
+        }
+
+        async fn last_seq(&self, session_id: &SessionId) -> Result<u64, EventStoreError> {
+            self.inner.last_seq(session_id).await
         }
     }
 
@@ -9890,6 +10594,36 @@ mod tests {
             req: &CreateSessionRequest,
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: None,
+                flow_overlay_failure: None,
+                callback_pending_after_run: false,
+            })
+        }
+    }
+
+    struct CountingBuilder {
+        builds: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for CountingBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            self.builds.fetch_add(1, Ordering::AcqRel);
             let session = req
                 .build
                 .as_ref()

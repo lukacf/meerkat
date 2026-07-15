@@ -25531,6 +25531,7 @@ async fn test_external_turn_unknown_meerkat_fails() {
             "Hello".to_string().into(),
             meerkat_core::types::HandlingMode::Queue,
             None,
+            None,
         )
         .await;
     assert!(matches!(result, Err(MobError::MemberNotFound(_))));
@@ -44143,6 +44144,90 @@ async fn test_submit_work_external_origin_succeeds() {
 }
 
 #[tokio::test]
+async fn test_member_send_turn_tool_overlay_reaches_turn_runtime_and_plain_send_carries_none() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("l-turn-overlay");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+
+    let overlay = TurnToolOverlay {
+        allowed_tools: Some(vec!["host_tool_alpha".into(), "host_tool_beta".into()]),
+        blocked_tools: Some(vec!["shell".into()]),
+        dispatch_context: std::collections::BTreeMap::from([(
+            "host_tool_connection".to_string(),
+            serde_json::json!({"connection_id": "host-1", "run_id": "run-1"}),
+        )]),
+    };
+    let member = handle.member(&identity).await.expect("member handle");
+    member
+        .send_with_turn_tool_overlay(
+            "use the host tools",
+            HandlingMode::Queue,
+            Some(overlay.clone()),
+        )
+        .await
+        .expect("overlay send");
+    member
+        .send("plain follow-up", HandlingMode::Queue)
+        .await
+        .expect("plain send");
+
+    let overlays = service
+        .recorded_flow_turn_overlays()
+        .await
+        .into_iter()
+        .map(|(_, overlay)| overlay)
+        .collect::<Vec<_>>();
+    assert_eq!(overlays, vec![Some(overlay), None]);
+}
+
+#[tokio::test]
+async fn test_member_send_turn_tool_overlay_rejects_autonomous_host_before_dispatch() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("l-autonomous-overlay");
+    handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn autonomous lead");
+    let dispatches_before = service.recorded_flow_turn_overlays().await.len();
+
+    let error = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .send_with_turn_tool_overlay(
+            "cannot enforce this overlay",
+            HandlingMode::Queue,
+            Some(TurnToolOverlay {
+                allowed_tools: Some(vec!["host_tool_alpha".into()]),
+                ..TurnToolOverlay::default()
+            }),
+        )
+        .await
+        .expect_err("autonomous inbox path must reject overlays");
+
+    assert!(matches!(
+        error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::AutonomousHost,
+            ..
+        }
+    ));
+    assert!(
+        service.recorded_flow_turn_overlays().await.len() == dispatches_before,
+        "rejection must happen before runtime dispatch"
+    );
+}
+
+#[tokio::test]
 async fn test_wire_external_peer_not_blocked_by_delayed_turn_driven_submit_work() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member_id = AgentIdentity::from("l-busy-turn-driven");
@@ -47311,6 +47396,7 @@ async fn mob_runtime_parity_execute_probe(
                 AgentIdentity::from(fixture.lead_identity.as_str()),
                 meerkat_core::types::ContentInput::from("mob runtime parity external turn"),
                 meerkat_core::types::HandlingMode::Queue,
+                None,
                 None,
             )
             .await

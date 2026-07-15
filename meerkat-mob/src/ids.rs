@@ -391,6 +391,13 @@ pub struct WorkSpec {
     /// reject it fail-closed with a typed [`crate::MobError`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub injected_context: Vec<meerkat_core::types::ContentInput>,
+    /// Ephemeral tool visibility and dispatch context for this turn.
+    ///
+    /// This carrier is supported only by turn-driven members. Autonomous
+    /// inbox delivery cannot install a per-turn overlay and rejects a present
+    /// value before the MobMachine admits the work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
     /// Host-supplied interaction identity for this unit of work.
     ///
     /// Ask-15 addendum: the delivery path carries this id to
@@ -416,6 +423,7 @@ impl WorkSpec {
             content: content.into(),
             origin,
             injected_context: Vec::new(),
+            turn_tool_overlay: None,
             interaction_id: None,
             objective_id: None,
         }
@@ -436,6 +444,15 @@ impl WorkSpec {
         injected_context: Vec<meerkat_core::types::ContentInput>,
     ) -> Self {
         self.injected_context = injected_context;
+        self
+    }
+
+    /// Attach an ephemeral per-turn tool overlay to this work spec.
+    pub fn with_turn_tool_overlay(
+        mut self,
+        turn_tool_overlay: meerkat_core::service::TurnToolOverlay,
+    ) -> Self {
+        self.turn_tool_overlay = Some(turn_tool_overlay);
         self
     }
 
@@ -498,6 +515,32 @@ mod tests {
         let json = serde_json::to_value(&keyed).unwrap();
         let parsed: WorkSpec = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.interaction_id, Some(id));
+    }
+
+    #[test]
+    fn work_spec_turn_tool_overlay_is_serde_additive() {
+        let plain = WorkSpec::new("do the thing", WorkOrigin::External);
+        let plain_json = serde_json::to_value(&plain).unwrap();
+        assert!(
+            plain_json.get("turn_tool_overlay").is_none(),
+            "None must preserve the pre-field serialized shape"
+        );
+        let decoded: WorkSpec = serde_json::from_value(plain_json).unwrap();
+        assert!(decoded.turn_tool_overlay.is_none());
+
+        let overlay = meerkat_core::service::TurnToolOverlay {
+            allowed_tools: Some(vec!["host_tool_alpha".into()]),
+            blocked_tools: Some(vec!["shell".into()]),
+            dispatch_context: std::collections::BTreeMap::from([(
+                "host_tool_connection".to_string(),
+                serde_json::json!({"connection_id": "host-1"}),
+            )]),
+        };
+        let carried = WorkSpec::new("do the thing", WorkOrigin::External)
+            .with_turn_tool_overlay(overlay.clone());
+        let round_trip: WorkSpec =
+            serde_json::from_value(serde_json::to_value(&carried).unwrap()).unwrap();
+        assert_eq!(round_trip.turn_tool_overlay, Some(overlay));
     }
 
     #[test]

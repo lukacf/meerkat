@@ -2584,6 +2584,7 @@ impl MobHandle {
                     content: spec.content,
                     origin: spec.origin,
                     injected_context: spec.injected_context,
+                    turn_tool_overlay: spec.turn_tool_overlay,
                     interaction_id: spec.interaction_id,
                     objective_id: spec.objective_id,
                     handling_mode,
@@ -5003,6 +5004,7 @@ impl MobHandle {
         message: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
     ) -> Result<(AgentRuntimeId, FenceToken), MobError> {
         let (runtime_id, fence_token) = self
             .resolve_submit_work_runtime_binding(
@@ -5015,7 +5017,10 @@ impl MobHandle {
             runtime_id: runtime_id.clone(),
             fence_token,
             work_ref: WorkRef::new(),
-            spec: WorkSpec::new(message, WorkOrigin::External),
+            spec: WorkSpec {
+                turn_tool_overlay,
+                ..WorkSpec::new(message, WorkOrigin::External)
+            },
             handling_mode,
             render_metadata,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
@@ -7114,7 +7119,22 @@ impl MemberHandle {
         content: impl Into<meerkat_core::types::ContentInput>,
         handling_mode: HandlingMode,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        self.send_with_render_metadata(content, handling_mode, None)
+        self.send_with_options(content, handling_mode, None, None)
+            .await
+    }
+
+    /// Submit external work with an ephemeral per-turn tool overlay.
+    ///
+    /// Turn-driven members install the overlay in their
+    /// `StartTurnRuntimeSemantics`. Autonomous-host members reject a present
+    /// overlay because their inbox path cannot enforce it.
+    pub async fn send_with_turn_tool_overlay(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    ) -> Result<MemberDeliveryReceipt, MobError> {
+        self.send_with_options(content, handling_mode, None, turn_tool_overlay)
             .await
     }
 
@@ -7125,6 +7145,17 @@ impl MemberHandle {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
+        self.send_with_options(content, handling_mode, render_metadata, None)
+            .await
+    }
+
+    async fn send_with_options(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    ) -> Result<MemberDeliveryReceipt, MobError> {
         let (agent_runtime_id, fence_token) = self
             .mob
             .external_turn_for_member(
@@ -7132,6 +7163,7 @@ impl MemberHandle {
                 content.into(),
                 handling_mode,
                 render_metadata,
+                turn_tool_overlay,
             )
             .await?;
         Ok(MemberDeliveryReceipt {

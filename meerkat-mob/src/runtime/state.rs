@@ -303,6 +303,11 @@ pub(super) struct SubmitWorkPayload {
     /// dispatch carrier only — the MobMachine DSL admits identity facts
     /// (runtime id, fence, work id, origin), never content payloads.
     pub injected_context: Vec<ContentInput>,
+    /// Ephemeral per-turn tool overlay riding with the work content.
+    /// Shell dispatch carrier only; the actor rejects it for autonomous
+    /// members before admission and lowers it into turn runtime semantics for
+    /// turn-driven members.
+    pub turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
     /// Host-supplied interaction identity riding with the work content.
     /// Shell dispatch carrier only (content-adjacent metadata, like
     /// `render_metadata`); stamped into the turn's transcript identity at

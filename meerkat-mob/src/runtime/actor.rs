@@ -129,6 +129,9 @@ struct SubmitWorkDispatchRequest {
     /// Deliverable on queue-mode turn-driven dispatch (local and remote);
     /// autonomous inbox delivery and steer dispatch reject it fail-closed.
     injected_context: Vec<ContentInput>,
+    /// Ephemeral per-turn tool overlay. Only turn-driven dispatch can install
+    /// it; autonomous inbox delivery rejects a present value before admission.
+    turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
     /// Host-supplied interaction identity for the delivered turn. Stamped
     /// into `RuntimeTurnMetadata.transcript_identity` on turn-driven
     /// dispatch and onto the injected inbox event on autonomous dispatch,
@@ -20031,6 +20034,7 @@ impl MobActor {
             content,
             origin,
             injected_context,
+            turn_tool_overlay,
             interaction_id,
             objective_id,
             handling_mode,
@@ -20174,6 +20178,17 @@ impl MobActor {
                 });
             }
         }
+        if turn_tool_overlay.is_some()
+            && entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::AutonomousHost,
+                reason: format!(
+                    "turn tool overlay cannot be enforced for autonomous host member '{}'; use turn_driven runtime mode",
+                    agent_identity
+                ),
+            });
+        }
 
         // Project the caller's identifiers into DSL bridging types. Existing
         // members use the caller-supplied runtime/fence so MobMachine can
@@ -20238,6 +20253,7 @@ impl MobActor {
                 SubmitWorkDispatchRequest {
                     content,
                     injected_context,
+                    turn_tool_overlay,
                     interaction_id,
                     objective_id,
                     handling_mode,
@@ -20358,6 +20374,7 @@ impl MobActor {
                     // Spawn kickoff is mob-internal coordination content; the
                     // injected-context slot belongs to the submit-work lane.
                     injected_context: Vec::new(),
+                    turn_tool_overlay: None,
                     // Mob-internal kickoff carries no host interaction id.
                     interaction_id: None,
                     objective_id: inherited_objective_id.or_else(|| {
@@ -20505,6 +20522,7 @@ impl MobActor {
         let SubmitWorkDispatchRequest {
             content,
             injected_context,
+            turn_tool_overlay,
             interaction_id,
             objective_id,
             handling_mode,
@@ -20630,7 +20648,7 @@ impl MobActor {
                         event_tx: None,
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                             handling_mode,
-                            None,
+                            turn_tool_overlay,
                             Vec::new(),
                             submit_work_turn_metadata(
                                 render_metadata,
@@ -20712,7 +20730,7 @@ impl MobActor {
                     event_tx: None,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         handling_mode,
-                        None,
+                        turn_tool_overlay,
                         Vec::new(),
                         submit_work_turn_metadata(render_metadata, interaction_id, objective_id),
                     ),

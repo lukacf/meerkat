@@ -143,7 +143,8 @@ mod tests {
     #[tokio::test]
     async fn binary_wired_factory_resolves_per_open_from_live_config_and_fails_closed() {
         let temp = tempfile::TempDir::new().expect("tempdir");
-        let factory = AgentFactory::new(temp.path().join("sessions")).without_token_store();
+        let factory =
+            AgentFactory::new(temp.path().join("sessions")).without_provider_auth_persistence();
         let store = Arc::new(MemoryConfigStore::new(
             Config::default(),
             meerkat_models::canonical(),

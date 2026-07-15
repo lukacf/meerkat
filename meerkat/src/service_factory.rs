@@ -236,7 +236,45 @@ impl SessionAgent for FactoryAgent {
         &mut self,
         system_prompt: String,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        self.agent.session_mut().set_system_prompt(system_prompt);
+        let mut build_state = self
+            .agent
+            .session()
+            .try_build_state()
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to restore session build state for system prompt update: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                meerkat_core::error::AgentError::InternalError(
+                    "session is missing build state for system prompt update".to_string(),
+                )
+            })?;
+        self.agent
+            .session_mut()
+            .set_system_prompt_with_source(
+                system_prompt.clone(),
+                meerkat_core::session_durable_config_authority::SessionSystemPromptSource::DirectMutation,
+            )
+            .map_err(|err| {
+                meerkat_core::error::AgentError::ConfigError(format!(
+                    "system prompt update was rejected by durable-config authority: {err}"
+                ))
+            })?;
+        // A deferred first-turn override changes the canonical base itself.
+        // Keep the exact bytes and their typed intent together so live
+        // open/refresh never has to reconstruct either fact from transcript
+        // shape or stale create-time policy.
+        build_state.system_prompt = meerkat_core::SystemPromptOverride::Set(system_prompt.clone());
+        build_state.assembled_system_prompt = Some(system_prompt);
+        self.agent
+            .session_mut()
+            .set_build_state(build_state)
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to persist canonical system prompt update: {err}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -2040,6 +2078,42 @@ mod tests {
         };
         req.build = Some(build);
         req
+    }
+
+    #[tokio::test]
+    async fn deferred_first_turn_prompt_update_refreshes_canonical_assembled_bytes()
+    -> Result<(), String> {
+        let mut builder = FactoryAgentBuilder::new(AgentFactory::minimal(), Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        let mut request = make_session_request("claude-sonnet-4-5");
+        request.system_prompt =
+            meerkat_core::SystemPromptOverride::Set("create-time prompt".to_string());
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut agent = builder
+            .build_agent(&request, event_tx)
+            .await
+            .map_err(|error| format!("build failed: {error}"))?;
+
+        SessionAgent::update_system_prompt(&mut agent, "deferred override".to_string())
+            .map_err(|error| format!("prompt update failed: {error}"))?;
+
+        let build_state = agent
+            .session()
+            .build_state()
+            .ok_or_else(|| "updated agent lost session build state".to_string())?;
+        assert_eq!(
+            build_state.system_prompt,
+            meerkat_core::SystemPromptOverride::Set("deferred override".to_string())
+        );
+        assert_eq!(
+            build_state.assembled_system_prompt.as_deref(),
+            Some("deferred override")
+        );
+        assert!(matches!(
+            agent.session().messages().first(),
+            Some(Message::System(system)) if system.content == "deferred override"
+        ));
+        Ok(())
     }
 
     /// When realm config is populated and default_llm_client is None,

@@ -19,8 +19,9 @@ use chrono::{Duration as ChronoDuration, Utc};
 
 use meerkat_anthropic::runtime::oauth;
 use meerkat_auth_core::auth_store::{
-    CredentialMutationError, CredentialMutationFn, EphemeralTokenStore, PersistedAuthMode,
-    PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, EphemeralTokenStore,
+    InMemoryCoordinator, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence,
+    RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeaseTransition, GeneratedAuthLeaseHandle, LeaseKey,
@@ -31,6 +32,10 @@ use meerkat_core::{
 };
 use meerkat_llm_core::provider_runtime::binding::ResolvedConnection;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
+
+fn in_memory_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {
+    ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new()))
+}
 
 fn claude_ai_declaration() -> meerkat_auth_core::oauth_flow::OAuthProviderDeclaration {
     meerkat_auth_core::oauth_flow::oauth_provider_declaration(
@@ -288,7 +293,7 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
         &self,
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         mutation_fn().await
     }
 
@@ -311,7 +316,7 @@ impl RefreshCoordinator for FailingRefreshCoordinator {
         &self,
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         mutation_fn().await
     }
 
@@ -357,7 +362,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
+        .with_provider_auth_persistence(in_memory_persistence(store.clone()))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -397,7 +402,8 @@ async fn claude_ai_oauth_rejects_token_without_auth_lifecycle() {
         .unwrap();
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store.clone());
+    let env = ResolverEnvironment::testing()
+        .with_provider_auth_persistence(in_memory_persistence(store.clone()));
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));
@@ -445,7 +451,7 @@ async fn claude_ai_oauth_reauth_required_is_typed() {
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(reauth_required_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -489,7 +495,7 @@ async fn claude_ai_oauth_rejects_wrong_persisted_mode() {
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -544,7 +550,7 @@ async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
         },
     );
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -605,8 +611,10 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(StaticRefreshCoordinator { tokens: refreshed }),
+        ))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -647,10 +655,12 @@ async fn claude_ai_oauth_refresh_failure_is_typed() {
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
-        .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
-            error: RefreshError::Refresh("claude refresh transport failed".into()),
-        }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store,
+            Arc::new(FailingRefreshCoordinator {
+                error: RefreshError::Refresh("claude refresh transport failed".into()),
+            }),
+        ))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -707,8 +717,10 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(StaticRefreshCoordinator { tokens: refreshed }),
+        ))
         .with_auth_lease_handle(auth_lease)
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
@@ -752,7 +764,7 @@ async fn claude_ai_oauth_force_refresh_with_refresh_disallowed_errors_refresh_re
 
     let realm = realm_with_oauth_binding_no_refresh("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(auth_lease)
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
@@ -797,7 +809,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
 
     let realm = realm_with_oauth_binding("oauth_to_api_key");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
+        .with_provider_auth_persistence(in_memory_persistence(store.clone()))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -836,7 +848,7 @@ async fn oauth_to_api_key_rejects_claude_ai_oauth_mode() {
 
     let realm = realm_with_oauth_binding("oauth_to_api_key");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
@@ -865,7 +877,8 @@ async fn oauth_to_api_key_rejects_claude_ai_oauth_mode() {
 async fn missing_oauth_tokens_surface_interactive_login_required() {
     let store = Arc::new(EphemeralTokenStore::new());
     let realm = realm_with_oauth_binding("claude_ai_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store);
+    let env =
+        ResolverEnvironment::testing().with_provider_auth_persistence(in_memory_persistence(store));
     let registry = ProviderRuntimeRegistry::empty().with_runtime(std::sync::Arc::new(
         meerkat_anthropic::AnthropicProviderRuntime,
     ));

@@ -13,10 +13,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
+use futures::future::BoxFuture;
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::auth::{
-    CredentialMutationError, CredentialMutationFn, PersistedAuthMode, PersistedTokens,
-    RefreshCoordinator, RefreshError, RefreshFailureObservation, RefreshFn, TokenKey, TokenStore,
+    CredentialMutationError, CredentialMutationOutcome, PersistedAuthMode, PersistedTokens,
+    ProviderAuthPersistence, RefreshCoordinator, RefreshError, RefreshFailureObservation, TokenKey,
+    TokenStore,
 };
+#[cfg(all(not(target_arch = "wasm32"), test))]
+use meerkat_core::auth::{CredentialMutationFn, RefreshFn};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 #[cfg(not(target_arch = "wasm32"))]
@@ -259,6 +264,224 @@ pub struct ManagedStoreTokens {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl ManagedStoreTokens {
+    /// Release the process-local lifecycle guard before waiting for the shared
+    /// credential coordinator.
+    ///
+    /// Every durable mutation acquires in the canonical order
+    /// `coordinator/file lock -> lifecycle guard`. Holding the preload guard
+    /// while waiting for the coordinator would invert that order against an
+    /// interactive login/logout and can deadlock.
+    pub fn release_prelock_lifecycle_guard(&mut self) {
+        drop(self.lifecycle_guard.take());
+    }
+}
+
+/// Result of revalidating a managed OAuth credential inside the refresh
+/// coordinator's per-key transaction.
+///
+/// The provider runtime must not exchange a rotating refresh token until this
+/// preparation has run: a different process may have committed a newer token
+/// bundle while this resolver was waiting for the cross-process lock.
+#[cfg(not(target_arch = "wasm32"))]
+pub enum LockedManagedStoreOAuthRefresh {
+    /// A different refresh owner already published a credential which the
+    /// AuthMachine now admits for cached use. No provider exchange is needed.
+    UseCached(PersistedTokens),
+    /// This caller owns a refresh based on the durable predecessor captured
+    /// while the coordinator lock is held.
+    Refresh(PreparedManagedStoreOAuthRefresh),
+}
+
+/// How a coordinator-owned durable reload should be projected into the local
+/// managed-store lifecycle.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedStoreOAuthRefreshPreparationMode {
+    /// This refresh closure owns provider exchange when admission still
+    /// requires it after the locked reload.
+    RefreshOwner,
+    /// This caller joined an in-process coalesced refresh whose owner already
+    /// committed. Reproject the published durable result locally, but never
+    /// start another provider exchange.
+    AdoptPublished,
+}
+
+/// Provider callback that projects a coordinator-locked durable reload into a
+/// managed-store refresh transaction.
+#[cfg(not(target_arch = "wasm32"))]
+pub type ManagedStoreOAuthRefreshPrepareFn = Box<
+    dyn FnOnce(
+            PersistedTokens,
+            ManagedStoreOAuthRefreshPreparationMode,
+        ) -> BoxFuture<'static, Result<LockedManagedStoreOAuthRefresh, RefreshError>>
+        + Send
+        + 'static,
+>;
+
+/// Single owner of prepare-claim and coalesced-result adoption semantics for
+/// all managed OAuth providers.
+///
+/// A coordinator owner claims the callback inside its locked refresh closure.
+/// An in-process waiter whose closure was coalesced re-enters the exclusive
+/// per-key transaction and adopts the already-published durable result. Custom
+/// coordinators used by embedders/tests may instead return an unmarked exchange
+/// result without invoking the closure; that result is committed exactly once
+/// against the locked predecessor for backwards-compatible coordinator
+/// semantics.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct ManagedStoreOAuthRefreshPreparationSlot {
+    prepare: Arc<std::sync::Mutex<Option<ManagedStoreOAuthRefreshPrepareFn>>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ManagedStoreOAuthRefreshPreparationSlot {
+    pub fn new(prepare: ManagedStoreOAuthRefreshPrepareFn) -> Self {
+        Self {
+            prepare: Arc::new(std::sync::Mutex::new(Some(prepare))),
+        }
+    }
+
+    pub async fn claim_refresh_owner(
+        &self,
+        current: PersistedTokens,
+    ) -> Result<LockedManagedStoreOAuthRefresh, RefreshError> {
+        let prepare = self
+            .prepare
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| {
+                RefreshError::Refresh(
+                    "managed OAuth refresh preparation was already claimed".into(),
+                )
+            })?;
+        prepare(
+            current,
+            ManagedStoreOAuthRefreshPreparationMode::RefreshOwner,
+        )
+        .await
+    }
+
+    pub async fn finish_coordinated_refresh(
+        &self,
+        coordinator: Arc<dyn RefreshCoordinator>,
+        token_store: Arc<dyn TokenStore>,
+        key: TokenKey,
+        refreshed: PersistedTokens,
+    ) -> Result<PersistedTokens, RefreshError> {
+        let unclaimed_prepare = self
+            .prepare
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(prepare) = unclaimed_prepare else {
+            return Ok(refreshed);
+        };
+
+        let returned = refreshed;
+        let outcome = coordinator
+            .with_exclusive_mutation(
+                key.clone(),
+                Box::new(move || {
+                    Box::pin(async move {
+                        let current = token_store
+                            .load(&key)
+                            .await
+                            .map_err(|error| {
+                                CredentialMutationError::TokenStore(error.to_string())
+                            })?
+                            .ok_or_else(|| {
+                                CredentialMutationError::Operation(
+                                    "persisted tokens disappeared before shared refresh adoption"
+                                        .into(),
+                                )
+                            })?;
+                        let returned_was_already_published = current == returned
+                            || meerkat_core::tokens_lifecycle_published(&returned);
+                        let mode = if returned_was_already_published {
+                            ManagedStoreOAuthRefreshPreparationMode::AdoptPublished
+                        } else {
+                            ManagedStoreOAuthRefreshPreparationMode::RefreshOwner
+                        };
+                        match prepare(current, mode).await.map_err(|error| {
+                            CredentialMutationError::AuthLifecycle(error.to_string())
+                        })? {
+                            LockedManagedStoreOAuthRefresh::UseCached(cached) => {
+                                Ok(CredentialMutationOutcome::Persisted(cached))
+                            }
+                            LockedManagedStoreOAuthRefresh::Refresh(transaction) => transaction
+                                .commit(returned)
+                                .await
+                                .map(CredentialMutationOutcome::Persisted)
+                                .map_err(|error| {
+                                    CredentialMutationError::AuthLifecycle(error.to_string())
+                                }),
+                        }
+                    })
+                }),
+            )
+            .await
+            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+        match outcome {
+            CredentialMutationOutcome::Persisted(tokens) => Ok(tokens),
+            CredentialMutationOutcome::Cleared => Err(RefreshError::Refresh(
+                "shared refresh adoption observed a cleared credential".into(),
+            )),
+        }
+    }
+}
+
+/// Prepared managed-store refresh transaction.
+///
+/// `previous` contains both the token bytes and the opaque AuthMachine restore
+/// snapshot observed under the coordinator lock. Commit and compensation must
+/// stay on this object so neither can accidentally fall back to a pre-lock
+/// resolver snapshot.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct PreparedManagedStoreOAuthRefresh {
+    env: ResolverEnvironment,
+    binding: ValidatedBinding,
+    previous: ManagedStoreTokens,
+    refresh_started: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PreparedManagedStoreOAuthRefresh {
+    /// Commit provider-refreshed tokens against the exact durable predecessor
+    /// captured under the refresh coordinator lock.
+    pub async fn commit(self, refreshed: PersistedTokens) -> Result<PersistedTokens, RefreshError> {
+        match publish_managed_store_tokens_lifecycle_and_save(
+            &self.env,
+            &self.binding,
+            &self.previous,
+            &refreshed,
+        )
+        .await
+        {
+            Ok(committed) => Ok(committed),
+            Err(error) => Err(self.fail(RefreshError::Refresh(error.to_string()))),
+        }
+    }
+
+    /// Publish the provider failure through AuthMachine authority while the
+    /// same prepared transaction still owns the lifecycle begun under lock.
+    pub fn fail(self, error: RefreshError) -> RefreshError {
+        let observation = error.observation();
+        match mark_managed_store_oauth_refresh_failed(
+            &self.env,
+            &self.binding,
+            self.refresh_started,
+            observation,
+        ) {
+            Ok(()) => error,
+            Err(lifecycle_error) => RefreshError::Refresh(format!("{error}; {lifecycle_error}")),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedStoreLifecycle {
     Authorized,
@@ -321,8 +544,9 @@ fn resolve_credential_use_admission(
 /// disposition. The provider runtime shell maps exactly one branch:
 /// [`UseCached`](OAuthLoginCredentialAdmission::UseCached) uses the persisted
 /// credential directly, [`BeginRefresh`](OAuthLoginCredentialAdmission::BeginRefresh)
-/// runs `begin_managed_store_oauth_refresh_lifecycle` and the provider OAuth
-/// refresh. The refresh-disallowed / reauth / lease-absent dispositions are
+/// enters [`prepare_managed_store_oauth_refresh_under_lock`], which begins the
+/// lifecycle and provider exchange under shared mutation authority. The
+/// refresh-disallowed / reauth / lease-absent dispositions are
 /// surfaced as the matching [`ProviderAuthError`] rather than a variant, so the
 /// provider never re-derives the use-vs-refresh-vs-error decision.
 #[cfg(not(target_arch = "wasm32"))]
@@ -430,10 +654,9 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     binding: &ValidatedBinding,
 ) -> Result<ManagedStoreTokens, ProviderAuthError> {
     let store = env
-        .token_store
-        .as_ref()
-        .ok_or_else(|| interactive_login_error(binding))?
-        .clone();
+        .provider_auth_persistence()
+        .map(ProviderAuthPersistence::token_store)
+        .ok_or_else(|| interactive_login_error(binding))?;
     let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
     let lifecycle_guard = if binding
@@ -596,7 +819,7 @@ fn observe_auth_lease_freshness_for_now(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn begin_managed_store_oauth_refresh_lifecycle(
+fn begin_managed_store_oauth_refresh_lifecycle(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     previous: &mut ManagedStoreTokens,
@@ -661,6 +884,137 @@ pub fn begin_managed_store_oauth_refresh_lifecycle(
     }
 }
 
+/// Establish the managed OAuth refresh baseline while the provider's
+/// [`RefreshCoordinator`] transaction is held.
+///
+/// Resolver admission happens once before entering the coordinator to avoid a
+/// lock for the common cached path, but that observation is only advisory. A
+/// different process can publish newer rotating-token material before this
+/// caller acquires the file lock. This function therefore reloads and verifies
+/// the durable baseline, reprojects AuthMachine authority from its durable
+/// marker when it changed, reruns cached-vs-refresh admission, and only then
+/// begins a refresh. The returned transaction owns the under-lock token and
+/// lifecycle restore snapshots used by both commit and rollback.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn prepare_managed_store_oauth_refresh_under_lock(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    mut previous: ManagedStoreTokens,
+    locked_baseline: PersistedTokens,
+    mode: ManagedStoreOAuthRefreshPreparationMode,
+) -> Result<LockedManagedStoreOAuthRefresh, ProviderAuthError> {
+    if previous.lifecycle_guard.is_some() {
+        return Err(ProviderAuthError::SourceResolutionFailed(
+            "managed OAuth refresh entered coordinator while holding the pre-lock lifecycle guard"
+                .into(),
+        ));
+    }
+    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
+    previous.lifecycle_guard =
+        Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await);
+
+    let durable_baseline = previous
+        .store
+        .load(&previous.key)
+        .await
+        .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?
+        .ok_or_else(|| {
+            ProviderAuthError::SourceResolutionFailed(
+                "persisted tokens disappeared inside OAuth refresh transaction".into(),
+            )
+        })?;
+    if durable_baseline != locked_baseline {
+        return Err(ProviderAuthError::SourceResolutionFailed(
+            "managed_store tokens changed after the coordinator-locked reload".into(),
+        ));
+    }
+
+    let expected_mode = require_persisted_auth_mode(&durable_baseline, binding)?;
+    if !crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode) {
+        return Err(ProviderAuthError::SourceResolutionFailed(
+            "managed_store refresh transaction requires an OAuth-login credential".into(),
+        ));
+    }
+    if !durable_marker::marker_payload_valid_for_tokens(&durable_baseline, &previous.key) {
+        return Err(stale_credential_error());
+    }
+
+    if durable_baseline == previous.tokens {
+        // Preserve byte-for-byte identity with the value loaded by the
+        // coordinator-owned provider closure even when no rebase was needed.
+        previous.tokens = durable_baseline.clone();
+    } else {
+        let auth_lease = env
+            .auth_lease_handle
+            .as_ref()
+            .ok_or_else(lease_absent_error)?;
+        // The process-local projection was restored from the pre-lock token.
+        // Replace only its credential lifecycle side, then import the durable
+        // marker that belongs to the locked predecessor through generated
+        // AuthMachine authority.
+        auth_lease
+            .release_credential_lifecycle(&lease_key)
+            .map_err(|error| {
+                ProviderAuthError::SourceResolutionFailed(format!(
+                    "AuthMachine lifecycle rebase release failed: {error}"
+                ))
+            })?;
+        let restored = meerkat_core::rehydrate_marked_tokens_for_status(
+            previous.store.as_ref(),
+            auth_lease,
+            binding.auth_binding_ref(),
+            expected_mode,
+            (env.now)(),
+        )
+        .await
+        .map_err(|error| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle rebase failed: {error}"
+            ))
+        })?
+        .ok_or_else(stale_credential_error)?;
+        if restored != durable_baseline {
+            return Err(ProviderAuthError::SourceResolutionFailed(
+                "AuthMachine lifecycle rebase did not restore the locked OAuth baseline".into(),
+            ));
+        }
+
+        observe_auth_lease_freshness_for_now(auth_lease.as_ref(), &lease_key, (env.now)())?;
+        let restore_snapshot = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
+        let snapshot = restore_snapshot.snapshot().clone();
+        previous.tokens = durable_baseline.clone();
+        previous.lifecycle_snapshot = Some(snapshot);
+        previous.lifecycle_restore_snapshot = Some(restore_snapshot);
+    }
+
+    let admission = resolve_oauth_login_credential_disposition(
+        env,
+        binding,
+        durable_baseline.primary_secret.is_some(),
+    )?;
+    if mode == ManagedStoreOAuthRefreshPreparationMode::AdoptPublished {
+        return Ok(LockedManagedStoreOAuthRefresh::UseCached(durable_baseline));
+    }
+
+    match admission {
+        OAuthLoginCredentialAdmission::UseCached => {
+            Ok(LockedManagedStoreOAuthRefresh::UseCached(durable_baseline))
+        }
+        OAuthLoginCredentialAdmission::BeginRefresh => {
+            let refresh_started =
+                begin_managed_store_oauth_refresh_lifecycle(env, binding, &mut previous)?;
+            Ok(LockedManagedStoreOAuthRefresh::Refresh(
+                PreparedManagedStoreOAuthRefresh {
+                    env: env.clone(),
+                    binding: binding.clone(),
+                    previous,
+                    refresh_started,
+                },
+            ))
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn mark_managed_store_oauth_refresh_failed(
     env: &ResolverEnvironment,
@@ -691,7 +1045,8 @@ pub fn mark_managed_store_oauth_refresh_failed(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn managed_store_oauth_refresh_failure_coordinator(
+#[cfg(test)]
+fn managed_store_oauth_refresh_failure_coordinator(
     inner: Arc<dyn RefreshCoordinator>,
     env: ResolverEnvironment,
     binding: ValidatedBinding,
@@ -709,6 +1064,7 @@ pub fn managed_store_oauth_refresh_failure_coordinator(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 struct ManagedStoreOAuthRefreshPreClaimGuard {
     env: ResolverEnvironment,
     binding: ValidatedBinding,
@@ -717,6 +1073,7 @@ struct ManagedStoreOAuthRefreshPreClaimGuard {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 impl ManagedStoreOAuthRefreshPreClaimGuard {
     fn new(
         env: ResolverEnvironment,
@@ -750,6 +1107,7 @@ impl ManagedStoreOAuthRefreshPreClaimGuard {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 impl Drop for ManagedStoreOAuthRefreshPreClaimGuard {
     fn drop(&mut self) {
         let _ = self.fail_if_unclaimed();
@@ -757,6 +1115,7 @@ impl Drop for ManagedStoreOAuthRefreshPreClaimGuard {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 struct ManagedStoreOAuthRefreshFailureCoordinator {
     inner: Arc<dyn RefreshCoordinator>,
     env: ResolverEnvironment,
@@ -766,6 +1125,7 @@ struct ManagedStoreOAuthRefreshFailureCoordinator {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 impl ManagedStoreOAuthRefreshFailureCoordinator {
     fn wrap_refresh_fn(&self, refresh_fn: RefreshFn) -> RefreshFn {
         let env = self.env.clone();
@@ -793,13 +1153,14 @@ impl ManagedStoreOAuthRefreshFailureCoordinator {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
 #[async_trait]
 impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
     async fn with_exclusive_mutation(
         &self,
         key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         self.inner.with_exclusive_mutation(key, mutation_fn).await
     }
 
@@ -1315,7 +1676,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use crate::EphemeralTokenStore;
     #[cfg(not(target_arch = "wasm32"))]
-    use meerkat_core::auth::{PersistedTokens, TokenKey, TokenStore};
+    use meerkat_core::auth::{PersistedTokens, ProviderAuthPersistence, TokenKey, TokenStore};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::handles::{
         AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
@@ -1325,6 +1686,11 @@ mod tests {
         AuthBindingRef, AuthProfile, AuthRouteHints, BackendProfile, BindingPolicy, Provider,
     };
     use meerkat_llm_core::provider_runtime::{ProviderRuntimeCatalog, ValidatedBinding};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_provider_auth_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {
+        ProviderAuthPersistence::new(store, Arc::new(crate::InMemoryCoordinator::new()))
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn generated_auth_lease_handle_for_test(
@@ -1882,7 +2248,7 @@ mod tests {
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
 
         let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -1916,7 +2282,7 @@ mod tests {
         store.save(&key, &marked).await.unwrap();
         let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(generated_auth_lease_handle_for_test(Arc::clone(
                 &auth_lease,
             )));
@@ -1946,7 +2312,8 @@ mod tests {
             .save(&key, &PersistedTokens::api_key("sk-standalone"))
             .await
             .unwrap();
-        let env = ResolverEnvironment::testing().with_token_store(store);
+        let env = ResolverEnvironment::testing()
+            .with_provider_auth_persistence(test_provider_auth_persistence(store));
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -1969,7 +2336,7 @@ mod tests {
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(StaticAuthLeaseHandle::unknown().generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -1993,7 +2360,7 @@ mod tests {
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(StaticAuthLeaseHandle::released().generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2030,7 +2397,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let env = ResolverEnvironment::testing().with_token_store(store);
+        let env = ResolverEnvironment::testing()
+            .with_provider_auth_persistence(test_provider_auth_persistence(store));
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
             .await
@@ -2054,7 +2422,7 @@ mod tests {
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2084,7 +2452,7 @@ mod tests {
         });
         store.save(&key, &stale_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid_generation(2).generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2111,7 +2479,7 @@ mod tests {
         let marked = auth_lease.mark_tokens_lifecycle_published_for_test(&tokens);
         store.save(&key, &marked).await.unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2145,7 +2513,7 @@ mod tests {
         store.save(&key, &stale_marker).await.unwrap();
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2175,7 +2543,7 @@ mod tests {
         store.save(&key, &incomplete_marker).await.unwrap();
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2203,7 +2571,7 @@ mod tests {
         store.save(&key, &marked).await.unwrap();
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2243,7 +2611,7 @@ mod tests {
             credential_published_at_millis: None,
         });
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2278,7 +2646,7 @@ mod tests {
             credential_published_at_millis: None,
         });
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2310,7 +2678,7 @@ mod tests {
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2351,7 +2719,7 @@ mod tests {
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
@@ -2625,7 +2993,7 @@ mod tests {
             None,
         );
         let env = ResolverEnvironment::testing()
-            .with_token_store(Arc::clone(&store))
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err =
@@ -2682,7 +3050,7 @@ mod tests {
         };
         let refreshed = chatgpt_oauth_tokens("refreshed-access");
         let env = ResolverEnvironment::testing()
-            .with_token_store(Arc::clone(&store))
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
         let committed =
@@ -2698,6 +3066,202 @@ mod tests {
         assert_eq!(after_refresh.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(after_refresh.generation, before_refresh.generation + 1);
         assert!(after_refresh.credential_present);
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "file-lock"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_rotating_refreshes_rebase_token_and_lifecycle_baseline_under_file_lock() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
+        let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
+
+        let mut raw_a = chatgpt_oauth_tokens("access-a");
+        raw_a.refresh_token = Some("refresh-a".into());
+        raw_a.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
+        raw_a.last_refresh = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        let publisher = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Expired),
+            expires_at: Some(meerkat_core::persisted_token_expires_at_epoch_secs(&raw_a)),
+            credential_present: true,
+            generation: 1,
+            credential_published_at_millis: Some(1),
+        });
+        let marked_a = publisher.mark_tokens_lifecycle_published_for_test(&raw_a);
+        store.save(&key, &marked_a).await.unwrap();
+
+        // Model two processes which both loaded A before either obtained the
+        // cross-process refresh lock. Each process has an independent
+        // AuthMachine projection restored from the same durable marker.
+        let make_preload = |auth_lease: GeneratedAuthLeaseHandle| {
+            let snapshot = auth_lease.snapshot(&lease_key);
+            ManagedStoreTokens {
+                store: Arc::clone(&store),
+                key: key.clone(),
+                tokens: marked_a.clone(),
+                lifecycle_snapshot: Some(snapshot),
+                lifecycle_restore_snapshot: Some(
+                    auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key),
+                ),
+                lifecycle: ManagedStoreLifecycle::RefreshRequired,
+                lifecycle_guard: None,
+            }
+        };
+
+        let runtime_one = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_one = generated_auth_lease_handle_for_test(Arc::clone(&runtime_one));
+        meerkat_core::rehydrate_marked_tokens_for_status(
+            store.as_ref(),
+            &auth_one,
+            binding.auth_binding_ref(),
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("first process restores A");
+        let preload_one = make_preload(auth_one.clone());
+
+        let runtime_two = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_two = generated_auth_lease_handle_for_test(Arc::clone(&runtime_two));
+        meerkat_core::rehydrate_marked_tokens_for_status(
+            store.as_ref(),
+            &auth_two,
+            binding.auth_binding_ref(),
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("second process restores A");
+        let preload_two = make_preload(auth_two.clone());
+
+        let env_one = ResolverEnvironment::testing()
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
+            .with_auth_lease_handle(auth_one.clone())
+            .with_force_refresh(true);
+        let env_two = ResolverEnvironment::testing()
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
+            .with_auth_lease_handle(auth_two.clone())
+            .with_force_refresh(true);
+        let lock_dir = tempfile::tempdir().unwrap();
+        let coordinator_one: Arc<dyn RefreshCoordinator> =
+            Arc::new(crate::FileLockCoordinator::new(lock_dir.path()));
+        let coordinator_two: Arc<dyn RefreshCoordinator> =
+            Arc::new(crate::FileLockCoordinator::new(lock_dir.path()));
+        let start = Arc::new(tokio::sync::Barrier::new(3));
+        let observed_baselines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        let spawn_refresh = |coordinator: Arc<dyn RefreshCoordinator>,
+                             env: ResolverEnvironment,
+                             binding: ValidatedBinding,
+                             preload: ManagedStoreTokens| {
+            let store = Arc::clone(&store);
+            let key = key.clone();
+            let start = Arc::clone(&start);
+            let observed_baselines = Arc::clone(&observed_baselines);
+            tokio::spawn(async move {
+                start.wait().await;
+                let refresh_key = key.clone();
+                let refresh_fn: RefreshFn = Box::new(move || {
+                    Box::pin(async move {
+                        let baseline = store
+                            .load(&refresh_key)
+                            .await
+                            .map_err(|error| RefreshError::Refresh(error.to_string()))?
+                            .ok_or_else(|| {
+                                RefreshError::Refresh("locked baseline disappeared".into())
+                            })?;
+                        observed_baselines
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(
+                                baseline
+                                    .refresh_token
+                                    .clone()
+                                    .expect("fixture baseline has rotating refresh token"),
+                            );
+                        let transaction = match prepare_managed_store_oauth_refresh_under_lock(
+                            &env,
+                            &binding,
+                            preload,
+                            baseline.clone(),
+                            ManagedStoreOAuthRefreshPreparationMode::RefreshOwner,
+                        )
+                        .await
+                        .map_err(|error| RefreshError::Refresh(error.to_string()))?
+                        {
+                            LockedManagedStoreOAuthRefresh::Refresh(transaction) => transaction,
+                            LockedManagedStoreOAuthRefresh::UseCached(_) => {
+                                return Err(RefreshError::Refresh(
+                                    "forced refresh unexpectedly reused cached tokens".into(),
+                                ));
+                            }
+                        };
+                        let mut rotated = baseline;
+                        match rotated.refresh_token.as_deref() {
+                            Some("refresh-a") => {
+                                rotated.primary_secret = Some("access-b".into());
+                                rotated.refresh_token = Some("refresh-b".into());
+                            }
+                            Some("refresh-b") => {
+                                rotated.primary_secret = Some("access-c".into());
+                                rotated.refresh_token = Some("refresh-c".into());
+                            }
+                            other => {
+                                return Err(transaction.fail(RefreshError::Refresh(format!(
+                                    "unexpected rotating-token baseline: {other:?}"
+                                ))));
+                            }
+                        }
+                        rotated.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+                        rotated.last_refresh = Some(chrono::Utc::now());
+                        transaction.commit(rotated).await
+                    })
+                });
+                coordinator
+                    .with_forced_refresh(key, refresh_fn)
+                    .await
+                    .expect("serialized forced refresh commits")
+            })
+        };
+
+        let first = spawn_refresh(coordinator_one, env_one, binding.clone(), preload_one);
+        let second = spawn_refresh(coordinator_two, env_two, binding, preload_two);
+        start.wait().await;
+        let first_result = first.await.unwrap();
+        let second_result = second.await.unwrap();
+
+        let baselines = observed_baselines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(baselines, vec!["refresh-a", "refresh-b"]);
+        let result_secrets = [
+            first_result.primary_secret.as_deref(),
+            second_result.primary_secret.as_deref(),
+        ];
+        assert!(result_secrets.contains(&Some("access-b")));
+        assert!(result_secrets.contains(&Some("access-c")));
+
+        let stored = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(stored.primary_secret.as_deref(), Some("access-c"));
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-c"));
+        assert!(durable_marker::marker_payload_valid_for_tokens(
+            &stored, &key
+        ));
+        let final_snapshot_matches_an_owner = [&auth_one, &auth_two].into_iter().any(|handle| {
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &stored,
+                &handle.snapshot(&lease_key),
+                &key,
+            ) == durable_marker::AuthLeaseDurableMarkerRelation::Matches
+        });
+        assert!(
+            final_snapshot_matches_an_owner,
+            "final C marker must match the AuthMachine that committed C"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2727,7 +3291,7 @@ mod tests {
             None,
         );
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let refresh_started =
@@ -2779,7 +3343,7 @@ mod tests {
             None,
         );
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
 
         let refresh_started =
@@ -2825,7 +3389,7 @@ mod tests {
         let tokens = auth_lease.mark_tokens_lifecycle_published_for_test(&expired_tokens);
         store.save(&key, &tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(Arc::clone(&store))
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
         let mut loaded = load_managed_store_tokens_with_lifecycle(&env, &binding)
             .await
@@ -2886,7 +3450,7 @@ mod tests {
             None,
         );
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
@@ -2974,7 +3538,7 @@ mod tests {
             None,
         );
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
@@ -3009,7 +3573,7 @@ mod tests {
             &self,
             _key: TokenKey,
             _mutation_fn: CredentialMutationFn,
-        ) -> Result<PersistedTokens, CredentialMutationError> {
+        ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
             Err(CredentialMutationError::Cancelled)
         }
 
@@ -3057,7 +3621,7 @@ mod tests {
             None,
         );
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
         let refresh_started =
             begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
@@ -3099,7 +3663,7 @@ mod tests {
             auth_lease.mark_tokens_lifecycle_published_for_test(&raw_initial_tokens);
         store.save(&key, &initial_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(Arc::clone(&store))
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
         let first = load_managed_store_tokens_with_lifecycle(&env, &binding)
@@ -3114,7 +3678,7 @@ mod tests {
             let binding =
                 simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
             let env = ResolverEnvironment::testing()
-                .with_token_store(second_store)
+                .with_provider_auth_persistence(test_provider_auth_persistence(second_store))
                 .with_auth_lease_handle(second_auth_lease.generated());
             let result = load_managed_store_tokens_with_lifecycle(&env, &binding)
                 .await
@@ -3164,7 +3728,7 @@ mod tests {
         let newer_tokens = chatgpt_oauth_tokens("newer-login-access");
         store.save(&key, &newer_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(Arc::clone(&store))
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = publish_managed_store_tokens_lifecycle_and_save(
@@ -3213,7 +3777,7 @@ mod tests {
         };
         let refreshed = chatgpt_oauth_tokens("shared-refresh-access");
         let env = ResolverEnvironment::testing()
-            .with_token_store(Arc::clone(&store))
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
         let first =
@@ -3266,7 +3830,7 @@ mod tests {
         };
         store.save(&key, &shared_tokens).await.unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(Arc::clone(&store))
+            .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err =
@@ -3296,7 +3860,7 @@ mod tests {
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
-            .with_token_store(store)
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid().generated());
 
         let err = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)

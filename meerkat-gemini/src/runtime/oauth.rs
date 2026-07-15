@@ -13,10 +13,9 @@
 //! https://developers.google.com/identity/protocols/oauth2#installed —
 //! the secret is considered non-sensitive in this flow.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Utc;
-use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
@@ -24,16 +23,15 @@ use meerkat_auth_core::auth_oauth::{
     exchange_refresh_token, oauth_refresh_error,
 };
 use meerkat_auth_core::auth_store::{
-    InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError,
+    PersistedAuthMode, PersistedTokens, ProviderAuthPersistence, RefreshCoordinator, RefreshError,
     RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_auth_core::oauth_flow::{OAuthProviderIdentity, oauth_provider_endpoints};
+use meerkat_auth_core::resolver::{
+    LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
+};
 
-pub type TokenCommitFn = Box<
-    dyn FnOnce(PersistedTokens) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
-        + Send
-        + 'static,
->;
+pub type TokenPrepareFn = meerkat_auth_core::resolver::ManagedStoreOAuthRefreshPrepareFn;
 
 // ---------------------------------------------------------------------
 // Provider OAuth declaration
@@ -119,39 +117,23 @@ impl GoogleIdClaims {
 
 pub struct GoogleCodeAssistOAuthRuntime {
     http: reqwest::Client,
-    token_store: Arc<dyn TokenStore>,
-    refresh_coord: Arc<dyn RefreshCoordinator>,
+    persistence: ProviderAuthPersistence,
     endpoints: OAuthEndpoints,
     key: TokenKey,
 }
 
 impl GoogleCodeAssistOAuthRuntime {
     pub fn new(
-        token_store: Arc<dyn TokenStore>,
-        refresh_coord: Arc<dyn RefreshCoordinator>,
+        persistence: ProviderAuthPersistence,
         endpoints: OAuthEndpoints,
         key: TokenKey,
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
-            token_store,
-            refresh_coord,
+            persistence,
             endpoints,
             key,
         }
-    }
-
-    pub fn new_with_default_coordinator(
-        token_store: Arc<dyn TokenStore>,
-        endpoints: OAuthEndpoints,
-        key: TokenKey,
-    ) -> Self {
-        Self::new(
-            token_store,
-            Arc::new(InMemoryCoordinator::new()),
-            endpoints,
-            key,
-        )
     }
 
     pub fn endpoints(&self) -> &OAuthEndpoints {
@@ -162,24 +144,32 @@ impl GoogleCodeAssistOAuthRuntime {
         &self.key
     }
 
-    async fn refresh_tokens_with_commit_slot(
+    fn token_store(&self) -> Arc<dyn TokenStore> {
+        self.persistence.token_store()
+    }
+
+    fn refresh_coordinator(&self) -> Arc<dyn RefreshCoordinator> {
+        self.persistence.refresh_coordinator()
+    }
+
+    async fn refresh_tokens_with_locked_preparation_inner(
         &self,
-        commit_fn: TokenCommitFn,
+        prepare_fn: TokenPrepareFn,
         force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
-        let commit_slot = Arc::new(Mutex::new(Some(commit_fn)));
+        let preparation = ManagedStoreOAuthRefreshPreparationSlot::new(prepare_fn);
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
-        let token_store = Arc::clone(&self.token_store);
+        let token_store = self.token_store();
         let key = self.key.clone();
-        let commit_slot_for_refresh = Arc::clone(&commit_slot);
+        let preparation_for_refresh = preparation.clone();
         // Google requires the client_secret for refresh on installed apps.
         let refresh_fn: RefreshFn = Box::new(move || {
             let http = http.clone();
             let endpoints = endpoints.clone();
             let token_store = Arc::clone(&token_store);
             let key = key.clone();
-            let commit_slot = Arc::clone(&commit_slot_for_refresh);
+            let preparation = preparation_for_refresh.clone();
             Box::pin(async move {
                 let current = token_store
                     .load(&key)
@@ -190,62 +180,76 @@ impl GoogleCodeAssistOAuthRuntime {
                             "persisted tokens disappeared before OAuth refresh".into(),
                         )
                     })?;
-                let refresh_token = current.refresh_token.clone().ok_or_else(|| {
-                    RefreshError::Observed {
-                        message: "missing refresh_token".into(),
-                        observation:
-                            meerkat_core::RefreshFailureObservation::local_credential_unusable(),
+                match preparation.claim_refresh_owner(current.clone()).await? {
+                    LockedManagedStoreOAuthRefresh::UseCached(cached) => Ok(cached),
+                    LockedManagedStoreOAuthRefresh::Refresh(transaction) => {
+                        let refresh_token = match current.refresh_token.clone() {
+                            Some(refresh_token) => refresh_token,
+                            None => {
+                                return Err(transaction.fail(RefreshError::Observed {
+                                    message: "missing refresh_token".into(),
+                                    observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(),
+                                }));
+                            }
+                        };
+                        let result = match exchange_refresh_token(
+                            &http,
+                            &endpoints,
+                            &refresh_token,
+                            code_assist_client_secret(),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                return Err(transaction.fail(oauth_refresh_error(error)));
+                            }
+                        };
+                        let refreshed = match oauth_result_to_persisted(
+                            result,
+                            PersistedAuthMode::GoogleOauth,
+                            Some(refresh_token),
+                        ) {
+                            Ok(refreshed) => refreshed,
+                            Err(error) => {
+                                return Err(
+                                    transaction.fail(RefreshError::Refresh(error.to_string()))
+                                );
+                            }
+                        };
+                        transaction.commit(refreshed).await
                     }
-                })?;
-                let result = exchange_refresh_token(
-                    &http,
-                    &endpoints,
-                    &refresh_token,
-                    code_assist_client_secret(),
-                )
-                .await
-                .map_err(oauth_refresh_error)?;
-                let refreshed = oauth_result_to_persisted(
-                    result,
-                    PersistedAuthMode::GoogleOauth,
-                    Some(refresh_token),
-                )
-                .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                let commit = commit_slot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                match commit {
-                    Some(commit) => commit(refreshed).await,
-                    None => Ok(refreshed),
                 }
             })
         });
         let refreshed = if force_refresh_coordination {
-            self.refresh_coord
+            self.refresh_coordinator()
                 .with_forced_refresh(self.key.clone(), refresh_fn)
-                .await?
+                .await
         } else {
-            self.refresh_coord
+            self.refresh_coordinator()
                 .with_refresh(self.key.clone(), refresh_fn)
-                .await?
-        };
-        let commit = commit_slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        match commit {
-            Some(commit) => Ok(commit(refreshed).await?),
-            None => Ok(refreshed),
+                .await
         }
+        .map_err(GoogleCodeAssistOAuthError::from)?;
+
+        preparation
+            .finish_coordinated_refresh(
+                self.refresh_coordinator(),
+                self.token_store(),
+                self.key.clone(),
+                refreshed,
+            )
+            .await
+            .map_err(GoogleCodeAssistOAuthError::Refresh)
     }
 
-    pub(crate) async fn refresh_tokens_with_commit(
+    pub(crate) async fn refresh_tokens_with_locked_preparation(
         &self,
-        commit_fn: TokenCommitFn,
+        prepare_fn: TokenPrepareFn,
         force_refresh_coordination: bool,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
-        self.refresh_tokens_with_commit_slot(commit_fn, force_refresh_coordination)
+        self.refresh_tokens_with_locked_preparation_inner(prepare_fn, force_refresh_coordination)
             .await
     }
 

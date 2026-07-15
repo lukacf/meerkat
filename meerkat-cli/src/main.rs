@@ -4457,9 +4457,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Test { binding_id } => {
-            use meerkat_providers::auth_store::{
-                InMemoryCoordinator, TokenStore, TokenStoreBackend,
-            };
+            use meerkat_providers::auth_store::TokenStoreBackend;
 
             let realm = auth_config_realm_or_default(config_realm_override);
             let section = config
@@ -4469,13 +4467,12 @@ async fn handle_auth_command(
             let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
             let registry = cli_provider_registry();
-            let store: Arc<dyn TokenStore> = TokenStoreBackend::default_auto()
+            let persistence = TokenStoreBackend::default_auto()
                 .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
-                .open()
+                .open_with_refresh_authority()
                 .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
             let env = meerkat_providers::ResolverEnvironment::with_process_env()
-                .with_token_store(store)
-                .with_refresh_coordinator(Arc::new(InMemoryCoordinator::default()))
+                .with_provider_auth_persistence(persistence)
                 .with_auth_lease_handle(scope.auth_lease.clone());
             let auth_binding = meerkat_core::AuthBindingRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
@@ -4588,10 +4585,11 @@ async fn handle_auth_command(
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
                 use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
-                let store = TokenStoreBackend::default_auto()
+                let persistence = TokenStoreBackend::default_auto()
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
-                    .open()
+                    .open_with_refresh_authority()
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
+                let store = persistence.token_store();
                 let binding_id = auth_status_binding_id(&realm, &profile_id, &realm_set)?;
                 let key = TokenKey::parse(&realm, binding_id)
                     .map_err(|e| anyhow::anyhow!("invalid token-key realm/binding: {e}"))?;
@@ -4607,10 +4605,10 @@ async fn handle_auth_command(
                         profile: key.profile.clone(),
                         origin: meerkat_core::connection::BindingOrigin::Configured,
                     };
-                    meerkat_core::clear_tokens_and_publish_lifecycle_released(
-                        store.as_ref(),
-                        &scope.auth_lease,
-                        &auth_binding,
+                    meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+                        persistence.clone(),
+                        scope.auth_lease.clone(),
+                        auth_binding,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
@@ -4755,10 +4753,7 @@ async fn refresh_auth_profile(
 ) -> anyhow::Result<()> {
     use meerkat_core::auth::AuthRefreshReason;
     use meerkat_providers::ResolverEnvironment;
-    use meerkat_providers::auth_store::{
-        InMemoryCoordinator, RefreshCoordinator, TokenKey, TokenStore, TokenStoreBackend,
-    };
-    use std::sync::Arc as StdArc;
+    use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
 
     let section = config
         .realm
@@ -4797,11 +4792,11 @@ async fn refresh_auth_profile(
 
     // Wire the TokenStore + RefreshCoordinator into the environment so
     // the refresh write-back reaches persistent storage.
-    let store: StdArc<dyn TokenStore> = TokenStoreBackend::default_auto()
+    let persistence = TokenStoreBackend::default_auto()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
-        .open()
+        .open_with_refresh_authority()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
-    let coord: StdArc<dyn RefreshCoordinator> = StdArc::new(InMemoryCoordinator::default());
+    let store = persistence.token_store();
 
     // Pre-state for the reported diff.
     let key = TokenKey::parse(realm, &binding_id)
@@ -4822,8 +4817,7 @@ async fn refresh_auth_profile(
     }
 
     let env = ResolverEnvironment::with_process_env()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(coord)
+        .with_provider_auth_persistence(persistence.clone())
         .with_auth_lease_handle(scope.auth_lease.clone())
         .with_force_refresh(true);
     let registry = cli_provider_registry();
@@ -4846,37 +4840,71 @@ async fn refresh_auth_profile(
         .await
         .map_err(|e| anyhow::anyhow!("Refresh failed: {e}"))?;
 
-    // Post-state after refresh is observable via the TokenStore (the
-    // refresh path writes back there).
-    let after = store
-        .load(&key)
+    // Rehydrate (or, for a legacy unmarked refresh result, repair) the
+    // lifecycle marker under the same backend-derived per-key transaction as
+    // refresh/login/logout. The post-state returned here is the exact durable
+    // record observed while that transaction still owns the key.
+    let mutation_store = Arc::clone(&store);
+    let mutation_auth_lease = scope.auth_lease.clone();
+    let mutation_auth_binding = auth_binding.clone();
+    let mutation_key = key.clone();
+    let outcome = persistence
+        .refresh_coordinator()
+        .with_exclusive_mutation(
+            key.clone(),
+            Box::new(move || {
+                Box::pin(async move {
+                    use meerkat_providers::auth_store::{
+                        CredentialMutationError, CredentialMutationOutcome,
+                    };
+                    let lease_key =
+                        meerkat_core::handles::LeaseKey::from_auth_binding(&mutation_auth_binding);
+                    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    let current = meerkat_core::rehydrate_durable_predecessor_for_mutation(
+                        mutation_store.as_ref(),
+                        &mutation_auth_lease,
+                        &mutation_auth_binding,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                    .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?
+                    .ok_or_else(|| {
+                        CredentialMutationError::TokenStore(
+                            "refresh completed without a persisted credential".to_string(),
+                        )
+                    })?;
+                    if mutation_auth_lease.snapshot(&lease_key).credential_present {
+                        return Ok(CredentialMutationOutcome::Persisted(current));
+                    }
+                    let transition = meerkat_core::publish_token_lifecycle_acquired(
+                        &mutation_auth_lease,
+                        &mutation_auth_binding,
+                        &current,
+                    )
+                    .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?;
+                    let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                        &mutation_key,
+                        &current,
+                        &transition,
+                    )
+                    .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?;
+                    mutation_store
+                        .save(&mutation_key, &committed)
+                        .await
+                        .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?;
+                    Ok(CredentialMutationOutcome::Persisted(committed))
+                })
+            }),
+        )
         .await
-        .map_err(|e| anyhow::anyhow!("TokenStore reload failed: {e}"))?;
-    let Some(after_tokens) = after.as_ref() else {
-        anyhow::bail!("Refresh completed but TokenStore no longer has '{realm}:{binding_id}'");
-    };
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
-    let snapshot = scope.auth_lease.snapshot(&lease_key);
-    if !snapshot.credential_present {
-        let transition = meerkat_core::publish_token_lifecycle_acquired(
-            &scope.auth_lease,
-            &auth_binding,
-            after_tokens,
-        )
-        .map_err(|e| anyhow::anyhow!("AuthMachine lifecycle acquire failed: {e}"))?;
-        let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            &key,
-            after_tokens,
-            &transition,
-        )
-        .map_err(|e| anyhow::anyhow!("AuthMachine lifecycle marker handoff failed: {e}"))?;
-        if committed != *after_tokens {
-            store
-                .save(&key, &committed)
-                .await
-                .map_err(|e| anyhow::anyhow!("TokenStore lifecycle marker save failed: {e}"))?;
+        .map_err(|error| anyhow::anyhow!("refresh lifecycle commit failed: {error}"))?;
+    let after_tokens = match outcome {
+        meerkat_providers::auth_store::CredentialMutationOutcome::Persisted(tokens) => tokens,
+        meerkat_providers::auth_store::CredentialMutationOutcome::Cleared => {
+            anyhow::bail!("Refresh completed but TokenStore no longer has '{realm}:{binding_id}'")
         }
-    }
+    };
+    let after = Some(after_tokens);
 
     println!("profile:       {realm}:{profile_id}");
     println!("binding:       {realm}:{binding_id}");
@@ -5458,9 +5486,11 @@ const LEGACY_LOGIN_BINDING_IDS: &[&str] = &[
 /// existing sign-in keeps working without re-auth. Re-running copies nothing
 /// once `global` is populated. Returns the number of credentials copied.
 async fn migrate_legacy_login_credentials_to_global(
-    store: &dyn meerkat_providers::auth_store::TokenStore,
-) -> Result<usize, meerkat_providers::auth_store::TokenStoreError> {
-    use meerkat_providers::auth_store::TokenKey;
+    persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+) -> Result<usize, meerkat_providers::auth_store::CredentialMutationError> {
+    use meerkat_providers::auth_store::{CredentialMutationError, TokenKey};
+    let store = persistence.token_store();
     let mut migrated = 0usize;
 
     // Pass 1 — per-known-binding direct `load` probe. OS keyring backends
@@ -5481,16 +5511,24 @@ async fn migrate_legacy_login_credentials_to_global(
                 continue;
             }
         };
-        migrated += migrate_one_legacy_login_credential(store, &dev_key).await?;
+        migrated +=
+            migrate_one_legacy_login_credential(persistence.clone(), auth_lease.clone(), dev_key)
+                .await?;
     }
 
     // Pass 2 — `list`-based superset. Catches any enumerable `dev:*`
     // credential the probe set does not name (e.g. profile-override keys).
-    for key in store.list().await? {
+    for key in store
+        .list()
+        .await
+        .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?
+    {
         if key.realm.as_str() != LEGACY_LOGIN_REALM_SLUG {
             continue;
         }
-        migrated += migrate_one_legacy_login_credential(store, &key).await?;
+        migrated +=
+            migrate_one_legacy_login_credential(persistence.clone(), auth_lease.clone(), key)
+                .await?;
     }
 
     Ok(migrated)
@@ -5501,24 +5539,131 @@ async fn migrate_legacy_login_credentials_to_global(
 /// credential wins) and idempotent (a missing dev credential is a no-op).
 /// Returns 1 if a copy was performed, 0 otherwise.
 async fn migrate_one_legacy_login_credential(
-    store: &dyn meerkat_providers::auth_store::TokenStore,
-    dev_key: &meerkat_providers::auth_store::TokenKey,
-) -> Result<usize, meerkat_providers::auth_store::TokenStoreError> {
-    use meerkat_providers::auth_store::TokenKey;
+    persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    dev_key: meerkat_providers::auth_store::TokenKey,
+) -> Result<usize, meerkat_providers::auth_store::CredentialMutationError> {
+    use meerkat_providers::auth_store::{
+        CredentialMutationError, CredentialMutationOutcome, TokenKey,
+    };
+    let store = persistence.token_store();
+    let refresh_coordinator = persistence.refresh_coordinator();
     debug_assert_eq!(dev_key.realm.as_str(), LEGACY_LOGIN_REALM_SLUG);
     let global_key = TokenKey::new_with_profile(
         meerkat_core::connection::RealmId::global(),
         dev_key.binding.clone(),
         dev_key.profile.clone(),
     );
-    if store.load(&global_key).await?.is_some() {
-        return Ok(0); // no-clobber: an existing global credential wins
+    let copied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let copied_in_mutation = Arc::clone(&copied);
+    let source_store = Arc::clone(&store);
+    let target_coordinator = Arc::clone(&refresh_coordinator);
+    let outcome = refresh_coordinator
+        .with_exclusive_mutation(
+            dev_key.clone(),
+            Box::new(move || {
+                Box::pin(async move {
+                    // Lock order is permanently source `dev` then target
+                    // `global`; every migration follows this one-way order.
+                    // Reload both while their locks are held so a concurrent
+                    // source refresh cannot leave the target with stale A.
+                    let Some(source_tokens) = source_store
+                        .load(&dev_key)
+                        .await
+                        .map_err(|error| {
+                            CredentialMutationError::TokenStore(error.to_string())
+                        })?
+                    else {
+                        return Ok(CredentialMutationOutcome::Cleared);
+                    };
+                    let target_store = Arc::clone(&source_store);
+                    let target_key = global_key.clone();
+                    let target_binding = AuthBindingRef {
+                        realm: target_key.realm.clone(),
+                        binding: target_key.binding.clone(),
+                        profile: target_key.profile.clone(),
+                        origin: meerkat_core::connection::BindingOrigin::Configured,
+                    };
+                    let target_auth_lease = auth_lease.clone();
+                    target_coordinator
+                        .with_exclusive_mutation(
+                            global_key,
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    if let Some(existing) = target_store
+                                        .load(&target_key)
+                                        .await
+                                        .map_err(|error| {
+                                            CredentialMutationError::TokenStore(error.to_string())
+                                        })?
+                                    {
+                                        return Ok(CredentialMutationOutcome::Persisted(existing));
+                                    }
+                                    let lease_key =
+                                        meerkat_core::handles::LeaseKey::from_auth_binding(
+                                            &target_binding,
+                                        );
+                                    let _guard =
+                                        meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key)
+                                            .await;
+                                    let previous_lifecycle = target_auth_lease
+                                        .capture_auth_lifecycle_restore_snapshot(&lease_key);
+                                    let transition = meerkat_core::publish_token_lifecycle_acquired(
+                                        &target_auth_lease,
+                                        &target_binding,
+                                        &source_tokens,
+                                    )
+                                    .map_err(|error| {
+                                        CredentialMutationError::AuthLifecycle(error.to_string())
+                                    })?;
+                                    let committed = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                                        &target_key,
+                                        &source_tokens,
+                                        &transition,
+                                    ) {
+                                        Ok(committed) => committed,
+                                        Err(error) => {
+                                            let _ = target_auth_lease
+                                                .release_credential_lifecycle(&lease_key);
+                                            let _ = meerkat_core::restore_token_lifecycle_snapshot(
+                                                &target_auth_lease,
+                                                &previous_lifecycle,
+                                            );
+                                            return Err(CredentialMutationError::AuthLifecycle(
+                                                error.to_string(),
+                                            ));
+                                        }
+                                    };
+                                    if let Err(error) = target_store
+                                        .save(&target_key, &committed)
+                                        .await
+                                    {
+                                        let _ = target_auth_lease
+                                            .release_credential_lifecycle(&lease_key);
+                                        let _ = meerkat_core::restore_token_lifecycle_snapshot(
+                                            &target_auth_lease,
+                                            &previous_lifecycle,
+                                        );
+                                        return Err(CredentialMutationError::TokenStore(
+                                            error.to_string(),
+                                        ));
+                                    }
+                                    copied_in_mutation
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    Ok(CredentialMutationOutcome::Persisted(committed))
+                                })
+                            }),
+                        )
+                        .await
+                })
+            }),
+        )
+        .await?;
+    match outcome {
+        CredentialMutationOutcome::Persisted(_) | CredentialMutationOutcome::Cleared => Ok(
+            usize::from(copied.load(std::sync::atomic::Ordering::Acquire)),
+        ),
     }
-    if let Some(tokens) = store.load(dev_key).await? {
-        store.save(&global_key, &tokens).await?;
-        return Ok(1);
-    }
-    Ok(0)
 }
 
 /// Provision the `[realm.global]` OAuth binding SECTION for every migrated
@@ -5595,16 +5740,20 @@ async fn ensure_legacy_login_credentials_migrated_once(scope: &RuntimeScope) {
     {
         return; // already attempted in this process
     }
-    let store = match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-        .and_then(|backend| backend.open())
+    let persistence = match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+        .and_then(|backend| backend.open_with_refresh_authority())
     {
-        Ok(store) => store,
+        Ok(persistence) => persistence,
         Err(e) => {
             tracing::warn!(error = %e, "legacy dev->global credential migration skipped (TokenStore open failed)");
             return;
         }
     };
-    if let Err(e) = migrate_legacy_login_credentials_to_global(store.as_ref()).await {
+    let store = persistence.token_store();
+    if let Err(e) =
+        migrate_legacy_login_credentials_to_global(persistence.clone(), scope.auth_lease.clone())
+            .await
+    {
         tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
     }
     // Anchor each migrated credential with its `[realm.global]` binding section
@@ -5642,13 +5791,18 @@ struct CliTokenCommitSnapshot {
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn prepare_cli_token_commit_unlocked(
     store: &dyn meerkat_providers::auth_store::TokenStore,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
 ) -> anyhow::Result<CliPreparedTokenCommitSnapshot> {
     let key = meerkat_providers::auth_store::TokenKey::from_auth_binding(auth_binding);
-    let previous = store
-        .load(&key)
-        .await
-        .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
+    let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
+        store,
+        auth_lease,
+        auth_binding,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("durable credential predecessor rehydrate failed: {error}"))?;
     Ok(CliPreparedTokenCommitSnapshot {
         key,
         lease_key: meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding),
@@ -5672,12 +5826,16 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
 ) -> anyhow::Result<CliTokenCommitSnapshot> {
     let key = meerkat_providers::auth_store::TokenKey::from_auth_binding(auth_binding);
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
+    let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
+        store,
+        auth_lease,
+        auth_binding,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("durable credential predecessor rehydrate failed: {error}"))?;
     let previous_lifecycle_restore = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
-    let previous = store
-        .load(&key)
-        .await
-        .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
     // Acquire FIRST. A rejected acquisition mutates nothing — no token bytes
     // were persisted and the lease is unchanged — so the error propagates
     // without compensation.
@@ -5772,16 +5930,50 @@ async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_tokens_and_publish_lifecycle(
-    store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
-    auth_binding: &AuthBindingRef,
-    tokens: &meerkat_providers::auth_store::PersistedTokens,
+    persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    auth_binding: AuthBindingRef,
+    tokens: meerkat_providers::auth_store::PersistedTokens,
 ) -> anyhow::Result<()> {
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    save_cli_tokens_and_publish_lifecycle_commit_unlocked(store, auth_lease, auth_binding, tokens)
+    use meerkat_providers::auth_store::{
+        CredentialMutationError, CredentialMutationOutcome, TokenKey,
+    };
+    let store = persistence.token_store();
+    let refresh_coordinator = persistence.refresh_coordinator();
+    let key = TokenKey::from_auth_binding(&auth_binding);
+    let outcome = refresh_coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key =
+                        meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
+                    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    let commit = save_cli_tokens_and_publish_lifecycle_commit_unlocked(
+                        store.as_ref(),
+                        &auth_lease,
+                        &auth_binding,
+                        &tokens,
+                    )
+                    .await
+                    .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
+                    let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                        &commit.key,
+                        &tokens,
+                        &commit.lifecycle_transition,
+                    )
+                    .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?;
+                    Ok(CredentialMutationOutcome::Persisted(committed))
+                })
+            }),
+        )
         .await?;
-    Ok(())
+    match outcome {
+        CredentialMutationOutcome::Persisted(_) => Ok(()),
+        CredentialMutationOutcome::Cleared => {
+            anyhow::bail!("credential save transaction returned cleared outcome")
+        }
+    }
 }
 
 /// Release the lease acquired by an acquire-first token commit and restore the
@@ -5849,39 +6041,90 @@ async fn rollback_cli_token_commit(
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-struct CliBrowserFlowConsume<'a> {
-    authority: &'a dyn meerkat_providers::oauth_flow::OAuthFlowAuthority,
-    state: &'a str,
+struct OwnedCliBrowserFlowConsume {
+    authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
+    state: String,
     provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
-    redirect_uri: &'a str,
+    redirect_uri: String,
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_oauth_tokens_and_consume_browser_flow(
-    store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
-    auth_binding: &AuthBindingRef,
-    tokens: &meerkat_providers::auth_store::PersistedTokens,
-    flow: CliBrowserFlowConsume<'_>,
+    persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+    auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    auth_binding: AuthBindingRef,
+    tokens: meerkat_providers::auth_store::PersistedTokens,
+    flow: OwnedCliBrowserFlowConsume,
 ) -> anyhow::Result<()> {
+    use meerkat_providers::auth_store::{
+        CredentialMutationError, CredentialMutationOutcome, TokenKey,
+    };
+    let store = persistence.token_store();
+    let refresh_coordinator = persistence.refresh_coordinator();
     flow.authority
-        .verify(flow.state, auth_binding, flow.provider, flow.redirect_uri)
+        .verify(
+            &flow.state,
+            &auth_binding,
+            flow.provider,
+            &flow.redirect_uri,
+        )
         .map_err(|e| anyhow::anyhow!("oauth state verification failed: {e}"))?;
-    let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let prepared = prepare_cli_token_commit_unlocked(store, auth_binding).await?;
-    flow.authority
-        .consume(flow.state, auth_binding, flow.provider, flow.redirect_uri)
-        .map_err(|err| anyhow::anyhow!("oauth state terminal consume failed: {err}"))?;
-    save_prepared_cli_tokens_after_terminal_consume_unlocked(
-        store,
-        auth_lease,
-        auth_binding,
-        tokens,
-        prepared,
-    )
-    .await?;
-    Ok(())
+    let key = TokenKey::from_auth_binding(&auth_binding);
+    let load_key = key.clone();
+    let outcome = refresh_coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key =
+                        meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
+                    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    let prepared = prepare_cli_token_commit_unlocked(
+                        store.as_ref(),
+                        &auth_lease,
+                        &auth_binding,
+                    )
+                    .await
+                    .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
+                    flow.authority
+                        .consume(
+                            &flow.state,
+                            &auth_binding,
+                            flow.provider,
+                            &flow.redirect_uri,
+                        )
+                        .map_err(|error| {
+                            CredentialMutationError::AuthLifecycle(error.to_string())
+                        })?;
+                    save_prepared_cli_tokens_after_terminal_consume_unlocked(
+                        store.as_ref(),
+                        &auth_lease,
+                        &auth_binding,
+                        &tokens,
+                        prepared,
+                    )
+                    .await
+                    .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
+                    let committed = store
+                        .load(&load_key)
+                        .await
+                        .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?
+                        .ok_or_else(|| {
+                            CredentialMutationError::TokenStore(
+                                "successful browser login left no persisted credential".to_string(),
+                            )
+                        })?;
+                    Ok(CredentialMutationOutcome::Persisted(committed))
+                })
+            }),
+        )
+        .await?;
+    match outcome {
+        CredentialMutationOutcome::Persisted(_) => Ok(()),
+        CredentialMutationOutcome::Cleared => {
+            anyhow::bail!("browser-login transaction returned cleared outcome")
+        }
+    }
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -5958,10 +6201,13 @@ async fn noninteractive_login(
         }
     };
 
-    let store = TokenStoreBackend::default_auto()?.open()?;
+    let persistence = TokenStoreBackend::default_auto()?.open_with_refresh_authority()?;
     // One-time, idempotent: carry any pre-`global` (`dev`) login credentials
     // forward so an existing sign-in keeps working under the new global realm.
-    if let Err(e) = migrate_legacy_login_credentials_to_global(store.as_ref()).await {
+    if let Err(e) =
+        migrate_legacy_login_credentials_to_global(persistence.clone(), scope.auth_lease.clone())
+            .await
+    {
         tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
     }
     let binding_id_str = format!("default_{provider_lc}");
@@ -5985,10 +6231,10 @@ async fn noninteractive_login(
     };
     let auth_binding = auth_binding_from_token_key(&key);
     save_cli_tokens_and_publish_lifecycle(
-        store.as_ref(),
-        &scope.auth_lease,
-        &auth_binding,
-        &persisted,
+        persistence,
+        scope.auth_lease.clone(),
+        auth_binding,
+        persisted,
     )
     .await?;
     println!(
@@ -6002,13 +6248,12 @@ async fn interactive_login(
     provider_hint: Option<&str>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    use std::sync::Arc as StdArc;
     use std::time::Duration;
 
     use meerkat_providers::auth_oauth::{
         OAuthError, PkcePair, bind_loopback_callback_with_redirect,
     };
-    use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreBackend};
+    use meerkat_providers::auth_store::{PersistedTokens, TokenKey, TokenStoreBackend};
 
     // --- Provider selection (interactive if none passed) -----------
     let provider = resolve_login_provider(provider_hint)?;
@@ -6210,25 +6455,28 @@ async fn interactive_login(
         metadata: serde_json::Value::Null,
     };
 
-    let store: StdArc<dyn TokenStore> = TokenStoreBackend::default_auto()
+    let persistence = TokenStoreBackend::default_auto()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
-        .open()
+        .open_with_refresh_authority()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
     // One-time, idempotent: carry any pre-`global` (`dev`) login credentials
     // forward so an existing sign-in keeps working under the new global realm.
-    if let Err(e) = migrate_legacy_login_credentials_to_global(store.as_ref()).await {
+    if let Err(e) =
+        migrate_legacy_login_credentials_to_global(persistence.clone(), scope.auth_lease.clone())
+            .await
+    {
         tracing::warn!(error = %e, "legacy dev->global credential migration skipped");
     }
     save_cli_oauth_tokens_and_consume_browser_flow(
-        store.as_ref(),
-        &scope.auth_lease,
-        &auth_binding,
-        &tokens,
-        CliBrowserFlowConsume {
-            authority: scope.oauth_flow_authority.as_ref(),
-            state: &outcome.state,
+        persistence,
+        scope.auth_lease.clone(),
+        auth_binding.clone(),
+        tokens.clone(),
+        OwnedCliBrowserFlowConsume {
+            authority: Arc::clone(&scope.oauth_flow_authority),
+            state: outcome.state.clone(),
             provider: identity,
-            redirect_uri: &redirect_url,
+            redirect_uri: redirect_url.clone(),
         },
     )
     .await?;
@@ -6313,10 +6561,11 @@ fn token_store_load_error_allows_clear(e: &meerkat_providers::auth_store::TokenS
 async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
 
-    let store = TokenStoreBackend::default_auto()
+    let persistence = TokenStoreBackend::default_auto()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
-        .open()
+        .open_with_refresh_authority()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
+    let store = persistence.token_store();
     // Wave-c C-12: TokenKey now takes typed atoms; parse the raw
     // `profile_id` form at this logout boundary. This is the
     // non-AuthBindingRef carve-out `split_once(':')` site explicitly
@@ -6346,10 +6595,10 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
                 profile: key.profile.clone(),
                 origin: meerkat_core::connection::BindingOrigin::Configured,
             };
-            meerkat_core::clear_tokens_and_publish_lifecycle_released(
-                store.as_ref(),
-                &scope.auth_lease,
-                &auth_binding,
+            meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+                persistence.clone(),
+                scope.auth_lease.clone(),
+                auth_binding,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
@@ -6551,13 +6800,10 @@ fn doctor_resolver_environment() -> meerkat_providers::ResolverEnvironment {
     #[cfg(not(target_arch = "wasm32"))]
     {
         if let Ok(backend) = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-            && let Ok(store) = backend.open()
+            && let Ok(persistence) = backend.open_with_refresh_authority()
         {
-            env = env.with_token_store(store);
+            env = env.with_provider_auth_persistence(persistence);
         }
-        env = env.with_refresh_coordinator(Arc::new(
-            meerkat_providers::auth_store::InMemoryCoordinator::default(),
-        ));
     }
     env
 }
@@ -7748,23 +7994,16 @@ fn new_cli_mcp_oauth_auth_lease() -> anyhow::Result<meerkat_core::handles::Gener
 fn open_mcp_oauth_authority(
     mode: CliMcpAuthMode,
 ) -> anyhow::Result<meerkat_auth_core::McpOAuthAuthority> {
-    let backend = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-        .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
-    let refresh_lock_dir = backend.refresh_lock_dir().ok_or_else(|| {
-        anyhow::anyhow!("MCP OAuth persisted TokenStore has no refresh-lock authority")
-    })?;
-    let store = backend
-        .open()
+    let persistence = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+        .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?
+        .open_with_refresh_authority()
         .map_err(|error| anyhow::anyhow!("Cannot open MCP OAuth TokenStore: {error}"))?;
     let browser: Arc<dyn meerkat_auth_core::BrowserOpener> = Arc::new(CliMcpBrowserOpener { mode });
     let auth_lease = new_cli_mcp_oauth_auth_lease()?;
     Ok(meerkat_auth_core::McpOAuthAuthority::new(
-        store,
+        persistence,
         browser,
         auth_lease,
-        Arc::new(meerkat_auth_core::FileLockCoordinator::new(
-            refresh_lock_dir,
-        )),
     ))
 }
 
@@ -15066,6 +15305,22 @@ mod tests {
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn test_auth_refresh_coordinator() -> Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>
+    {
+        Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new())
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn test_provider_auth_persistence(
+        store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
+    ) -> meerkat_providers::auth_store::ProviderAuthPersistence {
+        meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            store,
+            test_auth_refresh_coordinator(),
+        )
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_login_save_boundary_publishes_binding_scoped_auth_lease() {
         use meerkat_core::handles::{AuthLeasePhase, LeaseKey};
@@ -15073,7 +15328,7 @@ mod tests {
             EphemeralTokenStore, PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
         };
 
-        let store = EphemeralTokenStore::new();
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let auth_lease = new_cli_auth_handles().0;
         let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
@@ -15093,9 +15348,14 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
 
-        save_cli_tokens_and_publish_lifecycle(&store, &auth_lease, &auth_binding, &tokens)
-            .await
-            .expect("login save boundary should publish lease lifecycle");
+        save_cli_tokens_and_publish_lifecycle(
+            test_provider_auth_persistence(Arc::clone(&store)),
+            auth_lease.clone(),
+            auth_binding.clone(),
+            tokens,
+        )
+        .await
+        .expect("login save boundary should publish lease lifecycle");
 
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         assert_eq!(
@@ -15162,7 +15422,7 @@ mod tests {
             }
         }
 
-        let store = SaveFailingTokenStore;
+        let store: Arc<dyn TokenStore> = Arc::new(SaveFailingTokenStore);
         let auth_lease = new_cli_auth_handles().0;
         let auth_binding = meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
@@ -15172,10 +15432,10 @@ mod tests {
         };
 
         let err = save_cli_tokens_and_publish_lifecycle(
-            &store,
-            &auth_lease,
-            &auth_binding,
-            &PersistedTokens::api_key("sk-test"),
+            test_provider_auth_persistence(store),
+            auth_lease.clone(),
+            auth_binding.clone(),
+            PersistedTokens::api_key("sk-test"),
         )
         .await
         .expect_err("durable save failure must surface");
@@ -15645,7 +15905,9 @@ mod tests {
     async fn dev_to_global_credential_migration_idempotent_no_clobber() {
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
 
-        let store = EphemeralTokenStore::new();
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let persistence = test_provider_auth_persistence(Arc::clone(&store));
+        let auth_lease = new_cli_auth_handles().0;
         let dev_key = TokenKey::parse("dev", "default_openai").expect("dev key");
         store
             .save(&dev_key, &openai_oauth_tokens())
@@ -15653,9 +15915,10 @@ mod tests {
             .expect("seed dev token");
 
         // First migration copies dev -> global, leaving dev intact.
-        let copied = migrate_legacy_login_credentials_to_global(&store)
-            .await
-            .expect("migrate");
+        let copied =
+            migrate_legacy_login_credentials_to_global(persistence.clone(), auth_lease.clone())
+                .await
+                .expect("migrate");
         assert_eq!(copied, 1);
         let global_key = TokenKey::parse("global", "default_openai").expect("global key");
         assert!(
@@ -15668,16 +15931,17 @@ mod tests {
         );
 
         // Idempotent: a second run copies nothing.
-        let copied_again = migrate_legacy_login_credentials_to_global(&store)
-            .await
-            .expect("re-migrate");
+        let copied_again =
+            migrate_legacy_login_credentials_to_global(persistence.clone(), auth_lease.clone())
+                .await
+                .expect("re-migrate");
         assert_eq!(copied_again, 0, "migration must be idempotent");
 
         // No-clobber: an existing global credential is never overwritten.
         let mut owned = openai_oauth_tokens();
         owned.primary_secret = Some("global-owned-secret".to_string());
         store.save(&global_key, &owned).await.expect("seed global");
-        let _ = migrate_legacy_login_credentials_to_global(&store)
+        let _ = migrate_legacy_login_credentials_to_global(persistence, auth_lease)
             .await
             .expect("migrate no-clobber");
         let after = store
@@ -15780,7 +16044,9 @@ mod tests {
     async fn non_login_path_migrates_keyring_resident_dev_credential_to_global() {
         use meerkat_providers::auth_store::{TokenKey, TokenStore};
 
-        let store = NonEnumerableTokenStore::new();
+        let store: Arc<dyn TokenStore> = Arc::new(NonEnumerableTokenStore::new());
+        let persistence = test_provider_auth_persistence(Arc::clone(&store));
+        let auth_lease = new_cli_auth_handles().0;
         // Seed a credential reachable only via `load` (a known login binding id),
         // and confirm the store genuinely cannot enumerate it.
         let dev_key = TokenKey::parse("dev", "anthropic_oauth").expect("dev key");
@@ -15795,9 +16061,10 @@ mod tests {
 
         // The run/resolution (NON-login) trigger drives exactly this migration.
         // The per-binding `load` probe finds the credential `list` cannot.
-        let copied = migrate_legacy_login_credentials_to_global(&store)
-            .await
-            .expect("migrate");
+        let copied =
+            migrate_legacy_login_credentials_to_global(persistence.clone(), auth_lease.clone())
+                .await
+                .expect("migrate");
         assert_eq!(
             copied, 1,
             "keyring-resident dev credential must be migrated"
@@ -15814,9 +16081,10 @@ mod tests {
         );
 
         // Idempotent: a second run copies nothing.
-        let copied_again = migrate_legacy_login_credentials_to_global(&store)
-            .await
-            .expect("re-migrate");
+        let copied_again =
+            migrate_legacy_login_credentials_to_global(persistence.clone(), auth_lease.clone())
+                .await
+                .expect("re-migrate");
         assert_eq!(copied_again, 0, "migration must be idempotent");
 
         // No-clobber: an existing global credential is never overwritten, even
@@ -15824,7 +16092,7 @@ mod tests {
         let mut owned = openai_oauth_tokens();
         owned.primary_secret = Some("global-owned-secret".to_string());
         store.save(&global_key, &owned).await.expect("seed global");
-        let _ = migrate_legacy_login_credentials_to_global(&store)
+        let _ = migrate_legacy_login_credentials_to_global(persistence, auth_lease)
             .await
             .expect("migrate no-clobber");
         let after = store
@@ -15947,11 +16215,13 @@ mod tests {
                 Arc::clone(&raw_auth_lease),
             )
             .expect("test AuthLeaseHandle must be certified by generated AuthMachine authority");
-        let authority = meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(60),
-            Arc::clone(&raw_auth_lease),
+        let authority = Arc::new(
+            meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                std::time::Duration::from_secs(60),
+                Arc::clone(&raw_auth_lease),
+            ),
         );
-        let store = EphemeralTokenStore::new();
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let auth_binding = openai_auth_binding();
         let redirect_uri = "http://127.0.0.1:12345/callback";
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
@@ -15965,15 +16235,15 @@ mod tests {
             .expect("authority admits browser flow");
 
         save_cli_oauth_tokens_and_consume_browser_flow(
-            &store,
-            &auth_lease,
-            &auth_binding,
-            &openai_oauth_tokens(),
-            CliBrowserFlowConsume {
-                authority: &authority,
-                state: &state,
+            test_provider_auth_persistence(Arc::clone(&store)),
+            auth_lease.clone(),
+            auth_binding.clone(),
+            openai_oauth_tokens(),
+            OwnedCliBrowserFlowConsume {
+                authority: authority.clone(),
+                state: state.clone(),
                 provider,
-                redirect_uri,
+                redirect_uri: redirect_uri.to_string(),
             },
         )
         .await
@@ -16163,20 +16433,21 @@ mod tests {
         use meerkat_providers::auth_store::{TokenKey, TokenStore};
 
         let auth_lease = new_cli_auth_handles().0;
-        let store = SaveCountingCliTokenStore::new();
+        let store = Arc::new(SaveCountingCliTokenStore::new());
+        let mutation_store: Arc<dyn meerkat_providers::auth_store::TokenStore> = store.clone();
         let auth_binding = openai_auth_binding();
         let provider = meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
 
         let err = save_cli_oauth_tokens_and_consume_browser_flow(
-            &store,
-            &auth_lease,
-            &auth_binding,
-            &openai_oauth_tokens(),
-            CliBrowserFlowConsume {
-                authority: &RejectCliBrowserConsumeAuthority,
-                state: "state",
+            test_provider_auth_persistence(mutation_store),
+            auth_lease.clone(),
+            auth_binding.clone(),
+            openai_oauth_tokens(),
+            OwnedCliBrowserFlowConsume {
+                authority: Arc::new(RejectCliBrowserConsumeAuthority),
+                state: "state".to_string(),
                 provider,
-                redirect_uri: "http://127.0.0.1:12345/callback",
+                redirect_uri: "http://127.0.0.1:12345/callback".to_string(),
             },
         )
         .await

@@ -1568,6 +1568,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filtered_adapter_forwards_mcp_lifecycle_handle_to_retained_router() {
+        let adapter = Arc::new(McpRouterAdapter::new(generated_surface_router()));
+        let filtered =
+            meerkat_core::FilteredToolDispatcher::new(Arc::clone(&adapter), Vec::<String>::new());
+        let handle = Arc::new(MockMcpServerLifecycleHandle::new());
+
+        filtered.bind_mcp_server_lifecycle_handle(
+            Arc::clone(&handle) as Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>
+        );
+        adapter
+            .stage_add(meerkat_core::McpServerConfig::stdio(
+                "filtered-retained",
+                "/bin/echo",
+                Vec::<String>::new(),
+                HashMap::new(),
+            ))
+            .await
+            .expect("filtered wrapper must retain lifecycle authority on the adapter");
+
+        assert_eq!(
+            handle.events(),
+            vec![(
+                "connect_pending".to_string(),
+                "filtered-retained".to_string(),
+            )],
+            "a filtered MCP adapter must forward handshake lifecycle events to the session handle"
+        );
+    }
+
+    #[tokio::test]
     async fn router_lifecycle_handle_none_is_noop() {
         // Router without a bound MCP lifecycle mirror: external surface
         // lifecycle still flows through its owner, while mirror notifications

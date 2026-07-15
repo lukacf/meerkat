@@ -418,6 +418,10 @@ pub mod surface;
 // re-exported here for surface crates.
 pub use meerkat_core::config::SystemPromptOverride;
 
+// Target-neutral prompt-policy renderer. Native source loading and the
+// filesystem-free WASM path both lower into this one semantic owner.
+mod prompt_policy;
+
 // Prompt assembly (filesystem-dependent: reads AGENTS.md, system_prompt_file)
 #[cfg(not(target_arch = "wasm32"))]
 mod prompt_assembly;

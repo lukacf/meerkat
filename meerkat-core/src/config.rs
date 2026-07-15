@@ -386,8 +386,10 @@ impl Config {
         }
 
         // Skills: scalar toggles child-wins when non-default; repositories
-        // append parent-first, with a child shadowing a same-named parent
-        // source rather than dropping the rest. No removal of inherited sources.
+        // append parent-first, with a child shadowing the same canonical
+        // source UUID rather than a merely same-named source. Display names
+        // are presentation and may legitimately collide. No removal of
+        // inherited sources.
         let default_skills = crate::skills_config::SkillsConfig::default();
         if other.skills.enabled != default_skills.enabled {
             self.skills.enabled = other.skills.enabled;
@@ -403,7 +405,7 @@ impl Config {
                 .skills
                 .repositories
                 .iter_mut()
-                .find(|existing| existing.name == repo.name)
+                .find(|existing| existing.source_uuid == repo.source_uuid)
             {
                 *existing = repo;
             } else {
@@ -2832,6 +2834,81 @@ model = "custom-model"
             .map(|r| r.name.as_str())
             .collect();
         assert_eq!(repos, vec!["base-repo", "child-repo"]);
+    }
+
+    #[test]
+    fn realm_skill_composition_preserves_distinct_same_named_source_uuids() {
+        let parent_id = crate::connection::RealmId::parse("parent").expect("valid parent realm");
+        let child_id = crate::connection::RealmId::parse("child").expect("valid child realm");
+        let parent_source =
+            crate::skills::SourceUuid::parse("00000000-0000-4000-8000-000000000011")
+                .expect("valid parent source uuid");
+        let child_source = crate::skills::SourceUuid::parse("00000000-0000-4000-8000-000000000012")
+            .expect("valid child source uuid");
+
+        let mut parent = Config::default();
+        parent.realm.insert(
+            parent_id.to_string(),
+            crate::connection::RealmConfigSection::default(),
+        );
+        parent.skills.repositories = vec![skill_repo(
+            "shared-display-name",
+            &parent_source.to_string(),
+            "/parent",
+        )];
+
+        let mut child = Config::default();
+        child.realm.insert(
+            child_id.to_string(),
+            crate::connection::RealmConfigSection {
+                parent: Some(parent_id.clone()),
+                ..Default::default()
+            },
+        );
+        child.skills.repositories = vec![skill_repo(
+            "shared-display-name",
+            &child_source.to_string(),
+            "/child",
+        )];
+
+        let docs =
+            std::collections::BTreeMap::from([(parent_id, parent), (child_id.clone(), child)]);
+        let effective =
+            compose_effective_config(&docs, &std::collections::BTreeMap::new(), &child_id)
+                .expect("realm composition should succeed");
+
+        assert_eq!(effective.skills.repositories.len(), 2);
+        assert_eq!(
+            effective
+                .skills
+                .repositories
+                .iter()
+                .map(|repo| (&repo.source_uuid, repo.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (&parent_source, "shared-display-name"),
+                (&child_source, "shared-display-name"),
+            ],
+            "display-name collisions must not erase a distinct canonical source"
+        );
+    }
+
+    #[test]
+    fn skill_repository_merge_overrides_matching_source_uuid() {
+        let source_uuid = "00000000-0000-4000-8000-000000000013";
+        let mut parent = Config::default();
+        parent.skills.repositories = vec![skill_repo("parent-name", source_uuid, "/parent")];
+        let mut child = Config::default();
+        child.skills.repositories = vec![skill_repo("child-name", source_uuid, "/child")];
+
+        parent.merge(child);
+
+        assert_eq!(parent.skills.repositories.len(), 1);
+        assert_eq!(parent.skills.repositories[0].name, "child-name");
+        assert!(matches!(
+            &parent.skills.repositories[0].transport,
+            crate::skills_config::SkillRepoTransport::Filesystem { path } if path == "/child"
+        ));
     }
 
     // RCT-15

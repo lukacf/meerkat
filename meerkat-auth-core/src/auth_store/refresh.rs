@@ -20,8 +20,8 @@ use futures::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::Mutex;
 
 use super::{
-    CredentialMutationError, CredentialMutationFn, PersistedTokens, RefreshCoordinator,
-    RefreshError, RefreshFn, TokenKey,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedTokens,
+    RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
 };
 
 // ---------------------------------------------------------------------
@@ -111,7 +111,7 @@ impl RefreshCoordinator for InMemoryCoordinator {
         &self,
         key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         let mutation_gate = self.mutation_gate(&key);
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -157,8 +157,8 @@ mod file_lock {
     use fs4::fs_std::FileExt;
 
     use super::{
-        CredentialMutationError, CredentialMutationFn, InMemoryCoordinator, RefreshCoordinator,
-        RefreshError, RefreshFn,
+        CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome,
+        InMemoryCoordinator, RefreshCoordinator, RefreshError, RefreshFn,
     };
     use crate::auth_store::{PersistedTokens, TokenKey};
 
@@ -271,7 +271,7 @@ mod file_lock {
             &self,
             key: TokenKey,
             mutation_fn: CredentialMutationFn,
-        ) -> Result<PersistedTokens, CredentialMutationError> {
+        ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
             let mutation_fn = self.with_locking_mutation(&key, mutation_fn);
             self.inner.with_exclusive_mutation(key, mutation_fn).await
         }

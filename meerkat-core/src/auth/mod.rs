@@ -21,7 +21,8 @@ pub use lease::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use lifecycle::{
     AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
-    rehydrate_marked_tokens_for_status,
+    clear_tokens_and_publish_lifecycle_released_coordinated,
+    rehydrate_durable_predecessor_for_mutation, rehydrate_marked_tokens_for_status,
 };
 pub use lifecycle::{
     PublishedAuthStatus, TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
@@ -45,7 +46,7 @@ pub use principal::{
 };
 pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{
-    CredentialMutationError, CredentialMutationFn, PersistedAuthMode, PersistedTokens,
-    RefreshCoordinator, RefreshError, RefreshFailureObservation, RefreshFn, TokenKey, TokenStore,
-    TokenStoreError,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedAuthMode,
+    PersistedTokens, ProviderAuthPersistence, RefreshCoordinator, RefreshError,
+    RefreshFailureObservation, RefreshFn, TokenKey, TokenStore, TokenStoreError,
 };

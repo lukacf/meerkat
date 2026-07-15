@@ -19,10 +19,8 @@ use serde::Deserialize;
 use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    OAuthLoginCredentialAdmission, begin_managed_store_oauth_refresh_lifecycle,
-    load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_coordinator,
-    mark_managed_store_oauth_refresh_failed, publish_managed_store_tokens_lifecycle_and_save,
-    resolve_oauth_login_credential_disposition,
+    OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
+    prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
@@ -355,23 +353,6 @@ async fn resolve_code_assist_user_project(
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-fn google_code_assist_oauth_refresh_failure_observation(
-    error: &oauth::GoogleCodeAssistOAuthError,
-) -> meerkat_auth_core::RefreshFailureObservation {
-    match error {
-        oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired
-        | oauth::GoogleCodeAssistOAuthError::MissingRefreshToken => {
-            meerkat_auth_core::RefreshFailureObservation::local_credential_unusable()
-        }
-        oauth::GoogleCodeAssistOAuthError::Refresh(error) => error.observation(),
-        oauth::GoogleCodeAssistOAuthError::OAuth(error) => {
-            meerkat_auth_core::auth_oauth::oauth_refresh_observation(error)
-        }
-        _ => meerkat_auth_core::RefreshFailureObservation::transient(),
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 fn google_code_assist_oauth_refresh_error(
     error: oauth::GoogleCodeAssistOAuthError,
     authmachine_failure: String,
@@ -555,61 +536,49 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     )? {
                         OAuthLoginCredentialAdmission::UseCached => persisted,
                         OAuthLoginCredentialAdmission::BeginRefresh => {
-                            let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
-                                env,
-                                binding,
-                                &mut managed,
-                            )?;
-                            let coord = env.refresh_coord.clone().unwrap_or_else(|| {
-                                Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
-                            });
-                            let coord = managed_store_oauth_refresh_failure_coordinator(
-                                coord,
-                                env.clone(),
-                                binding.clone(),
-                                refresh_started,
-                            );
+                            managed.release_prelock_lifecycle_guard();
+                            let persistence = env
+                                .provider_auth_persistence()
+                                .cloned()
+                                .ok_or_else(|| {
+                                ProviderAuthError::SourceResolutionFailed(
+                                    "managed_store OAuth requires provider-auth persistence authority"
+                                        .into(),
+                                )
+                            })?;
                             let endpoints =
                                 oauth::code_assist_endpoints("http://127.0.0.1:0/callback");
                             let runtime = oauth::GoogleCodeAssistOAuthRuntime::new(
-                                managed.store.clone(),
-                                coord,
+                                persistence,
                                 endpoints,
                                 managed.key.clone(),
                             );
-                            let commit_env = env.clone();
-                            let commit_binding = binding.clone();
-                            let commit: oauth::TokenCommitFn = Box::new(move |tokens| {
-                                Box::pin(async move {
-                                    publish_managed_store_tokens_lifecycle_and_save(
-                                        &commit_env,
-                                        &commit_binding,
-                                        &managed,
-                                        &tokens,
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        meerkat_auth_core::RefreshError::Refresh(e.to_string())
+                            let prepare_env = env.clone();
+                            let prepare_binding = binding.clone();
+                            let prepare: oauth::TokenPrepareFn =
+                                Box::new(move |locked_baseline, mode| {
+                                    Box::pin(async move {
+                                        prepare_managed_store_oauth_refresh_under_lock(
+                                            &prepare_env,
+                                            &prepare_binding,
+                                            managed,
+                                            locked_baseline,
+                                            mode,
+                                        )
+                                        .await
+                                        .map_err(|error| {
+                                            meerkat_auth_core::RefreshError::Refresh(
+                                                error.to_string(),
+                                            )
+                                        })
                                     })
-                                })
-                            });
-                            let refreshed = runtime
-                                .refresh_tokens_with_commit(commit, env.force_refresh)
-                                .await;
-                            refreshed.map_err(|e| {
-                                let observation =
-                                    google_code_assist_oauth_refresh_failure_observation(&e);
-                                let failure = mark_managed_store_oauth_refresh_failed(
-                                    env,
-                                    binding,
-                                    refresh_started,
-                                    observation,
-                                )
-                                .err()
-                                .map(|err| format!("; {err}"))
-                                .unwrap_or_default();
-                                google_code_assist_oauth_refresh_error(e, failure)
-                            })?
+                                });
+                            runtime
+                                .refresh_tokens_with_locked_preparation(prepare, env.force_refresh)
+                                .await
+                                .map_err(|error| {
+                                    google_code_assist_oauth_refresh_error(error, String::new())
+                                })?
                         }
                     };
                     let access = effective_tokens

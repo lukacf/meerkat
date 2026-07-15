@@ -17,17 +17,18 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::FutureExt;
 use meerkat_auth_core::auth_store::{
-    CredentialMutationError, FileLockCoordinator, PersistedTokens, RefreshCoordinator,
-    RefreshError, TokenKey,
+    CredentialMutationError, CredentialMutationOutcome, FileLockCoordinator, FileTokenStore,
+    PersistedTokens, RefreshCoordinator, RefreshError, TokenKey, TokenStore, TokenStoreBackend,
 };
 
 const CHILD_ENV: &str = "MEERKAT_REFRESH_CROSSPROC_CHILD";
 const COUNTER_ENV: &str = "MEERKAT_REFRESH_CROSSPROC_COUNTER";
-const LOCK_DIR_ENV: &str = "MEERKAT_REFRESH_CROSSPROC_LOCK_DIR";
+const BACKEND_ROOT_ENV: &str = "MEERKAT_REFRESH_CROSSPROC_BACKEND_ROOT";
 
 fn read_counter(path: &PathBuf) -> u64 {
     std::fs::read_to_string(path)
@@ -49,9 +50,12 @@ async fn crossproc_child_runner() {
         return;
     }
     let counter = PathBuf::from(std::env::var(COUNTER_ENV).unwrap());
-    let lock_dir = PathBuf::from(std::env::var(LOCK_DIR_ENV).unwrap());
+    let backend_root = PathBuf::from(std::env::var(BACKEND_ROOT_ENV).unwrap());
 
-    let coord = FileLockCoordinator::new(lock_dir);
+    let persistence = TokenStoreBackend::File { root: backend_root }
+        .open_with_refresh_authority()
+        .expect("file backend opens with refresh authority");
+    let coord = persistence.refresh_coordinator();
     let key = TokenKey::parse("crossproc", "counter").expect("valid slugs");
     let counter_inside = counter.clone();
     let result = coord
@@ -81,7 +85,7 @@ async fn two_processes_racing_produce_no_lost_updates() {
 
     let temp = tempfile::tempdir().unwrap();
     let counter = temp.path().join("counter.txt");
-    let lock_dir = temp.path().join("locks");
+    let backend_root = temp.path().join("credentials");
     write_counter(&counter, 0);
 
     let exe = std::env::current_exe().unwrap();
@@ -93,7 +97,7 @@ async fn two_processes_racing_produce_no_lost_updates() {
     for i in 0..n_children {
         let exe = exe.clone();
         let counter = counter.clone();
-        let lock_dir = lock_dir.clone();
+        let backend_root = backend_root.clone();
         handles.push(tokio::task::spawn_blocking(
             move || -> std::io::Result<()> {
                 let status = Command::new(&exe)
@@ -102,7 +106,7 @@ async fn two_processes_racing_produce_no_lost_updates() {
                     .arg("--nocapture")
                     .env(CHILD_ENV, "1")
                     .env(COUNTER_ENV, counter)
-                    .env(LOCK_DIR_ENV, &lock_dir)
+                    .env(BACKEND_ROOT_ENV, &backend_root)
                     .env("CHILD_INDEX", i.to_string())
                     .status()?;
                 if !status.success() {
@@ -164,7 +168,9 @@ async fn in_process_two_coordinators_share_lock_dir() {
                             tokio::time::sleep(Duration::from_millis(30)).await;
                             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                            Ok::<_, CredentialMutationError>(PersistedTokens::api_key("ok"))
+                            Ok::<_, CredentialMutationError>(CredentialMutationOutcome::Persisted(
+                                PersistedTokens::api_key("ok"),
+                            ))
                         }
                         .boxed()
                     }),
@@ -182,4 +188,182 @@ async fn in_process_two_coordinators_share_lock_dir() {
         1,
         "two coordinators with the same lock_dir must serialize",
     );
+}
+
+#[tokio::test]
+async fn coordinated_logout_cannot_be_followed_by_stale_refresh_save() {
+    if std::env::var(CHILD_ENV).is_ok() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let lock_dir = temp.path().join("locks");
+    let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(temp.path().join("credentials")));
+    let refresh_coordinator = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
+    let logout_coordinator = Arc::new(FileLockCoordinator::new(lock_dir));
+    let key = TokenKey::parse("dev", "openai").expect("valid key");
+    let original = PersistedTokens::api_key("credential-a");
+    let refreshed = PersistedTokens::api_key("credential-b");
+    store.save(&key, &original).await.unwrap();
+
+    let (refresh_entered_tx, refresh_entered_rx) = tokio::sync::oneshot::channel();
+    let release_refresh = Arc::new(tokio::sync::Notify::new());
+    let refresh_task = {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        let refreshed = refreshed.clone();
+        let release_refresh = Arc::clone(&release_refresh);
+        tokio::spawn(async move {
+            refresh_coordinator
+                .with_refresh(
+                    key.clone(),
+                    Box::new(move || {
+                        async move {
+                            let loaded = store.load(&key).await.unwrap();
+                            assert_eq!(loaded, Some(original));
+                            refresh_entered_tx.send(()).unwrap();
+                            release_refresh.notified().await;
+                            store.save(&key, &refreshed).await.unwrap();
+                            Ok::<_, RefreshError>(refreshed)
+                        }
+                        .boxed()
+                    }),
+                )
+                .await
+        })
+    };
+    refresh_entered_rx.await.unwrap();
+
+    let (logout_attempted_tx, logout_attempted_rx) = tokio::sync::oneshot::channel();
+    let logout_entered = Arc::new(AtomicBool::new(false));
+    let logout_task = {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        let logout_entered = Arc::clone(&logout_entered);
+        tokio::spawn(async move {
+            logout_attempted_tx.send(()).unwrap();
+            logout_coordinator
+                .with_exclusive_mutation(
+                    key.clone(),
+                    Box::new(move || {
+                        async move {
+                            logout_entered.store(true, Ordering::SeqCst);
+                            assert_eq!(
+                                store.load(&key).await.unwrap(),
+                                Some(PersistedTokens::api_key("credential-b"))
+                            );
+                            store.clear(&key).await.unwrap();
+                            Ok::<_, CredentialMutationError>(CredentialMutationOutcome::Cleared)
+                        }
+                        .boxed()
+                    }),
+                )
+                .await
+        })
+    };
+    logout_attempted_rx.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !logout_entered.load(Ordering::SeqCst),
+        "logout must wait while a stale refresh owns the shared key lock"
+    );
+
+    release_refresh.notify_one();
+    assert_eq!(refresh_task.await.unwrap().unwrap(), refreshed);
+    assert_eq!(
+        logout_task.await.unwrap().unwrap(),
+        CredentialMutationOutcome::Cleared
+    );
+    assert_eq!(store.load(&key).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn replacement_login_cannot_be_overwritten_by_stale_refresh() {
+    if std::env::var(CHILD_ENV).is_ok() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let lock_dir = temp.path().join("locks");
+    let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(temp.path().join("credentials")));
+    let refresh_coordinator = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
+    let login_coordinator = Arc::new(FileLockCoordinator::new(lock_dir));
+    let key = TokenKey::parse("dev", "anthropic").expect("valid key");
+    let original = PersistedTokens::api_key("credential-a");
+    let refreshed = PersistedTokens::api_key("credential-b");
+    let replacement = PersistedTokens::api_key("credential-c");
+    store.save(&key, &original).await.unwrap();
+
+    let (refresh_entered_tx, refresh_entered_rx) = tokio::sync::oneshot::channel();
+    let release_refresh = Arc::new(tokio::sync::Notify::new());
+    let refresh_task = {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        let refreshed = refreshed.clone();
+        let release_refresh = Arc::clone(&release_refresh);
+        tokio::spawn(async move {
+            refresh_coordinator
+                .with_refresh(
+                    key.clone(),
+                    Box::new(move || {
+                        async move {
+                            let loaded = store.load(&key).await.unwrap();
+                            assert_eq!(loaded, Some(original));
+                            refresh_entered_tx.send(()).unwrap();
+                            release_refresh.notified().await;
+                            store.save(&key, &refreshed).await.unwrap();
+                            Ok::<_, RefreshError>(refreshed)
+                        }
+                        .boxed()
+                    }),
+                )
+                .await
+        })
+    };
+    refresh_entered_rx.await.unwrap();
+
+    let (login_attempted_tx, login_attempted_rx) = tokio::sync::oneshot::channel();
+    let login_entered = Arc::new(AtomicBool::new(false));
+    let login_task = {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        let replacement = replacement.clone();
+        let login_entered = Arc::clone(&login_entered);
+        tokio::spawn(async move {
+            login_attempted_tx.send(()).unwrap();
+            login_coordinator
+                .with_exclusive_mutation(
+                    key.clone(),
+                    Box::new(move || {
+                        async move {
+                            login_entered.store(true, Ordering::SeqCst);
+                            assert_eq!(
+                                store.load(&key).await.unwrap(),
+                                Some(PersistedTokens::api_key("credential-b"))
+                            );
+                            store.save(&key, &replacement).await.unwrap();
+                            Ok::<_, CredentialMutationError>(CredentialMutationOutcome::Persisted(
+                                replacement,
+                            ))
+                        }
+                        .boxed()
+                    }),
+                )
+                .await
+        })
+    };
+    login_attempted_rx.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !login_entered.load(Ordering::SeqCst),
+        "replacement login must wait while a stale refresh owns the shared key lock"
+    );
+
+    release_refresh.notify_one();
+    assert_eq!(refresh_task.await.unwrap().unwrap(), refreshed);
+    assert_eq!(
+        login_task.await.unwrap().unwrap(),
+        CredentialMutationOutcome::Persisted(replacement.clone())
+    );
+    assert_eq!(store.load(&key).await.unwrap(), Some(replacement));
 }

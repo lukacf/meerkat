@@ -3145,6 +3145,15 @@ impl SessionRuntime {
         self.factory.resolution_token_store()
     }
 
+    /// Complete provider-auth persistence capability shared by provider
+    /// resolution and RPC credential mutations.
+    pub fn provider_auth_persistence(
+        &self,
+    ) -> Result<Option<meerkat_providers::auth_store::ProviderAuthPersistence>, meerkat::FactoryError>
+    {
+        self.factory.resolution_provider_auth_persistence()
+    }
+
     pub fn auth_lease_handle(&self) -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
         self.runtime_adapter.auth_lease_handle()
     }
@@ -11056,20 +11065,27 @@ mod tests {
             )
             .await
             .expect("realtime_session_open_config");
-        let projected = open_config
+        assert!(
+            open_config.runtime_system_context.iter().any(|append| {
+                append.source.as_deref() == Some("ctx-rpc-recovered-live-missing")
+                    && append.content.render_text() == "recovered live-missing runtime context"
+            }),
+            "recovered live session should carry the context-only append through typed runtime context: {:?}",
+            open_config.runtime_system_context
+        );
+        let seed_system_text = open_config
             .seed_messages
             .iter()
             .filter_map(|message| match message {
-                Message::System(system) => Some(system.content.clone()),
+                Message::System(system) => Some(system.content.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            projected.iter().any(|text| {
-                text.contains("ctx-rpc-recovered-live-missing")
-                    && text.contains("recovered live-missing runtime context")
-            }),
-            "recovered live session should include context-only append: {projected:?}"
+            !seed_system_text.contains("ctx-rpc-recovered-live-missing")
+                && !seed_system_text.contains("recovered live-missing runtime context"),
+            "runtime context must not be folded into canonical seed prompt bytes: {seed_system_text}"
         );
     }
 
@@ -11691,14 +11707,22 @@ mod tests {
                 _ => None,
             })
             .expect("expected root system projection");
+        let canonical_assembled = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("export live session")
+            .build_state()
+            .and_then(|state| state.assembled_system_prompt)
+            .expect("canonical assembled prompt must be persisted");
 
-        assert!(
-            root_system.contains("You are the realtime operator."),
-            "expected root system prompt to preserve canonical build-state system prompt: {root_system}"
+        assert_eq!(
+            root_system, canonical_assembled,
+            "live root must reuse the exact persisted canonical assembled bytes"
         );
         assert!(
-            root_system.contains("[Session Build Instructions]"),
-            "expected root system prompt to render durable build-state instructions: {root_system}"
+            !root_system.contains("[Session Build Instructions]"),
+            "live projection must not re-render canonical instructions with a competing marker: {root_system}"
         );
         assert!(
             root_system.contains("Remember user-provided codewords verbatim.")
@@ -11783,14 +11807,22 @@ mod tests {
                 _ => None,
             })
             .expect("expected root system projection after recovery");
+        let canonical_assembled = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("export recovered live session")
+            .build_state()
+            .and_then(|state| state.assembled_system_prompt)
+            .expect("recovered canonical assembled prompt must be persisted");
 
-        assert!(
-            root_system.contains("You are the recovered realtime operator."),
-            "expected recovered realtime projection to preserve canonical system prompt: {root_system}"
+        assert_eq!(
+            root_system, canonical_assembled,
+            "recovered live root must reuse the exact persisted canonical assembled bytes"
         );
         assert!(
-            root_system.contains("[Session Build Instructions]"),
-            "expected recovered realtime projection to render durable build-state instructions: {root_system}"
+            !root_system.contains("[Session Build Instructions]"),
+            "recovered live projection must not re-render canonical instructions with a competing marker: {root_system}"
         );
         assert!(
             root_system.contains("Remember user-provided codewords verbatim.")
@@ -11801,7 +11833,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realtime_open_config_includes_runtime_owned_terminal_peer_response_projection() {
+    async fn realtime_open_config_carries_runtime_owned_terminal_peer_response_as_typed_context() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         base_runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -11883,19 +11915,21 @@ mod tests {
                     )
                     .await
                     .expect("realtime_session_open_config");
-                let projected = open_config
-                    .seed_messages
+                let has_context = open_config
+                    .runtime_system_context
                     .iter()
-                    .filter_map(|message| match message {
-                        Message::System(system) => Some(system.content.to_lowercase()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if projected.iter().any(|text| {
-                    text.contains(
-                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-                    ) && text.contains("birch seventeen")
-                }) {
+                    .any(|append| {
+                        append.source.as_deref().is_some_and(|source| {
+                            source.contains(
+                                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                            )
+                        }) && append
+                            .content
+                            .render_text()
+                            .to_lowercase()
+                            .contains("birch seventeen")
+                    });
+                if has_context {
                     break open_config;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
@@ -11913,12 +11947,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            projected.iter().any(|text| {
+            !projected.iter().any(|text| {
                 text.contains(
                     "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-                ) && text.contains("birch seventeen")
+                ) || text.contains("birch seventeen")
             }),
-            "expected realtime projection to include runtime-owned terminal peer response: {projected:?}"
+            "runtime-owned terminal peer response must not be folded into canonical seed prompt bytes: {projected:?}"
         );
         assert!(
             open_config.runtime_system_context.iter().any(|append| {
@@ -12078,28 +12112,26 @@ mod tests {
                     )
                     .await
                     .expect("realtime_session_open_config");
-                let projected = open_config
-                    .seed_messages
+                let has_context = open_config
+                    .runtime_system_context
                     .iter()
-                    .filter_map(|message| match message {
-                        Message::System(system) => Some(system.content.to_lowercase()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if projected.iter().any(|text| {
-                    text.contains(
-                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-                    ) && text.contains("birch seventeen")
-                }) {
+                    .any(|append| {
+                        append.source.as_deref().is_some_and(|source| {
+                            source.contains(
+                                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                            )
+                        }) && append.content.render_text().contains("birch seventeen")
+                    });
+                if has_context {
                     break open_config;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("recovered realtime projection should include terminal peer response");
+        .expect("recovered realtime projection should restore typed terminal peer response");
 
-        let projected = open_config
+        let seed_system_messages = open_config
             .seed_messages
             .iter()
             .filter_map(|message| match message {
@@ -12108,12 +12140,23 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            projected.iter().any(|text| {
+            !seed_system_messages.iter().any(|text| {
                 text.contains(
                     "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-                ) && text.contains("birch seventeen")
+                ) || text.contains("birch seventeen")
             }),
-            "expected recovered realtime projection to include authoritative terminal peer response: {projected:?}"
+            "recovered runtime context must not be folded into canonical seed prompt bytes: {seed_system_messages:?}"
+        );
+        assert!(
+            open_config.runtime_system_context.iter().any(|append| {
+                append.source.as_deref().is_some_and(|source| {
+                    source.contains(
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    )
+                }) && append.content.render_text().contains("birch seventeen")
+            }),
+            "expected recovery to restore authoritative terminal peer response as typed context: {:?}",
+            open_config.runtime_system_context
         );
     }
 
@@ -12588,7 +12631,18 @@ mod tests {
             .await
             .expect("realtime_session_open_config");
 
-        let projected = open_config
+        assert!(
+            open_config.runtime_system_context.iter().any(|append| {
+                append.source.as_deref().is_some_and(|source| {
+                    source.contains(
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    )
+                }) && append.content.render_text().contains("birch seventeen")
+            }),
+            "expected realtime projection to carry service-applied runtime context through the typed field: {:?}",
+            open_config.runtime_system_context
+        );
+        let seed_system_messages = open_config
             .seed_messages
             .iter()
             .filter_map(|message| match message {
@@ -12597,12 +12651,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            projected.iter().any(|text| {
+            !seed_system_messages.iter().any(|text| {
                 text.contains(
                     "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-                ) && text.contains("birch seventeen")
+                ) || text.contains("birch seventeen")
             }),
-            "expected realtime projection to include runtime context applied via session service: {projected:?}"
+            "service-applied runtime context must not be folded into canonical seed prompt bytes: {seed_system_messages:?}"
         );
     }
 
@@ -13233,12 +13287,23 @@ mod tests {
             "expected realtime projection to preserve remembered assistant turn: {assistant_messages:?}"
         );
         assert!(
-            system_messages.iter().any(|text| {
+            !system_messages.iter().any(|text| {
                 text.contains(
                     "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-                ) && text.contains("birch seventeen")
+                ) || text.contains("birch seventeen")
             }),
-            "expected realtime projection to preserve authoritative token system context: {system_messages:?}"
+            "typed runtime context must not be folded into canonical seed prompt bytes: {system_messages:?}"
+        );
+        assert!(
+            open_config.runtime_system_context.iter().any(|append| {
+                append.source.as_deref().is_some_and(|source| {
+                    source.contains(
+                        "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    )
+                }) && append.content.render_text().contains("birch seventeen")
+            }),
+            "expected realtime projection to preserve authoritative token as typed runtime context: {:?}",
+            open_config.runtime_system_context
         );
     }
 
@@ -13961,7 +14026,12 @@ mod tests {
     async fn reconfigure_build_threads_auth_lease_for_managed_store_resolution() {
         let temp = tempfile::tempdir().unwrap();
         let token_store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
-        let factory = temp_factory(&temp).with_token_store(token_store.clone());
+        let factory = temp_factory(&temp).with_provider_auth_persistence(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                token_store.clone(),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+        );
         let runtime = make_runtime(factory, 10);
         runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
             Arc::new(meerkat_core::MemoryConfigStore::new(

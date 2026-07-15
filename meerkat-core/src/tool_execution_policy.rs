@@ -127,8 +127,8 @@ impl ToolExecutionPolicy {
 /// so the denial reaches the transcript as an ordinary `is_error` tool
 /// result and the run continues. It explicitly forwards
 /// `bind_mcp_server_lifecycle_handle` and `bind_external_tool_surface_handle`
-/// (which `FilteredToolDispatcher` does not) so wrapping never strips MCP
-/// DSL lifecycle mirroring from the inner dispatcher.
+/// just like `FilteredToolDispatcher`, so either wrapper preserves MCP DSL
+/// lifecycle mirroring from the inner dispatcher.
 pub struct ExecutionPolicyGatedDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
     policy: ToolExecutionPolicy,

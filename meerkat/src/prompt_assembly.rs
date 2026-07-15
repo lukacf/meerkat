@@ -76,36 +76,17 @@ pub async fn assemble_system_prompt(
     extra_sections: &[&str],
     tool_usage_instructions: &str,
 ) -> Result<String, PromptAssemblyError> {
-    match prompt_override {
-        // 1a. Explicit per-request prompt wins outright (skips AGENTS.md and
-        //     config), but appended sections still apply.
-        SystemPromptOverride::Set(prompt) => {
-            return Ok(append_sections(
-                prompt,
-                extra_sections,
-                &[],
-                tool_usage_instructions,
-            ));
-        }
-        // 1b. Explicit disable suppresses every prompt source (config file,
-        //     config inline, AGENTS.md, default). Only the appended
-        //     extra/config-tool/dispatcher sections remain.
-        SystemPromptOverride::Disable => {
-            let config_tool_sections: Vec<&str> = config
-                .agent
-                .tool_instructions
-                .as_deref()
-                .into_iter()
-                .collect();
-            return Ok(append_sections(
-                "",
-                extra_sections,
-                &config_tool_sections,
-                tool_usage_instructions,
-            ));
-        }
-        // Fall through to the config/AGENTS/default precedence chain below.
-        SystemPromptOverride::Inherit => {}
+    // Explicit Set/Disable skips filesystem prompt sources. The target-neutral
+    // renderer remains the only owner of the actual tri-state decision and
+    // section ordering.
+    if prompt_override.is_explicit() {
+        return Ok(crate::prompt_policy::render_system_prompt_policy(
+            config,
+            prompt_override,
+            "",
+            extra_sections,
+            tool_usage_instructions,
+        ));
     }
 
     // 2-4. This crate owns filesystem reads and prompt precedence, then passes
@@ -147,20 +128,13 @@ pub async fn assemble_system_prompt(
 
     // 4. compose() uses the override if set, otherwise DEFAULT_SYSTEM_PROMPT.
     //    Either way, AGENTS.md files are appended (global + project).
-    let base = spc.compose().await;
+    let inherited_base = spc.compose().await;
 
-    // 5. Append config-level tool instructions (if any) before dispatcher instructions.
-    let config_tool_sections: Vec<&str> = config
-        .agent
-        .tool_instructions
-        .as_deref()
-        .into_iter()
-        .collect();
-
-    Ok(append_sections(
-        &base,
+    Ok(crate::prompt_policy::render_system_prompt_policy(
+        config,
+        prompt_override,
+        &inherited_base,
         extra_sections,
-        &config_tool_sections,
         tool_usage_instructions,
     ))
 }
@@ -484,35 +458,6 @@ fn format_include_chain(stack: &[PathBuf], terminal: Option<&Path>) -> String {
         .chain(terminal.map(|path| path.display().to_string()))
         .collect::<Vec<_>>()
         .join(" -> ")
-}
-
-/// Append extra sections and tool instructions to a base prompt.
-fn append_sections(
-    base: &str,
-    extra_sections: &[&str],
-    config_tool_sections: &[&str],
-    tool_instructions: &str,
-) -> String {
-    let mut prompt = base.to_string();
-    let push_section = |prompt: &mut String, section: &str| {
-        if section.is_empty() {
-            return;
-        }
-        // Avoid a leading "\n\n" when the base is empty (e.g. an explicitly
-        // disabled prompt with only appended sections).
-        if !prompt.is_empty() {
-            prompt.push_str("\n\n");
-        }
-        prompt.push_str(section);
-    };
-    for section in extra_sections {
-        push_section(&mut prompt, section);
-    }
-    for section in config_tool_sections {
-        push_section(&mut prompt, section);
-    }
-    push_section(&mut prompt, tool_instructions);
-    prompt
 }
 
 #[cfg(test)]

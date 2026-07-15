@@ -27,8 +27,9 @@ use meerkat_providers::auth_oauth::{
     poll_device_code, request_device_code,
 };
 use meerkat_providers::auth_store::{
-    PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
-    credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
+    CredentialMutationError, CredentialMutationOutcome, PersistedAuthMode, PersistedTokens,
+    RefreshCoordinator, TokenKey, TokenStore, credential_source_uses_persisted_store,
+    persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
     OAuthDevicePollLease, OAuthFlowError, OAuthProviderIdentity, resolve_oauth_provider,
@@ -348,6 +349,29 @@ fn require_token_store(
         })
 }
 
+#[allow(clippy::result_large_err)]
+fn require_provider_auth_persistence(
+    runtime: &SessionRuntime,
+    id: Option<RpcId>,
+) -> Result<meerkat_providers::auth_store::ProviderAuthPersistence, RpcResponse> {
+    runtime
+        .provider_auth_persistence()
+        .map_err(|error| {
+            RpcResponse::error(
+                id.clone(),
+                error::INTERNAL_ERROR,
+                format!("provider auth persistence unavailable: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                "provider auth persistence is not configured for this runtime",
+            )
+        })
+}
+
 fn require_managed_store_source(
     id: Option<RpcId>,
     binding_id: &str,
@@ -474,19 +498,24 @@ struct TokenCommitSnapshot {
 async fn prepare_token_commit_unlocked(
     id: Option<RpcId>,
     store: &Arc<dyn TokenStore>,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
 ) -> Result<PreparedTokenCommitSnapshot, RpcResponse> {
     let key = TokenKey::from_auth_binding(auth_binding);
-    let previous = match store.load(&key).await {
-        Ok(previous) => previous,
-        Err(e) => {
-            return Err(RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("TokenStore load failed: {e}"),
-            ));
-        }
-    };
+    let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
+        store.as_ref(),
+        auth_lease,
+        auth_binding,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|error| {
+        RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("durable credential predecessor rehydrate failed: {error}"),
+        )
+    })?;
     Ok(PreparedTokenCommitSnapshot {
         key,
         lease_key: LeaseKey::from_auth_binding(auth_binding),
@@ -504,30 +533,33 @@ async fn prepare_token_commit_unlocked(
 async fn save_tokens_and_publish_lifecycle_commit_unlocked(
     id: Option<RpcId>,
     store: &Arc<dyn TokenStore>,
-    runtime: &SessionRuntime,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
 ) -> Result<TokenCommitSnapshot, RpcResponse> {
     let key = TokenKey::from_auth_binding(auth_binding);
     let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let auth_lease = runtime.generated_auth_lease_handle();
+    let previous = meerkat_core::rehydrate_durable_predecessor_for_mutation(
+        store.as_ref(),
+        auth_lease,
+        auth_binding,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|error| {
+        RpcResponse::error(
+            id.clone(),
+            error::INTERNAL_ERROR,
+            format!("durable credential predecessor rehydrate failed: {error}"),
+        )
+    })?;
     let previous_lifecycle_restore = auth_lease.capture_auth_lifecycle_restore_snapshot(&lease_key);
     let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
-    let previous = match store.load(&key).await {
-        Ok(previous) => previous,
-        Err(e) => {
-            return Err(RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("TokenStore load failed: {e}"),
-            ));
-        }
-    };
     // Acquire FIRST. A rejected acquisition mutates nothing — no token bytes
     // were persisted and the lease is unchanged — so the error propagates
     // without compensation.
     let transition =
-        match meerkat_core::publish_token_lifecycle_acquired(&auth_lease, auth_binding, tokens) {
+        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens) {
             Ok(transition) => transition,
             Err(e) => {
                 return Err(RpcResponse::error(
@@ -545,7 +577,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
-    save_marked_token_commit_unlocked(id, store.as_ref(), &auth_lease, &commit, tokens, "").await?;
+    save_marked_token_commit_unlocked(id, store.as_ref(), auth_lease, &commit, tokens, "").await?;
     Ok(commit)
 }
 
@@ -598,16 +630,65 @@ async fn save_marked_token_commit_unlocked(
 
 async fn save_tokens_and_publish_lifecycle(
     id: Option<RpcId>,
-    store: &Arc<dyn TokenStore>,
     runtime: &SessionRuntime,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
 ) -> Result<(), RpcResponse> {
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    save_tokens_and_publish_lifecycle_commit_unlocked(id, store, runtime, auth_binding, tokens)
+    let persistence = require_provider_auth_persistence(runtime, id.clone())?;
+    let refresh_coordinator = persistence.refresh_coordinator();
+    let auth_lease = runtime.generated_auth_lease_handle();
+    let mutation_store = persistence.token_store();
+    let mutation_binding = auth_binding.clone();
+    let mutation_tokens = tokens.clone();
+    let key = TokenKey::from_auth_binding(auth_binding);
+    let mutation_id = id.clone();
+    let outcome = refresh_coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key = LeaseKey::from_auth_binding(&mutation_binding);
+                    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    let commit = save_tokens_and_publish_lifecycle_commit_unlocked(
+                        mutation_id,
+                        &mutation_store,
+                        &auth_lease,
+                        &mutation_binding,
+                        &mutation_tokens,
+                    )
+                    .await
+                    .map_err(rpc_response_to_credential_mutation_error)?;
+                    let committed = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                        &commit.key,
+                        &mutation_tokens,
+                        &commit.lifecycle_transition,
+                    )
+                    .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?;
+                    Ok(CredentialMutationOutcome::Persisted(committed))
+                })
+            }),
+        )
         .await
-        .map(|_| ())
+        .map_err(|error| {
+            RpcResponse::error(id.clone(), error::INTERNAL_ERROR, error.to_string())
+        })?;
+    match outcome {
+        CredentialMutationOutcome::Persisted(_) => Ok(()),
+        CredentialMutationOutcome::Cleared => Err(RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "credential save transaction returned cleared outcome",
+        )),
+    }
+}
+
+fn rpc_response_to_credential_mutation_error(response: RpcResponse) -> CredentialMutationError {
+    CredentialMutationError::Operation(
+        response
+            .error
+            .map(|error| error.message)
+            .unwrap_or_else(|| "credential mutation failed without a typed RPC error".to_string()),
+    )
 }
 
 /// Release the lease acquired by an acquire-first token commit and restore the
@@ -676,17 +757,16 @@ async fn rollback_token_commit(
 async fn save_prepared_tokens_after_terminal_consume_unlocked(
     id: Option<RpcId>,
     store: &Arc<dyn TokenStore>,
-    runtime: &SessionRuntime,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     prepared: PreparedTokenCommitSnapshot,
 ) -> Result<(), RpcResponse> {
-    let auth_lease = runtime.generated_auth_lease_handle();
     let previous_lifecycle_restore =
         auth_lease.capture_auth_lifecycle_restore_snapshot(&prepared.lease_key);
     let previous_lifecycle = previous_lifecycle_restore.snapshot().clone();
     let transition =
-        match meerkat_core::publish_token_lifecycle_acquired(&auth_lease, auth_binding, tokens) {
+        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens) {
             Ok(transition) => transition,
             Err(e) => {
                 return Err(RpcResponse::error(
@@ -707,7 +787,7 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
     save_marked_token_commit_unlocked(
         id,
         store.as_ref(),
-        &auth_lease,
+        auth_lease,
         &commit,
         tokens,
         " after OAuth consume",
@@ -718,7 +798,7 @@ async fn save_prepared_tokens_after_terminal_consume_unlocked(
 async fn save_tokens_and_consume_device_flow_unlocked(
     id: Option<RpcId>,
     store: &Arc<dyn TokenStore>,
-    runtime: &SessionRuntime,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     poll_lease: OAuthDevicePollLease,
@@ -733,20 +813,20 @@ async fn save_tokens_and_consume_device_flow_unlocked(
     if let Some(resp) = verify_terminal_device_flow(id.clone(), &poll_lease) {
         return Some(resp);
     }
-    let prepared = match prepare_token_commit_unlocked(id.clone(), store, auth_binding).await {
-        Ok(prepared) => prepared,
-        Err(resp) => return Some(resp),
-    };
-    let auth_lease = runtime.generated_auth_lease_handle();
+    let prepared =
+        match prepare_token_commit_unlocked(id.clone(), store, auth_lease, auth_binding).await {
+            Ok(prepared) => prepared,
+            Err(resp) => return Some(resp),
+        };
     if let Some(resp) =
-        consume_terminal_device_flow(id.clone(), &auth_lease, auth_binding, poll_lease)
+        consume_terminal_device_flow(id.clone(), auth_lease, auth_binding, poll_lease)
     {
         return Some(resp);
     }
     save_prepared_tokens_after_terminal_consume_unlocked(
         id,
         store,
-        runtime,
+        auth_lease,
         auth_binding,
         tokens,
         prepared,
@@ -757,23 +837,69 @@ async fn save_tokens_and_consume_device_flow_unlocked(
 
 async fn save_tokens_and_consume_device_flow(
     id: Option<RpcId>,
-    store: &Arc<dyn TokenStore>,
     runtime: &SessionRuntime,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     poll_lease: OAuthDevicePollLease,
 ) -> Option<RpcResponse> {
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    save_tokens_and_consume_device_flow_unlocked(
-        id,
-        store,
-        runtime,
-        auth_binding,
-        tokens,
-        poll_lease,
-    )
-    .await
+    let persistence = match require_provider_auth_persistence(runtime, id.clone()) {
+        Ok(persistence) => persistence,
+        Err(response) => return Some(response),
+    };
+    let refresh_coordinator = persistence.refresh_coordinator();
+    let auth_lease = runtime.generated_auth_lease_handle();
+    let mutation_store = persistence.token_store();
+    let mutation_binding = auth_binding.clone();
+    let mutation_tokens = tokens.clone();
+    let key = TokenKey::from_auth_binding(auth_binding);
+    let load_key = key.clone();
+    let mutation_id = id.clone();
+    let outcome = refresh_coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key = LeaseKey::from_auth_binding(&mutation_binding);
+                    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    if let Some(response) = save_tokens_and_consume_device_flow_unlocked(
+                        mutation_id,
+                        &mutation_store,
+                        &auth_lease,
+                        &mutation_binding,
+                        &mutation_tokens,
+                        poll_lease,
+                    )
+                    .await
+                    {
+                        return Err(rpc_response_to_credential_mutation_error(response));
+                    }
+                    let committed = mutation_store
+                        .load(&load_key)
+                        .await
+                        .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?
+                        .ok_or_else(|| {
+                            CredentialMutationError::TokenStore(
+                                "successful device login left no persisted credential".to_string(),
+                            )
+                        })?;
+                    Ok(CredentialMutationOutcome::Persisted(committed))
+                })
+            }),
+        )
+        .await;
+    match outcome {
+        Ok(CredentialMutationOutcome::Persisted(_)) => None,
+        Ok(CredentialMutationOutcome::Cleared) => Some(RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "device-login transaction returned cleared outcome",
+        )),
+        Err(error) => Some(RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            error.to_string(),
+        )),
+    }
 }
 
 struct BrowserFlowConsume<'a> {
@@ -783,10 +909,17 @@ struct BrowserFlowConsume<'a> {
     redirect_uri: &'a str,
 }
 
+struct OwnedBrowserFlowConsume {
+    authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
+    state: String,
+    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+    redirect_uri: String,
+}
+
 async fn save_tokens_and_consume_browser_flow_unlocked(
     id: Option<RpcId>,
     store: &Arc<dyn TokenStore>,
-    runtime: &SessionRuntime,
+    auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
     flow: BrowserFlowConsume<'_>,
@@ -798,12 +931,12 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
             "consume_oauth_browser_flow requires an AuthMachine-owned OAuth flow authority",
         ));
     }
-    let prepared = prepare_token_commit_unlocked(id.clone(), store, auth_binding).await?;
+    let prepared =
+        prepare_token_commit_unlocked(id.clone(), store, auth_lease, auth_binding).await?;
     flow.authority
         .consume(flow.state, auth_binding, flow.provider, flow.redirect_uri)
         .map_err(|err| {
-            let auth_lease = runtime.generated_auth_lease_handle();
-            release_uncredentialed_terminal_oauth_lifecycle(&auth_lease, auth_binding);
+            release_uncredentialed_terminal_oauth_lifecycle(auth_lease, auth_binding);
             RpcResponse::error(
                 id.clone(),
                 error::INTERNAL_ERROR,
@@ -813,7 +946,7 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
     save_prepared_tokens_after_terminal_consume_unlocked(
         id,
         store,
-        runtime,
+        auth_lease,
         auth_binding,
         tokens,
         prepared,
@@ -824,34 +957,83 @@ async fn save_tokens_and_consume_browser_flow_unlocked(
 
 async fn save_tokens_and_consume_browser_flow(
     id: Option<RpcId>,
-    store: &Arc<dyn TokenStore>,
     runtime: &SessionRuntime,
     auth_binding: &AuthBindingRef,
     tokens: &PersistedTokens,
-    flow: BrowserFlowConsume<'_>,
+    flow: OwnedBrowserFlowConsume,
 ) -> Result<(), RpcResponse> {
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    save_tokens_and_consume_browser_flow_unlocked(id, store, runtime, auth_binding, tokens, flow)
+    let persistence = require_provider_auth_persistence(runtime, id.clone())?;
+    let refresh_coordinator = persistence.refresh_coordinator();
+    let auth_lease = runtime.generated_auth_lease_handle();
+    let mutation_store = persistence.token_store();
+    let mutation_binding = auth_binding.clone();
+    let mutation_tokens = tokens.clone();
+    let key = TokenKey::from_auth_binding(auth_binding);
+    let load_key = key.clone();
+    let mutation_id = id.clone();
+    let outcome = refresh_coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key = LeaseKey::from_auth_binding(&mutation_binding);
+                    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    save_tokens_and_consume_browser_flow_unlocked(
+                        mutation_id,
+                        &mutation_store,
+                        &auth_lease,
+                        &mutation_binding,
+                        &mutation_tokens,
+                        BrowserFlowConsume {
+                            authority: flow.authority.as_ref(),
+                            state: &flow.state,
+                            provider: flow.provider,
+                            redirect_uri: &flow.redirect_uri,
+                        },
+                    )
+                    .await
+                    .map_err(rpc_response_to_credential_mutation_error)?;
+                    let committed = mutation_store
+                        .load(&load_key)
+                        .await
+                        .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?
+                        .ok_or_else(|| {
+                            CredentialMutationError::TokenStore(
+                                "successful browser login left no persisted credential".to_string(),
+                            )
+                        })?;
+                    Ok(CredentialMutationOutcome::Persisted(committed))
+                })
+            }),
+        )
         .await
+        .map_err(|error| {
+            RpcResponse::error(id.clone(), error::INTERNAL_ERROR, error.to_string())
+        })?;
+    match outcome {
+        CredentialMutationOutcome::Persisted(_) => Ok(()),
+        CredentialMutationOutcome::Cleared => Err(RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            "browser-login transaction returned cleared outcome",
+        )),
+    }
 }
 
 async fn clear_tokens_and_publish_lifecycle(
     id: Option<RpcId>,
-    store: &Arc<dyn TokenStore>,
     runtime: &SessionRuntime,
     auth_binding: &AuthBindingRef,
 ) -> Result<(), RpcResponse> {
-    let lease_key = LeaseKey::from_auth_binding(auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+    let persistence = require_provider_auth_persistence(runtime, id.clone())?;
     let auth_lease = runtime.generated_auth_lease_handle();
-    meerkat_core::clear_tokens_and_publish_lifecycle_released(
-        store.as_ref(),
-        &auth_lease,
-        auth_binding,
+    meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated(
+        persistence,
+        auth_lease,
+        auth_binding.clone(),
     )
     .await
-    .map_err(|e| RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()))
+    .map_err(|error| RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string()))
 }
 
 // --- Realm projection -------------------------------------------------
@@ -1020,10 +1202,9 @@ pub async fn handle_auth_profile_create(
     if let Some(r) = require_managed_store_source(id.clone(), &parsed.binding_id, &auth_profile) {
         return r;
     }
-    let store = match require_token_store(runtime, id.clone()) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
+    if let Err(response) = require_provider_auth_persistence(runtime, id.clone()) {
+        return response;
+    }
     let tokens = PersistedTokens {
         auth_mode,
         primary_secret: Some(parsed.secret),
@@ -1036,7 +1217,7 @@ pub async fn handle_auth_profile_create(
         metadata: serde_json::Value::Null,
     };
     if let Err(resp) =
-        save_tokens_and_publish_lifecycle(id.clone(), &store, runtime, &auth_binding, &tokens).await
+        save_tokens_and_publish_lifecycle(id.clone(), runtime, &auth_binding, &tokens).await
     {
         return resp;
     }
@@ -1080,12 +1261,10 @@ pub async fn handle_auth_profile_delete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let store = match require_token_store(runtime, id.clone()) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    if let Err(resp) =
-        clear_tokens_and_publish_lifecycle(id.clone(), &store, runtime, &auth_binding).await
+    if let Err(response) = require_provider_auth_persistence(runtime, id.clone()) {
+        return response;
+    }
+    if let Err(resp) = clear_tokens_and_publish_lifecycle(id.clone(), runtime, &auth_binding).await
     {
         return resp;
     }
@@ -1247,12 +1426,9 @@ pub async fn handle_auth_login_complete(
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
 
-    let store = match require_token_store(runtime, id.clone()) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    let lease_key = LeaseKey::from_auth_binding(&auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+    if let Err(response) = require_provider_auth_persistence(runtime, id.clone()) {
+        return response;
+    }
     let flow = match runtime.oauth_flow_authority().verify(
         &parsed.state,
         &auth_binding,
@@ -1336,17 +1512,16 @@ pub async fn handle_auth_login_complete(
         metadata: serde_json::Value::Null,
     };
     let authority = runtime.oauth_flow_authority();
-    if let Err(resp) = save_tokens_and_consume_browser_flow_unlocked(
+    if let Err(resp) = save_tokens_and_consume_browser_flow(
         id.clone(),
-        &store,
         runtime,
         &auth_binding,
         &tokens,
-        BrowserFlowConsume {
-            authority: authority.as_ref(),
-            state: &parsed.state,
+        OwnedBrowserFlowConsume {
+            authority,
+            state: parsed.state.clone(),
             provider: resolved.identity,
-            redirect_uri: &parsed.redirect_uri,
+            redirect_uri: parsed.redirect_uri.clone(),
         },
     )
     .await
@@ -1542,8 +1717,6 @@ pub async fn handle_auth_login_device_complete(
     {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
-    let lease_key = LeaseKey::from_auth_binding(&auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
     let poll_lease = match runtime.oauth_flow_authority().begin_device_code_poll(
         &parsed.device_code,
         &auth_binding,
@@ -1598,10 +1771,9 @@ pub async fn handle_auth_login_device_complete(
             Some(resp) => resp,
         },
         DevicePollOutcome::Ready(result) => {
-            let store = match require_token_store(runtime, id.clone()) {
-                Ok(s) => s,
-                Err(r) => return r,
-            };
+            if let Err(response) = require_provider_auth_persistence(runtime, id.clone()) {
+                return response;
+            }
             let expires_at = match result.expires_at_from(chrono::Utc::now()) {
                 Ok(expires_at) => expires_at,
                 Err(e) => {
@@ -1627,9 +1799,8 @@ pub async fn handle_auth_login_device_complete(
                 account_id: None,
                 metadata: serde_json::Value::Null,
             };
-            if let Some(resp) = save_tokens_and_consume_device_flow_unlocked(
+            if let Some(resp) = save_tokens_and_consume_device_flow(
                 id.clone(),
-                &store,
                 runtime,
                 &auth_binding,
                 &tokens,
@@ -1720,8 +1891,6 @@ pub async fn handle_auth_login_provision_api_key(
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
-    let lease_key = LeaseKey::from_auth_binding(&auth_binding);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
     let flow_authority = runtime.oauth_flow_authority();
     let provision_provider = OAuthProviderIdentity::AnthropicConsoleApiKey;
     let provision_redirect_uri = a_oauth::MANUAL_REDIRECT_URL;
@@ -1740,8 +1909,8 @@ pub async fn handle_auth_login_provision_api_key(
             );
         }
     };
-    let store = match require_token_store(runtime, id.clone()) {
-        Ok(s) => s,
+    let persistence = match require_provider_auth_persistence(runtime, id.clone()) {
+        Ok(persistence) => persistence,
         Err(r) => {
             let _ = flow_authority.consume(
                 &provision_state,
@@ -1758,8 +1927,8 @@ pub async fn handle_auth_login_provision_api_key(
     // and returns the API key token bundle; this handler owns the
     // TokenStore/AuthMachine commit and terminal flow consume.
     let endpoints = a_oauth::console_endpoints(a_oauth::MANUAL_REDIRECT_URL);
-    let oauth_runtime = a_oauth::AnthropicOAuthRuntime::new_with_default_coordinator(
-        Arc::clone(&store),
+    let oauth_runtime = a_oauth::AnthropicOAuthRuntime::new(
+        persistence,
         endpoints,
         TokenKey::from_auth_binding(&auth_binding),
     );
@@ -1768,17 +1937,16 @@ pub async fn handle_auth_login_provision_api_key(
         .await
     {
         Ok(tokens) => {
-            if let Err(resp) = save_tokens_and_consume_browser_flow_unlocked(
+            if let Err(resp) = save_tokens_and_consume_browser_flow(
                 id.clone(),
-                &store,
                 runtime,
                 &auth_binding,
                 &tokens,
-                BrowserFlowConsume {
-                    authority: flow_authority.as_ref(),
-                    state: &provision_state,
+                OwnedBrowserFlowConsume {
+                    authority: Arc::clone(&flow_authority),
+                    state: provision_state.clone(),
                     provider: provision_provider,
-                    redirect_uri: provision_redirect_uri,
+                    redirect_uri: provision_redirect_uri.to_string(),
                 },
             )
             .await
@@ -1992,12 +2160,10 @@ pub async fn handle_auth_logout(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let store = match require_token_store(runtime, id.clone()) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    if let Err(resp) =
-        clear_tokens_and_publish_lifecycle(id.clone(), &store, runtime, &auth_binding).await
+    if let Err(response) = require_provider_auth_persistence(runtime, id.clone()) {
+        return response;
+    }
+    if let Err(resp) = clear_tokens_and_publish_lifecycle(id.clone(), runtime, &auth_binding).await
     {
         return resp;
     }
@@ -2081,12 +2247,12 @@ mod tests {
         test_runtime_with_config_and_token_store(config, token_store)
     }
 
-    fn test_runtime_with_config_without_token_store(
+    fn test_runtime_with_config_without_provider_auth_persistence(
         config: meerkat_core::Config,
     ) -> SessionRuntime {
         let temp = tempfile::tempdir().unwrap();
-        let factory =
-            meerkat::AgentFactory::new(temp.path().join("sessions")).without_token_store();
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
@@ -2116,8 +2282,13 @@ mod tests {
         token_store: Arc<dyn TokenStore>,
     ) -> SessionRuntime {
         let temp = tempfile::tempdir().unwrap();
-        let factory =
-            meerkat::AgentFactory::new(temp.path().join("sessions")).with_token_store(token_store);
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
+            .with_provider_auth_persistence(
+                meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                    token_store,
+                    Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+                ),
+            );
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::new());
@@ -3190,8 +3361,9 @@ mod tests {
 
     #[tokio::test]
     async fn provision_api_key_rejects_same_provider_non_oauth_target_before_token_store() {
-        let runtime =
-            test_runtime_with_config_without_token_store(config_with_anthropic_api_key_binding());
+        let runtime = test_runtime_with_config_without_provider_auth_persistence(
+            config_with_anthropic_api_key_binding(),
+        );
         let params = raw_params(serde_json::json!({
             "access_token": "console-access-token",
             "realm_id": "dev",
@@ -3210,7 +3382,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_api_key_rejects_oauth_method_with_wrong_backend_before_token_store() {
-        let runtime = test_runtime_with_config_without_token_store(
+        let runtime = test_runtime_with_config_without_provider_auth_persistence(
             config_with_anthropic_oauth_to_api_key_wrong_backend_binding(),
         );
         let params = raw_params(serde_json::json!({
@@ -3232,7 +3404,7 @@ mod tests {
     #[tokio::test]
     async fn provision_api_key_requires_runtime_oauth_flow_admission_before_token_store()
     -> Result<(), String> {
-        let runtime = test_runtime_with_config_without_token_store(
+        let runtime = test_runtime_with_config_without_provider_auth_persistence(
             config_with_anthropic_oauth_to_api_key_binding(),
         );
         let authority = runtime.oauth_flow_authority();
@@ -3290,7 +3462,7 @@ mod tests {
 
     #[tokio::test]
     async fn browser_login_token_store_preflight_failure_does_not_consume_state() {
-        let runtime = test_runtime_with_config_without_token_store(
+        let runtime = test_runtime_with_config_without_provider_auth_persistence(
             config_with_openai_oauth_binding(CredentialSourceSpec::ManagedStore),
         );
         let redirect_uri = "http://127.0.0.1:0/callback";
@@ -3315,9 +3487,15 @@ mod tests {
         let resp =
             handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
-        let error = resp.error.expect("missing TokenStore should fail");
+        let error = resp
+            .error
+            .expect("missing provider auth persistence should fail");
         assert_eq!(error.code, crate::error::INTERNAL_ERROR);
-        assert!(error.message.contains("TokenStore not configured"));
+        assert!(
+            error
+                .message
+                .contains("provider auth persistence is not configured")
+        );
         let flow = runtime
             .oauth_flow_authority()
             .consume(
@@ -3831,7 +4009,6 @@ mod tests {
 
         let resp = save_tokens_and_consume_device_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
@@ -3869,19 +4046,19 @@ mod tests {
             origin: meerkat_core::connection::BindingOrigin::Configured,
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
-        let authority = RejectBrowserConsumeAuthority;
+        let authority: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> =
+            Arc::new(RejectBrowserConsumeAuthority);
 
         let resp = save_tokens_and_consume_browser_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
-            BrowserFlowConsume {
-                authority: &authority,
-                state: "browser-state",
+            OwnedBrowserFlowConsume {
+                authority,
+                state: "browser-state".to_string(),
                 provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri: "http://127.0.0.1/callback",
+                redirect_uri: "http://127.0.0.1/callback".to_string(),
             },
         )
         .await
@@ -3913,15 +4090,14 @@ mod tests {
 
         let resp = save_tokens_and_consume_browser_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
-            BrowserFlowConsume {
-                authority: &RejectBrowserConsumeAuthority,
-                state: "browser-state",
+            OwnedBrowserFlowConsume {
+                authority: Arc::new(RejectBrowserConsumeAuthority),
+                state: "browser-state".to_string(),
                 provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri: "http://127.0.0.1/callback",
+                redirect_uri: "http://127.0.0.1/callback".to_string(),
             },
         )
         .await
@@ -3956,7 +4132,6 @@ mod tests {
 
         save_tokens_and_publish_lifecycle(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
@@ -3993,7 +4168,6 @@ mod tests {
 
         let resp = save_tokens_and_publish_lifecycle(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
@@ -4037,9 +4211,9 @@ mod tests {
         };
         let key = TokenKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
-        let registry = meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
+        let registry = Arc::new(meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
             std::time::Duration::from_secs(600),
-        );
+        ));
         let state = registry
             .start(
                 auth_binding.clone(),
@@ -4051,15 +4225,14 @@ mod tests {
 
         let resp = save_tokens_and_consume_browser_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
-            BrowserFlowConsume {
-                authority: &registry,
-                state: &state,
+            OwnedBrowserFlowConsume {
+                authority: registry.clone(),
+                state: state.clone(),
                 provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri,
+                redirect_uri: redirect_uri.to_string(),
             },
         )
         .await
@@ -4125,7 +4298,6 @@ mod tests {
 
         let resp = save_tokens_and_consume_device_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
@@ -4179,15 +4351,14 @@ mod tests {
 
         let resp = save_tokens_and_consume_browser_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
-            BrowserFlowConsume {
-                authority: &RejectBrowserConsumeAuthority,
-                state: "browser-state",
+            OwnedBrowserFlowConsume {
+                authority: Arc::new(RejectBrowserConsumeAuthority),
+                state: "browser-state".to_string(),
                 provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri: "http://127.0.0.1/callback",
+                redirect_uri: "http://127.0.0.1/callback".to_string(),
             },
         )
         .await
@@ -4239,7 +4410,7 @@ mod tests {
         let commit = save_tokens_and_publish_lifecycle_commit_unlocked(
             Some(RpcId::Num(1)),
             &store,
-            &runtime,
+            &auth_lease,
             &auth_binding,
             &failed_tokens,
         )
@@ -4327,7 +4498,7 @@ mod tests {
         let commit = save_tokens_and_publish_lifecycle_commit_unlocked(
             Some(RpcId::Num(1)),
             &store,
-            &runtime,
+            &auth_lease,
             &auth_binding,
             &failed_tokens,
         )
@@ -4407,7 +4578,6 @@ mod tests {
 
         let resp = save_tokens_and_consume_device_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
@@ -4471,15 +4641,14 @@ mod tests {
 
         let resp = save_tokens_and_consume_browser_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
-            BrowserFlowConsume {
-                authority: authority.as_ref(),
-                state: &state,
+            OwnedBrowserFlowConsume {
+                authority: Arc::clone(&authority),
+                state: state.clone(),
                 provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri,
+                redirect_uri: redirect_uri.to_string(),
             },
         )
         .await
@@ -4528,16 +4697,15 @@ mod tests {
 
         save_tokens_and_consume_browser_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &tokens,
-            BrowserFlowConsume {
-                authority: authority.as_ref(),
-                state: &state,
+            OwnedBrowserFlowConsume {
+                authority: Arc::clone(&authority),
+                state: state.clone(),
                 provider:
                     meerkat_providers::oauth_flow::OAuthProviderIdentity::AnthropicConsoleApiKey,
-                redirect_uri,
+                redirect_uri: redirect_uri.to_string(),
             },
         )
         .await
@@ -4597,19 +4765,19 @@ mod tests {
                 "new-verifier".to_string(),
             )
             .expect("new browser flow admitted");
-        let rejecting = RejectBrowserConsumeAuthority;
+        let rejecting: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> =
+            Arc::new(RejectBrowserConsumeAuthority);
 
         let resp = save_tokens_and_consume_browser_flow(
             Some(RpcId::Num(1)),
-            &store,
             &runtime,
             &auth_binding,
             &PersistedTokens::api_key("sk-new"),
-            BrowserFlowConsume {
-                authority: &rejecting,
-                state: &old_state,
+            OwnedBrowserFlowConsume {
+                authority: rejecting,
+                state: old_state.clone(),
                 provider: meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
-                redirect_uri,
+                redirect_uri: redirect_uri.to_string(),
             },
         )
         .await

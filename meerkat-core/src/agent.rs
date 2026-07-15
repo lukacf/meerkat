@@ -915,6 +915,20 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
     ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
         self.inner.completion_enrichment()
     }
+
+    fn bind_mcp_server_lifecycle_handle(
+        &self,
+        handle: Arc<dyn crate::handles::McpServerLifecycleHandle>,
+    ) {
+        self.inner.bind_mcp_server_lifecycle_handle(handle);
+    }
+
+    fn bind_external_tool_surface_handle(
+        &self,
+        handle: Arc<dyn crate::handles::ExternalToolSurfaceHandle>,
+    ) {
+        self.inner.bind_external_tool_surface_handle(handle);
+    }
 }
 
 /// Trait for session stores

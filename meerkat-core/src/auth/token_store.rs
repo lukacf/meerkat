@@ -11,6 +11,8 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use std::sync::Arc;
+
 use crate::connection::{AuthBindingRef, BindingId, IdentityError, ProfileId, RealmId};
 
 /// Key for a persisted token bundle: realm + binding + optional auth profile override.
@@ -388,9 +390,22 @@ pub enum CredentialMutationError {
     LockFailed(String),
 }
 
+/// Typed durable result of one exclusive credential mutation.
+///
+/// Refresh and credential replacement publish the exact persisted token bytes;
+/// logout/profile deletion publish the absence of durable credentials. Keeping
+/// both outcomes in the coordinator contract lets every mutation share the
+/// same per-key cross-process transaction without inventing sentinel tokens or
+/// a second locking seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialMutationOutcome {
+    Persisted(PersistedTokens),
+    Cleared,
+}
+
 /// Boxed non-coalescing credential mutation closure.
 pub type CredentialMutationFn = Box<
-    dyn FnOnce() -> BoxFuture<'static, Result<PersistedTokens, CredentialMutationError>>
+    dyn FnOnce() -> BoxFuture<'static, Result<CredentialMutationOutcome, CredentialMutationError>>
         + Send
         + 'static,
 >;
@@ -408,7 +423,7 @@ pub trait RefreshCoordinator: Send + Sync {
         &self,
         key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError>;
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError>;
 
     async fn with_refresh(
         &self,
@@ -422,5 +437,41 @@ pub trait RefreshCoordinator: Send + Sync {
         refresh_fn: RefreshFn,
     ) -> Result<PersistedTokens, RefreshError> {
         self.with_refresh(key, refresh_fn).await
+    }
+}
+
+/// Complete provider-auth persistence capability.
+///
+/// Rotating provider credentials are only safe when their vault and mutation
+/// authority agree. Keeping the [`TokenStore`] and [`RefreshCoordinator`] in
+/// one value makes that pairing an invariant of provider-resolution and
+/// factory composition instead of a convention reconstructed by each caller.
+/// Native persisted backends construct this value from one backend decision;
+/// ephemeral hosts and tests must pair their process-local store and
+/// coordinator explicitly through [`Self::new`].
+#[derive(Clone)]
+pub struct ProviderAuthPersistence {
+    token_store: Arc<dyn TokenStore>,
+    refresh_coordinator: Arc<dyn RefreshCoordinator>,
+}
+
+impl ProviderAuthPersistence {
+    /// Pair one token vault with the authority that serializes its mutations.
+    pub fn new(
+        token_store: Arc<dyn TokenStore>,
+        refresh_coordinator: Arc<dyn RefreshCoordinator>,
+    ) -> Self {
+        Self {
+            token_store,
+            refresh_coordinator,
+        }
+    }
+
+    pub fn token_store(&self) -> Arc<dyn TokenStore> {
+        Arc::clone(&self.token_store)
+    }
+
+    pub fn refresh_coordinator(&self) -> Arc<dyn RefreshCoordinator> {
+        Arc::clone(&self.refresh_coordinator)
     }
 }

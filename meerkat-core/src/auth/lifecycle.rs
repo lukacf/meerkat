@@ -15,6 +15,10 @@ use std::{
 };
 
 use super::status::AuthStatusPhase;
+#[cfg(not(target_arch = "wasm32"))]
+use super::token_store::{
+    CredentialMutationError, CredentialMutationOutcome, ProviderAuthPersistence,
+};
 use super::token_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
 };
@@ -313,6 +317,71 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
     Ok(())
 }
 
+/// Clear one persisted credential inside the backend-derived mutation
+/// authority shared with refresh and login.
+///
+/// The complete lifecycle stage, durable clear, and any rollback remain inside
+/// the coordinator transaction. A concurrent refresh can therefore run either
+/// before this operation or after it observes the cleared store, but can never
+/// commit stale bytes after a successful logout/profile deletion.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn clear_tokens_and_publish_lifecycle_released_coordinated(
+    persistence: ProviderAuthPersistence,
+    handle: GeneratedAuthLeaseHandle,
+    auth_binding: AuthBindingRef,
+) -> Result<(), CredentialMutationError> {
+    let key = TokenKey::from_auth_binding(&auth_binding);
+    let store = persistence.token_store();
+    let refresh_coordinator = persistence.refresh_coordinator();
+    let outcome = refresh_coordinator
+        .with_exclusive_mutation(
+            key,
+            Box::new(move || {
+                Box::pin(async move {
+                    let lease_key = LeaseKey::from_auth_binding(&auth_binding);
+                    let _guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
+                    rehydrate_durable_predecessor_for_mutation(
+                        store.as_ref(),
+                        &handle,
+                        &auth_binding,
+                        Utc::now(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        CredentialMutationError::AuthLifecycle(error.to_string())
+                    })?;
+                    clear_tokens_and_publish_lifecycle_released(
+                        store.as_ref(),
+                        &handle,
+                        &auth_binding,
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        TokenLifecycleClearError::TokenStoreClear(error) => {
+                            CredentialMutationError::TokenStore(error.to_string())
+                        }
+                        TokenLifecycleClearError::AuthMachineRelease(error) => {
+                            CredentialMutationError::AuthLifecycle(error.to_string())
+                        }
+                        TokenLifecycleClearError::StagedReleaseRestore { clear, restore } => {
+                            CredentialMutationError::AuthLifecycle(format!(
+                                "TokenStore clear failed ({clear}); staged lifecycle rollback failed ({restore})"
+                            ))
+                        }
+                    })?;
+                    Ok(CredentialMutationOutcome::Cleared)
+                })
+            }),
+        )
+        .await?;
+    match outcome {
+        CredentialMutationOutcome::Cleared => Ok(()),
+        CredentialMutationOutcome::Persisted(_) => Err(CredentialMutationError::Operation(
+            "credential clear transaction returned persisted-token outcome".to_string(),
+        )),
+    }
+}
+
 /// Restore an AuthMachine lease projection from a previously captured
 /// snapshot.
 ///
@@ -433,6 +502,58 @@ pub async fn rehydrate_marked_tokens_for_status(
             .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
     }
     Ok(restored)
+}
+
+/// Align the process-local AuthMachine projection with the exact durable
+/// predecessor loaded inside an exclusive credential-mutation transaction.
+///
+/// A different process may have refreshed credential A into B before this
+/// process acquires the coordinator lock. Login/profile replacement must
+/// capture rollback state from B's durable lifecycle marker, not from the
+/// caller's stale pre-lock projection of A. Missing, structurally malformed,
+/// or invalidly-marked bytes are dead credentials: they release any stale
+/// local lease before the explicit replacement/clear mutation proceeds. This
+/// recovery is intentionally mutation-only; read/status paths continue to
+/// surface malformed durable storage as a fault.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn rehydrate_durable_predecessor_for_mutation(
+    token_store: &dyn TokenStore,
+    auth_lease: &GeneratedAuthLeaseHandle,
+    auth_binding: &AuthBindingRef,
+    now: DateTime<Utc>,
+) -> Result<Option<PersistedTokens>, AuthStatusRehydrateError> {
+    let key = TokenKey::from_auth_binding(auth_binding);
+    let tokens = match token_store.load(&key).await {
+        Ok(tokens) => tokens,
+        Err(TokenStoreError::Serde(_)) => None,
+        Err(error) => return Err(AuthStatusRehydrateError::TokenStore(error)),
+    };
+    let lease_key = LeaseKey::from_auth_binding(auth_binding);
+    let restored = match tokens.as_ref() {
+        Some(tokens) => restore_marked_token_lifecycle(auth_lease, auth_binding, tokens)?,
+        None => None,
+    };
+    if restored.is_some() {
+        auth_lease
+            .observe_credential_freshness(
+                &lease_key,
+                now.timestamp().max(0) as u64,
+                crate::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS,
+            )
+            .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
+    } else {
+        let snapshot = auth_lease.snapshot(&lease_key);
+        if snapshot.credential_present
+            && snapshot
+                .phase
+                .is_some_and(|phase| phase != AuthLeasePhase::Released)
+        {
+            auth_lease
+                .release_lease(&lease_key)
+                .map_err(AuthStatusRehydrateError::LifecycleRestore)?;
+        }
+    }
+    Ok(tokens)
 }
 
 pub fn project_published_auth_status<'a>(

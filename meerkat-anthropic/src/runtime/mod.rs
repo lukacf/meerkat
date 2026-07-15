@@ -22,10 +22,8 @@ use meerkat_core::{AuthLease, AuthMetadata, Provider};
 use meerkat_auth_core::resolver::interactive_login_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    ManagedStoreLifecycle, OAuthLoginCredentialAdmission,
-    begin_managed_store_oauth_refresh_lifecycle, load_managed_store_tokens_with_lifecycle,
-    managed_store_oauth_refresh_failure_coordinator, mark_managed_store_oauth_refresh_failed,
-    publish_managed_store_tokens_lifecycle_and_save, resolve_oauth_login_credential_disposition,
+    ManagedStoreLifecycle, OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
+    prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
@@ -86,23 +84,6 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
 
     fn label(&self) -> &'static str {
         "claude-ai-oauth"
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-fn anthropic_oauth_refresh_failure_observation(
-    error: &oauth::AnthropicOAuthError,
-) -> meerkat_auth_core::RefreshFailureObservation {
-    match error {
-        oauth::AnthropicOAuthError::InteractiveLoginRequired
-        | oauth::AnthropicOAuthError::MissingRefreshToken => {
-            meerkat_auth_core::RefreshFailureObservation::local_credential_unusable()
-        }
-        oauth::AnthropicOAuthError::Refresh(error) => error.observation(),
-        oauth::AnthropicOAuthError::OAuth(error) => {
-            meerkat_auth_core::auth_oauth::oauth_refresh_observation(error)
-        }
-        _ => meerkat_auth_core::RefreshFailureObservation::transient(),
     }
 }
 
@@ -369,39 +350,34 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                             )? {
                                 OAuthLoginCredentialAdmission::UseCached => persisted,
                                 OAuthLoginCredentialAdmission::BeginRefresh => {
-                                    let refresh_started =
-                                        begin_managed_store_oauth_refresh_lifecycle(
-                                            env,
-                                            binding,
-                                            &mut managed,
-                                        )?;
-                                    let coord = env.refresh_coord.clone().unwrap_or_else(|| {
-                                        Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
-                                    });
-                                    let coord = managed_store_oauth_refresh_failure_coordinator(
-                                        coord,
-                                        env.clone(),
-                                        binding.clone(),
-                                        refresh_started,
-                                    );
+                                    managed.release_prelock_lifecycle_guard();
+                                    let persistence = env
+                                        .provider_auth_persistence()
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                        ProviderAuthError::SourceResolutionFailed(
+                                            "managed_store OAuth requires provider-auth persistence authority"
+                                                .into(),
+                                        )
+                                    })?;
                                     let endpoints =
                                         oauth::claude_ai_endpoints(oauth::MANUAL_REDIRECT_URL);
                                     let runtime = oauth::AnthropicOAuthRuntime::new(
-                                        managed.store.clone(),
-                                        coord,
+                                        persistence,
                                         endpoints,
                                         managed.key.clone(),
                                     );
-                                    let commit_env = env.clone();
-                                    let commit_binding = binding.clone();
-                                    let commit: oauth::TokenCommitFn =
-                                        Box::new(move |tokens| {
+                                    let prepare_env = env.clone();
+                                    let prepare_binding = binding.clone();
+                                    let prepare: oauth::TokenPrepareFn =
+                                        Box::new(move |locked_baseline, mode| {
                                             Box::pin(async move {
-                                                publish_managed_store_tokens_lifecycle_and_save(
-                                                    &commit_env,
-                                                    &commit_binding,
-                                                    &managed,
-                                                    &tokens,
+                                                prepare_managed_store_oauth_refresh_under_lock(
+                                                    &prepare_env,
+                                                    &prepare_binding,
+                                                    managed,
+                                                    locked_baseline,
+                                                    mode,
                                                 )
                                                 .await
                                                 .map_err(|e| {
@@ -411,23 +387,15 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                                 })
                                             })
                                         });
-                                    let refreshed = runtime
-                                        .refresh_tokens_with_commit(commit, env.force_refresh)
-                                        .await;
-                                    refreshed.map_err(|e| {
-                                        let observation =
-                                            anthropic_oauth_refresh_failure_observation(&e);
-                                        let failure = mark_managed_store_oauth_refresh_failed(
-                                            env,
-                                            binding,
-                                            refresh_started,
-                                            observation,
+                                    runtime
+                                        .refresh_tokens_with_locked_preparation(
+                                            prepare,
+                                            env.force_refresh,
                                         )
-                                        .err()
-                                        .map(|err| format!("; {err}"))
-                                        .unwrap_or_default();
-                                        anthropic_oauth_refresh_error(e, failure)
-                                    })?
+                                        .await
+                                        .map_err(|error| {
+                                            anthropic_oauth_refresh_error(error, String::new())
+                                        })?
                                 }
                             }
                         }

@@ -21,8 +21,8 @@ use crate::auth_oauth::{
     oauth_refresh_observation,
 };
 use crate::auth_store::{
-    CredentialMutationError, EphemeralTokenStore, InMemoryCoordinator, PersistedAuthMode,
-    PersistedTokens, RefreshCoordinator, RefreshError, TokenKey, TokenStore,
+    CredentialMutationError, CredentialMutationOutcome, PersistedAuthMode, PersistedTokens,
+    ProviderAuthPersistence, RefreshCoordinator, RefreshError, TokenKey, TokenStore,
 };
 use meerkat_core::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
@@ -198,7 +198,8 @@ pub enum McpOAuthError {
 #[derive(Clone)]
 pub struct McpOAuthAuthority {
     http: Client,
-    token_store: Arc<dyn TokenStore>,
+    /// Token vault plus same-key refresh serialization authority.
+    provider_auth_persistence: ProviderAuthPersistence,
     browser: Arc<dyn BrowserOpener>,
     login_timeout: Duration,
     /// Generated `AuthMachine` lease handle that owns the credential
@@ -207,91 +208,59 @@ pub struct McpOAuthAuthority {
     /// below `meerkat-runtime` in the dep graph and cannot mint a certified
     /// handle itself.
     auth_lease: GeneratedAuthLeaseHandle,
-    /// Owns same-key refresh serialization. General construction requires this
-    /// authority explicitly; only the concrete ephemeral constructors install
-    /// process-local coordination on the caller's behalf.
-    refresh_coordinator: Arc<dyn RefreshCoordinator>,
 }
 
 impl McpOAuthAuthority {
     pub fn new(
-        token_store: Arc<dyn TokenStore>,
+        provider_auth_persistence: ProviderAuthPersistence,
         browser: Arc<dyn BrowserOpener>,
         auth_lease: GeneratedAuthLeaseHandle,
-        refresh_coordinator: Arc<dyn RefreshCoordinator>,
     ) -> Self {
         Self {
             http: Client::new(),
-            token_store,
+            provider_auth_persistence,
             browser,
             login_timeout: MCP_INTERACTIVE_LOGIN_TIMEOUT,
             auth_lease,
-            refresh_coordinator,
         }
     }
 
-    /// Construct an explicitly ephemeral authority with process-local refresh
-    /// coordination. Persisted stores cannot reach this constructor because the
-    /// concrete [`EphemeralTokenStore`] type is part of the signature.
-    pub fn new_ephemeral(
-        token_store: Arc<EphemeralTokenStore>,
-        browser: Arc<dyn BrowserOpener>,
-        auth_lease: GeneratedAuthLeaseHandle,
-    ) -> Self {
-        Self::new(
-            token_store,
-            browser,
-            auth_lease,
-            Arc::new(InMemoryCoordinator::new()),
-        )
-    }
-
-    pub fn with_http_and_refresh_coordinator(
-        token_store: Arc<dyn TokenStore>,
+    pub fn with_http(
+        provider_auth_persistence: ProviderAuthPersistence,
         browser: Arc<dyn BrowserOpener>,
         http: Client,
         auth_lease: GeneratedAuthLeaseHandle,
-        refresh_coordinator: Arc<dyn RefreshCoordinator>,
     ) -> Self {
         Self {
             http,
-            token_store,
+            provider_auth_persistence,
             browser,
             login_timeout: MCP_INTERACTIVE_LOGIN_TIMEOUT,
             auth_lease,
-            refresh_coordinator,
         }
     }
 
-    /// HTTP-injected counterpart to [`Self::new_ephemeral`].
-    pub fn with_http_ephemeral(
-        token_store: Arc<EphemeralTokenStore>,
+    #[cfg(test)]
+    fn with_test_http(
+        token_store: Arc<crate::auth_store::EphemeralTokenStore>,
         browser: Arc<dyn BrowserOpener>,
         http: Client,
         auth_lease: GeneratedAuthLeaseHandle,
     ) -> Self {
-        Self::with_http_and_refresh_coordinator(
-            token_store,
+        Self::with_http(
+            ProviderAuthPersistence::new(
+                token_store,
+                Arc::new(crate::auth_store::InMemoryCoordinator::new()),
+            ),
             browser,
             http,
             auth_lease,
-            Arc::new(InMemoryCoordinator::new()),
         )
-    }
-
-    #[cfg(test)]
-    fn with_http(
-        token_store: Arc<EphemeralTokenStore>,
-        browser: Arc<dyn BrowserOpener>,
-        http: Client,
-        auth_lease: GeneratedAuthLeaseHandle,
-    ) -> Self {
-        Self::with_http_ephemeral(token_store, browser, http, auth_lease)
     }
 
     #[cfg(test)]
     fn with_http_and_login_timeout(
-        token_store: Arc<EphemeralTokenStore>,
+        token_store: Arc<crate::auth_store::EphemeralTokenStore>,
         browser: Arc<dyn BrowserOpener>,
         http: Client,
         login_timeout: Duration,
@@ -299,12 +268,22 @@ impl McpOAuthAuthority {
     ) -> Self {
         Self {
             http,
-            token_store,
+            provider_auth_persistence: ProviderAuthPersistence::new(
+                token_store,
+                Arc::new(crate::auth_store::InMemoryCoordinator::new()),
+            ),
             browser,
             login_timeout,
             auth_lease,
-            refresh_coordinator: Arc::new(InMemoryCoordinator::new()),
         }
+    }
+
+    fn token_store(&self) -> Arc<dyn TokenStore> {
+        self.provider_auth_persistence.token_store()
+    }
+
+    fn refresh_coordinator(&self) -> Arc<dyn RefreshCoordinator> {
+        self.provider_auth_persistence.refresh_coordinator()
     }
 
     pub async fn stored_bearer_token(
@@ -329,7 +308,7 @@ impl McpOAuthAuthority {
                 let error_target = refresh_target.clone();
                 let refresh_key = key.clone();
                 let refreshed = self
-                    .refresh_coordinator
+                    .refresh_coordinator()
                     .with_refresh(
                         key,
                         Box::new(move || {
@@ -424,7 +403,7 @@ impl McpOAuthAuthority {
         let commit_target = target.clone();
         let commit_key = key.clone();
         let committed = self
-            .refresh_coordinator
+            .refresh_coordinator()
             .with_exclusive_mutation(
                 key,
                 Box::new(move || {
@@ -436,11 +415,18 @@ impl McpOAuthAuthority {
                                 &persisted,
                             )
                             .await
+                            .map(CredentialMutationOutcome::Persisted)
                     })
                 }),
             )
             .await
             .map_err(|error| map_coordinated_login_error(target, error))?;
+        let CredentialMutationOutcome::Persisted(committed) = committed else {
+            return Err(McpOAuthError::AuthLifecycle {
+                server_name: target.server_name().to_string(),
+                reason: "interactive MCP OAuth login unexpectedly cleared credentials".to_string(),
+            });
+        };
         committed
             .primary_secret
             .ok_or_else(|| McpOAuthError::AuthLifecycle {
@@ -464,7 +450,7 @@ impl McpOAuthAuthority {
             .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
         let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
         let mut previous_tokens = self
-            .token_store
+            .token_store()
             .load(key)
             .await
             .map_err(|error| CredentialMutationError::TokenStore(error.to_string()))?;
@@ -482,7 +468,7 @@ impl McpOAuthAuthority {
                 .auth_binding_ref()
                 .map_err(|error| CredentialMutationError::Operation(error.to_string()))?;
             previous_tokens = meerkat_core::rehydrate_marked_tokens_for_status(
-                self.token_store.as_ref(),
+                self.token_store().as_ref(),
                 &self.auth_lease,
                 &auth_binding,
                 PersistedAuthMode::McpOauth,
@@ -515,7 +501,7 @@ impl McpOAuthAuthority {
                 )));
             }
         };
-        if let Err(error) = self.token_store.save(key, &published).await {
+        if let Err(error) = self.token_store().save(key, &published).await {
             let rollback_errors = self
                 .rollback_login_publication(
                     key,
@@ -609,12 +595,12 @@ impl McpOAuthAuthority {
                         }
                     }
                 }
-                if let Err(error) = self.token_store.save(key, &restored_tokens).await {
+                if let Err(error) = self.token_store().save(key, &restored_tokens).await {
                     rollback_errors.push(format!("TokenStore rollback save failed: {error}"));
                 }
             }
             None => {
-                if let Err(error) = self.token_store.clear(key).await {
+                if let Err(error) = self.token_store().clear(key).await {
                     rollback_errors.push(format!("TokenStore rollback clear failed: {error}"));
                 }
             }
@@ -631,7 +617,7 @@ impl McpOAuthAuthority {
         key: &TokenKey,
     ) -> Result<Option<AdmittedMcpCredential>, McpOAuthError> {
         let Some(mut tokens) = self
-            .token_store
+            .token_store()
             .load(key)
             .await
             .map_err(|error| McpOAuthError::TokenStore(error.to_string()))?
@@ -681,7 +667,7 @@ impl McpOAuthAuthority {
             );
         if restore_from_durable_marker {
             tokens = meerkat_core::rehydrate_marked_tokens_for_status(
-                self.token_store.as_ref(),
+                self.token_store().as_ref(),
                 &self.auth_lease,
                 &auth_binding,
                 PersistedAuthMode::McpOauth,
@@ -872,7 +858,7 @@ impl McpOAuthAuthority {
             persisted.refresh_token = Some(refresh_token);
         }
 
-        let current_tokens = match self.token_store.load(key).await {
+        let current_tokens = match self.token_store().load(key).await {
             Ok(tokens) => tokens,
             Err(error) => {
                 let observation = meerkat_core::RefreshFailureObservation::transient();
@@ -936,7 +922,7 @@ impl McpOAuthAuthority {
                     .await);
             }
         };
-        if let Err(error) = self.token_store.save(key, &published).await {
+        if let Err(error) = self.token_store().save(key, &published).await {
             return Err(self
                 .rollback_refresh_publication(
                     key,
@@ -964,7 +950,7 @@ impl McpOAuthAuthority {
             // clear, a new authority observes no credential and cannot restore
             // the permanently rejected marker. The coordinator-owned task then
             // closes the in-memory Refreshing phase without a cancellation gap.
-            if let Err(error) = self.token_store.clear(key).await {
+            if let Err(error) = self.token_store().clear(key).await {
                 let closure = self
                     .auth_lease
                     .refresh_failed(lease_key, observation.clone())
@@ -1030,7 +1016,7 @@ impl McpOAuthAuthority {
             Ok(None) => {}
             Err(error) => rollback_errors.push(format!("AuthMachine restore failed: {error}")),
         }
-        if let Err(error) = self.token_store.save(key, &restored_tokens).await {
+        if let Err(error) = self.token_store().save(key, &restored_tokens).await {
             rollback_errors.push(format!("TokenStore restore failed: {error}"));
         }
         let suffix = if rollback_errors.is_empty() {
@@ -1555,7 +1541,7 @@ struct AdmittedMcpCredential {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::EphemeralTokenStore;
+    use crate::{EphemeralTokenStore, InMemoryCoordinator};
     use axum::extract::{Query, State};
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::{IntoResponse, Redirect};
@@ -1977,8 +1963,12 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
         let auth_lease = test_auth_lease();
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), auth_lease.clone());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            auth_lease.clone(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
@@ -2008,8 +1998,12 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
@@ -2051,12 +2045,11 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let auth_lease = test_auth_lease();
-        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            store.clone(),
+        let authority = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             auth_lease.clone(),
-            Arc::new(InMemoryCoordinator::new()),
         );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
@@ -2088,7 +2081,7 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let auth_lease = test_auth_lease();
-        let authority = McpOAuthAuthority::with_http_ephemeral(
+        let authority = McpOAuthAuthority::with_test_http(
             store.clone(),
             recording_browser(Arc::clone(&state)),
             Client::new(),
@@ -2112,7 +2105,7 @@ mod tests {
             &target.token_key().unwrap()
         ));
         let restored_auth_lease = test_auth_lease();
-        let restored_authority = McpOAuthAuthority::with_http(
+        let restored_authority = McpOAuthAuthority::with_test_http(
             store.clone(),
             recording_browser(Arc::clone(&state)),
             Client::new(),
@@ -2138,7 +2131,7 @@ mod tests {
     async fn concurrent_expired_reads_share_one_refresh_transaction() {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
-        let authority = McpOAuthAuthority::with_http_ephemeral(
+        let authority = McpOAuthAuthority::with_test_http(
             store.clone(),
             recording_browser(Arc::clone(&state)),
             Client::new(),
@@ -2187,12 +2180,14 @@ mod tests {
         let store: Arc<dyn TokenStore> =
             Arc::new(FileTokenStore::new(temp.path().join("credentials")));
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
-        let seed = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            Arc::clone(&store),
+        let seed = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(
+                Arc::clone(&store),
+                Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+            ),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             test_auth_lease(),
-            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
         );
         seed.interactive_login(&target, None).await.unwrap();
         republish_stored_tokens(&seed, store.as_ref(), &target, |tokens| {
@@ -2202,12 +2197,14 @@ mod tests {
         .await;
 
         state.pause_refresh.store(true, Ordering::SeqCst);
-        let refresh = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            Arc::clone(&store),
+        let refresh = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(
+                Arc::clone(&store),
+                Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+            ),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             test_auth_lease(),
-            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
         );
         let refresh_target = target.clone();
         let refresh_task =
@@ -2215,12 +2212,14 @@ mod tests {
         state.refresh_started.notified().await;
 
         let login_lease = test_auth_lease();
-        let login = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            Arc::clone(&store),
+        let login = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(
+                Arc::clone(&store),
+                Arc::new(FileLockCoordinator::new(lock_dir)),
+            ),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             login_lease.clone(),
-            Arc::new(FileLockCoordinator::new(lock_dir)),
         );
         let login_target = target.clone();
         let mut login_task =
@@ -2264,12 +2263,14 @@ mod tests {
         let durable_store: Arc<dyn TokenStore> =
             Arc::new(FileTokenStore::new(temp.path().join("credentials")));
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
-        let seed = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            Arc::clone(&durable_store),
+        let seed = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(
+                Arc::clone(&durable_store),
+                Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+            ),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             test_auth_lease(),
-            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
         );
         seed.interactive_login(&target, None).await.unwrap();
         republish_stored_tokens(&seed, durable_store.as_ref(), &target, |tokens| {
@@ -2279,12 +2280,14 @@ mod tests {
         .await;
 
         state.pause_refresh.store(true, Ordering::SeqCst);
-        let refresh = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            Arc::clone(&durable_store),
+        let refresh = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(
+                Arc::clone(&durable_store),
+                Arc::new(FileLockCoordinator::new(lock_dir.clone())),
+            ),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             test_auth_lease(),
-            Arc::new(FileLockCoordinator::new(lock_dir.clone())),
         );
         let refresh_target = target.clone();
         let refresh_task =
@@ -2296,12 +2299,14 @@ mod tests {
             fail_next_save: AtomicBool::new(true),
         });
         let login_lease = test_auth_lease();
-        let login = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            failing_store,
+        let login = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(
+                failing_store,
+                Arc::new(FileLockCoordinator::new(lock_dir)),
+            ),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             login_lease.clone(),
-            Arc::new(FileLockCoordinator::new(lock_dir)),
         );
         let login_target = target.clone();
         let mut login_task =
@@ -2350,12 +2355,11 @@ mod tests {
             fail_next_save: AtomicBool::new(false),
         });
         let auth_lease = test_auth_lease();
-        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            store.clone(),
+        let authority = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             auth_lease.clone(),
-            Arc::new(InMemoryCoordinator::new()),
         );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
         authority.interactive_login(&target, None).await.unwrap();
@@ -2395,12 +2399,11 @@ mod tests {
             inner: Arc::clone(&inner),
             fail_next_save: AtomicBool::new(false),
         });
-        let seed_authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            store.clone(),
+        let seed_authority = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             test_auth_lease(),
-            Arc::new(InMemoryCoordinator::new()),
         );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
         seed_authority
@@ -2414,12 +2417,11 @@ mod tests {
             })
             .await;
         let auth_lease = test_auth_lease();
-        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            store.clone(),
+        let authority = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             auth_lease.clone(),
-            Arc::new(InMemoryCoordinator::new()),
         );
         store.fail_next_save.store(true, Ordering::SeqCst);
 
@@ -2537,8 +2539,12 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
         let token = authority
             .interactive_login(
@@ -2604,8 +2610,12 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let token = authority
@@ -2631,8 +2641,12 @@ mod tests {
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
         let auth_lease = test_auth_lease();
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), auth_lease.clone());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            auth_lease.clone(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         authority
@@ -2677,7 +2691,7 @@ mod tests {
             );
             token_requests.len()
         };
-        let restarted = McpOAuthAuthority::with_http(
+        let restarted = McpOAuthAuthority::with_test_http(
             store.clone(),
             recording_browser(Arc::clone(&state)),
             Client::new(),
@@ -2705,12 +2719,11 @@ mod tests {
             inner: Arc::clone(&inner),
         });
         let auth_lease = test_auth_lease();
-        let authority = McpOAuthAuthority::with_http_and_refresh_coordinator(
-            store.clone(),
+        let authority = McpOAuthAuthority::with_http(
+            ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
             recording_browser(Arc::clone(&state)),
             Client::new(),
             auth_lease.clone(),
-            Arc::new(InMemoryCoordinator::new()),
         );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
         authority.interactive_login(&target, None).await.unwrap();
@@ -2745,7 +2758,7 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let auth_lease = test_auth_lease();
-        let authority = McpOAuthAuthority::with_http(
+        let authority = McpOAuthAuthority::with_test_http(
             store.clone(),
             recording_browser(state),
             Client::new(),
@@ -2792,7 +2805,7 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let auth_lease = test_auth_lease();
-        let authority = McpOAuthAuthority::with_http(
+        let authority = McpOAuthAuthority::with_test_http(
             store.clone(),
             recording_browser(Arc::clone(&state)),
             Client::new(),
@@ -2823,8 +2836,12 @@ mod tests {
         let (base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let original = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
         let other = McpServerIdentity::from_server_config("glean", format!("{base}/other-mcp"));
 
@@ -2856,8 +2873,12 @@ mod tests {
         *state.include_registration_endpoint.lock() = false;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -2882,8 +2903,12 @@ mod tests {
         *state.omit_token_endpoint_auth_method.lock() = true;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -2908,8 +2933,12 @@ mod tests {
         *state.resource_override.lock() = Some(format!("{base}/other-mcp"));
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -2934,8 +2963,12 @@ mod tests {
         *state.resource_override.lock() = Some("/mcp".to_string());
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -2955,8 +2988,12 @@ mod tests {
         let (_base, state) = spawn_oauth_fixture().await;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", "http://mcp.example.test/mcp");
 
         let result = authority.interactive_login(&target, None).await;
@@ -2981,8 +3018,12 @@ mod tests {
         *state.issuer_override.lock() = Some("https://issuer.example.invalid".to_string());
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -3007,8 +3048,12 @@ mod tests {
         *state.issuer_override.lock() = Some(format!("{base}/"));
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -3054,8 +3099,12 @@ mod tests {
         *state.token_fails.lock() = true;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -3070,8 +3119,12 @@ mod tests {
         *state.authorize_outcome.lock() = AuthorizeOutcome::StateMismatch;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;
@@ -3086,8 +3139,12 @@ mod tests {
         *state.authorize_outcome.lock() = AuthorizeOutcome::Denied;
         let store = Arc::new(EphemeralTokenStore::new());
         let browser = recording_browser(Arc::clone(&state));
-        let authority =
-            McpOAuthAuthority::with_http(store.clone(), browser, Client::new(), test_auth_lease());
+        let authority = McpOAuthAuthority::with_test_http(
+            store.clone(),
+            browser,
+            Client::new(),
+            test_auth_lease(),
+        );
         let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"));
 
         let result = authority.interactive_login(&target, None).await;

@@ -5,7 +5,6 @@ use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides, ToolsCon
 use crate::hooks::HookEngine;
 use crate::model_defaults::ModelOperationalDefaultsResolver;
 use crate::ops::ConcurrencyLimits;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
 #[cfg(test)]
@@ -562,28 +561,14 @@ impl AgentBuilder {
             // opts in. The canonical composition seam (facade/runtime) always
             // hands core an explicit prompt or none, so it never reaches here;
             // standalone core construction stays unprompted unless asked.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                session
-                    .set_system_prompt_with_source(
-                        SystemPromptConfig::new().compose().await,
-                        crate::session_durable_config_authority::SessionSystemPromptSource::DefaultBuild,
-                    )
-                    .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
-                        message: err.to_string(),
-                    })?;
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                session
-                    .set_system_prompt_with_source(
-                        String::new(),
-                        crate::session_durable_config_authority::SessionSystemPromptSource::WasmDefaultBuild,
-                    )
-                    .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
-                        message: err.to_string(),
-                    })?;
-            }
+            session
+                .set_system_prompt_with_source(
+                    SystemPromptConfig::new().compose().await,
+                    crate::session_durable_config_authority::SessionSystemPromptSource::DefaultBuild,
+                )
+                .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
+                    message: err.to_string(),
+                })?;
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
@@ -1799,8 +1784,7 @@ mod tests {
     }
 
     /// Dogma gate (#308): a caller without an upstream composition seam can opt
-    /// in to default-prompt composition explicitly. On non-wasm the composed
-    /// default is a non-empty prompt; on wasm it is the empty wasm default.
+    /// in to target-neutral default-prompt composition explicitly.
     #[tokio::test]
     async fn standalone_builder_composes_default_prompt_when_policy_opts_in() {
         let client = Arc::new(MockClient);
@@ -1815,15 +1799,9 @@ mod tests {
         let messages = agent.session().messages();
         match messages.first() {
             Some(Message::System(sys)) => {
-                #[cfg(not(target_arch = "wasm32"))]
                 assert!(
                     !sys.content.is_empty(),
                     "ComposeDefault must compose a non-empty default system prompt"
-                );
-                #[cfg(target_arch = "wasm32")]
-                assert!(
-                    sys.content.is_empty(),
-                    "wasm ComposeDefault uses the empty wasm default prompt"
                 );
             }
             other => panic!("ComposeDefault should inject a System message, got: {other:?}"),

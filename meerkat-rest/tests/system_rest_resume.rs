@@ -133,7 +133,10 @@ async fn inner_test_rest_resume_metadata() {
         mob_state,
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_auth_persistence: meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        ),
         auth_lease: runtime_adapter.generated_auth_lease_handle(),
         provider_registry,
     };
@@ -284,7 +287,10 @@ async fn inner_test_rest_resume_metadata() {
         mob_state: mob_state2,
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_auth_persistence: meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        ),
         auth_lease: runtime_adapter2.generated_auth_lease_handle(),
         provider_registry: provider_registry2,
     };

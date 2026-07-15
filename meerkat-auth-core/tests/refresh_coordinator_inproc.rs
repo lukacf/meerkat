@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use meerkat_auth_core::auth_store::{
-    CredentialMutationError, InMemoryCoordinator, PersistedTokens, RefreshCoordinator,
-    RefreshError, TokenKey,
+    CredentialMutationError, CredentialMutationOutcome, InMemoryCoordinator, PersistedTokens,
+    RefreshCoordinator, RefreshError, TokenKey,
 };
 
 fn fresh_tokens() -> PersistedTokens {
@@ -187,9 +187,9 @@ async fn exclusive_mutations_serialize_without_coalescing() {
                             max_in_flight.fetch_max(active, Ordering::SeqCst);
                             tokio::time::sleep(Duration::from_millis(20)).await;
                             in_flight.fetch_sub(1, Ordering::SeqCst);
-                            Ok::<_, CredentialMutationError>(PersistedTokens::api_key(format!(
-                                "mutation-{index}"
-                            )))
+                            Ok::<_, CredentialMutationError>(CredentialMutationOutcome::Persisted(
+                                PersistedTokens::api_key(format!("mutation-{index}")),
+                            ))
                         }
                         .boxed()
                     }),

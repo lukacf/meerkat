@@ -19,7 +19,7 @@ use meerkat_core::{
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{
     EnsureRuntimeExecutorAttachment, MeerkatMachine, PendingRuntimeExecutorAttachment,
-    RuntimeDriverError, RuntimeExecutorAttachmentWitness,
+    PreparedSessionMaterialization, RuntimeDriverError, RuntimeExecutorAttachmentWitness,
 };
 use tokio::sync::mpsc;
 
@@ -392,6 +392,51 @@ where
     Ok(result)
 }
 
+/// Materialize the exact service actor without choosing a surface executor.
+///
+/// This is the narrow seam for callers such as realtime-open that must make a
+/// deferred session live before their owning surface selects and installs its
+/// executor. If an exact executor attachment already exists, only its missing
+/// actor is reconstructed. Otherwise the successful actor is committed as
+/// unattached so a later surface-specific attachment can consume it without
+/// inheriting a generic executor.
+pub async fn materialize_session_actor_unattached_with_reserved_admission<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    session: Session,
+    request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
+    if let Some(witness) = adapter
+        .current_executor_attachment_witness(session.id())
+        .await
+    {
+        return materialize_attached_session_actor_only_with_admission_and_boundary_mode(
+            service,
+            adapter,
+            witness,
+            session,
+            request,
+            reserved_admission,
+            false,
+        )
+        .await;
+    }
+
+    let (result, mut prepared) = materialize_unique_session_actor_transaction_with_admission(
+        service,
+        adapter,
+        session,
+        request,
+        reserved_admission,
+    )
+    .await?;
+    prepared.commit_actor_unattached().await?;
+    Ok(result)
+}
+
 /// Reserved-admission actor reconstruction for a runtime executor that already
 /// owns the service's stable, non-reentrant turn-finalization boundary.
 ///
@@ -455,19 +500,41 @@ where
         + Send
         + 'static,
 {
-    materialize_unique_session_attachment_transaction_with_admission(
+    let (result, mut prepared) = materialize_unique_session_actor_transaction_with_admission(
         service,
         adapter,
         session,
         request,
         reserved_admission,
-        executor_factory,
     )
-    .await
+    .await?;
+
+    let executor_session_id = result.session_id.clone();
+    let attachment = match prepared
+        .ensure_executor_attachment(move |witness| executor_factory(executor_session_id, witness))
+        .await
+    {
+        Ok(EnsureRuntimeExecutorAttachment::Pending(pending)) => pending,
+        Ok(EnsureRuntimeExecutorAttachment::Existing(witness)) => {
+            rollback_prepared_runtime_registration(&mut prepared, false).await;
+            return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(
+                RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "unique session materialization unexpectedly found committed attachment {witness:?}"
+                    ),
+                },
+            ));
+        }
+        Err(error) => {
+            rollback_prepared_runtime_registration(&mut prepared, false).await;
+            return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+        }
+    };
+
+    Ok((result, attachment))
 }
 
-async fn materialize_unique_session_attachment_transaction_with_admission<
-    F,
+async fn materialize_unique_session_actor_transaction_with_admission<
     B: SessionAgentBuilder + 'static,
 >(
     service: &Arc<PersistentSessionService<B>>,
@@ -475,13 +542,7 @@ async fn materialize_unique_session_attachment_transaction_with_admission<
     session: Session,
     mut request: CreateSessionRequest,
     reserved_admission: crate::RuntimeContextAdmissionGuard,
-    executor_factory: F,
-) -> Result<(RunResult, PendingRuntimeExecutorAttachment), SurfaceRuntimeMaterializeError>
-where
-    F: FnOnce(SessionId, RuntimeExecutorAttachmentWitness) -> Box<dyn CoreExecutor>
-        + Send
-        + 'static,
-{
+) -> Result<(RunResult, PreparedSessionMaterialization), SurfaceRuntimeMaterializeError> {
     let prepared_session_id = session.id().clone();
     let mut prepared = match adapter
         .prepare_session_materialization(prepared_session_id.clone())
@@ -563,29 +624,7 @@ where
         return Err(error);
     }
 
-    let executor_session_id = result.session_id.clone();
-    let attachment = match prepared
-        .ensure_executor_attachment(move |witness| executor_factory(executor_session_id, witness))
-        .await
-    {
-        Ok(EnsureRuntimeExecutorAttachment::Pending(pending)) => pending,
-        Ok(EnsureRuntimeExecutorAttachment::Existing(witness)) => {
-            rollback_prepared_runtime_registration(&mut prepared, false).await;
-            return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(
-                RuntimeDriverError::ValidationFailed {
-                    reason: format!(
-                        "unique session materialization unexpectedly found committed attachment {witness:?}"
-                    ),
-                },
-            ));
-        }
-        Err(error) => {
-            rollback_prepared_runtime_registration(&mut prepared, false).await;
-            return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
-        }
-    };
-
-    Ok((result, attachment))
+    Ok((result, prepared))
 }
 
 async fn materialize_attached_session_actor_only_with_admission_and_boundary_mode<
@@ -1402,6 +1441,10 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                 self.adapter.session_control_authority(),
             )
             .await
+            .or_else(|error| match error {
+                SessionError::NotRunning { .. } => Ok(()),
+                error => Err(error),
+            })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 
@@ -2663,7 +2706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_runtime_executor_cancel_after_boundary_surfaces_no_active_run() {
+    async fn persistent_runtime_executor_cancel_after_boundary_noops_without_active_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
         let result = Box::pin(materialize_session(
@@ -2688,9 +2731,7 @@ mod tests {
         executor
             .cancel_after_boundary("test boundary cancel".to_string())
             .await
-            .expect_err(
-                "boundary cancel without an active run must surface the session running-state error",
-            );
+            .expect("boundary cancel without an active run is an executor-local no-op");
 
         expect_unregister_completion(&adapter, &result.session_id).await;
     }

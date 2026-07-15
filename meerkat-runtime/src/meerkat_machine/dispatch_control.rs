@@ -314,10 +314,16 @@ impl MeerkatMachine {
                 .await
                 .map_err(RuntimeControlPlaneError::Internal)?;
 
-                // A sampled actor Boolean is not admission authority. Direct
-                // ingest resolves from generated machine state, then attempts
-                // exact post-admission boundary preparation when applicable.
-                let active_turn_boundary_available = false;
+                // Boundary availability selects the generated live-staging
+                // plan. Exact attachment/run authority is revalidated by the
+                // post-admission commit before any context is published.
+                let active_turn_boundary_available =
+                    Self::active_turn_boundary_candidate_available(
+                        &driver,
+                        boundary_handle.is_some(),
+                        attachment_id.is_some(),
+                    )
+                    .await;
 
                 let (
                     outcome,

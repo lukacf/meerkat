@@ -14,9 +14,12 @@ use meerkat_core::InheritedToolVisibilityAuthority;
 use meerkat_core::PeerMeta;
 use meerkat_core::RealmId;
 use meerkat_core::Session;
+use meerkat_core::SessionLlmIdentity;
 use meerkat_core::SessionToolVisibilityState;
 use meerkat_core::ToolCategoryOverride;
-use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext};
+use meerkat_core::service::{
+    CreateSessionRequest, DeferredPromptPolicy, MobToolAuthorityContext, ResumeOverrideMask,
+};
 use meerkat_core::session::SessionMetadata;
 use meerkat_core::types::SessionId;
 use std::sync::Arc;
@@ -410,18 +413,23 @@ fn apply_resumed_session_metadata(
     // `resume_overrides` (typed mask, set from the profile in
     // `build_agent_config`). A masked field keeps the freshly-built profile
     // value so a definition edit applies to resumed durable sessions.
-    let mask = config.resume_override_mask;
-    if !mask.model {
-        config.model = metadata.model.clone();
-    }
+    let effective_identity = effective_resumed_session_llm_identity(
+        SessionLlmIdentity {
+            model: config.model.clone(),
+            provider: config.provider.unwrap_or(metadata.provider),
+            self_hosted_server_id: config.self_hosted_server_id.clone(),
+            provider_params: config.provider_params.clone(),
+            auth_binding: config.auth_binding.clone(),
+        },
+        metadata,
+        config.resume_override_mask,
+    );
+    config.model = effective_identity.model;
+    config.provider = Some(effective_identity.provider);
+    config.self_hosted_server_id = effective_identity.self_hosted_server_id;
+    config.provider_params = effective_identity.provider_params;
+    config.auth_binding = effective_identity.auth_binding;
     config.max_tokens = Some(metadata.max_tokens);
-    if !mask.provider {
-        config.provider = Some(metadata.provider);
-        config.self_hosted_server_id = metadata.self_hosted_server_id.clone();
-    }
-    if !mask.provider_params {
-        config.provider_params = metadata.provider_params.clone();
-    }
     config.override_builtins = metadata.tooling.builtins;
     config.override_shell = metadata.tooling.shell;
     config.override_memory = metadata.tooling.memory;
@@ -444,6 +452,36 @@ fn apply_resumed_session_metadata(
         config.peer_meta = Some(stamp_standard_mob_member_labels(peer_meta, &binding));
     }
     Ok(())
+}
+
+/// Resolve the exact LLM identity a mob resume will hand to AgentFactory.
+///
+/// The portable profile is the candidate; durable metadata wins for every
+/// unmasked field. An explicit current binding keeps precedence, while an
+/// omitted binding restores the durable configured binding. Both the actual
+/// resumed build and member-host Tier-2 preflight use this one pure seam.
+pub(crate) fn effective_resumed_session_llm_identity(
+    mut candidate: SessionLlmIdentity,
+    metadata: &SessionMetadata,
+    mask: ResumeOverrideMask,
+) -> SessionLlmIdentity {
+    if !mask.model {
+        candidate.model = metadata.model.clone();
+    }
+    if !mask.provider {
+        candidate.provider = metadata.provider;
+        candidate.self_hosted_server_id = metadata.self_hosted_server_id.clone();
+    }
+    if !mask.provider_params {
+        candidate.provider_params = metadata.provider_params.clone();
+    }
+    if !mask.auth_binding && candidate.auth_binding.is_none() {
+        candidate.auth_binding = metadata
+            .auth_binding
+            .clone()
+            .filter(|binding| !binding.is_env_default());
+    }
+    candidate
 }
 
 pub(crate) fn resumed_comms_name_matches_current_or_legacy(current: &str, stored: &str) -> bool {
@@ -2606,6 +2644,12 @@ mod tests {
         config.resume_override_mask.model = true;
         config.resume_override_mask.provider = true;
 
+        let durable_auth_binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("durable").unwrap(),
+            binding: meerkat_core::BindingId::parse("durable_primary").unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
         let metadata = SessionMetadata {
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
             model: "gpt-5.4".to_string(),
@@ -2622,7 +2666,7 @@ mod tests {
             instance_id: None,
             backend: None,
             config_generation: None,
-            auth_binding: None,
+            auth_binding: Some(durable_auth_binding.clone()),
             mob_member_binding: None,
         };
 
@@ -2642,6 +2686,11 @@ mod tests {
             Some(stale_params),
             "unmasked provider_params restore durable truth"
         );
+        assert_eq!(
+            config.auth_binding.as_ref(),
+            Some(&durable_auth_binding),
+            "an omitted current binding restores the durable configured binding"
+        );
 
         // Without the mask, durable metadata wins (existing behavior pinned).
         let mut config = AgentBuildConfig::new("claude-opus-4-8");
@@ -2649,6 +2698,22 @@ mod tests {
         apply_resumed_session_metadata(&mut config, &metadata).expect("metadata applies");
         assert_eq!(config.model, "gpt-5.4");
         assert_eq!(config.provider, Some(meerkat_core::Provider::OpenAI));
+
+        let explicit_auth_binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("updated").unwrap(),
+            binding: meerkat_core::BindingId::parse("openai_primary").unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let mut explicit = AgentBuildConfig::new("gpt-5.4");
+        explicit.comms_name = Some("mob.m/lead/lead-1".to_string());
+        explicit.auth_binding = Some(explicit_auth_binding.clone());
+        apply_resumed_session_metadata(&mut explicit, &metadata).expect("metadata applies");
+        assert_eq!(
+            explicit.auth_binding.as_ref(),
+            Some(&explicit_auth_binding),
+            "an explicit current binding keeps precedence over durable metadata"
+        );
     }
 
     #[test]

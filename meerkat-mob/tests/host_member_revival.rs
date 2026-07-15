@@ -138,6 +138,30 @@ async fn restart_revives_member_from_stored_spec_with_zero_bridge_traffic() {
             .unwrap_or(false)
     })
     .await;
+    // Session-service liveness precedes acceptor identity registration during
+    // boot revival. An authenticated HostStatus round-trip is the serving
+    // barrier: the host responder starts only after revived member identities
+    // have been registered. This explicit probe occurs after the zero-traffic
+    // assertion above, so autonomous boot remains traffic-free.
+    probe.trust(fixture.host_peer_descriptor()).await;
+    let status = probe
+        .send_bridge_command_raw(
+            &fixture.host_peer_descriptor(),
+            &raw_host_status_command(&probe, "mob-t12", 1),
+            REPLY_TIMEOUT,
+        )
+        .await
+        .expect("host serves status after boot revival");
+    let BridgeReply::HostStatus(status) = status else {
+        panic!("expected HostStatus serving barrier after boot revival")
+    };
+    assert!(
+        status
+            .members
+            .iter()
+            .any(|member| member.agent_identity == "b2" && member.healthy),
+        "serving barrier must report the revived member healthy: {status:?}",
+    );
     let member_descriptor = member_descriptor_from_ack("mob-t12/b2", &ack);
     probe.trust(member_descriptor.clone()).await;
     let receipt = probe

@@ -823,6 +823,17 @@ pub fn supervisor_authority_deletion_authority_for_record(
                 "generated supervisor test deletion recovery rejected record: {error}"
             ))
         })?;
+    mob_dsl::MobMachineMutator::apply(
+        &mut authority,
+        mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce {
+            intent: mob_dsl::PlacedCompletionLifecycleIntentKind::Destroy,
+        },
+    )
+    .map_err(|error| {
+        MobStoreError::Internal(format!(
+            "generated supervisor test deletion quiesce rejected record: {error}"
+        ))
+    })?;
     mob_dsl::MobMachineMutator::apply(&mut authority, mob_dsl::MobMachineInput::Destroy).map_err(
         |error| {
             MobStoreError::Internal(format!(

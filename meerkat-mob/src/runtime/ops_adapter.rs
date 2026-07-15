@@ -88,6 +88,15 @@ pub(crate) struct MobOpsAdapter {
     member_bindings: Arc<Mutex<HashMap<MemberOpsKey, MemberOpsBinding>>>,
 }
 
+/// Exact adapter-local witness for one session operation-registry binding.
+/// Used only when explicit resume has already proved that the corresponding
+/// runtime attachment cannot be reused and must not clear a later binding.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionOpsBindingWitness {
+    binding_id: uuid::Uuid,
+}
+
 /// Exact, cancellation-safe claim over one session member operation while it
 /// is still Provisioning (or an exact Running replay). Drop aborts only the
 /// operation/binding incarnation carrying this claim.
@@ -230,6 +239,55 @@ impl MobOpsAdapter {
                 exact_operation_id: None,
             },
         );
+        Ok(())
+    }
+
+    pub(crate) fn capture_session_binding_witness(
+        &self,
+        child_session_id: &SessionId,
+    ) -> Option<SessionOpsBindingWitness> {
+        self.member_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&MemberOpsKey::Session(child_session_id.clone()))
+            .map(|binding| SessionOpsBindingWitness {
+                binding_id: binding.binding_id,
+            })
+    }
+
+    /// Compare-and-remove only the binding observed before exact attachment
+    /// retirement. A replacement binding is never cleared, and an armed
+    /// provision claim fails closed rather than being detached underneath its
+    /// owner.
+    pub(crate) fn clear_session_binding_for_explicit_resume(
+        &self,
+        child_session_id: &SessionId,
+        expected: Option<SessionOpsBindingWitness>,
+    ) -> Result<(), MobError> {
+        let member_key = MemberOpsKey::Session(child_session_id.clone());
+        let mut bindings = self
+            .member_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = bindings.get(&member_key) else {
+            return Ok(());
+        };
+        let Some(expected) = expected else {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' appeared during explicit-resume retirement"
+            )));
+        };
+        if current.binding_id != expected.binding_id {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' changed during explicit-resume retirement"
+            )));
+        }
+        if current.provision_claim.is_some() {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' still has an exact provision claim during explicit resume"
+            )));
+        }
+        bindings.remove(&member_key);
         Ok(())
     }
 
@@ -2505,6 +2563,48 @@ mod tests {
             .expect("original binding remains usable");
         assert!(first.snapshot(&operation_id).unwrap().is_some());
         assert!(replacement.snapshot(&operation_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn explicit_resume_ops_cleanup_cannot_remove_replacement_binding() {
+        let adapter = MobOpsAdapter::new();
+        let session_id = SessionId::new();
+        let owner_session_id = SessionId::new();
+        adapter
+            .bind_session_registry(
+                session_id.clone(),
+                owner_session_id.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("bind old registry incarnation");
+        let old = adapter
+            .capture_session_binding_witness(&session_id)
+            .expect("capture old binding witness");
+        adapter
+            .clear_session_binding_for_explicit_resume(&session_id, Some(old))
+            .expect("clear exact old binding");
+
+        adapter
+            .bind_session_registry(
+                session_id.clone(),
+                owner_session_id,
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("bind replacement registry incarnation");
+        let replacement = adapter
+            .capture_session_binding_witness(&session_id)
+            .expect("capture replacement binding witness");
+        assert_ne!(replacement, old);
+
+        let error = adapter
+            .clear_session_binding_for_explicit_resume(&session_id, Some(old))
+            .expect_err("stale explicit-resume cleanup must not clear replacement binding");
+        assert!(error.to_string().contains("changed during explicit-resume"));
+        assert_eq!(
+            adapter.capture_session_binding_witness(&session_id),
+            Some(replacement),
+            "replacement binding remains installed"
+        );
     }
 
     #[tokio::test]

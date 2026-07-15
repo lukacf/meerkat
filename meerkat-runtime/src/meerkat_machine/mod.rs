@@ -1592,6 +1592,83 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
     epoch_id: meerkat_core::RuntimeEpochId,
 }
 
+/// Opaque identity for one exact runtime-session registration.
+///
+/// Unlike [`RuntimeExecutorAttachmentWitness`], this witness deliberately
+/// carries no executor identity. It exists for machine-owned cleanup of a
+/// terminal registration that never published an attachment (for example, a
+/// registration materialized only to recover its durable ops lifecycle).
+/// Callers may clone and compare the witness, but only this machine can use it
+/// to admit exact compare-and-remove teardown. Durable epoch identity alone is
+/// not exact because an epoch may survive an in-process entry rebuild; the
+/// private weak mutation-gate identity distinguishes those incarnations.
+#[derive(Clone)]
+pub struct RuntimeSessionRegistrationWitness {
+    machine: std::sync::Weak<MeerkatMachineShared>,
+    session_id: SessionId,
+    epoch_id: meerkat_core::RuntimeEpochId,
+    registration_gate: std::sync::Weak<Mutex<()>>,
+}
+
+impl RuntimeSessionRegistrationWitness {
+    fn new(
+        machine: std::sync::Weak<MeerkatMachineShared>,
+        session_id: SessionId,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        registration_gate: std::sync::Weak<Mutex<()>>,
+    ) -> Self {
+        Self {
+            machine,
+            session_id,
+            epoch_id,
+            registration_gate,
+        }
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn epoch_id(&self) -> &meerkat_core::RuntimeEpochId {
+        &self.epoch_id
+    }
+
+    fn belongs_to(&self, machine: &MeerkatMachine) -> bool {
+        std::ptr::eq(self.machine.as_ptr(), Arc::as_ptr(&machine.shared))
+    }
+
+    fn matches_entry(&self, entry: &RuntimeSessionEntry) -> bool {
+        self.registration_gate
+            .upgrade()
+            .is_some_and(|gate| Arc::ptr_eq(&gate, &entry.mutation_gate))
+    }
+
+    fn registration_gate(&self) -> Option<Arc<Mutex<()>>> {
+        self.registration_gate.upgrade()
+    }
+}
+
+impl std::fmt::Debug for RuntimeSessionRegistrationWitness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeSessionRegistrationWitness")
+            .field("session_id", &self.session_id)
+            .field("epoch_id", &self.epoch_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimeSessionRegistrationWitness {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.epoch_id == other.epoch_id
+            && std::sync::Weak::ptr_eq(&self.machine, &other.machine)
+            && std::sync::Weak::ptr_eq(&self.registration_gate, &other.registration_gate)
+    }
+}
+
+impl Eq for RuntimeSessionRegistrationWitness {}
+
 /// Opaque identity for one exact runtime-executor attachment.
 ///
 /// The machine mints this witness before constructing the executor so
@@ -3973,6 +4050,53 @@ impl MeerkatMachine {
     }
 
     #[cfg(test)]
+    pub(crate) fn arm_runtime_loop_before_queue_authority_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_runtime_loop_before_queue_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "runtime-loop queue-authority test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn run_runtime_loop_before_queue_authority_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_runtime_loop_before_queue_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+    }
+
+    #[cfg(test)]
     fn arm_control_command_after_logical_lookup_test_hook(
         &self,
         kind: ControlCommandLookupTestKind,
@@ -4362,7 +4486,7 @@ impl MeerkatMachine {
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         member_authority: Option<RuntimeEffectDispatchMemberAuthority>,
         pending_dispatch: PendingBoundaryCancelDispatchGuard,
-        expected_run_id: &RunId,
+        expected_run_id: Option<&RunId>,
         projected_effect: crate::effect::ProjectedRuntimeEffect,
         dispatch_generation: u64,
         dispatch_lifecycle_phase: dsl::MeerkatPhase,
@@ -4371,7 +4495,7 @@ impl MeerkatMachine {
         let cleanup_spawner = MachineCleanupTaskSpawner::acquire()?;
         let machine = self.clone();
         let session_id = session_id.clone();
-        let expected_run_id = expected_run_id.clone();
+        let expected_run_id = expected_run_id.cloned();
         let context = context.to_string();
         let completion = cleanup_spawner.spawn(async move {
             machine
@@ -4382,7 +4506,7 @@ impl MeerkatMachine {
                     boundary_handle,
                     member_authority,
                     pending_dispatch,
-                    &expected_run_id,
+                    expected_run_id.as_ref(),
                     projected_effect,
                     dispatch_generation,
                     dispatch_lifecycle_phase,
@@ -4408,7 +4532,7 @@ impl MeerkatMachine {
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         member_authority: Option<RuntimeEffectDispatchMemberAuthority>,
         mut pending_dispatch: PendingBoundaryCancelDispatchGuard,
-        expected_run_id: &RunId,
+        expected_run_id: Option<&RunId>,
         projected_effect: crate::effect::ProjectedRuntimeEffect,
         dispatch_generation: u64,
         dispatch_lifecycle_phase: dsl::MeerkatPhase,
@@ -4568,7 +4692,7 @@ impl MeerkatMachine {
                         cancel_plan.boundary_handle,
                         None,
                         cancel_plan.pending_dispatch,
-                        &cancel_plan.expected_run_id,
+                        Some(&cancel_plan.expected_run_id),
                         cancel_plan.projected_effect,
                         cancel_plan.dispatch_generation,
                         cancel_plan.dispatch_lifecycle_phase,
@@ -4596,12 +4720,16 @@ impl MeerkatMachine {
     async fn dispatch_cancel_after_boundary_live_handle(
         &self,
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
-        expected_run_id: &RunId,
+        expected_run_id: Option<&RunId>,
         projected_effect: &crate::effect::ProjectedRuntimeEffect,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
         let reason = projected_effect.reason().to_string();
-        if let Some(boundary_handle) = boundary_handle {
+        // The cloneable live handle is exact-run authority. Attached runtimes
+        // legitimately have no run yet; their generated CancelAfterBoundary
+        // dispatch still goes through the in-loop executor effect below, but
+        // must not fabricate an ID for this live callback.
+        if let (Some(boundary_handle), Some(expected_run_id)) = (boundary_handle, expected_run_id) {
             boundary_handle
                 .cancel_after_boundary(expected_run_id, reason)
                 .await
@@ -4640,7 +4768,7 @@ impl MeerkatMachine {
         authority: &Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
         dispatch_generation: u64,
         dispatch_lifecycle_phase: &dsl::MeerkatPhase,
-        expected_run_id: &RunId,
+        expected_run_id: Option<&RunId>,
     ) -> BoundaryCancelDispatchState {
         let authority = authority
             .lock()
@@ -4652,9 +4780,9 @@ impl MeerkatMachine {
         if !state.boundary_cancel_dispatch_pending {
             return BoundaryCancelDispatchState::ConsumedConverged;
         }
-        let expected_dsl_run_id = dsl::RunId::from_domain(expected_run_id);
+        let expected_dsl_run_id = expected_run_id.map(dsl::RunId::from_domain);
         if state.lifecycle_phase == *dispatch_lifecycle_phase
-            && state.current_run_id.as_ref() == Some(&expected_dsl_run_id)
+            && state.current_run_id.as_ref() == expected_dsl_run_id.as_ref()
         {
             BoundaryCancelDispatchState::Current
         } else {
@@ -5326,6 +5454,17 @@ pub struct MeerkatMachineShared {
     /// of retaining or fabricating that consumed guard.
     #[cfg(test)]
     test_fail_post_stop_unregister_after_fence: StdMutex<Option<SessionId>>,
+    /// One-shot deterministic gate after the runtime loop's first ready-effect
+    /// drain but before it acquires queue authority. Tests publish an executor
+    /// effect in this exact gap and prove the consumed wake is retained.
+    #[cfg(test)]
+    test_runtime_loop_before_queue_authority: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// One-shot deterministic gate after a logical control command resolves
     /// its SessionId but before it acquires the current entry's mutation gate.
     /// Tests replace A with B in this window to prove the command captures no
@@ -6252,6 +6391,8 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
                 #[cfg(test)]
+                test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
             }),
         }
@@ -6308,6 +6449,8 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
                 #[cfg(test)]
+                test_runtime_loop_before_queue_authority: StdMutex::new(None),
+                #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
             }),
         }
@@ -6363,6 +6506,8 @@ impl MeerkatMachine {
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
+                #[cfg(test)]
+                test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
             }),

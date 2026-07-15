@@ -292,6 +292,9 @@ pub enum ProviderPresenceProbeError {
     /// resolution with a faulted backend fails closed.
     #[error("provider presence probe credential backend unavailable: {detail}")]
     CredentialBackend { detail: String },
+    /// The exact materialization identity could not be formed for probing.
+    #[error("materialization preflight input is invalid: {detail}")]
+    PreflightInput { detail: String },
 }
 
 /// Presence-level provider resolvability probe (gotcha 13: presence only —
@@ -6449,10 +6452,11 @@ impl MobHostActor {
             {
                 Ok(observations) => observations,
                 Err(error) => {
+                    tracing::warn!(detail = %error, "materialize preflight observation failed locally");
                     self.send_failure(
                         candidate,
                         BridgeRejectionCause::Internal,
-                        format!("materialize preflight probe failed: {error}"),
+                        "materialize preflight probe failed; inspect host logs",
                         Some(reply_address.as_str()),
                     )
                     .await;
@@ -6577,6 +6581,7 @@ impl MobHostActor {
                     // runtime. Keep the rejection sender alive, but make the
                     // restart boundary sticky before replying.
                     let requires_fail_stop = error.requires_actor_fail_stop();
+                    tracing::warn!(detail = %error, "member materialization failed locally");
                     let (cause, reason) = error.wire_cause();
                     if requires_fail_stop {
                         self.durable_uncertainty_fail_stop = Some(reason.clone());
@@ -7023,6 +7028,7 @@ impl MobHostActor {
                 }
                 Err(error) => {
                     self.unrevived.insert((mob_id.clone(), identity.clone()));
+                    tracing::warn!(detail = %error, "materialize replay ensure failed locally");
                     let (cause, reason) = error.wire_cause();
                     self.send_failure(
                         candidate,

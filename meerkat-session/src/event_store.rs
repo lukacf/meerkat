@@ -1824,6 +1824,25 @@ mod tests {
             Ok(0)
         }
 
+        async fn record_projection_halt(
+            &self,
+            _session_id: &SessionId,
+            _reason: &str,
+        ) -> Result<(), EventStoreError> {
+            Err(EventStoreError::Store(
+                "LegacyEventStore does not support durable projection-halt markers".to_string(),
+            ))
+        }
+
+        async fn projection_halt(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<EventProjectionHaltMarker>, EventStoreError> {
+            Err(EventStoreError::Store(
+                "LegacyEventStore does not support durable projection-halt markers".to_string(),
+            ))
+        }
+
         async fn read_from(
             &self,
             _session_id: &SessionId,

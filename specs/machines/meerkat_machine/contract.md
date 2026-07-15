@@ -309,7 +309,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
-- `BeginUnregisterUnservedAttachment`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `UnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `ReconfigureSessionLlmIdentity`(previous_identity: SessionLlmIdentity, previous_visibility_state: SessionToolVisibilityState, previous_capability_surface: Option<SessionLlmCapabilitySurface>, previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus, previous_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, target_identity: SessionLlmIdentity, target_capability_surface: SessionLlmCapabilitySurface, next_visibility_state: SessionToolVisibilityState, next_capability_base_filter: ToolFilter, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, session_id: SessionId)
@@ -322,7 +321,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Retire`(session_id: SessionId)
 - `Reset`
 - `StopRuntimeExecutor`(reason: String)
-- `RecoverRuntimeCompletionResultCorrelation`(run_id: RunId)
 - `Destroy`(session_id: SessionId)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
@@ -366,6 +364,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Runtime-Internal Inputs
 - `PrepareTerminalSupervisorCleanupBindings`(session_id: SessionId)
 - `BeginUnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
+- `BeginUnregisterUnservedAttachment`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `RuntimeLoopStoppedForUnregister`(session_id: SessionId, forced_abort: Bool)
 - `CommsDrainExitedForUnregister`(session_id: SessionId, forced_abort: Bool)
 - `CompletionWaitersResolvedForUnregister`(session_id: SessionId)
@@ -397,6 +396,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `GrantMobOperatorManageMob`(mob_id: String)
 - `SetMobOperatorSpawnProfilesInMob`(mob_id: String, profiles: Set<String>)
 - `RuntimeExecutorExited`
+- `RecoverRuntimeCompletionResultCorrelation`(run_id: RunId)
 - `ResolveRuntimeCompletionResult`(run_id: Option<RunId>, terminal: RuntimeCompletionTerminalObservation, finalization: RuntimeCompletionFinalizationObservation)
 - `ResolveRuntimeCompletionCleanup`(session_id: SessionId, observation_session_id: SessionId, observation_agent_runtime_id: Option<AgentRuntimeId>, observation_fence_token: Option<FenceToken>, observation_runtime_generation: Option<Generation>, observation_runtime_epoch_id: Option<RuntimeEpochId>, outcome: RuntimeCompletionObservedOutcome, archived_by_authority: Bool, live_session: RuntimeCompletionLiveSessionObservation)
 - `ResolveRuntimeCompletionWaitFailure`(session_id: SessionId, failure: RuntimeCompletionWaitFailureObservation)

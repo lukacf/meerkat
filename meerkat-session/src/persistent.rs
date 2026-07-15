@@ -4508,7 +4508,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     pub async fn discard_live_session(&self, id: &SessionId) -> Result<(), SessionError> {
-        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        // Public discard must serialize with exact same-session
+        // materialization. The old surface-wide turn boundary is deliberately
+        // gone, but the recovery gate remains the narrow ownership fence that
+        // prevents stale cleanup from removing a replacement actor.
         self.discard_live_session_under_runtime_turn_boundary(id)
             .await
     }
@@ -9775,48 +9778,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_discard_waits_for_stable_turn_finalization_boundary() {
-        let service = Arc::new(PersistentSessionService::new(
-            DummyBuilder,
-            4,
-            Arc::new(MemoryStore::new()),
-            Arc::new(InMemoryRuntimeStore::new()),
-            memory_blob_store(),
-        ));
-        let session_id = SessionId::new();
-        let held_boundary = service
-            .acquire_runtime_turn_finalization_guard(&session_id)
-            .await;
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let service_for_discard = Arc::clone(&service);
-        let discard_session_id = session_id.clone();
-        let mut discard = tokio::spawn(async move {
-            let _ = started_tx.send(());
-            service_for_discard
-                .discard_live_session(&discard_session_id)
-                .await
-        });
-        started_rx.await.expect("discard task should start");
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), &mut discard)
-                .await
-                .is_err(),
-            "public discard must not cross an in-flight runtime turn boundary"
-        );
-
-        drop(held_boundary);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), discard)
-            .await
-            .expect("discard should finish after the boundary is released")
-            .expect("discard task should not panic");
-        assert!(matches!(
-            result,
-            Ok(()) | Err(SessionError::NotFound { .. })
-        ));
-    }
-
-    #[tokio::test]
     async fn idle_turn_finalization_gate_keys_are_reaped_without_splitting_overlap() {
         let service = PersistentSessionService::new(
             DummyBuilder,
@@ -10443,7 +10404,11 @@ mod tests {
                     if self.last_seq(session_id).await.unwrap() >= target_seq {
                         return;
                     }
-                    self.notify.notified().await;
+                    // `notify_waiters` does not retain a permit when an append
+                    // lands between the sequence check and waiter
+                    // registration. Polling keeps this test helper immune to
+                    // that lost-wakeup window.
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             })
             .await
@@ -12417,10 +12382,11 @@ mod tests {
             let system_context_state = session.system_context_state().unwrap_or_default();
             Ok(DummyAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),
-                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                system_context_state: test_system_context_state_handle(system_context_state),
                 run_failure: None,
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
+                execution_snapshot: None,
             })
         }
     }
@@ -24474,6 +24440,10 @@ mod tests {
             Some(meerkat_runtime::RuntimeState::Retired),
             "stored-only runtime authority must be durably retired"
         );
+        assert!(
+            !after_restart.contains_session(&id).await,
+            "archive must exact-remove the in-memory registration it reconstructed solely to retire stored authority"
+        );
         let archived = store
             .load(&id)
             .await
@@ -25692,6 +25662,7 @@ mod tests {
     #[tokio::test]
     async fn test_event_store_projection_records_persistent_session_events() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let event_store = Arc::new(RecordingEventStore::default());
         let event_store_trait: Arc<dyn EventStore> = event_store.clone();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -25699,7 +25670,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Arc::new(InMemoryRuntimeStore::new()),
+            runtime_store.clone(),
             memory_blob_store(),
         )
         .with_event_projection(
@@ -25716,7 +25687,7 @@ mod tests {
             .expect("create session");
         let session_id = run.session_id;
 
-        service
+        let output = service
             .apply_runtime_context_appends(
                 &session_id,
                 RunId::new(),
@@ -25734,6 +25705,22 @@ mod tests {
             )
             .await
             .expect("apply context append");
+        let committed_snapshot = output
+            .session_snapshot
+            .expect("context apply should carry a machine commit snapshot");
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id),
+                meerkat_runtime::SessionDelta {
+                    session_snapshot: committed_snapshot.clone(),
+                },
+            )
+            .await
+            .expect("commit context apply snapshot");
+        service
+            .checkpoint_committed_runtime_session_snapshot(&session_id, &committed_snapshot)
+            .await
+            .expect("post-commit checkpoint should publish context lifecycle events");
 
         event_store.wait_for_seq(&session_id, 2).await;
         assert_eq!(event_store.last_seq(&session_id).await.unwrap(), 2);

@@ -1070,6 +1070,21 @@ pub enum BuildAgentError {
     KeepAliveRequiresCommsName,
 }
 
+/// Authoritative, side-effect-free-with-respect-to-session-state LLM
+/// preflight used by remote materializers before they create a session.
+///
+/// Credential resolution may refresh its normal host-local credential lease,
+/// exactly as the subsequent factory build would, but this seam never writes
+/// session, runtime, or mob state.  The two variants preserve which typed
+/// materialization rejection the caller must publish.
+#[derive(Debug, thiserror::Error)]
+pub enum LlmIdentityPreflightError {
+    #[error("model/provider identity is not registered on this host: {detail}")]
+    ModelUnresolvable { detail: String },
+    #[error("provider binding or client is not resolvable on this host: {detail}")]
+    BindingUnresolvable { detail: String },
+}
+
 #[cfg(feature = "comms")]
 impl From<meerkat_comms::CommsRuntimeError> for BuildAgentError {
     fn from(error: meerkat_comms::CommsRuntimeError) -> Self {
@@ -3261,6 +3276,154 @@ impl AgentFactory {
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
         self.build_llm_client_for_identity_with_auth_lease(config, identity, None)
             .await
+    }
+
+    /// Validate one exact model/provider/binding tuple through the same model
+    /// registry and provider-runtime resolver used by [`Self::build_agent`].
+    ///
+    /// Remote materialization uses this before any session side effect.  A
+    /// provider hint does not make an arbitrary model id constructible: the
+    /// model must exist in the host registry after the request's digest-bound
+    /// custom models are merged.  Credential commands, external resolvers,
+    /// managed tokens, platform resolvers, and ordinary env bindings then run
+    /// through the factory's canonical provider-runtime path rather than a
+    /// parallel presence heuristic.
+    pub async fn preflight_llm_identity(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        custom_models: &BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+        preferred_realm: Option<&RealmId>,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+    ) -> Result<(), LlmIdentityPreflightError> {
+        let registry = if custom_models.is_empty() {
+            self.model_registry(config).map_err(|error| {
+                LlmIdentityPreflightError::ModelUnresolvable {
+                    detail: error.to_string(),
+                }
+            })?
+        } else {
+            ModelRegistry::from_config_with_models(
+                config,
+                custom_models,
+                meerkat_models::canonical(),
+            )
+            .map_err(|error| LlmIdentityPreflightError::ModelUnresolvable {
+                detail: error.to_string(),
+            })?
+        };
+        registry
+            .entry_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| LlmIdentityPreflightError::ModelUnresolvable {
+                detail: format!(
+                    "model '{}' is not registered for provider '{}'",
+                    identity.model,
+                    identity.provider.as_str()
+                ),
+            })?;
+
+        if matches!(identity.provider, Provider::SelfHosted) {
+            return self
+                .build_self_hosted_client_for_identity(
+                    config,
+                    &registry,
+                    identity,
+                    auth_lease_handle,
+                    preferred_realm,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+                    detail: error.to_string(),
+                });
+        }
+
+        // Match build_agent's test-only client override exactly: model
+        // registry validation above still runs, while credential material is
+        // intentionally unnecessary in this mode.
+        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
+            return Ok(());
+        }
+
+        #[allow(unused_mut)]
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(store) = self.resolution_token_store().map_err(|error| {
+                LlmIdentityPreflightError::BindingUnresolvable {
+                    detail: error.to_string(),
+                }
+            })? {
+                env = env.with_token_store(store);
+            }
+            if let Some(coordinator) = self.refresh_coord.clone() {
+                env = env.with_refresh_coordinator(coordinator);
+            }
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+
+        let explicit_auth_binding = identity.auth_binding.is_some();
+        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            preferred_realm,
+        )
+        .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+            detail: error.to_string(),
+        })?;
+        let mut first_error = None;
+        for target in candidates {
+            let mut candidate_env = env.clone();
+            if (!target.auth_binding.is_env_default() || explicit_auth_binding)
+                && let Some(handle) = auth_lease_handle.clone()
+            {
+                candidate_env = candidate_env.with_auth_lease_handle(handle);
+            }
+            match self
+                .provider_registry
+                .resolve(&target.realm, &target.auth_binding, &candidate_env)
+                .await
+            {
+                Ok(connection) => {
+                    if connection.provider != identity.provider {
+                        return Err(LlmIdentityPreflightError::BindingUnresolvable {
+                            detail: format!(
+                                "resolved provider '{}' does not match requested provider '{}'",
+                                connection.provider.as_str(),
+                                identity.provider.as_str()
+                            ),
+                        });
+                    }
+                    return self
+                        .provider_registry
+                        .build_client(connection)
+                        .map(|_| ())
+                        .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+                            detail: error.to_string(),
+                        });
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    if explicit_auth_binding {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(LlmIdentityPreflightError::BindingUnresolvable {
+            detail: first_error.map_or_else(
+                || {
+                    format!(
+                        "no auth binding candidates resolved for provider '{}'",
+                        identity.provider.as_str()
+                    )
+                },
+                |error| error.to_string(),
+            ),
+        })
     }
 
     pub async fn build_llm_client_for_identity_with_auth_lease(
@@ -7261,6 +7424,182 @@ mod tests {
 
         assert_eq!(provider, Provider::OpenAI);
         assert_eq!(server_id, None);
+    }
+
+    #[tokio::test]
+    async fn materialize_preflight_rejects_uncatalogued_explicit_provider_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let identity = SessionLlmIdentity {
+            model: "uncatalogued-openai-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let error = factory
+            .preflight_llm_identity(&Config::default(), &identity, &BTreeMap::new(), None, None)
+            .await
+            .expect_err("remote materialization must require a registered model/provider pair");
+
+        assert!(
+            matches!(error, LlmIdentityPreflightError::ModelUnresolvable { .. }),
+            "unknown model should reject before credential resolution: {error}"
+        );
+    }
+
+    #[cfg(all(feature = "openai", unix, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn materialize_preflight_executes_command_credential_through_canonical_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "command_token".to_string(),
+            AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::Command {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".to_string(), "printf sk-preflight-command".to_string()],
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    timeout_ms: 2_000,
+                    refresh_interval_ms: None,
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "command_openai".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "command_token".to_string(),
+                default_model: None,
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        let preferred_realm = meerkat_core::mob_realm_id("preflight").unwrap();
+        config
+            .realm
+            .insert(preferred_realm.as_str().to_string(), section);
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let auth_lease_handle =
+            meerkat_runtime::MeerkatMachine::ephemeral().generated_auth_lease_handle();
+
+        factory
+            .preflight_llm_identity(
+                &config,
+                &identity,
+                &BTreeMap::new(),
+                Some(&preferred_realm),
+                Some(auth_lease_handle),
+            )
+            .await
+            .expect(
+                "command credentials in the member's preferred mob realm are resolved by the canonical factory preflight",
+            );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn materialize_preflight_uses_runtime_auth_lease_for_managed_store() {
+        use meerkat_core::auth::TokenStore as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let token_store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
+        let factory =
+            AgentFactory::new(temp.path().join("sessions")).with_token_store(token_store.clone());
+        let preferred_realm = meerkat_core::mob_realm_id("managed-preflight").unwrap();
+        let auth_binding = AuthBindingRef {
+            realm: preferred_realm.clone(),
+            binding: BindingId::parse("managed_openai").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        let token_key = meerkat_core::auth::TokenKey::from_auth_binding(&auth_binding);
+        token_store
+            .save(
+                &token_key,
+                &meerkat_core::auth::PersistedTokens::api_key("sk-managed-preflight"),
+            )
+            .await
+            .unwrap();
+
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "managed_token".to_string(),
+            AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "managed_openai".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "managed_token".to_string(),
+                default_model: None,
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        let mut config = Config::default();
+        config
+            .realm
+            .insert(preferred_realm.as_str().to_string(), section);
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(auth_binding),
+        };
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+
+        factory
+            .preflight_llm_identity(
+                &config,
+                &identity,
+                &BTreeMap::new(),
+                Some(&preferred_realm),
+                Some(runtime.generated_auth_lease_handle()),
+            )
+            .await
+            .expect(
+                "managed credentials must resolve under the same runtime AuthMachine authority the subsequent SessionOwned build uses",
+            );
     }
 
     #[test]

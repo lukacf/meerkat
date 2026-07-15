@@ -1,6 +1,20 @@
 use super::*;
 
 impl MeerkatMachine {
+    /// Select whether generated admission should attempt exact live-boundary
+    /// staging. The machine-owned current run plus the exact captured
+    /// attachment capabilities are sufficient to select the plan; the
+    /// capability may still report `Unavailable`, and the post-admission
+    /// transaction revalidates attachment, run, and queued input before any
+    /// append is committed.
+    pub(super) async fn active_turn_boundary_candidate_available(
+        driver: &SharedDriver,
+        has_boundary_handle: bool,
+        has_live_attachment: bool,
+    ) -> bool {
+        has_boundary_handle && has_live_attachment && driver.lock().await.current_run_id().is_some()
+    }
+
     async fn commit_failed_accepted_input_terminal(
         &self,
         driver: &SharedDriver,
@@ -203,9 +217,11 @@ impl MeerkatMachine {
     ///
     /// The caller enters with M. Preparation runs without M so the session actor
     /// can park and call back into runtime mechanics. The same exact attachment
-    /// is then revalidated under M before the durable driver/store commit. Only
-    /// typed `Unavailable` leaves the input queued; `Stale` and `Fault` converge
-    /// the exact accepted input to a durable terminal before surfacing failure.
+    /// is then revalidated under M before the durable driver/store commit. If
+    /// no run is active yet, the input remains queued for the outer runtime wake.
+    /// Once an exact run exists, only typed `Unavailable` leaves the input queued;
+    /// `Stale` and `Fault` converge the exact accepted input to a durable terminal
+    /// before surfacing failure.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn commit_live_boundary_input_if_available(
         &self,
@@ -220,24 +236,12 @@ impl MeerkatMachine {
         let live_boundary_plan = {
             let driver = witness.driver.lock().await;
             let Some(run_id) = driver.current_run_id() else {
-                let error = RuntimeDriverError::StaleAuthority {
-                    reason: format!(
-                        "accepted live-boundary input {input_id} lost its active run before preparation"
-                    ),
-                };
-                drop(driver);
-                let error = self
-                    .finish_live_boundary_failure(
-                        session_id,
-                        witness,
-                        completions,
-                        publication_handle,
-                        input_id,
-                        error,
-                        fallback_wake,
-                    )
-                    .await;
-                return Err(error);
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input_id,
+                    "no active run is available for exact live-boundary context; retaining queued fallback"
+                );
+                return Ok((held_mutation_gate, false));
             };
             let Some(projection) = driver.driver_ingress().primitive_projection(input_id) else {
                 let error = RuntimeDriverError::Internal(format!(
@@ -759,11 +763,17 @@ impl MeerkatMachine {
                 self.require_directed_terminal_publication_capability(&session_id, &input)
                     .await?;
 
-                // Admission is machine-state-owned. Whether an actor can be
-                // parked at the next cooperative boundary is determined only
-                // by the exact post-admission preparation transaction; a
-                // sampled executor Boolean is not lifecycle authority.
-                let active_turn_boundary_available = false;
+                // This observation selects the generated live-boundary plan;
+                // it is not authority to publish. The exact post-admission
+                // transaction below revalidates the attachment, run, and
+                // queued input before committing the context append.
+                let active_turn_boundary_available =
+                    Self::active_turn_boundary_candidate_available(
+                        &driver,
+                        boundary_handle.is_some(),
+                        attachment_id.is_some(),
+                    )
+                    .await;
 
                 let (
                     flags,

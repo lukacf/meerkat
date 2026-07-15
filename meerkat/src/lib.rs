@@ -242,9 +242,9 @@ mod model_fallback;
 pub use factory::{
     AgentBuildConfig, AgentFactory, BuildAgentError, CreateSessionModelResolution,
     CreateSessionModelResolutionError, CreateSessionModelResolutionRequest, DynAgent,
-    decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,
-    resolve_create_session_default_model, resolve_create_session_model,
-    resolve_provider_catalog_default_model,
+    LlmIdentityPreflightError, decode_llm_client_override_from_service,
+    encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
+    resolve_create_session_model, resolve_provider_catalog_default_model,
 };
 
 pub mod help;

@@ -972,6 +972,7 @@ meerkat_machine_runtime_internal_inputs!(
         FatalFailure,
         RecoverableFailure,
         RecoverRuntimeAuthority,
+        RecoverRuntimeCompletionResultCorrelation,
         ResolveVisibleRuntimePhase,
     ],
     UserInterruptDispatch => [
@@ -979,6 +980,7 @@ meerkat_machine_runtime_internal_inputs!(
         ResolveUserInterruptPublicResult,
     ],
     SessionUnregisterDrainLifecycle => [
+        BeginUnregisterUnservedAttachment,
         BeginUnregisterSession,
         CommsDrainExitedForUnregister,
         CompletionWaitersResolvedForUnregister,

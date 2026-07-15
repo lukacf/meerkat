@@ -621,6 +621,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .and_then(|meta| meta.turn_tool_overlay.clone()),
                 turn_overrides,
                 pre_admission,
+                crate::session_runtime::LlmReconfigureBoundaryOwnership::AlreadyHeld,
             ),
         )
         .await;
@@ -835,6 +836,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         turn_tool_overlay,
                         turn_overrides,
                         pre_admission,
+                        crate::session_runtime::LlmReconfigureBoundaryOwnership::AlreadyHeld,
                     )
                     .await
                     .map_err(core_executor_error_from_rpc)

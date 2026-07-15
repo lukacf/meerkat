@@ -3171,7 +3171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_runtime_accept_clears_state_for_archived_session() {
+    async fn mcp_runtime_accept_after_out_of_band_archive_requires_resume_without_cleanup() {
         let temp = tempfile::tempdir().expect("tempdir");
         let context = build_test_context(&temp).await;
         let session_id = create_deferred_session_with_generated_authority(&context, "hello").await;
@@ -3181,32 +3181,49 @@ mod tests {
             .expect("MCP runtime executor should attach");
         assert!(context.runtime_adapter.contains_session(&session_id).await);
 
+        // Deliberately bypass the public MCP archive wrapper. Generic input is
+        // not the owner of the corresponding surface cleanup.
         archive_with_test_machine_authority(&context, &session_id)
             .await
             .expect("archive should succeed");
-        let rejected = context
+        let attachment_before_accept = context.current_attachment_witness(&session_id).await;
+        let sidecar_before_accept = context.has_sidecar(&session_id).await;
+        let error = context
             .accept_input_with_completion(
                 &session_id,
                 Input::Prompt(meerkat_runtime::PromptInput::new("after archive", None)),
                 None,
             )
-            .await;
+            .await
+            .expect_err("actor-missing generic input must require explicit resume");
         assert!(
-            matches!(
-                rejected,
-                Err(McpRuntimeIngressError::Runtime(
-                    meerkat_runtime::RuntimeDriverError::NotReady {
-                        state: meerkat_runtime::RuntimeState::Retired
-                    }
-                ))
-            ),
-            "archived MCP accept should reject as not ready: {rejected:?}"
+            error.to_string().contains("meerkat_resume"),
+            "out-of-band archive must use the typed resume-required contract: {error}"
         );
-        assert!(
-            !context.runtime_adapter.contains_session(&session_id).await,
-            "archived MCP accept may clear local runtime registration after reporting Retired"
+        let tool_error = error.into_tool_error("generic MCP accept failed");
+        assert_eq!(
+            tool_error.code,
+            meerkat_contracts::ErrorCode::SessionNotRunning.jsonrpc_code()
         );
-        assert!(!context.has_sidecar(&session_id).await);
+        assert_eq!(
+            tool_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("session_resume_required"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "resume-required ingress failure must retain structured MCP data"
+        );
+        assert_eq!(
+            context.current_attachment_witness(&session_id).await,
+            attachment_before_accept,
+            "generic input must not change attachment state owned by archive cleanup"
+        );
+        assert_eq!(
+            context.has_sidecar(&session_id).await,
+            sidecar_before_accept,
+            "generic input must not change sidecar state owned by archive cleanup"
+        );
     }
 
     #[tokio::test]

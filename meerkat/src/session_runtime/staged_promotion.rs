@@ -33,6 +33,88 @@ use crate::{
     StagedSessionRegistry,
 };
 
+pub(crate) fn surface_materialization_error_to_session_error(
+    error: crate::surface::SurfaceRuntimeMaterializeError,
+) -> SessionError {
+    match error {
+        crate::surface::SurfaceRuntimeMaterializeError::Session(error) => error,
+        error => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            error.to_string(),
+        )),
+    }
+}
+
+/// Materialize a staged actor through the shared exact transaction without
+/// choosing or installing a surface executor.
+///
+/// The serialized staged build may contain bindings from an earlier attempt;
+/// the shared facade replaces them with the current exact materialization
+/// witness before actor construction. A failed create therefore rolls back the
+/// exact attempt instead of leaving an actor-less `RetainedActor` claim that a
+/// retry cannot consume.
+pub(crate) async fn materialize_session_actor_unattached(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<MeerkatMachine>,
+    create_req: CreateSessionRequest,
+    admission: ActiveCapacityGuard,
+) -> Result<RunResult, SessionError> {
+    let session = create_req
+        .build
+        .as_ref()
+        .and_then(|build| build.resume_session.clone())
+        .ok_or_else(|| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "staged actor materialization requires an exact resume-session snapshot"
+                    .to_string(),
+            ))
+        })?;
+    crate::surface::materialize_session_actor_unattached_with_reserved_admission(
+        service,
+        runtime_adapter,
+        session,
+        create_req,
+        admission,
+    )
+    .await
+    .map_err(surface_materialization_error_to_session_error)
+}
+
+async fn materialize_attached_actor_under_runtime_turn_boundary(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<MeerkatMachine>,
+    create_req: CreateSessionRequest,
+    admission: ActiveCapacityGuard,
+) -> Result<RunResult, SessionError> {
+    let session = create_req
+        .build
+        .as_ref()
+        .and_then(|build| build.resume_session.clone())
+        .ok_or_else(|| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "runtime-loop actor materialization requires an exact resume-session snapshot"
+                    .to_string(),
+            ))
+        })?;
+    let fallback_service = Arc::clone(service);
+    let fallback_adapter = Arc::clone(runtime_adapter);
+    crate::surface::materialize_session_with_reserved_admission_under_runtime_turn_boundary(
+        service,
+        runtime_adapter,
+        session,
+        create_req,
+        admission,
+        move |session_id| {
+            crate::surface::default_persistent_executor(
+                fallback_service,
+                fallback_adapter,
+                session_id,
+            )
+        },
+    )
+    .await
+    .map_err(surface_materialization_error_to_session_error)
+}
+
 /// Boxed-future shape used by the spawned-task callbacks the staged-promotion
 /// helpers accept. Surfaces wrap their RPC-shaped closures into this type so
 /// the moved free functions stay surface-agnostic.
@@ -360,9 +442,9 @@ pub fn classify_recovered_create_failure(
 /// invocation here; surfaces compiled without `comms` pass a no-op.
 pub type CommsContextRefreshFn = Arc<dyn Fn(SessionId) -> BoxFut<'static, ()> + Send + Sync>;
 
-/// Spawn the staged-session promotion task that materializes the live
-/// session via `create_session` and immediately drives a runtime
-/// `apply_runtime_turn`. The returned receiver preserves ordinary service
+/// Spawn the staged-session promotion task that reconstructs the live actor
+/// under the runtime loop's exact committed attachment and immediately drives
+/// a runtime `apply_runtime_turn`. The returned receiver preserves ordinary service
 /// failures separately from typed post-handoff teardown requests; surfaces
 /// translate both onto their runtime-owned error seam.
 ///
@@ -401,11 +483,13 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                 false,
             ),
             (Some(admission), false) => (
-                service
-                    .create_session_with_reserved_admission_under_runtime_turn_boundary(
-                        create_req, admission,
-                    )
-                    .await,
+                materialize_attached_actor_under_runtime_turn_boundary(
+                    &service,
+                    &runtime_adapter,
+                    create_req,
+                    admission,
+                )
+                .await,
                 true,
             ),
             (None, true) => (
@@ -682,14 +766,15 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
     result_rx
 }
 
-/// Spawn a recovered-session promotion task that materializes the live
-/// session via `create_session_with_reserved_admission` and immediately
-/// drives a runtime `apply_runtime_turn`. Required cleanup is reported as a
+/// Spawn a recovered-session promotion task that reconstructs the live actor
+/// under the runtime loop's exact committed attachment and immediately drives
+/// a runtime `apply_runtime_turn`. Required cleanup is reported as a
 /// typed teardown request; this worker never unregisters the executor it is
 /// currently serving.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: Arc<MeerkatMachine>,
     comms_context_refresh: CommsContextRefreshFn,
     session_id: SessionId,
     create_req: CreateSessionRequest,
@@ -702,11 +787,13 @@ pub fn spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
 ) -> ServiceApplyRuntimeTurnSpawnReceiver {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = match service
-            .create_session_with_reserved_admission_under_runtime_turn_boundary(
-                create_req, admission,
-            )
-            .await
+        let result = match materialize_attached_actor_under_runtime_turn_boundary(
+            &service,
+            &runtime_adapter,
+            create_req,
+            admission,
+        )
+        .await
         {
             Ok(_) => {
                 let (turn_result_tx, turn_result_rx) = tokio::sync::oneshot::channel();
@@ -816,9 +903,13 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                 false,
             ),
             (Some(admission), false) => (
-                service
-                    .create_session_with_reserved_admission(create_req, admission)
-                    .await,
+                materialize_session_actor_unattached(
+                    &service,
+                    &runtime_adapter,
+                    create_req,
+                    admission,
+                )
+                .await,
                 true,
             ),
             (None, true) => (
@@ -829,7 +920,14 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                 )),
                 false,
             ),
-            (None, false) => (service.create_session(create_req).await, true),
+            (None, false) => (
+                Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "staged actor materialization for session {session_id} is missing its reserved admission"
+                    )),
+                )),
+                false,
+            ),
         };
         match create_result {
             Ok(_) => {
@@ -1013,36 +1111,38 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                     MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                 )
                 .await;
-            let mut unregister_result = Ok(());
-            if restore_result.is_ok() {
-                let primary_error = result
-                    .as_ref()
-                    .err()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "staged materialized turn requires restore".to_string());
-                unregister_result = unregister_session_compensation(
-                    runtime_adapter.as_ref(),
-                    &session_id,
-                    &primary_error,
-                )
-                .await;
-                #[cfg(feature = "comms")]
-                if let Err(error) = runtime_adapter.abort_comms_drain(&session_id).await {
-                    // Secondary fault on the restore path: the primary
-                    // restore outcome owns the result channel, so this drain
-                    // fault is surfaced as a typed warning instead of
-                    // overwriting the primary outcome.
-                    tracing::warn!(
-                        %session_id,
-                        %error,
-                        "failed to abort comms drain after materialized-failure restore"
-                    );
-                }
+            // Every pre-run failure that reaches this direct service-turn
+            // branch has already discarded its actor. Clear that exact machine
+            // registration whether archive succeeded or failed so a restored
+            // staged slot never carries shadow `RetainedActor` truth.
+            let primary_error = restore_result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .or_else(|| result.as_ref().err().map(ToString::to_string))
+                .unwrap_or_else(|| "staged materialized turn requires restore".to_string());
+            let unregister_result = unregister_session_compensation(
+                runtime_adapter.as_ref(),
+                &session_id,
+                &primary_error,
+            )
+            .await;
+            #[cfg(feature = "comms")]
+            if let Err(error) = runtime_adapter.abort_comms_drain(&session_id).await {
+                // Secondary fault on the restore path: the primary restore
+                // outcome owns the result channel, so this drain fault is
+                // surfaced as a typed warning instead of overwriting it.
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "failed to abort comms drain after materialized-failure restore"
+                );
             }
             promotion_cleanup.disarm();
             let _ = result_tx.send(match (restore_result, unregister_result) {
                 (Ok(()), Ok(())) => result,
-                (Ok(()), Err(error)) | (Err(error), _) => Err(error),
+                (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
+                (Err(_), Err(combined_error)) => Err(combined_error),
             });
             return;
         }

@@ -89,6 +89,16 @@ use meerkat::surface::{RequestContext, request_action};
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
 
+/// Whether the current caller must acquire the stable service turn boundary
+/// before applying an LLM identity reconfiguration.
+#[derive(Clone, Copy)]
+pub(crate) enum LlmReconfigureBoundaryOwnership {
+    /// Direct control-plane call: acquire the boundary in the adapter.
+    Acquire,
+    /// Runtime-loop apply: the executor's outer boundary remains held.
+    AlreadyHeld,
+}
+
 // W2-A: surface-agnostic LiveOpenPrecheckError + precheck_identity +
 // apply_precheck_gates moved to `meerkat::session_runtime::errors` and
 // `meerkat::session_runtime::live_orchestration`. RPC keeps a re-export
@@ -3332,6 +3342,7 @@ impl SessionRuntime {
         let comms_refresh = self.comms_context_refresh_callback(keep_alive);
         meerkat::session_runtime::staged_promotion::spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
             Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
             comms_refresh,
             session_id,
             create_req,
@@ -3357,14 +3368,51 @@ impl SessionRuntime {
         admission: ActiveCapacityGuard,
     ) -> ServiceApplyRuntimeTurnResultReceiver {
         let service = Arc::clone(&self.service);
+        let runtime_adapter = Arc::clone(&self.runtime_adapter);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = match service
-                .create_session_with_reserved_admission_under_runtime_turn_boundary(
-                    create_req, admission,
-                )
-                .await
-            {
+            let result = match {
+                let session = create_req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.resume_session.clone())
+                    .ok_or_else(|| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            "runtime-loop context recovery requires an exact resume-session snapshot"
+                                .to_string(),
+                        ))
+                    });
+                match session {
+                    Ok(session) => {
+                        let fallback_service = Arc::clone(&service);
+                        let fallback_adapter = Arc::clone(&runtime_adapter);
+                        meerkat::surface::materialize_session_with_reserved_admission_under_runtime_turn_boundary(
+                            &service,
+                            &runtime_adapter,
+                            session,
+                            create_req,
+                            admission,
+                            move |session_id| {
+                                meerkat::surface::default_persistent_executor(
+                                    fallback_service,
+                                    fallback_adapter,
+                                    session_id,
+                                )
+                            },
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            meerkat::surface::SurfaceRuntimeMaterializeError::Session(error) => {
+                                error
+                            }
+                            error => SessionError::Agent(
+                                meerkat_core::error::AgentError::InternalError(error.to_string()),
+                            ),
+                        })
+                    }
+                    Err(error) => Err(error),
+                }
+            } {
                 Ok(_) => {
                     service
                         .apply_runtime_context_appends_with_boundary(
@@ -4496,6 +4544,33 @@ impl SessionRuntime {
         session_id: &SessionId,
         ov: &crate::handlers::turn::TurnOverrides,
     ) -> Result<(), RpcError> {
+        self.hot_swap_llm_client_with_boundary_ownership(
+            session_id,
+            ov,
+            LlmReconfigureBoundaryOwnership::Acquire,
+        )
+        .await
+    }
+
+    async fn hot_swap_llm_client_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<(), RpcError> {
+        self.hot_swap_llm_client_with_boundary_ownership(
+            session_id,
+            ov,
+            LlmReconfigureBoundaryOwnership::AlreadyHeld,
+        )
+        .await
+    }
+
+    async fn hot_swap_llm_client_with_boundary_ownership(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+        boundary_ownership: LlmReconfigureBoundaryOwnership,
+    ) -> Result<(), RpcError> {
         let request = SessionLlmReconfigureRequest {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
@@ -4521,11 +4596,21 @@ impl SessionRuntime {
                 })?;
         }
 
-        let report = match self
-            .runtime_adapter
-            .reconfigure_session_llm_identity(session_id, request.clone())
-            .await
-        {
+        let reconfigure = match boundary_ownership {
+            LlmReconfigureBoundaryOwnership::Acquire => {
+                self.runtime_adapter
+                    .reconfigure_session_llm_identity(session_id, request)
+                    .await
+            }
+            LlmReconfigureBoundaryOwnership::AlreadyHeld => {
+                self.runtime_adapter
+                    .reconfigure_session_llm_identity_under_turn_finalization_boundary(
+                        session_id, request,
+                    )
+                    .await
+            }
+        };
+        let report = match reconfigure {
             Ok(report) => report,
             Err(err) => return Err(runtime_driver_error_to_rpc(err)),
         };
@@ -4726,7 +4811,7 @@ impl SessionRuntime {
     /// responses (and other context-only primitives) land as system-context
     /// blocks rather than triggering a turn.
     pub(crate) async fn apply_runtime_context_appends_via_service(
-        &self,
+        self: &Arc<Self>,
         session_id: &SessionId,
         run_id: meerkat_core::lifecycle::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
@@ -4752,7 +4837,7 @@ impl SessionRuntime {
 
     #[allow(clippy::too_many_arguments)]
     async fn apply_runtime_context_appends_with_recovery(
-        &self,
+        self: &Arc<Self>,
         session_id: &SessionId,
         run_id: meerkat_core::lifecycle::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
@@ -4829,6 +4914,17 @@ impl SessionRuntime {
         let recovered_create = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
+        if let Err(primary) = self.ensure_runtime_executor(session_id).await {
+            drop(admission);
+            return Err(self
+                .combine_with_recovered_runtime_cleanup(
+                    session_id,
+                    recovered_create.runtime_was_registered,
+                    primary,
+                    "clean up newly recovered runtime after executor attachment failure",
+                )
+                .await);
+        }
         let result_rx = self
             .spawn_recovered_create_and_apply_runtime_context_appends_with_admission_guard(
                 session_id.clone(),
@@ -5239,6 +5335,37 @@ impl SessionRuntime {
             .await
     }
 
+    async fn runtime_executor_for_session(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Box<dyn meerkat_core::lifecycle::CoreExecutor> {
+        #[cfg(feature = "mob")]
+        {
+            if let Some(mob_state) = self.mob_state().as_ref()
+                && (mob_state.owns_live_bridge_session(session_id).await
+                    || mob_state.owns_persisted_bridge_session(session_id).await)
+            {
+                let sink = self
+                    .notification_sink
+                    .read()
+                    .ok()
+                    .map(|slot| slot.clone())
+                    .unwrap_or_else(crate::router::NotificationSink::noop);
+                return Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
+                    mob_state.session_service(),
+                    Some(Arc::clone(self)),
+                    session_id.clone(),
+                    sink,
+                ));
+            }
+        }
+
+        Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(self),
+            session_id.clone(),
+        ))
+    }
+
     async fn ensure_runtime_executor_on_adapter(
         self: &Arc<Self>,
         adapter: &Arc<MeerkatMachine>,
@@ -5281,37 +5408,7 @@ impl SessionRuntime {
                     data: None,
                 });
             }
-            #[cfg(feature = "mob")]
-            let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> =
-                match self.mob_state().as_ref() {
-                    Some(mob_state)
-                        if mob_state.owns_live_bridge_session(session_id).await
-                            || mob_state.owns_persisted_bridge_session(session_id).await =>
-                    {
-                        let sink = self
-                            .notification_sink
-                            .read()
-                            .ok()
-                            .map(|slot| slot.clone())
-                            .unwrap_or_else(crate::router::NotificationSink::noop);
-                        Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
-                            mob_state.session_service(),
-                            Some(Arc::clone(self)),
-                            session_id.clone(),
-                            sink,
-                        ))
-                    }
-                    _ => Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                        Arc::clone(self),
-                        session_id.clone(),
-                    )),
-                };
-            #[cfg(not(feature = "mob"))]
-            let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> =
-                Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                    Arc::clone(self),
-                    session_id.clone(),
-                ));
+            let executor = self.runtime_executor_for_session(session_id).await;
             adapter
                 .ensure_session_with_executor(session_id.clone(), executor)
                 .await
@@ -5351,30 +5448,7 @@ impl SessionRuntime {
         {
             return Ok(());
         }
-        let mob_state = self.mob_state();
-        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = match mob_state.as_ref() {
-            Some(mob_state)
-                if mob_state.owns_live_bridge_session(session_id).await
-                    || mob_state.owns_persisted_bridge_session(session_id).await =>
-            {
-                let sink = self
-                    .notification_sink
-                    .read()
-                    .ok()
-                    .map(|slot| slot.clone())
-                    .unwrap_or_else(crate::router::NotificationSink::noop);
-                Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
-                    mob_state.session_service(),
-                    Some(Arc::clone(self)),
-                    session_id.clone(),
-                    sink,
-                ))
-            }
-            _ => Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                Arc::clone(self),
-                session_id.clone(),
-            )),
-        };
+        let executor = self.runtime_executor_for_session(session_id).await;
         self.runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
             .await
@@ -6230,7 +6304,7 @@ impl SessionRuntime {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn apply_runtime_turn(
-        &self,
+        self: &Arc<Self>,
         session_id: &SessionId,
         run_id: RunId,
         primitive: &RunPrimitive,
@@ -6248,6 +6322,7 @@ impl SessionRuntime {
             turn_tool_overlay,
             overrides,
             None,
+            LlmReconfigureBoundaryOwnership::Acquire,
         )
         .await
     }
@@ -6257,7 +6332,7 @@ impl SessionRuntime {
     // parallel copy.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn apply_runtime_turn_with_pre_admission(
-        &self,
+        self: &Arc<Self>,
         session_id: &SessionId,
         run_id: RunId,
         primitive: &RunPrimitive,
@@ -6266,6 +6341,7 @@ impl SessionRuntime {
         turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
         pre_admission: Option<RuntimePreAdmission>,
+        llm_reconfigure_boundary: LlmReconfigureBoundaryOwnership,
     ) -> Result<CoreApplyOutput, RpcError> {
         let mut pre_admission = pre_admission.map(RuntimePreAdmissionGuard::new);
         let workgraph_service = self.workgraph_service().ok();
@@ -6390,7 +6466,15 @@ impl SessionRuntime {
                     || ov.provider_params.is_some()
                     || ov.auth_binding.is_some())
             {
-                self.hot_swap_llm_client(session_id, ov).await?;
+                match llm_reconfigure_boundary {
+                    LlmReconfigureBoundaryOwnership::Acquire => {
+                        self.hot_swap_llm_client(session_id, ov).await?;
+                    }
+                    LlmReconfigureBoundaryOwnership::AlreadyHeld => {
+                        self.hot_swap_llm_client_under_turn_finalization_boundary(session_id, ov)
+                            .await?;
+                    }
+                }
             }
 
             let mut req = StartTurnRequest {
@@ -6575,8 +6659,8 @@ impl SessionRuntime {
             // A staged slot may survive executor-required teardown and retry.
             // Its serialized build config therefore cannot remain the owner
             // of epoch-local SessionRuntimeBindings: refresh from the current
-            // MeerkatMachine registration immediately before materialization
-            // and preserve that witness if this attempt is restored again.
+            // MeerkatMachine registration before selecting the executor and
+            // preserve that witness if this attempt is restored again.
             let current_bindings = match self
                 .runtime_adapter
                 .prepare_bindings(session_id.clone())
@@ -6670,6 +6754,10 @@ impl SessionRuntime {
                     });
                 }
             }
+            if let Err(error) = self.ensure_runtime_executor(session_id).await {
+                promotion_cleanup.restore_now().await;
+                return Err(error);
+            }
             let output_rx = self.spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                 session_id.clone(),
                 create_req,
@@ -6708,6 +6796,17 @@ impl SessionRuntime {
         let recovered_create = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
+        if let Err(primary) = self.ensure_runtime_executor(session_id).await {
+            drop(active_turn);
+            return Err(self
+                .combine_with_recovered_runtime_cleanup(
+                    session_id,
+                    recovered_create.runtime_was_registered,
+                    primary,
+                    "clean up newly recovered runtime after executor attachment failure",
+                )
+                .await);
+        }
         let recovered_labels = recovered_create.request.labels.clone();
         let mut start_request = StartTurnRequest {
             injected_context: Vec::new(),
@@ -12772,6 +12871,11 @@ mod tests {
             .discard_live_session(&session_id)
             .await
             .expect("discard_live_session");
+        runtime
+            .runtime_adapter()
+            .unregister_session(&session_id)
+            .await
+            .expect("unregister prior runtime incarnation before explicit recovery");
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
@@ -20760,6 +20864,10 @@ mod tests {
             Some(RuntimeState::Retired),
             "failed cleanup archive must not retire the runtime (document commit realizes first)"
         );
+        assert!(
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "failed cleanup archive must clear the actorless machine registration before retry"
+        );
         let blocked = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await;
@@ -24088,6 +24196,11 @@ mod tests {
             .discard_live_session(&session_id)
             .await
             .expect("discard live session after hot-swap");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("unregister prior runtime incarnation before persisted recovery");
 
         let (event_tx, _rx) = mpsc::channel(100);
         let recovered = runtime
@@ -24381,9 +24494,10 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
+            .start_turn_via_runtime(
                 &session_id,
                 "after rejection".into(),
+                Vec::new(),
                 tx,
                 None,
                 None,

@@ -25,7 +25,7 @@
 use meerkat_mob::machines::mob_machine::{
     AgentIdentity, AgentRuntimeId, FenceToken, Generation, KickoffPhase, MemberSessionDisposal,
     MobId, MobMachineAuthority, MobMachineEffect, MobMachineInput, MobMachineMutator,
-    MobMachineSignal, SessionId, SpawnPolicyRuntimeMode,
+    MobMachineSignal, PlacedCompletionLifecycleIntentKind, SessionId, SpawnPolicyRuntimeMode,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -186,6 +186,17 @@ fn kickoff_quiesced(identity_name: &str) -> MobMachineInput {
     }
 }
 
+fn begin_lifecycle_quiesce(
+    authority: &mut MobMachineAuthority,
+    intent: PlacedCompletionLifecycleIntentKind,
+) {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { intent },
+    )
+    .expect("lifecycle fixture must record the independent completion-drain intent");
+}
+
 fn close_session_ingress_detach(
     authority: &mut MobMachineAuthority,
     transition: &meerkat_mob::machines::mob_machine::MobMachineTransition,
@@ -318,6 +329,7 @@ fn retirement_archival_is_gated_on_kickoff_quiesce_closure() {
 fn stopped_retirement_accepts_runtime_success_before_archive_completion() {
     let mut authority = MobMachineAuthority::new();
     spawn_member(&mut authority, "alpha", "bridge-a");
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Stop);
     MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("mob stop accepted");
     let retire = MobMachineMutator::apply(&mut authority, retire_input("alpha", "bridge-a"))
         .expect("stopped retirement accepted");
@@ -508,6 +520,7 @@ fn late_kickoff_resolutions_for_unknown_member_are_typed_noops() {
 #[test]
 fn kickoff_inputs_are_total_in_destroyed_phase() {
     let mut authority = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
     MobMachineMutator::apply(&mut authority, MobMachineInput::Destroy)
         .expect("destroy of an empty mob must be accepted");
 
@@ -550,6 +563,7 @@ fn destroy_is_gated_on_kickoff_waiter_quiesce() {
     let mut authority = MobMachineAuthority::new();
     spawn_member(&mut authority, "alpha", "bridge-a");
     mark_kickoff_starting(&mut authority, "alpha");
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
 
     let blocked = MobMachineMutator::apply(&mut authority, MobMachineInput::Destroy);
     assert!(
@@ -573,6 +587,7 @@ fn destroy_is_gated_on_pending_spawn_drain() {
         })
         .expect("stage spawn accepted");
     assert_eq!(authority.state().pending_spawn_count, 1);
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
 
     let blocked = MobMachineMutator::apply(&mut authority, MobMachineInput::Destroy);
     assert!(
@@ -614,6 +629,7 @@ fn destroy_is_gated_on_pending_spawn_drain() {
 #[test]
 fn destroy_admission_emits_pending_spawn_quiesce_request() {
     let mut authority = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
     let transition = authority
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("destroy admission accepted");
@@ -631,6 +647,7 @@ fn admit_destroy_member_retire_emits_kickoff_quiesce_request() {
     let mut authority = MobMachineAuthority::new();
     spawn_member(&mut authority, "alpha", "bridge-a");
     mark_kickoff_starting(&mut authority, "alpha");
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
     authority
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("destroy admission accepted");
@@ -663,6 +680,7 @@ fn admit_destroy_member_retire_emits_kickoff_quiesce_request() {
 fn destroy_member_archive_retry_reemits_exact_journal_authority() {
     let mut authority = MobMachineAuthority::new();
     spawn_member(&mut authority, "alpha", "bridge-a");
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
     authority
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("destroy admission accepted");
@@ -754,6 +772,7 @@ fn late_complete_spawn_is_typed_noop() {
         })
         .expect("late spawn completion must be an accepted typed no-op");
 
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
     MobMachineMutator::apply(&mut authority, MobMachineInput::Destroy)
         .expect("destroy of an empty mob accepted");
     authority

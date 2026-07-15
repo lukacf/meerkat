@@ -6156,13 +6156,14 @@ impl MobHandle {
 
     /// Explicit route-install drain (ADJ-P4-9b): realizes every PENDING
     /// obligation in the machine ledger through the one canonical drain the
-    /// host-(re)bind and revival triggers also run actor-side. The drive
-    /// re-derives nothing — the obligation set is the in-flight truth, so
-    /// an idle drive sends nothing (re-derivation from durable graph facts
-    /// belongs to the rebind/recovery/revival triggers that know trust was
-    /// invalidated). Returns the post-drain projection — Ok with a
-    /// non-empty `outstanding` set names the obligations still pending
-    /// (per-obligation failures never fail the drive).
+    /// authenticated periodic HostStatus, host-(re)bind, and revival triggers
+    /// also run actor-side. The drive re-derives nothing — the obligation set
+    /// is the in-flight truth, so an idle drive sends nothing (re-derivation
+    /// from durable graph facts belongs to the rebind/recovery/revival
+    /// triggers that know trust was invalidated). Returns the post-drain
+    /// projection — Ok with a non-empty `outstanding` set names the
+    /// obligations still pending (per-obligation failures never fail the
+    /// drive).
     pub async fn drive_route_installs(
         &self,
     ) -> Result<meerkat_contracts::wire::MobRouteInstallsResult, MobError> {

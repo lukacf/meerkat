@@ -10872,6 +10872,151 @@ async fn cancel_after_boundary_returns_not_ready_without_attached_loop() {
 }
 
 #[tokio::test]
+async fn cancel_after_boundary_on_idle_attached_runtime_consumes_before_successor_run() {
+    struct CountingBoundaryHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for CountingBoundaryHandle {
+        async fn cancel_after_boundary(
+            &self,
+            _expected_run_id: &RunId,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct IdleAttachedExecutor {
+        live_boundary_calls: Arc<AtomicUsize>,
+        queued_effect_calls: Arc<AtomicUsize>,
+        call_order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for IdleAttachedExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(CountingBoundaryHandle {
+                calls: Arc::clone(&self.live_boundary_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.call_order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push("apply");
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_effect_calls.fetch_add(1, Ordering::SeqCst);
+            self.call_order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push("cancel");
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let live_boundary_calls = Arc::new(AtomicUsize::new(0));
+    let queued_effect_calls = Arc::new(AtomicUsize::new(0));
+    let call_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(IdleAttachedExecutor {
+                live_boundary_calls: Arc::clone(&live_boundary_calls),
+                queued_effect_calls: Arc::clone(&queued_effect_calls),
+                call_order: Arc::clone(&call_order),
+            }),
+        )
+        .await
+        .expect("idle runtime executor registration should succeed");
+
+    let before = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("idle attached snapshot");
+    assert_eq!(before.control.phase, RuntimeState::Attached);
+    assert!(before.control.current_run_id.is_none());
+
+    // Force the successor wake into process_queue, then pause after its first
+    // ready-effect drain and before queue authority. Publishing the idle cancel
+    // in that exact gap proves the recheck retains this already-consumed wake.
+    let (queue_gap_entered, queue_gap_release) =
+        adapter.arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("successor run"))
+        .await
+        .expect("successor run should be admitted");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("successor run completion");
+    tokio::time::timeout(Duration::from_secs(1), queue_gap_entered)
+        .await
+        .expect("runtime loop should reach the forced queue-authority gap")
+        .expect("runtime-loop queue-authority hook should remain armed");
+
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("idle attached boundary cancel should dispatch without a run id");
+    queue_gap_release
+        .send(())
+        .expect("runtime loop should still be waiting at the forced gap");
+
+    let completion_outcome =
+        tokio::time::timeout(Duration::from_secs(1), completion.wait_authorized())
+            .await
+            .expect("successor run should complete");
+    assert!(matches!(
+        completion_outcome,
+        CompletionOutcome::CompletedWithoutResult
+    ));
+    assert_eq!(
+        live_boundary_calls.load(Ordering::SeqCst),
+        0,
+        "an exact-run live callback must not be invoked without a run id"
+    );
+    assert_eq!(queued_effect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *call_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        vec!["cancel", "apply"],
+        "the idle cancel effect must not bleed into the successor run"
+    );
+}
+
+#[tokio::test]
 async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_executor_attach() {
     struct CountingInterruptHandle {
         calls: Arc<AtomicUsize>,
@@ -13318,11 +13463,11 @@ mod stop_under_gate_deadlock_class {
         let first_error = machine
             .stop_runtime_executor(&session_id, "inject post-stop dispatch failure")
             .await
-            .expect_err("first post-stop unregister must fail after consuming its fence");
+            .expect_err("first post-stop cleanup must fail after consuming its fence");
         assert!(
             first_error
                 .to_string()
-                .contains("injected post-stop unregister failure after fence consumption"),
+                .contains("injected post-stop cleanup failure after fence consumption"),
             "unexpected first post-stop failure: {first_error}"
         );
 
@@ -13330,19 +13475,20 @@ mod stop_under_gate_deadlock_class {
             .stop_runtime_executor(&session_id, "retry post-stop cleanup with exact fence")
             .await
             .expect("retained stop cleanup must reacquire its exact post-stop fence");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while machine.contains_session(&session_id).await {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("successful retained cleanup retry must converge through unregister");
 
         assert_eq!(
             cleanup_ran.load(Ordering::SeqCst),
             1,
             "successful retry must run retained surface cleanup exactly once"
         );
+        assert!(
+            machine.contains_session(&session_id).await,
+            "ordinary stop cleanup must preserve the registered Stopped runtime"
+        );
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("explicit unregister should remove the stopped runtime");
         assert!(!machine.contains_session(&session_id).await);
     }
 
@@ -13486,9 +13632,11 @@ mod stop_under_gate_deadlock_class {
             while cleanup_ran.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            while machine.contains_session(&session_id).await {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            assert!(machine.contains_session(&session_id).await);
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("explicit unregister should remove the stopped session");
         })
         .await
         .expect(
@@ -13545,9 +13693,11 @@ mod stop_under_gate_deadlock_class {
             while cleanup_ran.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            while machine.contains_session(&session_id).await {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            assert!(machine.contains_session(&session_id).await);
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("explicit unregister should remove the stopped session");
         })
         .await
         .expect(
@@ -13578,9 +13728,11 @@ mod stop_under_gate_deadlock_class {
             while cleanup_ran.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            while machine.contains_session(&session_id).await {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            assert!(machine.contains_session(&session_id).await);
+            machine
+                .unregister_session(&session_id)
+                .await
+                .expect("explicit unregister should remove the stopped session");
         })
         .await
         .expect(
@@ -13601,13 +13753,11 @@ mod stop_under_gate_deadlock_class {
             .stop_runtime_executor(&session_id, "retire first attachment")
             .await
             .expect("first runtime stop should be accepted");
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while machine.contains_session(&session_id).await {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("first attachment should unregister");
+        assert!(machine.contains_session(&session_id).await);
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("explicit unregister should remove the first stopped attachment");
 
         register(&machine, &session_id, &cleanup_ran, None, false).await;
         let replacement_attachment_id = attachment_id(&machine, &session_id).await;
@@ -13718,14 +13868,14 @@ mod stop_under_gate_deadlock_class {
         let authoritative_rebind = machine.prepare_bindings(session_id.clone()).await;
         assert!(
             authoritative_rebind.is_err(),
-            "generated Draining authority must reject authoritative binding preparation before a surface can rematerialize its actor"
+            "an in-progress exact stop must reject authoritative binding preparation before surface cleanup completes"
         );
         let local_rebind = machine
             .prepare_local_session_bindings(session_id.clone())
             .await;
         assert!(
             local_rebind.is_err(),
-            "generated Draining authority must reject local-resource binding preparation before a surface can rematerialize its actor"
+            "an in-progress exact stop must reject local-resource binding preparation before surface cleanup completes"
         );
 
         let mutation_guard = tokio::time::timeout(
@@ -13744,13 +13894,14 @@ mod stop_under_gate_deadlock_class {
             .expect("stop task must not panic")
             .expect("stop should complete after surface cleanup is released");
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while machine.contains_session(&session_id).await {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("unregister should finish after surface cleanup is released");
+        assert!(
+            machine.contains_session(&session_id).await,
+            "ordinary surface cleanup must preserve the registered Stopped runtime"
+        );
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("explicit unregister should remove the stopped runtime");
     }
 }
 
@@ -30930,6 +31081,156 @@ async fn stale_exact_attachment_unregister_is_noop_against_replacement() {
         .unregister_executor_attachment_if_current(&replacement)
         .await
         .expect("replacement cleanup should succeed");
+}
+
+#[tokio::test]
+async fn exact_terminal_unattached_registration_unregisters_stopped_session() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register stopped cleanup fixture");
+    let witness = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("registered session should have an exact registration witness");
+
+    machine
+        .stop_runtime_executor(&session_id, "terminal registration cleanup".to_string())
+        .await
+        .expect("bare registration should stop");
+    assert!(
+        machine
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .is_none(),
+        "registration-only fixture must remain unattached"
+    );
+    assert!(
+        machine
+            .unregister_terminal_session_registration_if_current(&witness)
+            .await
+            .expect("exact stopped registration cleanup should succeed")
+    );
+    assert!(!machine.contains_session(&session_id).await);
+}
+
+#[tokio::test]
+async fn exact_terminal_unattached_registration_unregisters_retired_session() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register retired cleanup fixture");
+    let witness = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("registered session should have an exact registration witness");
+    crate::traits::RuntimeControlPlane::retire(
+        machine.as_ref(),
+        &runtime_id_for_session(&session_id),
+    )
+    .await
+    .expect("bare registration should retire");
+
+    assert!(
+        machine
+            .unregister_terminal_session_registration_if_current(&witness)
+            .await
+            .expect("exact retired registration cleanup should succeed")
+    );
+    assert!(!machine.contains_session(&session_id).await);
+}
+
+#[tokio::test]
+async fn exact_terminal_unattached_registration_rejects_nonterminal_session() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register nonterminal cleanup fixture");
+    let witness = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("registered session should have an exact registration witness");
+
+    let error = machine
+        .unregister_terminal_session_registration_if_current(&witness)
+        .await
+        .expect_err("Idle registration must not satisfy terminal cleanup admission");
+    assert!(
+        matches!(error, RuntimeDriverError::ValidationFailed { .. }),
+        "nonterminal exact cleanup should reject with ValidationFailed, got {error:?}"
+    );
+    assert!(machine.contains_session(&session_id).await);
+    machine
+        .try_unregister_session(&session_id)
+        .await
+        .expect("clean nonterminal fixture");
+}
+
+#[tokio::test]
+async fn stale_exact_registration_unregister_is_noop_against_replacement() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register original cleanup fixture");
+    let stale = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("original registration should have a witness");
+    machine
+        .stop_runtime_executor(&session_id, "remove original registration".to_string())
+        .await
+        .expect("original registration should stop");
+    assert!(
+        machine
+            .unregister_terminal_session_registration_if_current(&stale)
+            .await
+            .expect("original exact cleanup should succeed")
+    );
+
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register same-SessionId replacement");
+    let replacement = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("replacement registration should have a witness");
+    assert_ne!(
+        stale, replacement,
+        "replacement must mint a new entry witness"
+    );
+    machine
+        .stop_runtime_executor(&session_id, "terminalize replacement".to_string())
+        .await
+        .expect("replacement registration should stop");
+
+    assert!(
+        !machine
+            .unregister_terminal_session_registration_if_current(&stale)
+            .await
+            .expect("stale exact cleanup should be an idempotent no-op")
+    );
+    assert_eq!(
+        machine
+            .current_session_registration_witness(&session_id)
+            .await,
+        Some(replacement.clone()),
+        "stale A must not remove replacement B"
+    );
+    assert!(
+        machine
+            .unregister_terminal_session_registration_if_current(&replacement)
+            .await
+            .expect("replacement exact cleanup should succeed")
+    );
 }
 
 #[tokio::test]

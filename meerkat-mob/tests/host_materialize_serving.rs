@@ -9,10 +9,9 @@
 //!   * H T18/T19 (restart revival)           → `host_member_revival.rs`
 //!   * H T25 (e2e-fast module)               → `tests/integration/tests/multi_host_spawn.rs`
 //!
-//! The `ModelUnresolvable` preflight leg of T8 is UNREACHABLE from a decoded
-//! spec in v1 (provider is REQUIRED on `PortableProfile`, so the
-//! (model, provider) pair always names a constructible client — DEC-P3H-8);
-//! the arm stays machine-kernel-pinned (phase-1 `mob_host_binding_authority.rs`).
+//! T8 drives both Tier-1 provider presence and the Tier-2 exact-model/auth
+//! probe. In particular, a required provider can be present while its selected
+//! model is still unresolvable on the member host.
 //!
 //! ADJ-9 (ensure-on-replay) is pinned controlling-side in
 //! `host_member_revival.rs`; here T4 pins the recorded-ack half.
@@ -146,11 +145,11 @@ async fn assert_only_persisted_inert_member_session(
         "post-create failure must leave the session discoverable and resumable"
     );
     assert!(
-        !service
+        service
             .session_known_to_archive_authority(&session_id)
             .await
             .expect("read member archive authority"),
-        "post-create failure must not archive the durable session"
+        "the preserved durable session must remain owned by its archive authority"
     );
     assert!(
         !service
@@ -696,6 +695,40 @@ async fn materialize_preflight_matrix_rejects_typed() {
                 .expect("typed preflight reply")
         }
     };
+
+    // ModelUnresolvable{model}: Tier-1 provider presence succeeds while the
+    // Tier-2 exact-model probe rejects the selected model.
+    fixture
+        .preflight
+        .as_ref()
+        .expect("scripted probe")
+        .set_model_resolvable(false);
+    let spec = sample_portable_member_spec("mob-t8", "model-miss", "worker");
+    let expected_model = spec.profile.model.clone();
+    let reply = send(sample_materialize_payload(
+        &probe,
+        1,
+        spec,
+        1,
+        1,
+        MaterializeLaunchMode::Fresh {},
+    ))
+    .await;
+    assert!(
+        matches!(
+            &reply,
+            BridgeReply::Rejected {
+                cause: BridgeRejectionCause::ModelUnresolvable { model },
+                ..
+            } if model == &expected_model
+        ),
+        "expected ModelUnresolvable naming the selected model, got {reply:?}"
+    );
+    fixture
+        .preflight
+        .as_ref()
+        .expect("scripted probe")
+        .set_model_resolvable(true);
 
     // AuthBindingUnresolvable: Tier-2 probe scripted false.
     fixture
@@ -1736,11 +1769,11 @@ async fn materialize_identity_mismatch_preserves_durable_session_and_quiesces_bo
         "the real created Fresh snapshot must remain discoverable and resumable"
     );
     assert!(
-        !service
+        service
             .session_known_to_archive_authority(&actual)
             .await
             .expect("read actual archive authority"),
-        "identity mismatch must not archive the already-durable session"
+        "the preserved actual session must remain owned by its archive authority"
     );
     assert!(
         fixture

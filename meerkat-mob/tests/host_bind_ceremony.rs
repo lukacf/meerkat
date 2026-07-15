@@ -771,6 +771,25 @@ async fn rebind_same_supervisor_identity_replaces_stale_address() {
     // each materialized row. The refreshed controller must still receive the
     // member reply after zero-traffic revival.
     let fixture = fixture.restart().await;
+    restarted.trust(fixture.host_peer_descriptor()).await;
+    let status = restarted
+        .send_bridge_command_raw(
+            &fixture.host_peer_descriptor(),
+            &raw_host_status_command(&restarted, mob_id, 8),
+            REPLY_TIMEOUT,
+        )
+        .await
+        .expect("host serves status after address-refresh revival");
+    let BridgeReply::HostStatus(status) = status else {
+        panic!("expected HostStatus serving barrier after address-refresh revival")
+    };
+    assert!(
+        status
+            .members
+            .iter()
+            .any(|member| { member.agent_identity == "address-member" && member.healthy }),
+        "serving barrier must report the address-refresh member healthy: {status:?}",
+    );
     assert!(matches!(
         restarted
             .send_bridge_command_raw(&member, &poll, REPLY_TIMEOUT)
@@ -1576,8 +1595,9 @@ async fn recovered_started_rejection_cannot_abort_prior_uncertain_send_or_unbloc
     let destroy = controlling.handle.destroy().await;
     let error = destroy.expect_err("unfinished original send must block destroy");
     assert!(
-        format!("{error:?}").contains("exact bind convergence is required before destroy"),
-        "unexpected destroy error: {error:?}",
+        matches!(&error, meerkat_mob::MobDestroyError::Mob(_))
+            && format!("{error:?}").contains("unfinished"),
+        "unfinished host-bind authority must block destroy with a typed mob error, got: {error:?}",
     );
 
     // The original exact request remains the only convergence path; once it

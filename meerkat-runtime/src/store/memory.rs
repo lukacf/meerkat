@@ -534,6 +534,25 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let incoming_session =
             serde_json::from_slice::<meerkat_core::Session>(&session_delta.session_snapshot)
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let compaction_intents = super::validated_compaction_projection_intents(&incoming_session)?;
+        if let Some(existing) = inner.compaction_projection_outbox.get(&rid) {
+            for intent in &compaction_intents {
+                if let Some(entry) = existing.get(&intent.projection) {
+                    if entry.finalized {
+                        return Err(RuntimeStoreError::WriteFailed(format!(
+                            "atomic session snapshot replays finalized compaction intent {}",
+                            intent.projection.revision()
+                        )));
+                    }
+                    if entry.intent != *intent {
+                        return Err(RuntimeStoreError::WriteFailed(format!(
+                            "conflicting compaction outbox intent for rewrite {}",
+                            intent.projection.revision()
+                        )));
+                    }
+                }
+            }
+        }
         if incoming_session.id() != &session_store_key {
             return Err(RuntimeStoreError::SessionKeyMismatch {
                 expected: session_store_key,
@@ -580,6 +599,18 @@ impl RuntimeStore for InMemoryRuntimeStore {
             )));
         }
 
+        let outbox = inner
+            .compaction_projection_outbox
+            .entry(rid.clone())
+            .or_default();
+        for intent in compaction_intents {
+            outbox
+                .entry(intent.projection.clone())
+                .or_insert(CompactionOutboxEntry {
+                    intent,
+                    finalized: false,
+                });
+        }
         inner
             .sessions
             .insert(rid.clone(), session_delta.session_snapshot);
@@ -1507,6 +1538,66 @@ mod tests {
         let inputs = store.load_input_states(&rid).await.unwrap();
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].state.input_id, seeded_input.state.input_id);
+    }
+
+    #[tokio::test]
+    async fn machine_terminal_atomic_apply_tracks_and_tombstones_compaction_intents() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("terminal-compaction-outbox");
+        let (session, intent) = session_with_compaction_intent();
+        let encoded = serde_json::to_vec(&session).unwrap();
+
+        store
+            .atomic_apply_with_machine_lifecycle(
+                &rid,
+                SessionDelta {
+                    session_snapshot: encoded.clone(),
+                },
+                make_receipt(RunId::new(), 0),
+                MachineLifecycleCommit::new_with_binding(
+                    crate::RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                Vec::new(),
+                session.id().clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap(),
+            vec![intent.clone()]
+        );
+
+        store
+            .mark_compaction_projection_finalized(&rid, &intent.projection)
+            .await
+            .unwrap();
+        let error = store
+            .atomic_apply_with_machine_lifecycle(
+                &rid,
+                SessionDelta {
+                    session_snapshot: encoded,
+                },
+                make_receipt(RunId::new(), 1),
+                MachineLifecycleCommit::new_with_binding(
+                    crate::RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                Vec::new(),
+                session.id().clone(),
+            )
+            .await
+            .expect_err("a finalized compaction tombstone must reject stale terminal replay");
+        assert!(
+            error
+                .to_string()
+                .contains("replays finalized compaction intent")
+        );
     }
 
     #[tokio::test]

@@ -765,15 +765,15 @@ pub trait CoreExecutor: Send + Sync {
         None
     }
 
-    /// Whether `MeerkatMachine` should close the exact runtime-loop
-    /// registration after this executor's post-stop cleanup returns.
+    /// Whether `MeerkatMachine` should retain and fence this attachment's exact
+    /// post-stop service cleanup authority.
     ///
-    /// Persistent surface executors opt in when their cleanup owns only the
-    /// service-side live actor. The machine then fences unregister by the
-    /// attachment incarnation it created, so the loop never awaits its own
-    /// `JoinHandle` and a stale cleanup cannot remove a replacement loop.
-    /// Executors with a broader incarnation protocol (for example mob member
-    /// sidecars) keep the default and own their fenced teardown themselves.
+    /// Opted-in executors expose a cloneable attachment-local cleanup handle.
+    /// The machine fences it by the attachment incarnation it created, so a
+    /// stale cleanup cannot remove replacement state. Ordinary runtime stop
+    /// cleans the service incarnation while preserving the registered
+    /// `Stopped` machine state; explicit unregister owns the later `Draining`
+    /// transition and registration removal.
     fn machine_managed_post_stop_unregister(&self) -> bool {
         false
     }

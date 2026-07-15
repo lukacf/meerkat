@@ -26,8 +26,9 @@ use meerkat_mob::machines::mob_machine::{
     MemberPeerEndpoint, MemberSessionDisposal, MobId, MobLifecycleJournalKind, MobMachineAuthority,
     MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, MobMachineState,
     MobPhase, MobSpawnMemberAdmissionKind, PeerAddress, PeerId, PeerName, PeerSigningKey,
-    PlacedSpawnId, PrincipalId, RemoteTurnObligation, RouteInstallObligation, RouteObligationKind,
-    RunId, SessionId, SpawnExecPhase, SpawnPolicyRuntimeMode, StepId, WiringEdge,
+    PlacedCompletionLifecycleIntentKind, PlacedSpawnId, PrincipalId, RemoteTurnObligation,
+    RouteInstallObligation, RouteObligationKind, RunId, SessionId, SpawnExecPhase,
+    SpawnPolicyRuntimeMode, StepId, WiringEdge,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -216,6 +217,17 @@ fn bind_owner_bridge(authority: &mut MobMachineAuthority) {
         },
     )
     .expect("owner bridge session must bind");
+}
+
+fn begin_lifecycle_quiesce(
+    authority: &mut MobMachineAuthority,
+    intent: PlacedCompletionLifecycleIntentKind,
+) {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { intent },
+    )
+    .expect("lifecycle fixture must record the independent completion-drain intent");
 }
 
 fn authorize_spawn_profile(
@@ -2148,16 +2160,6 @@ fn remote_turn_obligations_are_idempotent_set_semantics() {
         run_id: RunId("run-cross-member".to_string()),
         step_id: StepId("step-cross-member".to_string()),
     };
-    assert!(
-        MobMachineMutator::apply(
-            &mut authority,
-            MobMachineInput::RecordRemoteTurnObligation {
-                obligation: cross_member_same_input,
-            },
-        )
-        .is_err(),
-        "one input id cannot name live custody for two different remote members",
-    );
     for _ in 0..2 {
         MobMachineMutator::apply(
             &mut authority,
@@ -2281,6 +2283,21 @@ fn remote_turn_obligations_are_idempotent_set_semantics() {
         .is_err(),
         "an obligation for an unplaced identity must be rejected",
     );
+
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::RecordRemoteTurnObligation {
+            obligation: cross_member_same_input.clone(),
+        },
+    )
+    .expect("the exact custody key scopes an opaque input id to its member residency");
+    assert!(
+        authority
+            .state()
+            .pending_remote_turn_outcomes
+            .contains(&cross_member_same_input),
+        "equal input ids on distinct members name distinct custody rows",
+    );
 }
 
 /// U-3 extension (phase 6): dispatch classification is total over ROSTER
@@ -2368,6 +2385,7 @@ fn remote_turn_obligation_resolution_survives_lifecycle_phases() {
     // Stop with Pending custody, then drive every post-effect custody phase.
     // `per_phase` must rewrite the generated target to Stopped rather than
     // laundering cleanup into a lifecycle resurrection.
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Stop);
     MobMachineMutator::apply(&mut authority, MobMachineInput::Stop)
         .expect("mob stops with an outstanding obligation");
     MobMachineMutator::apply(
@@ -2420,6 +2438,7 @@ fn remote_turn_obligation_resolution_survives_lifecycle_phases() {
 #[test]
 fn remote_turn_post_destroy_cleanup_preserves_destroyed_phase() {
     let mut authority = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
     MobMachineMutator::apply(&mut authority, MobMachineInput::Destroy)
         .expect("empty authority can destroy");
     assert_eq!(authority.state().lifecycle_phase, MobPhase::Destroyed);
@@ -2472,6 +2491,10 @@ fn remote_turn_post_destroy_cleanup_preserves_destroyed_phase() {
 #[test]
 fn remote_turn_post_complete_cleanup_preserves_completed_phase() {
     let mut authority = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(
+        &mut authority,
+        PlacedCompletionLifecycleIntentKind::Complete,
+    );
     MobMachineMutator::apply(&mut authority, MobMachineInput::Complete)
         .expect("empty authority can complete");
     let obligation = RemoteTurnObligation::default();
@@ -2517,14 +2540,23 @@ fn recovered_flow_cleanup_signals_preserve_every_lifecycle_phase() {
     apply_cleanup(&mut running, MobPhase::Running);
 
     let mut stopped = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(&mut stopped, PlacedCompletionLifecycleIntentKind::Stop);
     MobMachineMutator::apply(&mut stopped, MobMachineInput::Stop).expect("stop");
     apply_cleanup(&mut stopped, MobPhase::Stopped);
 
     let mut completed = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(
+        &mut completed,
+        PlacedCompletionLifecycleIntentKind::Complete,
+    );
     MobMachineMutator::apply(&mut completed, MobMachineInput::Complete).expect("complete");
     apply_cleanup(&mut completed, MobPhase::Completed);
 
     let mut destroy_admitted = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(
+        &mut destroy_admitted,
+        PlacedCompletionLifecycleIntentKind::Destroy,
+    );
     destroy_admitted
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("admit destroy cleanup");
@@ -2535,6 +2567,10 @@ fn recovered_flow_cleanup_signals_preserve_every_lifecycle_phase() {
     );
 
     let mut storage_finalizing = MobMachineAuthority::new();
+    begin_lifecycle_quiesce(
+        &mut storage_finalizing,
+        PlacedCompletionLifecycleIntentKind::Destroy,
+    );
     storage_finalizing
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("admit destroy cleanup");
@@ -3804,6 +3840,10 @@ fn remote_retire_emits_host_addressed_release_and_destroy_clears_placement() {
         &host,
         SpawnPolicyRuntimeMode::TurnDriven,
     );
+    begin_lifecycle_quiesce(
+        &mut destroy_authority,
+        PlacedCompletionLifecycleIntentKind::Destroy,
+    );
     destroy_authority
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("destroy cleanup admitted");
@@ -3853,6 +3893,7 @@ fn destroy_requires_host_authority_to_be_revoked_first() {
     let host = host_id("host-destroy-guard");
     bind_owner_bridge(&mut authority);
     bind_host(&mut authority, &host, 1, HostCaps::FULL);
+    begin_lifecycle_quiesce(&mut authority, PlacedCompletionLifecycleIntentKind::Destroy);
     authority
         .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
         .expect("destroy cleanup admitted");

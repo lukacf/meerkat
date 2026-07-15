@@ -77,7 +77,9 @@ use meerkat_mob::runtime::host_actor::{
     TurnOutcomePendingPersistenceAuthority, TurnOutcomePersistenceAuthority,
     build_host_comms_runtime, spawn_mob_host_actor,
 };
-use meerkat_mob::runtime::host_materialize::MaterializePreflightProbe;
+use meerkat_mob::runtime::host_materialize::{
+    MaterializeLlmPreflightOutcome, MaterializePreflightProbe,
+};
 use tokio::sync::watch;
 
 /// Serialize tests that bind real loopback listeners or install inproc comms
@@ -425,10 +427,11 @@ pub fn member_realm() -> Arc<MemberRealm> {
 }
 
 /// Scripted Tier-1 + Tier-2 preflight probe for the member substrate
-/// (DEC-P3H-8): providers are the Tier-1 presence answer; `binding_resolvable`
-/// is the Tier-2 named-binding presence walk, scriptable per test.
+/// (DEC-P3H-8): providers are the Tier-1 presence answer; exact model and
+/// binding outcomes are independently scriptable for Tier 2.
 pub struct ScriptedPreflightProbe {
     providers: std::sync::Mutex<Vec<meerkat_core::Provider>>,
+    model_resolvable: AtomicBool,
     binding_resolvable: AtomicBool,
 }
 
@@ -436,8 +439,13 @@ impl ScriptedPreflightProbe {
     pub fn new(providers: Vec<meerkat_core::Provider>) -> Self {
         Self {
             providers: std::sync::Mutex::new(providers),
+            model_resolvable: AtomicBool::new(true),
             binding_resolvable: AtomicBool::new(true),
         }
+    }
+
+    pub fn set_model_resolvable(&self, resolvable: bool) {
+        self.model_resolvable.store(resolvable, Ordering::SeqCst);
     }
 
     pub fn set_binding_resolvable(&self, resolvable: bool) {
@@ -467,12 +475,23 @@ impl ProviderPresenceProbe for ScriptedPreflightProbe {
 
 #[async_trait::async_trait]
 impl MaterializePreflightProbe for ScriptedPreflightProbe {
-    async fn binding_resolvable(
+    async fn preflight_llm_identity(
         &self,
-        _binding: Option<&meerkat_core::AuthBindingRef>,
-        _provider: meerkat_core::Provider,
-    ) -> Result<bool, ProviderPresenceProbeError> {
-        Ok(self.binding_resolvable.load(Ordering::SeqCst))
+        _identity: &meerkat_core::SessionLlmIdentity,
+        _custom_models: &std::collections::BTreeMap<
+            String,
+            meerkat_core::config::CustomModelConfig,
+        >,
+        _preferred_realm: Option<&meerkat_core::RealmId>,
+        _auth_lease_handle: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<MaterializeLlmPreflightOutcome, ProviderPresenceProbeError> {
+        if !self.model_resolvable.load(Ordering::SeqCst) {
+            return Ok(MaterializeLlmPreflightOutcome::ModelUnresolvable);
+        }
+        if !self.binding_resolvable.load(Ordering::SeqCst) {
+            return Ok(MaterializeLlmPreflightOutcome::BindingUnresolvable);
+        }
+        Ok(MaterializeLlmPreflightOutcome::Resolved)
     }
 }
 

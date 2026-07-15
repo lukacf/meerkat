@@ -2331,6 +2331,17 @@ impl MobMachineState {
 mod tests {
     use super::*;
 
+    fn begin_completion_lifecycle_quiesce(
+        authority: &mut MobMachineAuthority,
+        intent: PlacedCompletionLifecycleIntentKind,
+    ) {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { intent },
+        )
+        .expect("completion lifecycle must enter exact quiesce intent before terminalization");
+    }
+
     fn quota_obligation(identity_suffix: usize, sequence: u64) -> RemoteTurnObligation {
         RemoteTurnObligation {
             agent_identity: AgentIdentity(format!("member-{identity_suffix}")),
@@ -2530,6 +2541,10 @@ mod tests {
             let session_id = seed_live_member(&mut authority, &identity, &runtime_id);
             let mob_id = MobId::from("pending-retirement-correlation");
             if stopped {
+                begin_completion_lifecycle_quiesce(
+                    &mut authority,
+                    PlacedCompletionLifecycleIntentKind::Stop,
+                );
                 MobMachineMutator::apply(&mut authority, MobMachineInput::Stop)
                     .expect("stop seeded authority");
             }
@@ -3928,6 +3943,13 @@ mod tests {
         let mut authority = MobMachineAuthority::new();
         let owner = authority.generated_authority_owner_token();
         let mut prepared = authority.prepare_authority();
+        MobMachineMutator::apply(
+            &mut prepared,
+            MobMachineInput::BeginPlacedCompletionLifecycleQuiesce {
+                intent: PlacedCompletionLifecycleIntentKind::Stop,
+            },
+        )
+        .expect("prepared authority should enter Stop quiesce");
         MobMachineMutator::apply(&mut prepared, MobMachineInput::Stop)
             .expect("prepared authority should accept Stop");
 
@@ -3946,8 +3968,19 @@ mod tests {
     fn commit_prepared_authority_rejects_stale_live_base() {
         let mut authority = MobMachineAuthority::new();
         let mut prepared = authority.prepare_authority();
+        MobMachineMutator::apply(
+            &mut prepared,
+            MobMachineInput::BeginPlacedCompletionLifecycleQuiesce {
+                intent: PlacedCompletionLifecycleIntentKind::Stop,
+            },
+        )
+        .expect("prepared authority should enter Stop quiesce");
         MobMachineMutator::apply(&mut prepared, MobMachineInput::Stop)
             .expect("prepared authority should accept Stop");
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Complete,
+        );
         MobMachineMutator::apply(&mut authority, MobMachineInput::Complete)
             .expect("live authority should move away from prepared base");
 
@@ -4104,6 +4137,10 @@ mod tests {
             .expect("prepared transition should carry member trust obligation");
         let expected_peer_id = obligation.b_peer_id().0.clone();
 
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Stop,
+        );
         MobMachineMutator::apply(&mut authority, MobMachineInput::Stop)
             .expect("live authority should stop without bumping topology");
         let error = crate::generated::protocol_mob_member_trust_wiring::wiring_authority_for_identity_with_live_authority(
@@ -4930,6 +4967,18 @@ mod tests {
             let session_id = seed_live_member(&mut authority, &identity, &runtime_id);
 
             if destroy {
+                if stopped {
+                    begin_completion_lifecycle_quiesce(
+                        &mut authority,
+                        PlacedCompletionLifecycleIntentKind::Stop,
+                    );
+                    MobMachineMutator::apply(&mut authority, MobMachineInput::Stop)
+                        .expect("move destroy-family retirement to stopped");
+                }
+                begin_completion_lifecycle_quiesce(
+                    &mut authority,
+                    PlacedCompletionLifecycleIntentKind::Destroy,
+                );
                 authority
                     .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
                     .expect("admit destroy cleanup");
@@ -4967,7 +5016,11 @@ mod tests {
                     fence_token: FenceToken(7),
                 })
                 .expect("observe runtime retirement");
-            if stopped {
+            if stopped && !destroy {
+                begin_completion_lifecycle_quiesce(
+                    &mut authority,
+                    PlacedCompletionLifecycleIntentKind::Stop,
+                );
                 MobMachineMutator::apply(&mut authority, MobMachineInput::Stop)
                     .expect("move non-live retirement to stopped");
             }
@@ -6521,6 +6574,11 @@ mod tests {
             })
             .expect("recover exact cleanup obligation");
 
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Destroy,
+        );
+
         assert!(
             authority
                 .apply_signal(MobMachineSignal::DestroyMob {
@@ -7175,6 +7233,10 @@ mod tests {
             )
             .is_err(),
             "flow and kickoff custody must never share an input correlation"
+        );
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Reset,
         );
         assert!(
             MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).is_err(),

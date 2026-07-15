@@ -1385,7 +1385,7 @@ fn turn_outcome_dedup_replays_the_recorded_row() {
 }
 
 #[test]
-fn turn_outcome_ack_prunes_exact_row_without_tombstoning_delayed_commit() {
+fn turn_outcome_ack_prunes_payload_and_tombstones_delayed_commit() {
     let mut authority = MobHostBindingAuthorityAuthority::new();
     bind(&mut authority, "mob-1", 1);
     let member_key = member("mob-1", "alpha");
@@ -1427,6 +1427,14 @@ fn turn_outcome_ack_prunes_exact_row_without_tombstoning_delayed_commit() {
             .turn_outcome_terminal_seqs
             .contains_key(&retained)
     );
+    assert_eq!(
+        authority
+            .state()
+            .turn_outcome_acknowledged
+            .get(&acknowledged),
+        Some(&true),
+        "present ACK retains exact negative memory until residency disposal"
+    );
 
     let replay = apply(
         &mut authority,
@@ -1440,9 +1448,20 @@ fn turn_outcome_ack_prunes_exact_row_without_tombstoning_delayed_commit() {
             if turn_key == &acknowledged
     ));
 
-    // The absent acknowledgement retained no negative memory. This models a
-    // poll ack that raced ahead of the delayed durable-journal commit.
-    reserve_pending(&mut authority, &acknowledged, 1);
+    // Re-reservation after a present ACK deduplicates against the exact-key
+    // tombstone; a delayed watcher cannot recreate Pending or a payload row.
+    let reserve_replay = apply(
+        &mut authority,
+        MobHostBindingAuthorityInput::ReserveTurnOutcomePending {
+            turn_key: acknowledged.clone(),
+            window_start: 1,
+        },
+    );
+    assert!(matches!(
+        reserve_replay.effects().first(),
+        Some(MobHostBindingAuthorityEffect::TurnOutcomePendingTerminalReplay { turn_key })
+            if turn_key == &acknowledged
+    ));
     let delayed = apply(
         &mut authority,
         MobHostBindingAuthorityInput::RecordTurnOutcome {
@@ -1453,11 +1472,8 @@ fn turn_outcome_ack_prunes_exact_row_without_tombstoning_delayed_commit() {
     );
     assert!(matches!(
         delayed.effects().first(),
-        Some(MobHostBindingAuthorityEffect::TurnOutcomeRecorded {
-            turn_key,
-            terminal_seq: 99,
-            ..
-        }) if turn_key == &acknowledged
+        Some(MobHostBindingAuthorityEffect::TurnOutcomeUnreservedDropped { turn_key })
+            if turn_key == &acknowledged
     ));
 }
 

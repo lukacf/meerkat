@@ -6312,6 +6312,17 @@ mod tests {
     use meerkat_core::types::ContentInput;
     use std::collections::BTreeMap;
 
+    fn begin_completion_lifecycle_quiesce(
+        authority: &mut mob_dsl::MobMachineAuthority,
+        intent: mob_dsl::PlacedCompletionLifecycleIntentKind,
+    ) {
+        mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { intent },
+        )
+        .expect("completion lifecycle must enter exact quiesce intent before terminalization");
+    }
+
     #[test]
     fn flow_projection_audit_requires_fail_closed_mob_machine_authority() {
         for record in flow_projection_kernel_audit() {
@@ -6423,6 +6434,10 @@ mod tests {
 
         // Stopped -> DeniedNotRunning.
         let mut stopped = mob_dsl::MobMachineAuthority::new();
+        begin_completion_lifecycle_quiesce(
+            &mut stopped,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop,
+        );
         mob_dsl::MobMachineMutator::apply(&mut stopped, mob_dsl::MobMachineInput::Stop)
             .expect("stop from running");
         assert_eq!(
@@ -6432,6 +6447,10 @@ mod tests {
 
         // Destroyed -> DeniedNotRunning.
         let mut destroyed = mob_dsl::MobMachineAuthority::new();
+        begin_completion_lifecycle_quiesce(
+            &mut destroyed,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Destroy,
+        );
         mob_dsl::MobMachineMutator::apply(&mut destroyed, mob_dsl::MobMachineInput::Destroy)
             .expect("destroy from running");
         assert_eq!(

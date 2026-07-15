@@ -310,6 +310,13 @@ mod tests {
             Ok(None)
         }
 
+        async fn prepare_member_session_for_explicit_resume(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<bool, MobError> {
+            Ok(false)
+        }
+
         async fn comms_runtime(
             &self,
             _member_ref: &MemberRef,

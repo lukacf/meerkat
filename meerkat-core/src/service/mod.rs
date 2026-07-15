@@ -97,6 +97,33 @@ pub enum SessionError {
 }
 
 impl SessionError {
+    const AGENT_BUILD_FAILURE_CAUSE_KEY: &'static str = "agent_build_failure_cause";
+    const LLM_IDENTITY_UNRESOLVABLE_CAUSE: &'static str = "LlmIdentityUnresolvable";
+
+    /// Preserve the typed class of an LLM identity/client construction
+    /// failure across the generic session-builder boundary. Remote member
+    /// materialization uses this to map a post-preflight credential TOCTOU
+    /// failure onto its stable wire rejection without parsing display text.
+    pub fn build_llm_identity_unresolvable(message: impl Into<String>) -> Self {
+        Self::FailedWithData {
+            message: message.into(),
+            data: serde_json::json!({
+                "agent_build_failure_cause": Self::LLM_IDENTITY_UNRESOLVABLE_CAUSE,
+            }),
+        }
+    }
+
+    pub fn is_build_llm_identity_unresolvable(&self) -> bool {
+        matches!(
+            self,
+            Self::FailedWithData { data, .. }
+                if data
+                    .get(Self::AGENT_BUILD_FAILURE_CAUSE_KEY)
+                    .and_then(serde_json::Value::as_str)
+                    == Some(Self::LLM_IDENTITY_UNRESOLVABLE_CAUSE)
+        )
+    }
+
     /// Fail-closed signal for a runtime executor whose live session mutated
     /// but whose terminal witness could not be trusted. The structured cause
     /// survives RPC transport and tells CoreExecutor adapters to stop the

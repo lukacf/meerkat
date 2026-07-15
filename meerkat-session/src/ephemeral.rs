@@ -232,7 +232,13 @@ impl LiveSessionActorWitness {
             && Arc::ptr_eq(&self.incarnation, &handle.actor_witness.incarnation)
     }
 
-    pub(crate) fn is_live(&self) -> bool {
+    /// Whether this exact actor incarnation has not been revoked.
+    ///
+    /// Session registries revoke a witness before removing or replacing its
+    /// actor. Callers that sample this while holding the registry's stable
+    /// lifecycle boundary can therefore use it as an exact-incarnation
+    /// liveness check, never as logical-session authority by itself.
+    pub fn is_live(&self) -> bool {
         self.incarnation.live.load(Ordering::Acquire)
     }
 

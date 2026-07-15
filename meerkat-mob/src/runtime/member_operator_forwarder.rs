@@ -202,11 +202,11 @@ impl MemberOperatorForwarder {
             let attempt_budget = self.budget.attempt.min(remaining);
             match tokio::time::timeout(attempt_budget, waiter).await {
                 Ok(Ok(candidate)) => {
-                    return decode_operator_reply(
+                    return decode_operator_reply_candidate(
                         tool_name,
                         &request_id,
-                        candidate.response_terminality,
-                        &candidate.interaction.content,
+                        &self.supervisor.peer_id,
+                        &candidate,
                     );
                 }
                 Ok(Err(_recv_dropped)) => {
@@ -230,6 +230,40 @@ impl MemberOperatorForwarder {
         let timeout_ms = u64::try_from(self.budget.total.as_millis()).unwrap_or(u64::MAX);
         Err(ToolError::timeout(tool_name, timeout_ms))
     }
+}
+
+/// Validate the machine-admitted canonical sender before decoding a waiter
+/// reply. The correlation UUID selects the mechanical waiter, but it is not
+/// peer authority: only the exact supervisor route targeted by this upcall
+/// may supply its result.
+fn decode_operator_reply_candidate(
+    tool_name: &str,
+    request_id: &str,
+    expected_supervisor_peer_id: &meerkat_core::comms::PeerId,
+    candidate: &PeerInputCandidate,
+) -> Result<MemberOperatorOutcome, ToolError> {
+    match candidate.from_peer_id() {
+        Some(sender_peer_id) if sender_peer_id == *expected_supervisor_peer_id => {}
+        Some(sender_peer_id) => {
+            return Err(ToolError::execution_failed(format!(
+                "tool '{tool_name}' upcall reply was admitted from canonical peer \
+                 '{sender_peer_id}', expected supervisor '{expected_supervisor_peer_id}'"
+            )));
+        }
+        None => {
+            return Err(ToolError::execution_failed(format!(
+                "tool '{tool_name}' upcall reply carried no admitted canonical peer identity; \
+                 expected supervisor '{expected_supervisor_peer_id}'"
+            )));
+        }
+    }
+
+    decode_operator_reply(
+        tool_name,
+        request_id,
+        candidate.response_terminality,
+        &candidate.interaction.content,
+    )
 }
 
 /// Decode one waiter-delivered terminal Response into the typed operator
@@ -294,7 +328,11 @@ mod tests {
     use crate::runtime::bridge_protocol::{
         BridgeRejectionCause, MemberOperatorReply, WireOpaqueJson,
     };
-    use meerkat_core::interaction::{InteractionId, TerminalDisposition};
+    use meerkat_core::interaction::{
+        InboxInteraction, InteractionId, PeerIngressAuthDecision, PeerIngressConvention,
+        PeerIngressFact, PeerIngressIdentity, PeerIngressKind, PeerInputClass, TerminalDisposition,
+    };
+    use meerkat_core::types::HandlingMode;
     use std::sync::Mutex;
 
     /// Fake transport: never resolves waiters; counts sends and records the
@@ -350,6 +388,56 @@ mod tests {
 
     fn supervisor_route() -> PeerRoute {
         PeerRoute::new(meerkat_core::comms::PeerId::from_ed25519_pubkey(&[7u8; 32]))
+    }
+
+    fn operator_reply_candidate(
+        sender_peer_id: meerkat_core::comms::PeerId,
+        request_id: &str,
+    ) -> PeerInputCandidate {
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let in_reply_to = InteractionId(Uuid::new_v4());
+        let reply = BridgeReply::MemberOperatorReply(MemberOperatorReply {
+            request_id: request_id.to_string(),
+            outcome: MemberOperatorOutcome::Completed {
+                result: WireOpaqueJson::from_value(&serde_json::json!({"ok": true})),
+            },
+        });
+        PeerInputCandidate {
+            interaction: InboxInteraction {
+                id: interaction_id,
+                from_route: Some(sender_peer_id),
+                from: "trusted-wired-peer".to_string(),
+                content: InteractionContent::Response {
+                    in_reply_to,
+                    status: meerkat_core::interaction::ResponseStatus::Completed,
+                    result: serde_json::to_value(reply).expect("encode operator reply"),
+                    blocks: None,
+                },
+                rendered_text: String::new(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+                sender_taint: None,
+                objective_id: None,
+            },
+            ingress: PeerIngressFact::peer(
+                interaction_id,
+                PeerInputClass::ResponseTerminal,
+                PeerIngressKind::Response,
+                Some(PeerIngressAuthDecision::Required),
+                PeerIngressIdentity::new(
+                    sender_peer_id,
+                    "trusted-wired-peer",
+                    PeerIngressConvention::Response {
+                        in_reply_to,
+                        status: meerkat_core::interaction::ResponseStatus::Completed,
+                    },
+                ),
+            ),
+            lifecycle_peer: None,
+            response_terminality: Some(TerminalityClass::Terminal {
+                disposition: TerminalDisposition::Completed,
+            }),
+        }
     }
 
     /// T-5: waiter never resolves ⇒ per-attempt re-send with the SAME
@@ -480,6 +568,27 @@ mod tests {
         )
         .expect("decodes");
         assert_eq!(decoded, outcome);
+    }
+
+    /// A correctly shaped, admitted response from another trusted/wired peer
+    /// cannot satisfy the supervisor waiter even if it knows the correlation
+    /// UUID and echoes the logical request id.
+    #[test]
+    fn waiter_reply_rejects_wrong_canonical_peer_before_decode() {
+        let expected_supervisor = supervisor_route().peer_id;
+        let wrong_trusted_peer = meerkat_core::comms::PeerId::from_ed25519_pubkey(&[8u8; 32]);
+        let candidate = operator_reply_candidate(wrong_trusted_peer, "req-1");
+
+        let error = decode_operator_reply_candidate(
+            "list_members",
+            "req-1",
+            &expected_supervisor,
+            &candidate,
+        )
+        .expect_err("a different admitted peer must not satisfy the supervisor waiter");
+
+        assert!(error.to_string().contains(&wrong_trusted_peer.to_string()));
+        assert!(error.to_string().contains(&expected_supervisor.to_string()));
     }
 
     #[test]

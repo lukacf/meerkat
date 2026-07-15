@@ -347,6 +347,33 @@ impl MeerkatMachine {
         })
     }
 
+    /// Execute the canonical LLM reconfiguration transaction while the
+    /// caller owns the session's stable turn-finalization boundary.
+    ///
+    /// Direct control-plane callers acquire that boundary in
+    /// `SessionServiceRuntimeExt::reconfigure_session_llm_identity`; runtime
+    /// loop executors already hold it across `CoreExecutor::apply` and enter
+    /// through the explicitly named under-boundary method instead.
+    pub async fn reconfigure_session_llm_identity_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        request: SessionLlmReconfigureRequest,
+    ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
+        let command = self
+            .prepare_reconfigure_session_llm_command(session_id, request)
+            .await?;
+        match self
+            .execute_meerkat_machine_command(None, command)
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::LlmReconfigured(report) => Ok(report),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for LLM reconfiguration: {other:?}"
+            ))),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn reconfigure_session_llm_identity_inner(
         &self,

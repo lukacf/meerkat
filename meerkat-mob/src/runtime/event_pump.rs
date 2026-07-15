@@ -3742,12 +3742,15 @@ mod tests {
         let runtime_id = AgentRuntimeId::initial(identity.clone());
         let fence_token = FenceToken::new(7);
         let peer = completion_test_peer("w-exit-race", "127.0.0.1:4027");
+        let stale_incarnation = manager
+            .next_incarnation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let expected_member = install_test_pump(
             &manager,
             &identity,
             &runtime_id,
             fence_token,
-            1,
+            stale_incarnation,
             peer.clone(),
         );
         {
@@ -3781,7 +3784,7 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let replacement = state.pumps.get(&identity).expect("replacement pump");
             assert_eq!(replacement.expected_member, expected_member);
-            assert_ne!(replacement.incarnation, 1);
+            assert_ne!(replacement.incarnation, stale_incarnation);
             assert!(
                 !replacement.exiting,
                 "ensure must publish a live replacement instead of accepting the dying lease"

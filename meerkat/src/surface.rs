@@ -67,6 +67,7 @@ pub use runtime_backed::{
     install_prepared_runtime_interrupt_handle_for_actor_slot,
     materialize_attached_session_actor_only,
     materialize_attached_session_actor_only_with_reserved_admission, materialize_session,
+    materialize_session_actor_unattached_with_reserved_admission,
     materialize_session_under_runtime_turn_boundary, materialize_session_with_reserved_admission,
     materialize_session_with_reserved_admission_under_runtime_turn_boundary,
     persistent_runtime_post_stop_cleanup_handle,

@@ -114,6 +114,12 @@ pub(crate) struct MobSupervisorBridge {
     /// in-flight sends, never a full `wait_for_response` window (ADJ-P6-2:
     /// rotation waits ≤ one poll window).
     authority_gate: RwLock<()>,
+    /// Serializes the complete generated peer-projection transition through
+    /// canonical trust-store reconciliation. The DSL mutex alone cannot cover
+    /// the awaited reconciliation tail: without this gate, a concurrent
+    /// add/remove can advance the projection epoch and make the first call's
+    /// exact generated obligation stale before it mints mutation authority.
+    trust_reconcile_gate: Mutex<()>,
 }
 
 /// Typed reachability domain for the supervisor bridge's advertised
@@ -191,6 +197,7 @@ impl MobSupervisorBridge {
             buffered_candidates: Mutex::new(VecDeque::new()),
             intake_notify: Arc::new(tokio::sync::Notify::new()),
             authority_gate: RwLock::new(()),
+            trust_reconcile_gate: Mutex::new(()),
         })
     }
 
@@ -634,10 +641,12 @@ impl MobSupervisorBridge {
     }
 
     async fn apply_bridge_trust(
+        trust_reconcile_gate: &Mutex<()>,
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
         recipient: TrustedPeerDescriptor,
     ) -> Result<RecipientTrustInstall, MobError> {
+        let _trust_reconcile_guard = trust_reconcile_gate.lock().await;
         let local_endpoint = Self::local_endpoint_for_runtime(runtime.as_ref())?;
         dsl.apply_input(
             mm_dsl::MeerkatMachineInput::PublishLocalEndpoint {
@@ -718,10 +727,12 @@ impl MobSupervisorBridge {
     /// absent; always applying the input is what lets a retry heal the window
     /// where the prior DSL mutation committed but live reconciliation failed.
     async fn remove_bridge_trust(
+        trust_reconcile_gate: &Mutex<()>,
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         dsl: &Arc<meerkat_runtime::HandleDslAuthority>,
         recipient: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
+        let _trust_reconcile_guard = trust_reconcile_gate.lock().await;
         let endpoint = mm_dsl::PeerEndpoint::from(&recipient);
         let transition = dsl
             .apply_input_with_transition(
@@ -1044,7 +1055,13 @@ impl MobSupervisorBridge {
             let send_result = async {
                 let runtime = self.runtime_with_gate_held().await;
                 let dsl = self.dsl.read().await.clone();
-                let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+                let _install = Self::apply_bridge_trust(
+                    &self.trust_reconcile_gate,
+                    &runtime,
+                    &dsl,
+                    recipient.clone(),
+                )
+                .await?;
                 Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await
             }
             .await;
@@ -1070,7 +1087,13 @@ impl MobSupervisorBridge {
         );
         let (runtime, dsl) =
             Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config).await?;
-        let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+        let _install = Self::apply_bridge_trust(
+            &self.trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await?;
         Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await
     }
 
@@ -1100,7 +1123,13 @@ impl MobSupervisorBridge {
                 // branch below and trust_recipient (Invariant #1: no raw or
                 // legacy authority writes).
                 let dsl = self.dsl.read().await.clone();
-                let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+                let _install = Self::apply_bridge_trust(
+                    &self.trust_reconcile_gate,
+                    &runtime,
+                    &dsl,
+                    recipient.clone(),
+                )
+                .await?;
                 self.request_json_with_runtime(
                     &runtime,
                     recipient,
@@ -1138,7 +1167,13 @@ impl MobSupervisorBridge {
         );
         let (runtime, dsl) =
             Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config).await?;
-        let _install = Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await?;
+        let _install = Self::apply_bridge_trust(
+            &self.trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await?;
         #[cfg(not(target_arch = "wasm32"))]
         let reply_endpoint = Self::ephemeral_probe_reply_endpoint(&runtime, &self.endpoint_config)?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1180,9 +1215,14 @@ impl MobSupervisorBridge {
             let send_result = async {
                 let runtime = self.runtime_with_gate_held().await;
                 let dsl = self.dsl.read().await.clone();
-                Self::apply_bridge_trust(&runtime, &dsl, recipient.clone())
-                    .await
-                    .map_err(BridgeRequestFailure::BeforeSend)?;
+                Self::apply_bridge_trust(
+                    &self.trust_reconcile_gate,
+                    &runtime,
+                    &dsl,
+                    recipient.clone(),
+                )
+                .await
+                .map_err(BridgeRequestFailure::BeforeSend)?;
                 self.request_json_with_runtime_classified(
                     &runtime,
                     recipient,
@@ -1230,9 +1270,14 @@ impl MobSupervisorBridge {
             Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config)
                 .await
                 .map_err(BridgeRequestFailure::BeforeSend)?;
-        Self::apply_bridge_trust(&runtime, &dsl, recipient.clone())
-            .await
-            .map_err(BridgeRequestFailure::BeforeSend)?;
+        Self::apply_bridge_trust(
+            &self.trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await
+        .map_err(BridgeRequestFailure::BeforeSend)?;
         #[cfg(not(target_arch = "wasm32"))]
         let reply_endpoint = Self::ephemeral_probe_reply_endpoint(&runtime, &self.endpoint_config)
             .map_err(BridgeRequestFailure::BeforeSend)?;
@@ -1265,7 +1310,13 @@ impl MobSupervisorBridge {
         let _authority_guard = self.authority_gate.read().await;
         let runtime = self.runtime_with_gate_held().await;
         let dsl = self.dsl.read().await.clone();
-        Self::apply_bridge_trust(&runtime, &dsl, recipient.clone()).await
+        Self::apply_bridge_trust(
+            &self.trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await
     }
 
     /// Fail-closed rollback for [`Self::trust_recipient`]: removes the recipient
@@ -1279,7 +1330,13 @@ impl MobSupervisorBridge {
         let _authority_guard = self.authority_gate.read().await;
         let runtime = self.runtime_with_gate_held().await;
         let dsl = self.dsl.read().await.clone();
-        Self::remove_bridge_trust(&runtime, &dsl, recipient.clone()).await
+        Self::remove_bridge_trust(
+            &self.trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await
     }
 
     pub(crate) async fn request_json<T: serde::Serialize>(
@@ -1990,9 +2047,14 @@ mod tests {
             .supervisor_spec_for_recipient(&recipient)
             .await
             .expect("sender descriptor should resolve");
-        MobSupervisorBridge::apply_bridge_trust(&recipient_runtime, &recipient_dsl, sender)
-            .await
-            .expect("recipient should trust sender for classified ingress");
+        MobSupervisorBridge::apply_bridge_trust(
+            &bridge.trust_reconcile_gate,
+            &recipient_runtime,
+            &recipient_dsl,
+            sender,
+        )
+        .await
+        .expect("recipient should trust sender for classified ingress");
         let runtime = bridge.runtime.read().await.clone();
         let expected_reply_endpoint = bridge
             .live_runtime_reply_endpoint(runtime.as_ref())
@@ -2129,9 +2191,14 @@ mod tests {
             .supervisor_spec_for_recipient(&recipient)
             .await
             .expect("sender descriptor");
-        MobSupervisorBridge::apply_bridge_trust(&recipient_runtime, &recipient_dsl, sender.clone())
-            .await
-            .expect("recipient trusts sender");
+        MobSupervisorBridge::apply_bridge_trust(
+            &bridge.trust_reconcile_gate,
+            &recipient_runtime,
+            &recipient_dsl,
+            sender.clone(),
+        )
+        .await
+        .expect("recipient trusts sender");
 
         let operation_id = super::super::bridge_protocol::SupervisorRotationOperationId::new();
         let delivery =
@@ -2283,6 +2350,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_trust_reconcile_serializes_concurrent_projection_epochs() {
+        let suffix = uuid::Uuid::new_v4();
+        let authority = SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let (runtime, dsl) = MobSupervisorBridge::build_runtime(
+            &format!("mob/__mob_supervisor__/trust-serialization-{suffix}"),
+            &authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("supervisor runtime should build");
+        let recipient = |label: &str| {
+            let keypair = meerkat_comms::Keypair::generate();
+            TrustedPeerDescriptor::unsigned_with_pubkey(
+                format!("trust-serialization-{label}-{suffix}"),
+                keypair.public_key().to_peer_id().to_string(),
+                *keypair.public_key().as_bytes(),
+                format!("inproc://trust-serialization-{label}-{suffix}"),
+            )
+            .expect("valid recipient descriptor")
+        };
+        let first_recipient = recipient("first");
+        let second_recipient = recipient("second");
+        let expected_peer_ids = [first_recipient.peer_id, second_recipient.peer_id];
+        let trust_reconcile_gate = Arc::new(Mutex::new(()));
+
+        // Queue both callers behind the same held gate. Releasing it makes
+        // them runnable together while the bridge-owned gate keeps each
+        // projection transition coupled to its awaited reconciliation tail.
+        let held = trust_reconcile_gate.lock().await;
+        let first = {
+            let gate = Arc::clone(&trust_reconcile_gate);
+            let runtime = Arc::clone(&runtime);
+            let dsl = Arc::clone(&dsl);
+            tokio::spawn(async move {
+                MobSupervisorBridge::apply_bridge_trust(
+                    gate.as_ref(),
+                    &runtime,
+                    &dsl,
+                    first_recipient,
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        let second = {
+            let gate = Arc::clone(&trust_reconcile_gate);
+            let runtime = Arc::clone(&runtime);
+            let dsl = Arc::clone(&dsl);
+            tokio::spawn(async move {
+                MobSupervisorBridge::apply_bridge_trust(
+                    gate.as_ref(),
+                    &runtime,
+                    &dsl,
+                    second_recipient,
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        drop(held);
+
+        first
+            .await
+            .expect("first trust task should join")
+            .expect("first trust projection should reconcile");
+        second
+            .await
+            .expect("second trust task should join")
+            .expect("second trust projection should reconcile");
+
+        let trusted_peer_ids = runtime
+            .trusted_peers_shared()
+            .entries()
+            .into_iter()
+            .map(|peer| peer.peer_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            expected_peer_ids
+                .into_iter()
+                .all(|peer_id| trusted_peer_ids.contains(&peer_id)),
+            "both serialized projection epochs must reach canonical trust: {trusted_peer_ids:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn bridge_trust_reconcile_repair_heals_committed_dsl_windows() {
         let suffix = uuid::Uuid::new_v4();
         let authority = SupervisorAuthorityRecord::generate(
@@ -2315,11 +2470,17 @@ mod tests {
             recipient_runtime.advertised_address(),
         )
         .expect("valid recipient descriptor");
+        let trust_reconcile_gate = Mutex::new(());
 
         fail_next_bridge_trust_add_reconcile_for_test(&recipient.peer_id.to_string());
-        MobSupervisorBridge::apply_bridge_trust(&runtime, &dsl, recipient.clone())
-            .await
-            .expect_err("fault after AddDirectPeerEndpoint must surface");
+        MobSupervisorBridge::apply_bridge_trust(
+            &trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await
+        .expect_err("fault after AddDirectPeerEndpoint must surface");
         assert!(
             dsl.snapshot_state()
                 .direct_peer_endpoints
@@ -2327,9 +2488,14 @@ mod tests {
             "the fault must exercise DSL-committed/live-unreconciled add state"
         );
         assert_eq!(
-            MobSupervisorBridge::apply_bridge_trust(&runtime, &dsl, recipient.clone())
-                .await
-                .expect("RepairAddDirectPeerEndpoint must reconcile live trust"),
+            MobSupervisorBridge::apply_bridge_trust(
+                &trust_reconcile_gate,
+                &runtime,
+                &dsl,
+                recipient.clone(),
+            )
+            .await
+            .expect("RepairAddDirectPeerEndpoint must reconcile live trust"),
             RecipientTrustInstall::NewlyInstalled
         );
 
@@ -2351,18 +2517,28 @@ mod tests {
         );
 
         fail_next_bridge_trust_remove_reconcile_for_test(&recipient.peer_id.to_string());
-        MobSupervisorBridge::remove_bridge_trust(&runtime, &dsl, recipient.clone())
-            .await
-            .expect_err("fault after RemoveDirectPeerEndpoint must surface");
+        MobSupervisorBridge::remove_bridge_trust(
+            &trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await
+        .expect_err("fault after RemoveDirectPeerEndpoint must surface");
         assert!(
             !dsl.snapshot_state()
                 .direct_peer_endpoints
                 .contains(&mm_dsl::PeerEndpoint::from(&recipient)),
             "the fault must exercise DSL-committed/live-unreconciled remove state"
         );
-        MobSupervisorBridge::remove_bridge_trust(&runtime, &dsl, recipient.clone())
-            .await
-            .expect("RepairRemoveDirectPeerEndpoint must remove stranded live trust");
+        MobSupervisorBridge::remove_bridge_trust(
+            &trust_reconcile_gate,
+            &runtime,
+            &dsl,
+            recipient.clone(),
+        )
+        .await
+        .expect("RepairRemoveDirectPeerEndpoint must remove stranded live trust");
 
         let send_result = runtime
             .send(CommsCommand::PeerRequest {

@@ -39,7 +39,8 @@ use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use meerkat_runtime::{
     EnsureRuntimeExecutorAttachment, Input, InputDurability, InputHeader, InputOrigin,
     InputVisibility, MeerkatMachine, PendingRuntimeExecutorAttachment,
-    PreparedSessionMaterialization, PromptInput, RuntimeExecutorAttachmentWitness,
+    PreparedAttachedSessionActorRecovery, PreparedSessionMaterialization, PromptInput,
+    RuntimeExecutorAttachmentWitness, RuntimeSessionRegistrationWitness,
 };
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
@@ -622,6 +623,22 @@ pub trait MobProvisioner: Send + Sync {
         bridge_session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>>;
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError>;
+    /// Prepare one machine-owned local session for the explicit mob-resume
+    /// seam. Returns `true` only when the caller must rebuild the live
+    /// session: an exact attachment owned by another provisioner incarnation
+    /// was retired, an unattached live actor was discarded, or this
+    /// provisioner's exact attachment has lost its actor and must be replaced
+    /// through the canonical materialization transaction. Returns `false`
+    /// when this provisioner already owns the complete active incarnation (or
+    /// when no runtime adapter participates).
+    ///
+    /// Implementations must never adopt or migrate attachment-local queued
+    /// work. Any retirement must be fenced by the machine-minted exact
+    /// attachment witness.
+    async fn prepare_member_session_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, MobError>;
     async fn ensure_runtime_session_state(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let _ = member_ref;
         Ok(())
@@ -867,6 +884,16 @@ pub struct MemberSessionDisposalArc {
 }
 
 #[cfg(feature = "runtime-adapter")]
+enum RuntimeSessionDisposalTarget {
+    Absent,
+    ExactAttachment {
+        witness: RuntimeExecutorAttachmentWitness,
+        sidecar: Option<Arc<RuntimeSessionState>>,
+    },
+    ExactRegistration(RuntimeSessionRegistrationWitness),
+}
+
+#[cfg(feature = "runtime-adapter")]
 impl MemberSessionDisposalArc {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
@@ -955,7 +982,7 @@ impl MemberSessionDisposalArc {
                 .map_err(|error| Self::runtime_archive_error(error.to_string()))?;
         self.retire_runtime_after_turn_boundary(session_id, &mut boundary)
             .await?;
-        self.unregister_runtime_session_binding(session_id, expected_state.as_ref(), &mut boundary)
+        self.unregister_runtime_session_binding(session_id, &expected_state, boundary)
             .await?;
         Ok(())
     }
@@ -984,20 +1011,41 @@ impl MemberSessionDisposalArc {
     async fn capture_exact_runtime_state_for_disposal(
         &self,
         session_id: &SessionId,
-    ) -> Result<Option<Arc<RuntimeSessionState>>, SessionError> {
+    ) -> Result<RuntimeSessionDisposalTarget, SessionError> {
         let Some(adapter) = &self.runtime_adapter else {
-            return Ok(None);
+            return Ok(RuntimeSessionDisposalTarget::Absent);
         };
         let current = adapter
             .current_executor_attachment_witness(session_id)
             .await;
+        let registration = adapter
+            .current_session_registration_witness(session_id)
+            .await;
         let state = self.runtime_sessions.read().await.get(session_id).cloned();
-        match (current, state) {
-            (Some(witness), Some(state)) if state.witness() == &witness => Ok(Some(state)),
-            (None, None) if !adapter.contains_session(session_id).await => Ok(None),
-            (current, state) => Err(Self::runtime_archive_error(format!(
-                "runtime disposal for {session_id} cannot capture an exact attachment pair: machine={current:?}, sidecar={:?}",
-                state.as_ref().map(|state| state.witness())
+        match (current, state, registration) {
+            (Some(witness), Some(state), Some(_)) if state.witness() == &witness => {
+                Ok(RuntimeSessionDisposalTarget::ExactAttachment {
+                    witness,
+                    sidecar: Some(state),
+                })
+            }
+            // The machine attachment is lifecycle authority. A reconstructed
+            // surface can legitimately have no entry in its mechanical
+            // sidecar index (for example after a cold backend rebuild or when
+            // the attachment was created through another shared surface).
+            // Preserve the exact machine witness and retire by compare-and-
+            // remove; never require the optional index to manufacture proof.
+            (Some(witness), None, Some(_)) => Ok(RuntimeSessionDisposalTarget::ExactAttachment {
+                witness,
+                sidecar: None,
+            }),
+            (None, None, Some(registration)) => Ok(
+                RuntimeSessionDisposalTarget::ExactRegistration(registration),
+            ),
+            (None, None, None) => Ok(RuntimeSessionDisposalTarget::Absent),
+            (current, state, registration) => Err(Self::runtime_archive_error(format!(
+                "runtime disposal for {session_id} cannot capture an exact machine/sidecar pair: attachment={current:?}, registration={registration:?}, sidecar={:?}",
+                state.as_ref().map(|state| state.witness()),
             ))),
         }
     }
@@ -1005,69 +1053,128 @@ impl MemberSessionDisposalArc {
     async fn unregister_runtime_session_binding(
         &self,
         session_id: &SessionId,
-        expected_state: Option<&Arc<RuntimeSessionState>>,
-        boundary: &mut RuntimeTurnFinalizationBoundaryLease,
+        target: &RuntimeSessionDisposalTarget,
+        boundary: RuntimeTurnFinalizationBoundaryLease,
     ) -> Result<(), SessionError> {
         boundary
             .require_session(session_id)
             .map_err(|error| Self::runtime_archive_error(error.to_string()))?;
         if let Some(adapter) = &self.runtime_adapter {
-            let Some(expected_state) = expected_state else {
-                if adapter.contains_session(session_id).await {
-                    return Err(Self::runtime_archive_error(format!(
-                        "runtime session {session_id} is registered without an exact attachment sidecar; refusing SessionId-wide disposal"
-                    )));
+            match target {
+                RuntimeSessionDisposalTarget::Absent => {
+                    if adapter.contains_session(session_id).await {
+                        return Err(Self::runtime_archive_error(format!(
+                            "runtime session {session_id} appeared after its exact absence capture"
+                        )));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            };
-            let current = adapter
-                .current_executor_attachment_witness(session_id)
-                .await;
-            let exact_sidecar = self
-                .runtime_sessions
-                .read()
-                .await
-                .get(session_id)
-                .is_some_and(|current| same_runtime_attachment(current, expected_state));
-            if current.as_ref() != Some(expected_state.witness()) || !exact_sidecar {
-                return Err(Self::runtime_archive_error(format!(
-                    "runtime attachment for {session_id} changed before exact disposal"
-                )));
+                RuntimeSessionDisposalTarget::ExactRegistration(registration) => {
+                    let sidecar_present =
+                        self.runtime_sessions.read().await.contains_key(session_id);
+                    if sidecar_present
+                        || adapter
+                            .current_executor_attachment_witness(session_id)
+                            .await
+                            .is_some()
+                    {
+                        return Err(Self::runtime_archive_error(format!(
+                            "runtime session {session_id} acquired attachment-local state before exact registration disposal"
+                        )));
+                    }
+                    // Canonical unregister may enter the service cleanup path.
+                    // Release the service boundary before the machine-owned
+                    // coordinator acquires its exact registration transaction
+                    // and mutation gates.
+                    drop(boundary);
+                    let removed = adapter
+                        .unregister_terminal_session_registration_if_current(registration)
+                        .await
+                        .map_err(|error| {
+                            Self::runtime_archive_error(format!(
+                                "failed exact terminal registration disposal for {session_id}: {error}"
+                            ))
+                        })?;
+                    if !removed {
+                        return Err(Self::runtime_archive_error(format!(
+                            "terminal runtime registration for {session_id} changed before exact disposal"
+                        )));
+                    }
+                    return Ok(());
+                }
+                RuntimeSessionDisposalTarget::ExactAttachment { witness, sidecar } => {
+                    let current = adapter
+                        .current_executor_attachment_witness(session_id)
+                        .await;
+                    if current.as_ref() != Some(witness) {
+                        return Err(Self::runtime_archive_error(format!(
+                            "runtime attachment for {session_id} changed before exact disposal"
+                        )));
+                    }
+                    if let Some(expected_state) = sidecar {
+                        let exact_sidecar = self
+                            .runtime_sessions
+                            .read()
+                            .await
+                            .get(session_id)
+                            .is_some_and(|current| {
+                                same_runtime_attachment(current, expected_state)
+                            });
+                        if !exact_sidecar {
+                            return Err(Self::runtime_archive_error(format!(
+                                "runtime sidecar for {session_id} changed before exact disposal"
+                            )));
+                        }
+                        let operation_guard = expected_state.operation_guard().await;
+                        expected_state.mark_cleanup_scheduled();
+                        expected_state.clear_queued_turns().await;
+                        drop(operation_guard);
+                    } else if self.runtime_sessions.read().await.contains_key(session_id) {
+                        return Err(Self::runtime_archive_error(format!(
+                            "runtime sidecar for {session_id} appeared after exact sidecar absence capture"
+                        )));
+                    }
+
+                    let retirement = adapter
+                        .prepare_executor_attachment_retirement_under_runtime_turn_boundary(witness)
+                        .await
+                        .map_err(|error| {
+                            Self::runtime_archive_error(format!(
+                                "failed to prepare exact runtime disposal for {session_id}: {error}"
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            Self::runtime_archive_error(format!(
+                                "runtime attachment for {session_id} disappeared before exact disposal"
+                            ))
+                        })?;
+                    drop(boundary);
+                    let removed = retirement
+                        .commit()
+                        .map_err(|error| {
+                            Self::runtime_archive_error(format!(
+                                "failed to start exact runtime disposal for {session_id}: {error}"
+                            ))
+                        })?
+                        .wait()
+                        .await
+                        .map_err(|error| {
+                            Self::runtime_archive_error(format!(
+                                "failed to complete exact runtime disposal for {session_id}: {error}"
+                            ))
+                        })?;
+                    if !removed {
+                        return Err(Self::runtime_archive_error(format!(
+                            "exact runtime disposal for {session_id} lost its attachment incarnation"
+                        )));
+                    }
+                    if let Some(expected_state) = sidecar {
+                        self.remove_runtime_session_state(session_id, Some(expected_state))
+                            .await;
+                    }
+                    return Ok(());
+                }
             }
-            let operation_guard = expected_state.operation_guard().await;
-            expected_state.mark_cleanup_scheduled();
-            expected_state.clear_queued_turns().await;
-            drop(operation_guard);
-            let retirement = adapter
-                .prepare_executor_attachment_retirement_under_runtime_turn_boundary(
-                    expected_state.witness(),
-                )
-                .await
-                .map_err(|error| {
-                    Self::runtime_archive_error(format!(
-                        "failed to prepare exact runtime disposal for {session_id}: {error}"
-                    ))
-                })?
-                .ok_or_else(|| {
-                    Self::runtime_archive_error(format!(
-                        "runtime attachment for {session_id} disappeared before exact disposal"
-                    ))
-                })?;
-            let removed = retirement
-                .commit_under_runtime_turn_finalization_boundary()
-                .await
-                .map_err(|error| {
-                    Self::runtime_archive_error(format!(
-                        "failed to complete exact runtime disposal for {session_id}: {error}"
-                    ))
-                })?;
-            if !removed {
-                return Err(Self::runtime_archive_error(format!(
-                    "exact runtime disposal for {session_id} lost its attachment incarnation"
-                )));
-            }
-            self.remove_runtime_session_state(session_id, Some(expected_state))
-                .await;
         }
         Ok(())
     }
@@ -1347,12 +1454,8 @@ impl MemberSessionDisposalArc {
                 );
                 self.retire_runtime_after_turn_boundary(session_id, &mut boundary)
                     .await?;
-                self.unregister_runtime_session_binding(
-                    session_id,
-                    expected_state.as_ref(),
-                    &mut boundary,
-                )
-                .await?;
+                self.unregister_runtime_session_binding(session_id, &expected_state, boundary)
+                    .await?;
                 return Ok(
                     crate::machines::mob_machine::MemberSessionDisposal::RuntimeReleasedOnlyHostOwned,
                 );
@@ -1384,12 +1487,8 @@ impl MemberSessionDisposalArc {
                         session_id = %session_id,
                         "SessionBackend::archive_with_authority_then_unregister unregistering runtime binding"
                     );
-                    self.unregister_runtime_session_binding(
-                        session_id,
-                        expected_state.as_ref(),
-                        &mut boundary,
-                    )
-                    .await?;
+                    self.unregister_runtime_session_binding(session_id, &expected_state, boundary)
+                        .await?;
                     tracing::info!(
                         session_id = %session_id,
                         "SessionBackend::archive_with_authority_then_unregister complete"
@@ -1434,8 +1533,8 @@ impl MemberSessionDisposalArc {
                                 .await?;
                             self.unregister_runtime_session_binding(
                                 session_id,
-                                expected_state.as_ref(),
-                                &mut boundary,
+                                &expected_state,
+                                boundary,
                             )
                             .await?;
                             if archive_authority_owned {
@@ -1460,12 +1559,8 @@ impl MemberSessionDisposalArc {
                             )),
                         ));
                     }
-                    self.unregister_runtime_session_binding(
-                        session_id,
-                        expected_state.as_ref(),
-                        &mut boundary,
-                    )
-                    .await?;
+                    self.unregister_runtime_session_binding(session_id, &expected_state, boundary)
+                        .await?;
                     if archive_authority_owned {
                         // Preserve the owned authority's public NotFound
                         // contract. `dispose` maps it to the idempotent
@@ -1497,6 +1592,132 @@ pub(super) enum FailedResumeRuntimeAuthority<'a> {
 
 #[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
+    /// Replace one retained serving attachment at the explicit mob-resume seam.
+    ///
+    /// A newly reconstructed mob owns a fresh attachment-local sidecar map, so
+    /// it cannot adopt an executor minted for the prior mob actor. Retire that
+    /// exact incarnation through the machine-owned teardown saga; its post-stop
+    /// cleanup removes only the old actor/sidecar and clears only old queued
+    /// work. The caller can then use the ordinary `ResumedDurable` provision
+    /// path to mint a new actor, attachment, and sidecar.
+    async fn retire_exact_attachment_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, MobError> {
+        let Some(adapter) = self.runtime_adapter.as_ref() else {
+            // Runtime-less session services retain their existing live actor;
+            // there is no attachment-local sidecar to replace.
+            return Ok(false);
+        };
+        let boundary =
+            RuntimeTurnFinalizationBoundaryLease::acquire(&self.session_service, session_id)
+                .await?;
+        let witness = adapter
+            .current_executor_attachment_witness(session_id)
+            .await;
+        // B stabilizes the actor/attachment incarnation while the sidecar is
+        // sampled. Do not retain R while acquiring M below. An exact active
+        // sidecar in this backend proves same-handle ownership and must be
+        // reused rather than torn down.
+        let observed_sidecar = self.runtime_sessions.read().await.get(session_id).cloned();
+        if let (Some(witness), Some(sidecar)) = (&witness, &observed_sidecar)
+            && sidecar.witness() == witness
+        {
+            if !sidecar.attachment_is_active(witness) || sidecar.cleanup_scheduled() {
+                return Err(MobError::Internal(format!(
+                    "explicit resume found its exact attachment sidecar for '{session_id}' but that sidecar is not active and reusable"
+                )));
+            }
+            let exact_actor_live = sidecar
+                .actor_witness()
+                .is_some_and(|witness| witness.is_live())
+                && self
+                    .session_service
+                    .live_session_actor_registered(session_id)
+                    .await?;
+            if exact_actor_live {
+                return Ok(false);
+            }
+            // The machine attachment and sidecar still agree, but their
+            // exact actor incarnation was revoked or exited. This is not a
+            // reusable live incarnation: retire it below. Its ops registry is
+            // attachment-local machine plumbing as well, so the exact old
+            // binding is compare-removed after retirement and the ordinary
+            // explicit-resume materialization mints a coherent replacement.
+        }
+        let observed_ops_binding = self.ops_adapter.capture_session_binding_witness(session_id);
+
+        let Some(witness) = witness else {
+            // `active_ids` was observed before B. If the actor outlived its
+            // attachment (or the exact attachment disappeared while resume
+            // acquired B), the fresh backend still cannot adopt that actor.
+            // Explicit resume is authorized to discard it and reconstruct the
+            // exact actor + attachment pair through `ResumedDurable`.
+            let discard_result = self
+                .session_service
+                .discard_live_session_under_runtime_turn_boundary(session_id)
+                .await;
+            drop(boundary);
+            match discard_result {
+                Ok(()) | Err(SessionError::NotFound { .. }) => {
+                    self.remove_runtime_session_state(session_id, observed_sidecar.as_ref())
+                        .await;
+                    self.ops_adapter.clear_session_binding_for_explicit_resume(
+                        session_id,
+                        observed_ops_binding,
+                    )?;
+                    return Ok(true);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let retirement = adapter
+            .prepare_executor_attachment_retirement_under_runtime_turn_boundary(&witness)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to prepare exact explicit-resume takeover for '{session_id}': {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "exact attachment for '{session_id}' changed before explicit-resume takeover"
+                ))
+            })?;
+
+        // The retirement lease retains exact M. Release B before the owned
+        // teardown closes the runtime loop, whose canonical post-stop cleanup
+        // reacquires B to remove the old actor and sidecar.
+        drop(boundary);
+        let removed = retirement
+            .commit()
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to start exact explicit-resume takeover for '{session_id}': {error}"
+                ))
+            })?
+            .wait()
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to complete exact explicit-resume takeover for '{session_id}': {error}"
+                ))
+            })?;
+        if !removed {
+            return Err(MobError::Internal(format!(
+                "exact attachment for '{session_id}' changed during explicit-resume takeover"
+            )));
+        }
+        // A stale sidecar in this provisioner can only belong to an older
+        // witness. Compare-and-remove it after the exact current retirement;
+        // a concurrently installed replacement can never be removed here.
+        self.remove_runtime_session_state(session_id, observed_sidecar.as_ref())
+            .await;
+        self.ops_adapter
+            .clear_session_binding_for_explicit_resume(session_id, observed_ops_binding)?;
+        Ok(true)
+    }
+
     #[cfg(feature = "runtime-adapter")]
     pub(super) async fn restore_failed_resume_before_receipt(
         &self,
@@ -2131,7 +2352,7 @@ pub(super) struct RuntimeSessionState {
     attachment_witness: RuntimeExecutorAttachmentWitness,
     // Exact service-owned actor incarnation bound to this attachment. `None`
     // exists only for the fail-closed synthetic-service test constructor.
-    actor_witness: Option<meerkat_session::LiveSessionActorWitness>,
+    actor_witness: StdMutex<Option<meerkat_session::LiveSessionActorWitness>>,
     // Mechanical attachment-local plumbing phase. This is deliberately not a
     // lifecycle authority: MeerkatMachine remains the authority for whether
     // the executor exists and may serve.
@@ -2361,7 +2582,7 @@ impl RuntimeSessionState {
         let queued_turn_owner = Arc::new(RuntimeQueuedTurnOwner::new(witness.clone()));
         Self {
             attachment_witness: witness,
-            actor_witness: Some(actor_witness),
+            actor_witness: StdMutex::new(Some(actor_witness)),
             attachment_phase: std::sync::atomic::AtomicU8::new(RUNTIME_ATTACHMENT_PENDING),
             operation_gate: Arc::new(Mutex::new(())),
             queued_turn_owner,
@@ -2378,7 +2599,7 @@ impl RuntimeSessionState {
         let queued_turn_owner = Arc::new(RuntimeQueuedTurnOwner::new(witness.clone()));
         Self {
             attachment_witness: witness,
-            actor_witness: None,
+            actor_witness: StdMutex::new(None),
             attachment_phase: std::sync::atomic::AtomicU8::new(RUNTIME_ATTACHMENT_PENDING),
             operation_gate: Arc::new(Mutex::new(())),
             queued_turn_owner,
@@ -2389,8 +2610,41 @@ impl RuntimeSessionState {
         &self.attachment_witness
     }
 
-    pub(super) fn actor_witness(&self) -> Option<&meerkat_session::LiveSessionActorWitness> {
-        self.actor_witness.as_ref()
+    pub(super) fn actor_witness(&self) -> Option<meerkat_session::LiveSessionActorWitness> {
+        self.actor_witness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Publish the exact replacement actor for this still-current attachment.
+    /// Actor-only recovery retains the machine mutation gate while calling
+    /// this, so the attachment cannot be replaced between validation and the
+    /// synchronous witness swap. The executor cleanup handle owns this same
+    /// state object and therefore observes the replacement actor thereafter.
+    fn replace_actor_witness(
+        &self,
+        attachment: &RuntimeExecutorAttachmentWitness,
+        actor_witness: meerkat_session::LiveSessionActorWitness,
+    ) -> Result<(), MobError> {
+        if !self.attachment_matches(attachment) {
+            return Err(MobError::Internal(format!(
+                "actor recovery for '{}' lost its exact executor attachment",
+                attachment.session_id()
+            )));
+        }
+        if actor_witness.session_id() != attachment.session_id() {
+            return Err(MobError::Internal(format!(
+                "actor recovery for '{}' produced actor witness for '{}'",
+                attachment.session_id(),
+                actor_witness.session_id()
+            )));
+        }
+        *self
+            .actor_witness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(actor_witness);
+        Ok(())
     }
 
     fn attachment_matches(&self, witness: &RuntimeExecutorAttachmentWitness) -> bool {
@@ -2627,6 +2881,115 @@ impl RuntimeTurnFinalizationBoundaryLease {
     }
 }
 
+/// Reconstruct the service-owned actor for one already-serving exact executor
+/// attachment. The complete create -> witness publication -> machine commit
+/// runs in the process-owned cleanup runtime while retaining B and exact M, so
+/// caller cancellation may lose the response but cannot leave a half-published
+/// actor or replace the executor attachment.
+#[cfg(feature = "runtime-adapter")]
+async fn create_attached_session_actor_recovery_owned(
+    session_id: SessionId,
+    session_service: Arc<dyn MobSessionService>,
+    mut prepared: PreparedAttachedSessionActorRecovery,
+    boundary: RuntimeTurnFinalizationBoundaryLease,
+    state: Arc<RuntimeSessionState>,
+    actor_witness_slot: meerkat_session::LiveSessionActorWitnessSlot,
+    req: meerkat_core::service::CreateSessionRequest,
+) -> Result<meerkat_core::RunResult, MobError> {
+    boundary.require_session(&session_id)?;
+    if prepared.witness().session_id() != &session_id || state.witness() != prepared.witness() {
+        return Err(MobError::Internal(format!(
+            "actor-only recovery for '{session_id}' lost its exact attachment tuple"
+        )));
+    }
+    let cleanup_spawner = meerkat_runtime::RuntimeCleanupTaskSpawner::acquire()
+        .map_err(|error| MobError::Internal(error.to_string()))?;
+    let wait_session_id = session_id.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    cleanup_spawner.spawn_detached(async move {
+        let _boundary = boundary;
+        let create_result = session_service
+            .create_session_with_actor_witness_under_runtime_turn_boundary(
+                req,
+                &actor_witness_slot,
+            )
+            .await;
+        let result = match create_result {
+            Ok(created) if created.session_id != session_id => {
+                let cleanup = match actor_witness_slot.witness() {
+                    Some(actor_witness) => session_service
+                        .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
+                        .await,
+                    None => session_service
+                        .discard_live_session_under_runtime_turn_boundary(&session_id)
+                        .await,
+                };
+                Err(MobError::Internal(match cleanup {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => format!(
+                        "actor-only recovery for '{session_id}' created unexpected session '{}'",
+                        created.session_id
+                    ),
+                    Err(cleanup_error) => format!(
+                        "actor-only recovery for '{session_id}' created unexpected session '{}'; actor cleanup also failed: {cleanup_error}",
+                        created.session_id
+                    ),
+                }))
+            }
+            Ok(created) => {
+                let actor_witness = match actor_witness_slot.witness() {
+                    Some(actor_witness) => actor_witness,
+                    None => {
+                        let cleanup = session_service
+                            .discard_live_session_under_runtime_turn_boundary(&session_id)
+                            .await;
+                        let error = MobError::Internal(match cleanup {
+                            Ok(()) | Err(SessionError::NotFound { .. }) => format!(
+                                "actor-only recovery for '{session_id}' returned without an exact actor witness"
+                            ),
+                            Err(cleanup_error) => format!(
+                                "actor-only recovery for '{session_id}' returned without an exact actor witness; actor cleanup also failed: {cleanup_error}"
+                            ),
+                        });
+                        let _ = result_tx.send(Err(error));
+                        return;
+                    }
+                };
+                let publication = state
+                    .replace_actor_witness(prepared.witness(), actor_witness.clone())
+                    .and_then(|()| {
+                        prepared
+                            .commit_actor()
+                            .map_err(|error| MobError::Internal(error.to_string()))
+                    });
+                match publication {
+                    Ok(()) => Ok(created),
+                    Err(error) => {
+                        let cleanup = session_service
+                            .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
+                            .await;
+                        Err(MobError::Internal(match cleanup {
+                            Ok(()) | Err(SessionError::NotFound { .. }) => error.to_string(),
+                            Err(cleanup_error) => format!(
+                                "{error}; exact recovered-actor cleanup also failed: {cleanup_error}"
+                            ),
+                        }))
+                    }
+                }
+            }
+            Err(error) => Err(MobError::from(error)),
+        };
+        // A lost response after successful commit is an ambiguous distributed
+        // outcome. The actor and attachment remain one valid resumable
+        // incarnation; callers resolve the outcome through discovery/retry.
+        let _ = result_tx.send(result);
+    });
+    result_rx.await.map_err(|error| {
+        MobError::Internal(format!(
+            "owned actor-only recovery for '{wait_session_id}' ended without a result: {error}"
+        ))
+    })?
+}
+
 /// Cancellation-safe owner of the service actor and exact prepared machine
 /// claim between actor creation and the final executor/operation commit.
 ///
@@ -2813,12 +3176,28 @@ impl PreparedServiceActorTransaction {
                 }
                 Err(create_error) => {
                     let cleanup = transaction.abort().await;
-                    let error = MobError::Internal(match cleanup {
-                        Ok(()) => create_error.to_string(),
-                        Err(cleanup_error) => format!(
-                            "{create_error}; exact actor/materialization cleanup also failed: {cleanup_error}"
-                        ),
-                    });
+                    let error = match cleanup {
+                        // Preserve the service's typed build failure once
+                        // exact volatile cleanup is proven. Callers can then
+                        // project the class without parsing display text.
+                        Ok(()) => MobError::SessionError(create_error),
+                        Err(cleanup_error) => {
+                            // Build diagnostics may contain host-local command
+                            // stderr or backend detail. Keep both diagnostics
+                            // in the owning host log; callers get only a
+                            // sanitized uncertainty message.
+                            tracing::error!(
+                                %session_id,
+                                build_detail = %create_error,
+                                cleanup_detail = %cleanup_error,
+                                "actor create and exact materialization cleanup both failed"
+                            );
+                            MobError::Internal(
+                                "agent build failed and exact actor/materialization cleanup also failed; inspect host logs"
+                                    .to_string(),
+                            )
+                        }
+                    };
                     let _ = result_tx.send(Err(error));
                 }
             }
@@ -4539,7 +4918,7 @@ impl MobSessionRuntimePostStopCleanupHandle {
         })?;
         let discard = self
             .session_service
-            .discard_live_session_actor_under_runtime_turn_boundary(actor_witness)
+            .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
             .await;
         if let Err(error) = discard
             && !matches!(error, SessionError::NotFound { .. })
@@ -4894,6 +5273,11 @@ impl MobProvisioner for SessionBackend {
         // committed the member-owned AgentRuntimeId and fence.
         let mut prepared_ops_binding: Option<(SessionId, Arc<dyn OpsLifecycleRegistry>)> = None;
         let mut prepared_materialization: Option<PreparedSessionMaterialization> = None;
+        let mut attached_actor_recovery: Option<(
+            PreparedAttachedSessionActorRecovery,
+            Arc<RuntimeSessionState>,
+        )> = None;
+        let mut recovered_attached_state: Option<Arc<RuntimeSessionState>> = None;
         let mut archived_resume_authorization = None;
         let mut reviving_retired_session = false;
         let mut materialization_turn_boundary: Option<RuntimeTurnFinalizationBoundaryLease> = None;
@@ -4935,79 +5319,131 @@ impl MobProvisioner for SessionBackend {
                 bridge_session_id = %member_bridge_session_id,
                 "SessionBackend::provision_member preparing local session bindings"
             );
-            #[cfg(target_arch = "wasm32")]
-            let mut prepared = {
-                let adapter = Arc::clone(adapter);
-                let bridge_session_id = member_bridge_session_id.clone();
-                let (reply_tx, reply_rx) = oneshot::channel();
-                tokio::spawn(async move {
-                    let result = adapter
-                        .prepare_local_session_materialization_with_mode(
-                            bridge_session_id,
-                            local_materialization_mode,
+            let current_attachment = if missing_live_revival {
+                adapter
+                    .current_executor_attachment_witness(&member_bridge_session_id)
+                    .await
+            } else {
+                None
+            };
+            if let Some(witness) = current_attachment {
+                let state = backend
+                    .runtime_sessions
+                    .read()
+                    .await
+                    .get(&member_bridge_session_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "missing-live actor recovery for '{member_bridge_session_id}' found an exact machine attachment without its attachment-local mob sidecar; explicit resume is required"
+                        ))
+                    })?;
+                if state.witness() != &witness
+                    || !state.attachment_is_active(&witness)
+                    || state.cleanup_scheduled()
+                    || !state.queued_turn_owner.is_owned_by(&witness)
+                {
+                    return Err(MobError::Internal(format!(
+                        "missing-live actor recovery for '{member_bridge_session_id}' found stale attachment-local mob state; explicit resume is required"
+                    )));
+                }
+                let prepared = adapter
+                    .prepare_attached_session_actor_recovery(&witness)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "prepare exact attached actor recovery for '{member_bridge_session_id}' failed: {error}"
+                        ))
+                    })?;
+                let bindings = prepared.bindings_clone();
+                let ops_registry = Arc::clone(bindings.ops_lifecycle());
+                if let Some(ref mut build) = req.create_session.build {
+                    build.runtime_build_mode =
+                        meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
+                }
+                prepared_ops_binding = Some((member_bridge_session_id.clone(), ops_registry));
+                attached_actor_recovery = Some((prepared, state));
+                tracing::debug!(
+                    bridge_session_id = %member_bridge_session_id,
+                    "SessionBackend::provision_member prepared actor-only recovery for exact attachment"
+                );
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                let mut prepared = {
+                    let adapter = Arc::clone(adapter);
+                    let bridge_session_id = member_bridge_session_id.clone();
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    tokio::spawn(async move {
+                        let result = adapter
+                            .prepare_local_session_materialization_with_mode(
+                                bridge_session_id,
+                                local_materialization_mode,
+                            )
+                            .await;
+                        let _ = reply_tx.send(result);
+                    });
+                    reply_rx.await.map_err(|_| {
+                        MobError::Internal(
+                            "prepare local session bindings task was canceled".to_string(),
                         )
-                        .await;
-                    let _ = reply_tx.send(result);
-                });
-                reply_rx.await.map_err(|_| {
-                    MobError::Internal(
-                        "prepare local session bindings task was canceled".to_string(),
+                    })?
+                }
+                .map_err(|e| {
+                    MobError::Internal(format!("prepare local session bindings failed: {e}"))
+                })?;
+                #[cfg(not(target_arch = "wasm32"))]
+                let mut prepared = adapter
+                    .prepare_local_session_materialization_with_mode(
+                        member_bridge_session_id.clone(),
+                        local_materialization_mode,
                     )
-                })?
-            }
-            .map_err(|e| {
-                MobError::Internal(format!("prepare local session bindings failed: {e}"))
-            })?;
-            #[cfg(not(target_arch = "wasm32"))]
-            let mut prepared = adapter
-                .prepare_local_session_materialization_with_mode(
-                    member_bridge_session_id.clone(),
-                    local_materialization_mode,
+                    .await
+                    .map_err(|e| {
+                        MobError::Internal(format!(
+                            "prepare local session materialization failed: {e}"
+                        ))
+                    })?;
+                install_prepared_mob_session_executor_handles(
+                    Arc::clone(&backend.session_service),
+                    Arc::clone(adapter),
+                    &prepared,
+                    actor_witness_slot.clone(),
                 )
                 .await
-                .map_err(|e| {
-                    MobError::Internal(format!("prepare local session materialization failed: {e}"))
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "install prepared session cleanup handles failed: {error}"
+                    ))
                 })?;
-            install_prepared_mob_session_executor_handles(
-                Arc::clone(&backend.session_service),
-                Arc::clone(adapter),
-                &prepared,
-                actor_witness_slot.clone(),
-            )
-            .await
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "install prepared session cleanup handles failed: {error}"
-                ))
-            })?;
-            tracing::debug!(
-                bridge_session_id = %member_bridge_session_id,
-                "SessionBackend::provision_member prepared exact local session materialization"
-            );
-            let bindings = prepared.bindings_clone();
-            let ops_registry = Arc::clone(bindings.ops_lifecycle());
-            if session_origin == ProvisionSessionOrigin::ResumedDurable
-                && adapter
-                    .meerkat_machine_archive_snapshot(&member_bridge_session_id)
-                    .await
-                    .is_some_and(|snapshot| {
-                        snapshot.control.phase == meerkat_runtime::RuntimeState::Retired
-                    })
-            {
-                reviving_retired_session = true;
-                archived_resume_authorization =
-                    Some(prepared.archived_resume_authorization().map_err(|error| {
-                        MobError::Internal(format!(
-                            "prepare exact archived-resume authorization failed: {error}"
-                        ))
-                    })?);
+                tracing::debug!(
+                    bridge_session_id = %member_bridge_session_id,
+                    "SessionBackend::provision_member prepared exact local session materialization"
+                );
+                let bindings = prepared.bindings_clone();
+                let ops_registry = Arc::clone(bindings.ops_lifecycle());
+                if session_origin == ProvisionSessionOrigin::ResumedDurable
+                    && adapter
+                        .meerkat_machine_archive_snapshot(&member_bridge_session_id)
+                        .await
+                        .is_some_and(|snapshot| {
+                            snapshot.control.phase == meerkat_runtime::RuntimeState::Retired
+                        })
+                {
+                    reviving_retired_session = true;
+                    archived_resume_authorization =
+                        Some(prepared.archived_resume_authorization().map_err(|error| {
+                            MobError::Internal(format!(
+                                "prepare exact archived-resume authorization failed: {error}"
+                            ))
+                        })?);
+                }
+                if let Some(ref mut build) = req.create_session.build {
+                    build.runtime_build_mode =
+                        meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
+                }
+                prepared_ops_binding = Some((member_bridge_session_id.clone(), ops_registry));
+                prepared_materialization = Some(prepared);
             }
-            if let Some(ref mut build) = req.create_session.build {
-                build.runtime_build_mode =
-                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
-            }
-            prepared_ops_binding = Some((member_bridge_session_id.clone(), ops_registry));
-            prepared_materialization = Some(prepared);
             tracing::debug!(
                 bridge_session_id = %member_bridge_session_id,
                 "SessionBackend::provision_member stamping eager turn metadata"
@@ -5024,23 +5460,27 @@ impl MobProvisioner for SessionBackend {
         let mut actor_transaction = if let Some(pre_registered_session_id) =
             pre_registered_bridge_session_id.as_ref()
         {
-            let prepared = prepared_materialization.take().ok_or_else(|| {
-                MobError::Internal(format!(
-                    "runtime-backed provision for '{pre_registered_session_id}' lost Prepared before actor creation"
-                ))
-            })?;
-            let boundary = materialization_turn_boundary.take().ok_or_else(|| {
-                MobError::Internal(format!(
-                    "runtime-backed provision for '{pre_registered_session_id}' lost B before actor creation"
-                ))
-            })?;
-            Some(PreparedServiceActorTransaction::new(
-                pre_registered_session_id.clone(),
-                Arc::clone(&backend.session_service),
-                prepared,
-                boundary,
-                actor_witness_slot.clone(),
-            )?)
+            if attached_actor_recovery.is_some() {
+                None
+            } else {
+                let prepared = prepared_materialization.take().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "runtime-backed provision for '{pre_registered_session_id}' lost Prepared before actor creation"
+                    ))
+                })?;
+                let boundary = materialization_turn_boundary.take().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "runtime-backed provision for '{pre_registered_session_id}' lost B before actor creation"
+                    ))
+                })?;
+                Some(PreparedServiceActorTransaction::new(
+                    pre_registered_session_id.clone(),
+                    Arc::clone(&backend.session_service),
+                    prepared,
+                    boundary,
+                    actor_witness_slot.clone(),
+                )?)
+            }
         } else {
             None
         };
@@ -5054,29 +5494,59 @@ impl MobProvisioner for SessionBackend {
         } else {
             None
         };
-        let create_result: Result<meerkat_core::RunResult, MobError> =
-            if let Some(transaction) = actor_transaction.take() {
-                match transaction
-                    .create_owned(req.create_session, create_authorization)
-                    .await
-                {
-                    Ok((created, transaction)) => {
-                        actor_transaction = Some(transaction);
-                        Ok(created)
-                    }
-                    Err(error) => Err(error),
-                }
-            } else if create_authorization.is_some() {
-                Err(MobError::Internal(
-                    "retired durable session revival lost its actor transaction".into(),
-                ))
+        let create_result: Result<meerkat_core::RunResult, MobError> = if let Some((
+            prepared,
+            state,
+        )) =
+            attached_actor_recovery.take()
+        {
+            if create_authorization.is_some() {
+                Err(MobError::Internal(format!(
+                    "actor-only recovery for '{}' unexpectedly carried archived-resume authority",
+                    prepared.witness().session_id()
+                )))
             } else {
-                backend
-                    .session_service
-                    .create_session(req.create_session)
-                    .await
-                    .map_err(MobError::from)
-            };
+                let recovery_session_id = prepared.witness().session_id().clone();
+                let boundary = materialization_turn_boundary.take().ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "actor-only recovery for '{recovery_session_id}' lost B before actor creation"
+                        ))
+                    })?;
+                let created = create_attached_session_actor_recovery_owned(
+                    recovery_session_id,
+                    Arc::clone(&backend.session_service),
+                    prepared,
+                    boundary,
+                    Arc::clone(&state),
+                    actor_witness_slot.clone(),
+                    req.create_session,
+                )
+                .await?;
+                recovered_attached_state = Some(state);
+                Ok(created)
+            }
+        } else if let Some(transaction) = actor_transaction.take() {
+            match transaction
+                .create_owned(req.create_session, create_authorization)
+                .await
+            {
+                Ok((created, transaction)) => {
+                    actor_transaction = Some(transaction);
+                    Ok(created)
+                }
+                Err(error) => Err(error),
+            }
+        } else if create_authorization.is_some() {
+            Err(MobError::Internal(
+                "retired durable session revival lost its actor transaction".into(),
+            ))
+        } else {
+            backend
+                .session_service
+                .create_session(req.create_session)
+                .await
+                .map_err(MobError::from)
+        };
         let created = match create_result {
             Ok(created) => created,
             Err(error) => return Err(error),
@@ -5235,27 +5705,39 @@ impl MobProvisioner for SessionBackend {
         let mut rollback_authority = None;
         let committed_operation;
         if let Some(adapter) = backend.runtime_adapter.as_ref() {
-            // This is the final async transaction before receipt publication.
-            // Transfer Prepared+B by value before startup can mint Pending/M;
-            // caller cancellation can therefore never split their cleanup.
-            let transaction = actor_transaction.take().ok_or_else(|| {
-                MobError::Internal(format!(
-                    "runtime-backed provision for '{created_bridge_session_id}' lost its actor transaction at owned attachment transfer"
-                ))
-            })?;
-            let (committed_state, exact_committed_operation, transaction) = transaction
-                .prepare_and_commit_runtime_attachment_and_operation_owned(
-                    Arc::clone(adapter),
-                    backend.workgraph_service.clone(),
-                    Arc::clone(&backend.runtime_sessions),
-                    missing_live_revival,
-                    prepared_operation,
-                )
-                .await?;
-            actor_transaction = Some(transaction);
-            committed_operation = exact_committed_operation;
-            if session_origin != ProvisionSessionOrigin::Fresh {
-                rollback_authority = Some(ResumedMemberRollbackAuthority::new(committed_state));
+            if let Some(committed_state) = recovered_attached_state.take() {
+                // Actor-only recovery preserves the exact serving attachment;
+                // the existing operation is a validated Running replay and is
+                // committed without any second attachment publication.
+                committed_operation = prepared_operation.commit()?;
+                if session_origin != ProvisionSessionOrigin::Fresh {
+                    rollback_authority =
+                        Some(ResumedMemberRollbackAuthority::new(committed_state));
+                }
+            } else {
+                // This is the final async transaction before receipt publication.
+                // Transfer Prepared+B by value before startup can mint Pending/M;
+                // caller cancellation can therefore never split their cleanup.
+                let transaction = actor_transaction.take().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "runtime-backed provision for '{created_bridge_session_id}' lost its actor transaction at owned attachment transfer"
+                    ))
+                })?;
+                let (committed_state, exact_committed_operation, transaction) = transaction
+                    .prepare_and_commit_runtime_attachment_and_operation_owned(
+                        Arc::clone(adapter),
+                        backend.workgraph_service.clone(),
+                        Arc::clone(&backend.runtime_sessions),
+                        missing_live_revival,
+                        prepared_operation,
+                    )
+                    .await?;
+                actor_transaction = Some(transaction);
+                committed_operation = exact_committed_operation;
+                if session_origin != ProvisionSessionOrigin::Fresh {
+                    rollback_authority =
+                        Some(ResumedMemberRollbackAuthority::new(committed_state));
+                }
             }
         } else {
             committed_operation = prepared_operation.commit()?;
@@ -5708,6 +6190,14 @@ impl MobProvisioner for SessionBackend {
         }
     }
 
+    async fn prepare_member_session_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, MobError> {
+        self.retire_exact_attachment_for_explicit_resume(session_id)
+            .await
+    }
+
     async fn ensure_runtime_session_state(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let bridge_session_id = Self::require_session(member_ref, "ensure runtime session for")?;
         self.runtime_session_state(&bridge_session_id)
@@ -5908,6 +6398,15 @@ impl MultiBackendProvisioner {
             supervisor_bridge,
             binding_persistence: None,
         }
+    }
+
+    pub(super) async fn retire_exact_attachment_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, MobError> {
+        self.session
+            .retire_exact_attachment_for_explicit_resume(session_id)
+            .await
     }
 
     pub fn with_binding_persistence(
@@ -8045,6 +8544,15 @@ impl MobProvisioner for MultiBackendProvisioner {
             } => Ok(None),
             _ => self.session.is_member_active(member_ref).await,
         }
+    }
+
+    async fn prepare_member_session_for_explicit_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, MobError> {
+        self.session
+            .retire_exact_attachment_for_explicit_resume(session_id)
+            .await
     }
 
     async fn ensure_runtime_session_state(&self, member_ref: &MemberRef) -> Result<(), MobError> {

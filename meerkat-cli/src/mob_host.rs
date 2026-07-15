@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use meerkat::surface::spawn_runtime_backed_schedule_host;
-use meerkat::{AgentFactory, ScheduleService, ScheduleToolDispatcher};
+use meerkat::{AgentFactory, LlmIdentityPreflightError, ScheduleService, ScheduleToolDispatcher};
 use meerkat::{FactoryAgentBuilder, PersistentSessionService};
 use meerkat_core::config::MobHostConfig;
 use meerkat_core::connection::{
@@ -36,7 +36,9 @@ use meerkat_mob::runtime::host_actor::{
     ProviderPresenceProbeError, RuntimeStoreHostBindingPersistence, build_host_comms_runtime,
     spawn_mob_host_actor,
 };
-use meerkat_mob::runtime::host_materialize::{HostMemberSubstrate, MaterializePreflightProbe};
+use meerkat_mob::runtime::host_materialize::{
+    HostMemberSubstrate, MaterializeLlmPreflightOutcome, MaterializePreflightProbe,
+};
 use meerkat_mob::runtime::host_observation::HostMemberObservation;
 use meerkat_rpc::secure_rpc::{TcpBindPolicy, validate_tcp_bind_policy};
 use meerkat_store::{RealmBackend, RealmOrigin};
@@ -194,6 +196,19 @@ impl std::fmt::Debug for ResolvedMobHostComposition {
     }
 }
 
+fn has_nonempty_ws_authority(url: &str) -> bool {
+    let Some((scheme, remainder)) = url.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "ws" | "wss") {
+        return false;
+    }
+    let authority_end = remainder
+        .find(|character| matches!(character, '/' | '?' | '#'))
+        .unwrap_or(remainder.len());
+    authority_end > 0
+}
+
 /// Flags override file values; absent both, the documented defaults apply.
 pub(crate) fn resolve_mob_host_composition(
     args: &MobHostArgs,
@@ -218,10 +233,17 @@ pub(crate) fn resolve_mob_host_composition(
         let Some(url) = live_ws_advertise.as_deref() else {
             return Err(MobHostStartupError::LiveWsAdvertiseRequired);
         };
-        let parsed =
-            url::Url::parse(url).map_err(|_| MobHostStartupError::LiveWsAdvertiseInvalid {
+        let trimmed_url = url.trim();
+        if !has_nonempty_ws_authority(trimmed_url) {
+            return Err(MobHostStartupError::LiveWsAdvertiseInvalid {
                 url: url.to_string(),
-            })?;
+            });
+        }
+        let parsed = url::Url::parse(trimmed_url).map_err(|_| {
+            MobHostStartupError::LiveWsAdvertiseInvalid {
+                url: url.to_string(),
+            }
+        })?;
         if !matches!(parsed.scheme(), "ws" | "wss")
             || parsed.cannot_be_a_base()
             || parsed.host_str().is_none_or(|host| host.is_empty())
@@ -351,6 +373,7 @@ fn ensure_pairing_listener_is_loopback(
 /// mob-side probe trait; the facade cannot name meerkat-mob types — the
 /// dependency edge runs mob→facade).
 pub(crate) struct FactoryProviderPresenceProbe {
+    factory: AgentFactory,
     config: Config,
     realm: Option<RealmId>,
     token_store: Option<Arc<dyn meerkat_core::auth::TokenStore>>,
@@ -370,6 +393,7 @@ impl FactoryProviderPresenceProbe {
             }
         })?;
         Ok(Self {
+            factory: factory.clone(),
             config,
             realm,
             token_store,
@@ -392,20 +416,39 @@ impl ProviderPresenceProbe for FactoryProviderPresenceProbe {
 
 #[async_trait]
 impl MaterializePreflightProbe for FactoryProviderPresenceProbe {
-    async fn binding_resolvable(
+    async fn preflight_llm_identity(
         &self,
-        binding: Option<&meerkat_core::AuthBindingRef>,
-        provider: Provider,
-    ) -> Result<bool, ProviderPresenceProbeError> {
-        probe_binding_presence_with_lookup(
-            &self.config,
-            provider,
-            binding,
-            self.realm.as_ref(),
-            self.token_store.as_ref(),
-            &|key| std::env::var(key).ok(),
+        identity: &meerkat_core::SessionLlmIdentity,
+        custom_models: &std::collections::BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+        preferred_realm: Option<&RealmId>,
+        auth_lease_handle: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<MaterializeLlmPreflightOutcome, ProviderPresenceProbeError> {
+        Ok(
+            match self
+                .factory
+                .preflight_llm_identity(
+                    &self.config,
+                    identity,
+                    custom_models,
+                    preferred_realm,
+                    Some(auth_lease_handle.clone()),
+                )
+                .await
+            {
+                Ok(()) => MaterializeLlmPreflightOutcome::Resolved,
+                Err(error @ LlmIdentityPreflightError::ModelUnresolvable { .. }) => {
+                    tracing::warn!(detail = %error, "member materialization model preflight rejected locally");
+                    MaterializeLlmPreflightOutcome::ModelUnresolvable
+                }
+                Err(error @ LlmIdentityPreflightError::BindingUnresolvable { .. }) => {
+                    // The diagnostic may contain command stderr or backend
+                    // detail. Keep it local; the bridge carries only the stable
+                    // typed rejection and a sanitized reason.
+                    tracing::warn!(detail = %error, "member materialization credential preflight rejected locally");
+                    MaterializeLlmPreflightOutcome::BindingUnresolvable
+                }
+            },
         )
-        .await
     }
 }
 
@@ -414,6 +457,7 @@ impl MaterializePreflightProbe for FactoryProviderPresenceProbe {
 /// the NAMED realm chain strictly. Presence-level reads only — zero network,
 /// zero OAuth (gotcha 13). A binding that names no candidate chain is typed
 /// absence (`Ok(false)`), never a probe fault.
+#[cfg(test)]
 async fn probe_binding_presence_with_lookup(
     config: &Config,
     provider: Provider,
@@ -1435,6 +1479,7 @@ mod tests {
         for invalid in [
             "ws://",
             "ws:///live",
+            "wss:////host.example/live",
             "wss://host.example/live?token=secret",
             "wss://host.example/live#fragment",
             "wss://user:secret@host.example/live",

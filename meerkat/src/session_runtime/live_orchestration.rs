@@ -1018,11 +1018,13 @@ mod orchestrator {
                 Some(adm) => adm,
                 None => self.service.reserve_create_session_admission().await?,
             };
-
-            match self
-                .service
-                .create_session_with_reserved_admission(create_req, admission)
-                .await
+            match crate::session_runtime::staged_promotion::materialize_session_actor_unattached(
+                self.service,
+                self.runtime_adapter,
+                create_req,
+                admission,
+            )
+            .await
             {
                 Ok(_) => {
                     promotion_cleanup.mark_materialized();

@@ -55,23 +55,38 @@ use crate::runtime::session_service::MobSessionService;
 // Tier-2 preflight probe (DEC-P3H-8) — widens the tier-1 presence probe
 // ---------------------------------------------------------------------------
 
-/// Tier-2 materialize preflight probe: the tier-1 provider presence facts
-/// plus a per-binding presence walk of a NAMED realm chain (the W2.5 recipe —
-/// zero network, zero OAuth, presence-level reads only; gotcha 13).
+/// Typed outcome of the authoritative model/provider/binding preflight.
+///
+/// These are observations, not host-side semantic state: the generated host
+/// authority still owns the final materialization verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializeLlmPreflightOutcome {
+    Resolved,
+    ModelUnresolvable,
+    BindingUnresolvable,
+}
+
+/// Tier-2 materialize preflight probe: the tier-1 advisory provider facts
+/// plus an exact dry build of the requested LLM identity through the hosting
+/// factory's canonical registry and credential resolver.
 ///
 /// Implemented above this crate (the composing binary owns the effective
-/// config chain and token store) and injected through
-/// [`HostMemberSubstrate::preflight_probe`]. Every answer is a pure shell
-/// fact; the machine composes the verdict (A11).
+/// config chain and agent factory) and injected through
+/// [`HostMemberSubstrate::preflight_probe`]. The factory may execute or
+/// refresh host-local credential sources exactly as a subsequent build would;
+/// it never writes session or mob state. The machine composes the verdict
+/// from the typed outcome (A11).
 #[async_trait]
 pub trait MaterializePreflightProbe: ProviderPresenceProbe {
-    /// Whether the named binding (or, for `None`, the provider's default
-    /// chain) is presence-resolvable on this host.
-    async fn binding_resolvable(
+    /// Resolve the exact digest-covered model/provider/binding tuple through
+    /// the same host factory seam the subsequent member build uses.
+    async fn preflight_llm_identity(
         &self,
-        binding: Option<&meerkat_core::AuthBindingRef>,
-        provider: meerkat_core::Provider,
-    ) -> Result<bool, ProviderPresenceProbeError>;
+        identity: &meerkat_core::SessionLlmIdentity,
+        custom_models: &BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+        preferred_realm: Option<&meerkat_core::RealmId>,
+        auth_lease_handle: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<MaterializeLlmPreflightOutcome, ProviderPresenceProbeError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +164,12 @@ pub enum MaterializeServeError {
     SupervisorBind { detail: String },
     #[error("member session service failed: {0}")]
     SessionService(#[from] SessionError),
+    #[error("member LLM binding '{realm}/{binding}' became unresolvable after preflight: {detail}")]
+    AuthBindingUnresolvable {
+        realm: String,
+        binding: String,
+        detail: String,
+    },
     #[error("session service returned '{created}' for admitted member session '{expected}'")]
     IdentityMismatch { expected: String, created: String },
     #[error("runtime session bindings preparation failed: {detail}")]
@@ -194,6 +215,15 @@ impl MaterializeServeError {
                 (Cause::ResumeSessionNotFound, self.to_string())
             }
             Self::ResumeSessionIdInvalid { .. } => (Cause::Unsupported, self.to_string()),
+            Self::AuthBindingUnresolvable { realm, binding, .. } => (
+                Cause::AuthBindingUnresolvable {
+                    realm: realm.clone(),
+                    binding: binding.clone(),
+                },
+                format!(
+                    "materialize rejected: auth binding '{realm}/{binding}' is unresolvable on this host"
+                ),
+            ),
             Self::Build(_)
             | Self::Comms { .. }
             | Self::SupervisorBind { .. }
@@ -205,6 +235,42 @@ impl MaterializeServeError {
             | Self::UnrecordedSessionCleanup { .. }
             | Self::RevivedIdentityDiverged { .. } => (Cause::Internal, self.to_string()),
         }
+    }
+}
+
+fn classify_materialize_create_error(
+    error: crate::error::MobError,
+    spec: &PortableMemberSpec,
+) -> MaterializeServeError {
+    let llm_identity_unresolvable = matches!(
+        &error,
+        crate::error::MobError::SessionError(session_error)
+            if session_error.is_build_llm_identity_unresolvable()
+    );
+    if !llm_identity_unresolvable {
+        return MaterializeServeError::Build(error);
+    }
+
+    let (realm, binding) = spec
+        .overlay
+        .auth_binding
+        .as_ref()
+        .map(|binding| {
+            (
+                binding.realm.as_str().to_string(),
+                binding.binding.as_str().to_string(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                "env_default".to_string(),
+                spec.profile.provider.as_str().to_string(),
+            )
+        });
+    MaterializeServeError::AuthBindingUnresolvable {
+        realm,
+        binding,
+        detail: error.to_string(),
     }
 }
 
@@ -625,8 +691,8 @@ fn stdio_command_discoverable(command: &str) -> bool {
     std::env::split_paths(&search).any(|dir| dir.join(command).is_file())
 }
 
-/// Assemble the tier-2 preflight observations. Every field is a pure fact,
-/// never a pre-decision (A11/RMAT read discipline); the generated
+/// Assemble the tier-2 preflight observations. Every field is an observed
+/// host fact, never a pre-decision (A11/RMAT read discipline); the generated
 /// `ResolveMaterializePreflight` arms compose the verdict.
 pub async fn assemble_preflight_observations(
     spec: &PortableMemberSpec,
@@ -635,29 +701,92 @@ pub async fn assemble_preflight_observations(
     substrate: &HostMemberSubstrate,
     capability_facts: HostCapabilityFacts,
 ) -> Result<MaterializePreflightObservations, ProviderPresenceProbeError> {
-    let provider = spec.profile.provider;
-    let catalog = meerkat_models::canonical();
-    // "The (model, provider) pair names a client this binary can construct":
-    // catalog hit OR mob-scoped custom-model hit OR a pinned provider that
-    // constructs without host config (self-hosted needs its alias binding).
-    let provider_constructible = !matches!(provider, meerkat_core::Provider::SelfHosted)
-        || spec.profile.self_hosted_server_id.is_some();
-    let model_resolvable = catalog.entry_for(provider, &spec.profile.model).is_some()
-        || spec
-            .definition_extract
-            .models
-            .contains_key(&spec.profile.model)
-        || provider_constructible;
-
-    let binding_ref = spec
-        .overlay
-        .auth_binding
-        .clone()
-        .map(meerkat_core::AuthBindingRef::from);
-    let binding_resolvable = substrate
-        .preflight_probe
-        .binding_resolvable(binding_ref.as_ref(), provider)
-        .await?;
+    let candidate_identity = meerkat_core::SessionLlmIdentity {
+        model: spec.profile.model.clone(),
+        provider: spec.profile.provider,
+        self_hosted_server_id: spec.profile.self_hosted_server_id.clone(),
+        provider_params: spec.profile.provider_params.clone().map(Into::into),
+        auth_binding: spec
+            .overlay
+            .auth_binding
+            .clone()
+            .map(meerkat_core::AuthBindingRef::from),
+    };
+    let identity = match launch {
+        MaterializeLaunchMode::Fresh {} => Some(candidate_identity),
+        MaterializeLaunchMode::Resume { session_id } => match SessionId::parse(session_id) {
+            Err(_) => {
+                // The materializer owns the stable typed invalid-id reply.
+                // No identity can be authoritatively derived before that.
+                None
+            }
+            Ok(session_id) => match substrate
+                .session_service
+                .load_persisted_session_metadata(&session_id)
+                .await
+                .map_err(|error| ProviderPresenceProbeError::PreflightInput {
+                    detail: format!(
+                        "resume session '{session_id}' metadata preflight failed: {error}"
+                    ),
+                })? {
+                Some(view) => {
+                    let metadata = view.session_metadata.ok_or_else(|| {
+                        ProviderPresenceProbeError::PreflightInput {
+                            detail: format!(
+                                "resume session '{session_id}' has no durable session metadata"
+                            ),
+                        }
+                    })?;
+                    let mut mask = meerkat_core::service::ResumeOverrideMask::default();
+                    for field in &spec.profile.resume_overrides {
+                        match field {
+                            meerkat_contracts::wire::WireMobResumeOverrideField::Model => {
+                                mask.model = true;
+                            }
+                            meerkat_contracts::wire::WireMobResumeOverrideField::Provider => {
+                                mask.provider = true;
+                            }
+                            meerkat_contracts::wire::WireMobResumeOverrideField::ProviderParams => {
+                                mask.provider_params = true;
+                            }
+                        }
+                    }
+                    Some(crate::build::effective_resumed_session_llm_identity(
+                        candidate_identity,
+                        &metadata,
+                        mask,
+                    ))
+                }
+                // Let the materializer return ResumeSessionNotFound through
+                // its existing typed launch seam; do not probe credentials
+                // for a build that cannot occur.
+                None => None,
+            },
+        },
+    };
+    let preferred_realm = meerkat_core::mob_realm_id(&spec.mob_id).map_err(|error| {
+        ProviderPresenceProbeError::PreflightInput {
+            detail: format!("invalid mob identity '{}': {error}", spec.mob_id),
+        }
+    })?;
+    let auth_lease_handle = substrate.runtime_adapter.generated_auth_lease_handle();
+    let (model_resolvable, binding_resolvable) = match identity {
+        Some(identity) => match substrate
+            .preflight_probe
+            .preflight_llm_identity(
+                &identity,
+                &spec.definition_extract.models,
+                Some(&preferred_realm),
+                &auth_lease_handle,
+            )
+            .await?
+        {
+            MaterializeLlmPreflightOutcome::Resolved => (true, true),
+            MaterializeLlmPreflightOutcome::ModelUnresolvable => (false, true),
+            MaterializeLlmPreflightOutcome::BindingUnresolvable => (true, false),
+        },
+        None => (true, true),
+    };
 
     let mut first_missing_env_key = None;
     for key in &spec.required_env_keys {
@@ -1524,7 +1653,7 @@ impl HostMemberMaterializer {
         let (created, actor_transaction) = actor_transaction
             .create_owned(req, None)
             .await
-            .map_err(MaterializeServeError::Build)?;
+            .map_err(|error| classify_materialize_create_error(error, spec))?;
         if created.session_id != session_id {
             let original = MaterializeServeError::IdentityMismatch {
                 expected: session_id.to_string(),
@@ -1989,7 +2118,7 @@ impl HostMemberMaterializer {
         let (created, actor_transaction) = actor_transaction
             .create_owned(req, None)
             .await
-            .map_err(MaterializeServeError::Build)?;
+            .map_err(|error| classify_materialize_create_error(error, spec))?;
         if created.session_id != session_id {
             let original = MaterializeServeError::IdentityMismatch {
                 expected: session_id.to_string(),
@@ -2541,6 +2670,35 @@ mod tests {
             },
             required_env_keys: Vec::new(),
         }
+    }
+
+    #[test]
+    fn post_preflight_llm_failure_is_typed_and_wire_diagnostic_is_sanitized() {
+        let spec = sample_spec();
+        let secret_stderr = "sk-secret-from-command-stderr";
+        let error = classify_materialize_create_error(
+            crate::error::MobError::SessionError(SessionError::build_llm_identity_unresolvable(
+                format!("command failed: {secret_stderr}"),
+            )),
+            &spec,
+        );
+
+        assert!(matches!(
+            &error,
+            MaterializeServeError::AuthBindingUnresolvable { .. }
+        ));
+        let (cause, reason) = error.wire_cause();
+        assert_eq!(
+            cause,
+            meerkat_contracts::wire::supervisor_bridge::BridgeRejectionCause::AuthBindingUnresolvable {
+                realm: "env_default".to_string(),
+                binding: "anthropic".to_string(),
+            }
+        );
+        assert!(
+            !reason.contains(secret_stderr),
+            "raw provider/command diagnostics must remain local"
+        );
     }
 
     // T21 — decompile totality over the contracts fixture: every carried

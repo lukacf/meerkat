@@ -3449,6 +3449,15 @@ mod placed_route_session_tests {
 ///
 /// Owns all mutable state. Runs in a dedicated tokio task.
 /// All mutations go through here; reads bypass via shared `Arc` state.
+struct ExplicitResumeMemberRebuild {
+    entry: RosterEntry,
+    member_ref: MemberRef,
+    bridge_session_id: SessionId,
+    requires_materialization: bool,
+    repoints_session_binding: bool,
+    recovered_peer_endpoint: Option<TrustedPeerDescriptor>,
+}
+
 pub(super) struct MobActor {
     pub(super) definition: Arc<MobDefinition>,
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
@@ -3460,6 +3469,9 @@ pub(super) struct MobActor {
     /// Whether this mob's definition declares an orchestrator.
     /// Gates orchestrator-specific transitions and notification fan-out.
     pub(super) has_orchestrator: bool,
+    /// Whether an explicit stopped -> running resume should enqueue the
+    /// informational orchestrator turn after the durable transition commits.
+    pub(super) notify_orchestrator_on_resume: bool,
     /// Flow-run EXECUTION-HANDLE registries — NOT semantic authority (#210).
     ///
     /// `run_tasks` (JoinHandles), `run_cancel_tokens` (CancellationTokens +
@@ -6231,9 +6243,10 @@ impl MobActor {
     /// uncertainty — the host may have served the command and the ack was
     /// lost). A delivered rejection — including `Unavailable` — is the
     /// host's answer and fails immediately. A failed Install stays pending
-    /// for the event-driven retry lanes (`drive_route_installs`, host rebind,
-    /// operator re-wire — ADJ-P4-1/ADJ-P4-7); a synchronous pre-unwire Remove
-    /// aborts the transaction so the still-wired edge can be compensated.
+    /// for the retry lanes (`drive_route_installs`, authenticated periodic
+    /// `HostStatus`, host rebind, operator re-wire — ADJ-P4-1/ADJ-P4-7); a
+    /// synchronous pre-unwire Remove aborts the transaction so the still-wired
+    /// edge can be compensated.
     async fn send_route_install_command(
         &mut self,
         host_peer: &TrustedPeerDescriptor,
@@ -6515,8 +6528,9 @@ impl MobActor {
     /// graph facts belongs to the triggers that KNOW trust was invalidated:
     /// host (re)bind (T2, `drain_route_installs_for_host`), controlling
     /// recovery (T3, builder reseed), and placed revival (T4,
-    /// `drive_route_installs_for_identity`). Event-driven only — no
-    /// periodic driver ships in phase 4 (ADJ-P4-1).
+    /// `drive_route_installs_for_identity`). Periodic authenticated
+    /// `HostStatus` drains only this already-recorded ledger; it never
+    /// re-derives route intent from graph projections.
     async fn handle_drive_route_installs(&mut self) -> Result<(), MobError> {
         self.realize_pending_route_installs(None).await
     }
@@ -9034,6 +9048,8 @@ impl MobActor {
         entry: &RosterEntry,
         member_ref: &MemberRef,
         bridge_session_id: &SessionId,
+        recovered_binding_without_endpoint: bool,
+        restore_topology_immediately: bool,
     ) -> Result<(), MobError> {
         let revival_lock = self.member_revival_lock_for(bridge_session_id).await;
         let _revival_guard = revival_lock.lock().await;
@@ -9157,6 +9173,8 @@ impl MobActor {
                             member_ref,
                             bridge_session_id,
                             stored_session,
+                            recovered_binding_without_endpoint,
+                            restore_topology_immediately,
                         )
                         .await
                     }
@@ -9906,6 +9924,8 @@ impl MobActor {
         member_ref: &MemberRef,
         bridge_session_id: &SessionId,
         stored_session: meerkat_core::session::Session,
+        recovered_binding_without_endpoint: bool,
+        restore_topology_immediately: bool,
     ) -> Result<(), MobError> {
         let agent_identity = entry.agent_identity.clone();
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
@@ -10048,7 +10068,7 @@ impl MobActor {
                 create_session: req,
                 session_origin: super::provisioner::ProvisionSessionOrigin::ResumedDurable,
                 binding: crate::RuntimeBinding::Session,
-                peer_name,
+                peer_name: peer_name.clone(),
                 owner_bridge_session_id: None,
                 ops_registry: None,
                 generated_self_owned_operation_owner: Some(bridge_session_id.clone()),
@@ -10072,63 +10092,111 @@ impl MobActor {
             )));
         }
 
+        // Snapshotless-head recovery first persists the exact replacement
+        // session binding so the old id cannot be classified Broken. When no
+        // live endpoint existed before takeover, enrich that same durable
+        // recovery fact with a follow-up endpoint carrier from the newly
+        // materialized comms incarnation before any topology is restored.
+        // An already-live replacement supplied its endpoint to the first
+        // carrier and therefore remains the ordinary one-event path.
+        if recovered_binding_without_endpoint {
+            let runtime = self
+                .provisioner
+                .comms_runtime(member_ref)
+                .await
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "revived replacement session '{bridge_session_id}' has no comms runtime"
+                    ))
+                })?;
+            let endpoint = super::provisioner::SessionBackend::trusted_peer_spec_from_runtime(
+                &peer_name,
+                runtime.as_ref(),
+            )?
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "revived replacement session '{bridge_session_id}' has no exact comms endpoint"
+                ))
+            })?;
+            let event = super::builder::append_recovered_session_binding(
+                &mut self.dsl_authority,
+                &self.events,
+                &self.definition.id,
+                entry,
+                bridge_session_id,
+                Some(endpoint),
+                "explicit_resume_upgrade_recovered_member_peer_endpoint",
+            )
+            .await?;
+            self.roster.write().await.apply_event(&event);
+            let _ = self
+                .machine_state_watch_tx
+                .send(self.dsl_authority.state().clone());
+        }
+
         // Re-project comms drain ownership onto the fresh comms runtime.
         self.ensure_mob_comms_drain(&agent_identity, member_ref)
             .await?;
 
-        // Re-fire the machine-owned topology restore plan onto the fresh comms
-        // runtime. Per-peer failures degrade typed through the generated
-        // `ResolveRespawnTopologyRestore` authority instead of destroying the
-        // revived member (#34 contract).
-        let plan = self.machine_restore_wiring_plan(&agent_identity)?;
-        let mut failed_restore_peer_ids: Vec<RespawnTopologyPeerId> = Vec::new();
-        for peer_identity in plan.local_peers {
-            if peer_identity == agent_identity {
-                continue;
+        if restore_topology_immediately {
+            // Dispatch-triggered one-member revival restores its topology
+            // immediately. Explicit mob Resume passes `false`: its shared
+            // all-member reconciliation must preflight the complete trust
+            // mutation set before any topology mutation occurs.
+            let plan = self.machine_restore_wiring_plan(&agent_identity)?;
+            let mut failed_restore_peer_ids: Vec<RespawnTopologyPeerId> = Vec::new();
+            for peer_identity in plan.local_peers {
+                if peer_identity == agent_identity {
+                    continue;
+                }
+                let peer_agent_identity = crate::ids::AgentIdentity::from(peer_identity.as_str());
+                if let Err(error) = self
+                    .handle_wire(
+                        agent_identity.clone(),
+                        super::handle::PeerTarget::Local(peer_agent_identity),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        peer = %peer_identity,
+                        %error,
+                        "revival: failed to restore machine-owned local peer edge"
+                    );
+                    failed_restore_peer_ids
+                        .push(RespawnTopologyPeerId::from(peer_identity.as_str()));
+                }
             }
-            let peer_agent_identity = crate::ids::AgentIdentity::from(peer_identity.as_str());
-            if let Err(error) = self
-                .handle_wire(
-                    agent_identity.clone(),
-                    super::handle::PeerTarget::Local(peer_agent_identity),
-                )
-                .await
+            for peer_spec in plan.external_peers {
+                let peer_id = RespawnTopologyPeerId::from(peer_spec.peer_id.as_str());
+                if let Err(error) = self
+                    .handle_wire(
+                        agent_identity.clone(),
+                        super::handle::PeerTarget::External(peer_spec.clone()),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        peer = %peer_spec.name,
+                        %error,
+                        "revival: failed to restore machine-owned external peer edge"
+                    );
+                    failed_restore_peer_ids.push(peer_id);
+                }
+            }
+            let resolution = self.resolve_respawn_topology_restore_result(
+                &agent_identity,
+                failed_restore_peer_ids,
+            )?;
+            if resolution.result == mob_dsl::RespawnTopologyRestoreResultKind::TopologyRestoreFailed
             {
                 tracing::warn!(
                     agent_identity = %agent_identity,
-                    peer = %peer_identity,
-                    %error,
-                    "revival: failed to restore machine-owned local peer edge"
+                    failed_peer_ids = ?resolution.failed_peer_ids,
+                    "revival completed with degraded machine-owned topology edges"
                 );
-                failed_restore_peer_ids.push(RespawnTopologyPeerId::from(peer_identity.as_str()));
             }
-        }
-        for peer_spec in plan.external_peers {
-            let peer_id = RespawnTopologyPeerId::from(peer_spec.peer_id.as_str());
-            if let Err(error) = self
-                .handle_wire(
-                    agent_identity.clone(),
-                    super::handle::PeerTarget::External(peer_spec.clone()),
-                )
-                .await
-            {
-                tracing::warn!(
-                    agent_identity = %agent_identity,
-                    peer = %peer_spec.name,
-                    %error,
-                    "revival: failed to restore machine-owned external peer edge"
-                );
-                failed_restore_peer_ids.push(peer_id);
-            }
-        }
-        let resolution =
-            self.resolve_respawn_topology_restore_result(&agent_identity, failed_restore_peer_ids)?;
-        if resolution.result == mob_dsl::RespawnTopologyRestoreResultKind::TopologyRestoreFailed {
-            tracing::warn!(
-                agent_identity = %agent_identity,
-                failed_peer_ids = ?resolution.failed_peer_ids,
-                "revival completed with degraded machine-owned topology edges"
-            );
         }
         Ok(())
     }
@@ -12738,6 +12806,291 @@ impl MobActor {
         Ok(())
     }
 
+    /// Fence every local session at the explicit stopped -> running resume
+    /// seam. A same-handle resume keeps the exact active sidecar already
+    /// owned by this provisioner. A reconstructed handle retires the foreign
+    /// exact attachment (or discards an unattached actor) and returns the
+    /// members that must be rebuilt after the durable Resume transition.
+    ///
+    /// Only `MemberRef::Session` is local session ownership. An unplaced
+    /// `BackendPeer` remains external peer-only material even if a legacy
+    /// machine journal still carries a stale session binding for it.
+    async fn prepare_explicit_resume_member_sessions(
+        &self,
+    ) -> Result<Vec<ExplicitResumeMemberRebuild>, MobError> {
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list().cloned().collect::<Vec<_>>()
+        };
+        let candidates = {
+            let machine = self.dsl_authority.state();
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    if !matches!(&entry.member_ref, MemberRef::Session { .. }) {
+                        return None;
+                    }
+                    let dsl_identity = mob_dsl::AgentIdentity::from_domain(
+                        &crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
+                    );
+                    if machine.member_placement.contains_key(&dsl_identity) {
+                        return None;
+                    }
+                    let session_id = match machine.member_session_bindings.get(&dsl_identity) {
+                        Some(session_id) => match SessionId::parse(&session_id.0) {
+                            Ok(session_id) => session_id,
+                            Err(error) => {
+                                return Some(Err(MobError::Internal(format!(
+                                    "MobMachine has invalid explicit-resume session binding '{}' for '{}': {error}",
+                                    session_id.0, entry.agent_identity
+                                ))));
+                            }
+                        },
+                        None => return None,
+                    };
+                    let member_ref = Self::project_member_ref_session_binding(
+                        &entry.member_ref,
+                        Some(session_id.clone()),
+                    )
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "explicit resume cannot project the current session binding for '{}'",
+                            entry.agent_identity
+                        ))
+                    });
+                    Some(member_ref.map(|member_ref| (entry, member_ref, session_id)))
+                })
+                .collect::<Result<Vec<_>, MobError>>()?
+        };
+
+        let mut rebuild = Vec::new();
+        let mut listed_sessions = None;
+        for (entry, member_ref, session_id) in candidates {
+            let requires_materialization = self
+                .provisioner
+                .prepare_member_session_for_explicit_resume(&session_id)
+                .await?;
+            if !requires_materialization {
+                continue;
+            }
+
+            let current_snapshot_present = self.session_service.supports_persistent_sessions()
+                && self
+                    .session_service
+                    .load_persisted_session_metadata(&session_id)
+                    .await
+                    .map_err(MobError::SessionError)?
+                    .is_some();
+            if current_snapshot_present || !self.session_service.supports_persistent_sessions() {
+                rebuild.push(ExplicitResumeMemberRebuild {
+                    entry,
+                    member_ref,
+                    bridge_session_id: session_id,
+                    requires_materialization,
+                    repoints_session_binding: false,
+                    recovered_peer_endpoint: None,
+                });
+                continue;
+            }
+
+            if listed_sessions.is_none() {
+                listed_sessions = Some(
+                    self.session_service
+                        .list(meerkat_core::service::SessionQuery::default())
+                        .await
+                        .map_err(MobError::SessionError)?,
+                );
+            }
+            let replacement = super::builder::latest_persisted_session_for_member(
+                self.session_service.as_ref(),
+                listed_sessions.as_deref().unwrap_or_default(),
+                &session_id,
+                &self.definition.id,
+                &entry.role,
+                &entry.agent_identity,
+            )
+            .await?;
+            let Some((replacement_session_id, _replacement_session)) = replacement else {
+                // No canonical persisted successor exists. Let the ordinary
+                // machine-owned classification record this exact binding as
+                // terminal Broken after Resume commits.
+                rebuild.push(ExplicitResumeMemberRebuild {
+                    entry,
+                    member_ref,
+                    bridge_session_id: session_id,
+                    requires_materialization,
+                    repoints_session_binding: false,
+                    recovered_peer_endpoint: None,
+                });
+                continue;
+            };
+
+            let replacement_member_ref = Self::project_member_ref_session_binding(
+                &entry.member_ref,
+                Some(replacement_session_id.clone()),
+            )
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "explicit resume cannot project replacement session binding for '{}'",
+                    entry.agent_identity
+                ))
+            })?;
+            let replacement_requires_materialization = self
+                .provisioner
+                .prepare_member_session_for_explicit_resume(&replacement_session_id)
+                .await?;
+            // Publish an endpoint from a live successor only when this exact
+            // provisioner is allowed to reuse that attachment. If preparation
+            // retires foreign attachment A, its descriptor is stale by
+            // definition and must never be journaled over replacement B. The
+            // existing post-materialization upgrade below records B instead.
+            let recovered_peer_endpoint = if replacement_requires_materialization {
+                None
+            } else {
+                let fallback_name = render_member_comms_name(
+                    self.definition.id.as_str(),
+                    entry.role.as_str(),
+                    entry.agent_identity.as_str(),
+                )?;
+                match self
+                    .provisioner
+                    .comms_runtime(&replacement_member_ref)
+                    .await
+                {
+                    Some(runtime) => {
+                        super::provisioner::SessionBackend::trusted_peer_spec_from_runtime(
+                            &fallback_name,
+                            runtime.as_ref(),
+                        )?
+                    }
+                    None => None,
+                }
+            };
+            rebuild.push(ExplicitResumeMemberRebuild {
+                entry,
+                member_ref: replacement_member_ref,
+                bridge_session_id: replacement_session_id,
+                requires_materialization: replacement_requires_materialization,
+                repoints_session_binding: true,
+                recovered_peer_endpoint,
+            });
+        }
+        Ok(rebuild)
+    }
+
+    /// Rebuild only the sessions whose prior exact attachment was retired by
+    /// the explicit resume preparation. The lifecycle is already durably
+    /// Running, so the existing machine-owned classify -> materialize ->
+    /// resolve seam is authoritative. Terminal member restore failures remain
+    /// a partial-resume success; infrastructure failures are surfaced after
+    /// every independent candidate has had a chance to converge.
+    async fn rebuild_explicit_resume_member_sessions(
+        &mut self,
+        rebuild: Vec<ExplicitResumeMemberRebuild>,
+    ) -> Result<(), MobError> {
+        let mut first_infrastructure_error = None;
+        for rebuild in rebuild {
+            let ExplicitResumeMemberRebuild {
+                entry,
+                member_ref,
+                bridge_session_id,
+                requires_materialization,
+                repoints_session_binding,
+                recovered_peer_endpoint,
+            } = rebuild;
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(
+                &crate::ids::AgentIdentity::from(entry.agent_identity.as_str()),
+            );
+            if self
+                .dsl_authority
+                .state()
+                .member_restore_failures
+                .contains_key(&dsl_identity)
+            {
+                continue;
+            }
+            if repoints_session_binding {
+                // `RecoverMemberSessionBinding` is a Running-only machine
+                // transition. The helper stages binding + endpoint on one
+                // detached authority, appends the replay-authority event, and
+                // publishes the machine only after that write succeeds. Apply
+                // the same event to the live roster projection afterward.
+                let event = super::builder::append_recovered_session_binding(
+                    &mut self.dsl_authority,
+                    &self.events,
+                    &self.definition.id,
+                    &entry,
+                    &bridge_session_id,
+                    recovered_peer_endpoint.clone(),
+                    "explicit_resume_repoint_missing_member_session_binding",
+                )
+                .await?;
+                self.roster.write().await.apply_event(&event);
+                let _ = self
+                    .machine_state_watch_tx
+                    .send(self.dsl_authority.state().clone());
+            }
+            if !requires_materialization {
+                continue;
+            }
+            match self
+                .revive_member_live_materialization(
+                    &entry,
+                    &member_ref,
+                    &bridge_session_id,
+                    repoints_session_binding && recovered_peer_endpoint.is_none(),
+                    false,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(MobError::MemberRestoreFailed { .. }) => {
+                    // The machine durably classified this one member Broken.
+                    // Other members and the resumed mob remain usable.
+                }
+                Err(error) => {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %entry.agent_identity,
+                        bridge_session_id = %bridge_session_id,
+                        error = %error,
+                        "explicit resume could not converge one member runtime"
+                    );
+                    if first_infrastructure_error.is_none() {
+                        first_infrastructure_error = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_infrastructure_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn orchestrator_is_broken(&self) -> bool {
+        let Some(orchestrator) = self.definition.orchestrator.as_ref() else {
+            return false;
+        };
+        let identity = {
+            let roster = self.roster.read().await;
+            roster
+                .by_profile(&orchestrator.profile)
+                .next()
+                .map(|entry| entry.agent_identity.clone())
+        };
+        let Some(identity) = identity else {
+            return false;
+        };
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(
+            identity.as_str(),
+        ));
+        self.dsl_authority
+            .state()
+            .member_restore_failures
+            .contains_key(&dsl_identity)
+    }
+
     /// Ensure all autonomous roster members have their runtime ready.
     ///
     /// Called on mob startup and resume. Does NOT fire synthetic kickoff turns —
@@ -14185,10 +14538,19 @@ impl MobActor {
         &mut self,
         intent: mob_dsl::PlacedCompletionLifecycleIntentKind,
     ) -> Result<(), MobError> {
-        let prepared = self.prepare_dsl_input_transition(
-            mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { intent },
-            "begin_placed_completion_lifecycle_quiesce",
-        )?;
+        let target = match intent {
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop => MobState::Stopped,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Complete => MobState::Completed,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Destroy => MobState::Destroyed,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Reset
+            | mob_dsl::PlacedCompletionLifecycleIntentKind::RetireAll => MobState::Running,
+        };
+        let prepared = self
+            .prepare_dsl_input_transition(
+                mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { intent },
+                "begin_placed_completion_lifecycle_quiesce",
+            )
+            .map_err(|_| self.invalid_transition_to(target))?;
         Self::require_placed_completion_lifecycle_intent_effect(
             &prepared.transition,
             intent,
@@ -15119,9 +15481,30 @@ impl MobActor {
                     match result {
                         Ok(status) => {
                             match self.reconcile_host_status_response(&host_id, status).await {
-                                Ok(()) => self
-                                    .reachability_observations
-                                    .mark_host_success(host_id.as_str()),
+                                Ok(()) => {
+                                    self.reachability_observations
+                                        .mark_host_success(host_id.as_str());
+                                    // T3 recovery records route-install
+                                    // obligations before the replacement
+                                    // actor starts. A successful periodic
+                                    // status reply is authenticated evidence
+                                    // that this exact current host binding is
+                                    // reachable, so converge those existing
+                                    // rows through the canonical drain. Do
+                                    // not re-derive here: polling must never
+                                    // manufacture route intent from a read
+                                    // model.
+                                    if let Err(error) =
+                                        self.realize_pending_route_installs(Some(&host_id)).await
+                                    {
+                                        tracing::error!(
+                                            mob_id = %self.definition.id,
+                                            host = %host_id.as_str(),
+                                            error = %error,
+                                            "authenticated host status found an invalid pending route-install ledger"
+                                        );
+                                    }
+                                }
                                 Err(error) => {
                                     self.reachability_observations
                                         .mark_host_failure(host_id.as_str(), &error);
@@ -15413,13 +15796,17 @@ impl MobActor {
                             "retire_all_preflight",
                         )?;
                         self.ensure_pending_spawn_alignment("retire_all preflight")?;
+                        // First mint every member's durable retirement-start
+                        // anchor. A failure before that boundary must not
+                        // publish a global lifecycle fence that cancels an
+                        // unrelated in-flight spawn.
+                        self.retire_all_members("retire_all").await?;
                         self.drive_placed_completion_lifecycle_cleanup(
                             None,
                             false,
                             Some(mob_dsl::PlacedCompletionLifecycleIntentKind::RetireAll),
                         )
                         .await?;
-                        self.retire_all_members("retire_all").await?;
                         self.end_placed_completion_lifecycle_quiesce(
                             mob_dsl::PlacedCompletionLifecycleIntentKind::RetireAll,
                         )
@@ -16711,11 +17098,31 @@ impl MobActor {
                         MobState::Running,
                         "resume_command_admission",
                     ) {
-                        Ok(()) => {
+                        Ok(()) => async {
                             // Re-enable checkpointers cancelled during stop.
                             self.provisioner.rearm_all_checkpointers().await;
-                            if let Err(error) =
-                                self.ensure_autonomous_runtimes_from_roster(true).await
+
+                            let rebuild = match self
+                                .prepare_explicit_resume_member_sessions()
+                                .await
+                            {
+                                Ok(rebuild) => rebuild,
+                                Err(error) => {
+                                    self.provisioner.cancel_all_checkpointers().await;
+                                    return Err(error);
+                                }
+                            };
+                            let rebuilt_attachment = !rebuild.is_empty();
+
+                            // Same-handle resume preserves the prior
+                            // pre-commit readiness contract. A reconstructed
+                            // handle cannot become ready until its foreign
+                            // attachments have been retired and the durable
+                            // Resume transition authorizes the existing
+                            // machine-owned revival seam.
+                            if !rebuilt_attachment
+                                && let Err(error) =
+                                    self.ensure_autonomous_runtimes_from_roster(true).await
                             {
                                 if let Err(stop_error) = self.stop_all_autonomous_members().await {
                                     tracing::warn!(
@@ -16725,47 +17132,158 @@ impl MobActor {
                                     );
                                 }
                                 self.provisioner.cancel_all_checkpointers().await;
-                                Err(error)
-                            } else {
-                                // Resume's durable End{Stop}/Resumed carrier is
-                                // the commit point. Do not enqueue the external
-                                // coordinator notification before it: an
-                                // absent/failed carrier must leave both the mob
-                                // and coordinator stopped. Pre-commit failures
-                                // still roll back the freshly restarted loops.
-                                if let Err(error) = self.resume_lifecycle_after_quiesce().await {
-                                    if let Err(stop_error) =
+                                return Err(error);
+                            }
+
+                            // Resume's durable End{Stop}/Resumed carrier is
+                            // the commit point. Do not enqueue the external
+                            // coordinator notification before it: an
+                            // absent/failed carrier must leave both the mob
+                            // and coordinator stopped. Same-handle pre-commit
+                            // failures still roll back freshly restarted
+                            // loops. A reconstructed handle may already have
+                            // retired foreign attachments; failure remains a
+                            // stopped, discoverable session set that an
+                            // explicit retry can rebuild.
+                            if let Err(error) = self.resume_lifecycle_after_quiesce().await {
+                                if !rebuilt_attachment
+                                    && let Err(stop_error) =
                                         self.stop_all_autonomous_members().await
-                                    {
-                                        tracing::warn!(
-                                            mob_id = %self.definition.id,
-                                            error = %stop_error,
-                                            "resume transition rollback failed while stopping autonomous loops"
-                                        );
-                                    }
-                                    self.provisioner.cancel_all_checkpointers().await;
-                                    Err(error)
-                                } else if self.has_orchestrator {
-                                    // The mob is durably Running now. A routed
-                                    // NotifyCoordinator effect is retained by
-                                    // the actor boundary until dispatch; a
-                                    // local transition failure is surfaced
-                                    // without pretending the Resume rolled
-                                    // back or stopping its live producers.
-                                    self.apply_dsl_signal(
-                                        mob_dsl::MobMachineSignal::ResumeOrchestrator,
-                                        "resume_orchestrator_after_durable_resume",
-                                    )
-                                    .map_err(|error| {
-                                        MobError::Internal(format!(
-                                            "mob resumed durably but orchestrator ResumeOrchestrator transition failed: {error}"
-                                        ))
-                                    })
-                                } else {
-                                    Ok(())
+                                {
+                                    tracing::warn!(
+                                        mob_id = %self.definition.id,
+                                        error = %stop_error,
+                                        "resume transition rollback failed while stopping autonomous loops"
+                                    );
+                                }
+                                self.provisioner.cancel_all_checkpointers().await;
+                                return Err(error);
+                            }
+
+                            let mut post_commit_error = None;
+                            if rebuilt_attachment {
+                                let rebuild_result = self
+                                    .rebuild_explicit_resume_member_sessions(rebuild)
+                                    .await;
+                                let readiness_result =
+                                    self.ensure_autonomous_runtimes_from_roster(false).await;
+                                if let Err(error) = rebuild_result {
+                                    post_commit_error = Some(error);
+                                }
+                                if let Err(error) = readiness_result
+                                    && post_commit_error.is_none()
+                                {
+                                    post_commit_error = Some(error);
                                 }
                             }
+
+                            #[cfg(feature = "runtime-adapter")]
+                            {
+                                // All exact session attachments are settled before
+                                // topology repair. The shared reconciler consumes its
+                                // generated trust handoffs directly; routing the same
+                                // effects again here would duplicate live mutations.
+                                let mut topology_roster = self.roster.read().await.snapshot();
+                                let topology_result = super::builder::reconcile_resume_topology(
+                                    &self.definition,
+                                    &mut topology_roster,
+                                    self.provisioner.as_ref(),
+                                    &self.supervisor_bridge,
+                                    &self.runtime_metadata,
+                                    &mut self.dsl_authority,
+                                    &self.dsl_topology_epoch,
+                                )
+                                .await;
+                                *self.roster.write().await =
+                                    RosterAuthority::from_roster(topology_roster);
+                                self.publish_machine_state_projection();
+                                if let Err(error) = topology_result
+                                    && post_commit_error.is_none()
+                                {
+                                    post_commit_error = Some(error);
+                                }
+                            }
+
+                            // A cold actor reconstructed while Stopped skips
+                            // the startup-time operation-binding restore. Once
+                            // explicit Resume has settled every attachment and
+                            // the shared topology seam has recovered the exact
+                            // current peer endpoint, rebuild those generated
+                            // owner bindings through the same seam used by a
+                            // cold Running actor. Peer-only members have no
+                            // local bridge session of their own, so this is
+                            // their only durable route back to the owner
+                            // bridge's operation registry before
+                            // respawn/retire. Binding after topology also
+                            // avoids anchoring a legacy pre-rebind address.
+                            if let Err(error) =
+                                self.restore_generated_member_operation_bindings().await
+                                && post_commit_error.is_none()
+                            {
+                                post_commit_error = Some(error);
+                            }
+
+                            if self.has_orchestrator {
+                                if self.orchestrator_is_broken().await {
+                                    tracing::warn!(
+                                        mob_id = %self.definition.id,
+                                        "skipping orchestrator resume notification because the orchestrator is Broken"
+                                    );
+                                } else {
+                                    let orchestrator_transition_succeeded = match self
+                                        .apply_dsl_signal(
+                                            mob_dsl::MobMachineSignal::ResumeOrchestrator,
+                                            "resume_orchestrator_after_durable_resume",
+                                        ) {
+                                        Ok(()) => true,
+                                        Err(error) => {
+                                            if post_commit_error.is_none() {
+                                                // The mob is durably Running;
+                                                // surface the local transition
+                                                // failure without pretending
+                                                // Resume rolled back.
+                                                post_commit_error = Some(MobError::Internal(
+                                                    format!(
+                                                        "mob resumed durably but orchestrator ResumeOrchestrator transition failed: {error}"
+                                                    ),
+                                                ));
+                                            }
+                                            false
+                                        }
+                                    };
+                                    if orchestrator_transition_succeeded
+                                        && self.notify_orchestrator_on_resume
+                                    {
+                                        let orchestrator_entry = if let Some(orchestrator) =
+                                            self.definition.orchestrator.as_ref()
+                                        {
+                                            let roster = self.roster.read().await;
+                                            roster
+                                                .by_profile(&orchestrator.profile)
+                                                .next()
+                                                .cloned()
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(orchestrator_entry) = orchestrator_entry
+                                            && let Err(error) = super::builder::realize_orchestrator_resume_notification(
+                                                self.definition.as_ref(),
+                                                &orchestrator_entry,
+                                                self.session_service.as_ref(),
+                                                self.provisioner.as_ref(),
+                                                &self.dsl_authority,
+                                            )
+                                            .await
+                                            && post_commit_error.is_none()
+                                        {
+                                            post_commit_error = Some(error);
+                                        }
+                                    }
+                                }
+                            }
+                            post_commit_error.map_or(Ok(()), Err)
                         }
+                        .await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -29088,6 +29606,87 @@ impl MobActor {
             .map_err(MobError::from)
     }
 
+    /// Prove that the exact controller-local runtime retire opened by an
+    /// explicit respawn has no consumer-side work left to perform.
+    ///
+    /// This is deliberately weaker than archive completion: a missing
+    /// durable snapshot without an archive tombstone remains host-owned
+    /// absence. It authorizes dropping only the exact queued runtime-retire
+    /// effect for the old incarnation. The ordinary disposal path still runs
+    /// afterwards and re-captures the machine attachment/sidecar pair, so a
+    /// replacement that appears after this observation is retired or rejected
+    /// fail-closed instead of being silently abandoned.
+    async fn respawn_runtime_retire_target_is_quiescent(
+        &self,
+        entry: &RosterEntry,
+        session_id: &SessionId,
+    ) -> Result<bool, MobError> {
+        let MemberRef::Session {
+            session_id: roster_session_id,
+        } = &entry.member_ref
+        else {
+            return Ok(false);
+        };
+        if roster_session_id != session_id {
+            return Ok(false);
+        }
+
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let dsl_session_id = mob_dsl::SessionId::from_domain(session_id);
+        let exact_machine_target = {
+            let state = self.dsl_authority.state();
+            state.member_session_bindings.get(&dsl_identity) == Some(&dsl_session_id)
+                && state.runtime_retire_pending_sessions.get(&dsl_runtime_id)
+                    == Some(&dsl_session_id)
+                && !state.member_placement.contains_key(&dsl_identity)
+        };
+        if !exact_machine_target
+            || !self.has_exact_queued_runtime_retire(
+                &dsl_identity,
+                &dsl_runtime_id,
+                &dsl_session_id,
+            )?
+        {
+            return Ok(false);
+        }
+        if self.session_service.has_live_session(session_id).await?
+            || self
+                .session_service
+                .load_persisted_session(session_id)
+                .await?
+                .is_some()
+        {
+            return Ok(false);
+        }
+
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let Some(adapter) = self.runtime_adapter.as_ref() else {
+                return Ok(false);
+            };
+            if adapter
+                .current_executor_attachment_witness(session_id)
+                .await
+                .is_some()
+                || adapter
+                    .archive_runtime_residue_present(session_id)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "respawn runtime-quiescence observation failed for '{session_id}': {error}"
+                        ))
+                    })?
+            {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+
+        #[cfg(not(feature = "runtime-adapter"))]
+        Ok(false)
+    }
+
     async fn detach_session_ingress_for_mob_destroy(
         &mut self,
         session_id: &SessionId,
@@ -29819,6 +30418,19 @@ impl MobActor {
                         &mob_dsl::SessionId::from_domain(&pending_session),
                         "retry_runtime_retire_after_consumer_refusal",
                     )?;
+                    if preserve_topology_for_respawn
+                        && self
+                            .respawn_runtime_retire_target_is_quiescent(&entry, &pending_session)
+                            .await?
+                    {
+                        tracing::debug!(
+                            mob_id = %self.definition.id,
+                            agent_identity = %agent_identity,
+                            bridge_session_id = %pending_session,
+                            "explicit respawn proved the exact old runtime-retire target quiescent"
+                        );
+                        self.discard_queued_runtime_retire_for(&dsl_runtime_id);
+                    }
                 }
             }
             self.flush_routed_effects().await?;
@@ -29915,6 +30527,27 @@ impl MobActor {
             "retire_request_pending_session_ingress_detach",
         )
         .await?;
+
+        // A Broken member may be retired after recovery has already proved
+        // either durable archive completion or, for explicit respawn only,
+        // that the exact old local runtime target has no actor, snapshot,
+        // attachment, or nonterminal residue. Dispatching the freshly queued
+        // request in either case can only produce
+        // `routed_session_not_registered`. Drop only this runtime's exact
+        // queued request; the ordinary disposal path still revalidates the
+        // attachment/sidecar pair and preserves honest host-owned archive
+        // disposition before publishing the terminal member transition.
+        if let Some(session_id) = entry.member_ref.bridge_session_id() {
+            let archive_complete = self.retirement_archive_already_complete(session_id).await?;
+            let exact_respawn_target_quiescent = !archive_complete
+                && preserve_topology_for_respawn
+                && self
+                    .respawn_runtime_retire_target_is_quiescent(&entry, session_id)
+                    .await?;
+            if archive_complete || exact_respawn_target_quiescent {
+                self.discard_queued_runtime_retire_for(&dsl_runtime_id);
+            }
+        }
 
         // Flush session-backed routed effects before the disposal pipeline
         // tears down the runtime session. A consumer refusal is closed back
@@ -34275,13 +34908,20 @@ impl MobActor {
                 .await
                 .map_err(super::handle::MobDestroyError::from)?;
         }
-        self.drive_placed_completion_lifecycle_cleanup(
-            None,
-            false,
-            Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Destroy),
-        )
-        .await
-        .map_err(super::handle::MobDestroyError::from)?;
+        // Destroy commits the DSL terminal before fallible storage/event
+        // cleanup. On a later cleanup retry, that committed transition has
+        // already proved every placed-completion obligation clear; attempting
+        // to begin the quiesce protocol again from Destroyed is both rejected
+        // by the DSL and prevents the retry from reaching its remaining work.
+        if self.dsl_state() != crate::runtime::MobState::Destroyed {
+            self.drive_placed_completion_lifecycle_cleanup(
+                None,
+                false,
+                Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Destroy),
+            )
+            .await
+            .map_err(super::handle::MobDestroyError::from)?;
+        }
         let was_active = self.destroy_cleanup_active;
         self.destroy_cleanup_active = true;
         let result = self.handle_destroy_inner().await;
@@ -34796,7 +35436,30 @@ impl MobActor {
     /// DL5: scheme-qualified `ws`/`wss` absolute base URL; presence IS the
     /// live capability).
     fn live_ws_endpoint_from_wire(url: &str) -> Result<mob_dsl::LiveWsEndpointUrl, MobError> {
-        let parsed = url::Url::parse(url).map_err(|_| {
+        // WHATWG parsing repairs `ws:///path` into a host named `path`.
+        // Require an authority in the wire spelling first so malformed host
+        // advertisements cannot be silently reinterpreted as another peer.
+        let wire = url.trim();
+        let raw_authority_valid = wire
+            .split_once(':')
+            .filter(|(scheme, _)| {
+                scheme.eq_ignore_ascii_case("ws") || scheme.eq_ignore_ascii_case("wss")
+            })
+            .and_then(|(_, remainder)| remainder.strip_prefix("//"))
+            .map(|remainder| {
+                let authority_end = remainder
+                    .find(|ch| matches!(ch, '/' | '?' | '#'))
+                    .unwrap_or(remainder.len());
+                let authority = &remainder[..authority_end];
+                !authority.is_empty() && !authority.contains('\\')
+            })
+            .unwrap_or(false);
+        if !raw_authority_valid {
+            return Err(MobError::WiringError(format!(
+                "host live endpoint must be an absolute ws:// or wss:// base URL, got '{url}'"
+            )));
+        }
+        let parsed = url::Url::parse(wire).map_err(|_| {
             MobError::WiringError(format!(
                 "host live endpoint must be an absolute ws:// or wss:// base URL, got '{url}'"
             ))
@@ -40203,6 +40866,8 @@ impl MobActor {
                         entry,
                         &machine_member_ref,
                         bridge_session_id,
+                        false,
+                        true,
                     )
                     .await?;
                     tracing::debug!(
@@ -41768,10 +42433,19 @@ impl MobActor {
                 (TerminalizationTarget::Canceled, MobRunStatus::Failed)
             )
         {
-            return self
+            let repaired = self
                 .flow_engine
                 .repair_persisted_terminalization(run_id, flow_id, target)
                 .await;
+            if repaired.is_err() {
+                // A terminal run snapshot is already durable, but its public
+                // terminal carrier could not be repaired. Continuing to serve
+                // commands would let the live MobMachine project from a state
+                // whose durable event truth is incomplete. Cold recovery owns
+                // the only safe retry boundary for this ambiguous commit.
+                self.durable_uncertainty_fail_stop = true;
+            }
+            return repaired;
         }
 
         let authority_input = command.authority_input(&run_id);
@@ -41799,10 +42473,30 @@ impl MobActor {
             }
             Ok(TerminalizationOutcome::Noop) => Ok(TerminalizationOutcome::Noop),
             Err(error) => {
-                if self
+                let persisted_target = match self
                     .persisted_terminal_status_matches_target(&run_id, &target)
-                    .await?
+                    .await
                 {
+                    Ok(persisted_target) => persisted_target,
+                    Err(reconcile_error) => {
+                        // Once the combined terminalization seam errors, an
+                        // unreadable run snapshot leaves the commit outcome
+                        // unknowable. Do not keep serving from volatile state.
+                        self.durable_uncertainty_fail_stop = true;
+                        return Err(MobError::Internal(format!(
+                            "terminalization failed for run '{run_id}' ({error}) and durable status reconciliation failed; actor is fail-stopping for cold recovery: {reconcile_error}"
+                        )));
+                    }
+                };
+                if persisted_target {
+                    // The store committed the terminal snapshot before the
+                    // terminal carrier failed. Keep the in-memory authority
+                    // aligned for this command, then fail-stop so only cold
+                    // recovery can repair the missing carrier and reopen the
+                    // actor from durable truth. Set the fence before the
+                    // volatile authority commit too: if that alignment step
+                    // rejects, the actor must still leave the serving set.
+                    self.durable_uncertainty_fail_stop = true;
                     self.commit_prepared_dsl_input(prepared)?;
                 }
                 Err(error)

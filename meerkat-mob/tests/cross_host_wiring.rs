@@ -935,7 +935,7 @@ async fn members_unwired_lost_ack_transient_poll_failure_keeps_committed_unwire(
 
 #[tokio::test(flavor = "multi_thread")]
 #[cfg(feature = "test-support")]
-async fn members_unwired_no_write_persistent_ceiling_outage_fail_stops_then_cold_repairs() {
+async fn members_unwired_no_write_restart_repairs_routes_on_authenticated_host_status() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let scenario = scripted_converged_wiring_scenario("xhw-unwire-no-write-outage").await;
     let ScriptedWiringScenario {
@@ -945,6 +945,7 @@ async fn members_unwired_no_write_persistent_ceiling_outage_fail_stops_then_cold
         host_id: _,
     } = scenario;
     let installs_before = scripted.install_peer_trust_count();
+    let removes_before = scripted.remove_peer_trust_count();
     controlling
         .storage_events_in_memory
         .fail_reconciliation_latest_cursor_reads_after_next_members_unwired_error(2);
@@ -962,6 +963,11 @@ async fn members_unwired_no_write_persistent_ceiling_outage_fail_stops_then_cold
         scripted.install_peer_trust_count(),
         installs_before,
         "an uncertain append must never compensate before cold replay"
+    );
+    assert_eq!(
+        scripted.remove_peer_trust_count(),
+        removes_before + 1,
+        "the pre-commit Remove reached b2 before the injected durable no-write outcome"
     );
     let follow_up = controlling
         .handle
@@ -981,6 +987,7 @@ async fn members_unwired_no_write_persistent_ceiling_outage_fail_stops_then_cold
         "the injected pre-write failure must leave no durable unwire"
     );
 
+    let status_count_before_restart = scripted.host_status_count();
     let controlling = controlling.restart_after_actor_fail_stop().await;
     let a1 = controlling
         .handle
@@ -992,22 +999,42 @@ async fn members_unwired_no_write_persistent_ceiling_outage_fail_stops_then_cold
         a1.wired_to.contains(&identity("b2")),
         "cold replay of the no-write outcome restores the durable wired graph"
     );
-    controlling
-        .handle
-        .drive_route_installs()
-        .await
-        .expect("cold-rederived Install repairs remote trust");
+    // Controller-only restart: the host and its materialized b2 runtime stay
+    // live throughout. Recovery re-derives the pending Install before the
+    // replacement actor starts; the next authenticated periodic HostStatus
+    // must drain it without an operator `drive_route_installs` call.
+    wait_until(
+        "authenticated HostStatus to drain the cold-recovered route install",
+        || async {
+            scripted.host_status_count() > status_count_before_restart
+                && scripted.install_peer_trust_count() == installs_before + 1
+                && route_installs_at_rest(&controlling).await
+        },
+    )
+    .await;
     assert_eq!(scripted.install_peer_trust_count(), installs_before + 1);
     assert!(route_installs_at_rest(&controlling).await);
     let a1_session = controlling.member_session_id(&identity("a1")).await;
     let a1_runtime = controlling.member_comms_runtime(&a1_session).await;
+    let a1_peer = a1_runtime.peer_id().expect("recovered a1 peer id");
+    assert_eq!(
+        scripted
+            .received_install_peer_trust_payloads()
+            .last()
+            .expect("periodic recovery install payload")
+            .peer
+            .peer_id,
+        a1_peer.to_string(),
+        "the recovered obligation installs the replacement controller's exact local a1 route"
+    );
+    let b2_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> = probe.runtime.clone();
     let receipt = send_peer_text(
-        &a1_runtime,
-        probe.self_descriptor().peer_id,
-        "cold replay repaired the no-write edge",
+        &b2_runtime,
+        a1_peer,
+        "host b2 reaches controller-local a1 after cold recovery",
     )
     .await
-    .expect("recovered local and remote trust admit delivery");
+    .expect("periodic HostStatus repairs the reverse b2 -> local a1 route");
     assert!(matches!(
         receipt,
         SendReceipt::PeerMessageSent {

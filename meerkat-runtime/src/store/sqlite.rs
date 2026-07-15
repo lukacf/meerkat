@@ -853,6 +853,11 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
 
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                reject_finalized_compaction_projection_replays(
+                    &tx,
+                    &runtime_id,
+                    &compaction_intents,
+                )?;
                 let previous = tx
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
@@ -3357,6 +3362,74 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
                 store.load_input_states(&runtime_id).await.unwrap().len(),
                 1,
                 "failed terminal transaction must retain only the seeded input row"
+            );
+        }
+
+        #[tokio::test]
+        async fn machine_terminal_atomic_apply_tracks_and_tombstones_compaction_intents() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let (session, intent) = session_with_compaction_intent();
+            let encoded = serde_json::to_vec(&session).unwrap();
+            let receipt = |sequence| RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: None,
+                message_count: 0,
+                sequence,
+            };
+
+            store
+                .atomic_apply_with_machine_lifecycle(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: encoded.clone(),
+                    },
+                    receipt(0),
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Idle,
+                        crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
+                    Vec::new(),
+                    session.id().clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap(),
+                vec![intent.clone()]
+            );
+
+            store
+                .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+                .await
+                .unwrap();
+            let error = store
+                .atomic_apply_with_machine_lifecycle(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: encoded,
+                    },
+                    receipt(1),
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Idle,
+                        crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
+                    Vec::new(),
+                    session.id().clone(),
+                )
+                .await
+                .expect_err("a finalized compaction tombstone must reject stale terminal replay");
+            assert!(
+                error
+                    .to_string()
+                    .contains("replays finalized compaction intent")
             );
         }
 

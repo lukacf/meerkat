@@ -3908,6 +3908,17 @@ fn state_is_awaiting_body_frame(state: &loop_iteration::State) -> bool {
 mod tests {
     use super::*;
 
+    fn begin_completion_lifecycle_quiesce(
+        authority: &mut mob_dsl::MobMachineAuthority,
+        intent: mob_dsl::PlacedCompletionLifecycleIntentKind,
+    ) {
+        mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::BeginPlacedCompletionLifecycleQuiesce { intent },
+        )
+        .expect("completion lifecycle must enter exact quiesce intent before terminalization");
+    }
+
     fn loop_completed_effect() -> loop_iteration::Effect {
         loop_iteration::Effect::LoopCompleted(loop_iteration::effects::LoopCompleted {
             loop_instance_id: LoopInstanceId::from("loop-1"),
@@ -4089,6 +4100,10 @@ mod tests {
         let mut completed_authority =
             mob_dsl::MobMachineAuthority::recover_from_state(authority.state().clone())
                 .expect("generated authority should recover terminal frame state");
+        begin_completion_lifecycle_quiesce(
+            &mut completed_authority,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Complete,
+        );
         mob_dsl::MobMachineMutator::apply(
             &mut completed_authority,
             mob_dsl::MobMachineInput::Complete,
@@ -4121,6 +4136,10 @@ mod tests {
         stopped_authority
             .apply_signal(mob_dsl::MobMachineSignal::CompleteFlow)
             .expect("generated complete-flow convergence should be accepted");
+        begin_completion_lifecycle_quiesce(
+            &mut stopped_authority,
+            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop,
+        );
         mob_dsl::MobMachineMutator::apply(&mut stopped_authority, mob_dsl::MobMachineInput::Stop)
             .expect("generated stop transition should be accepted after flow completion");
         assert_eq!(

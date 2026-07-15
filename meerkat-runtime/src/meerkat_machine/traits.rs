@@ -229,19 +229,8 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
     ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
         let host = self.llm_reconfigure_host()?;
         let _turn_finalization_guard = host.acquire_turn_finalization_boundary(session_id).await?;
-        let command = self
-            .prepare_reconfigure_session_llm_command(session_id, request)
-            .await?;
-        match self
-            .execute_meerkat_machine_command(None, command)
+        self.reconfigure_session_llm_identity_under_turn_finalization_boundary(session_id, request)
             .await
-            .map_err(MeerkatMachine::driver_error_from_command_error)?
-        {
-            MeerkatMachineCommandResult::LlmReconfigured(report) => Ok(report),
-            other => Err(RuntimeDriverError::Internal(format!(
-                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::reconfigure_session_llm_identity: {other:?}"
-            ))),
-        }
     }
 
     async fn resolved_session_llm_capabilities(
@@ -1005,15 +994,50 @@ impl MeerkatMachine {
         Ok(())
     }
 
-    /// Release a quiescent archive lease and discard only the reconstructable
-    /// in-memory registration inserted by archive preparation itself.
+    /// Compare-and-remove the reconstructable in-memory registration inserted
+    /// by archive preparation itself.
     ///
     /// This is intentionally not the generated `UnregisterSession` path: the
     /// durable runtime is already `Retired` or `Destroyed`, and archive cleanup
-    /// must not rewrite that terminal truth. The exact driver identity plus the
-    /// insertion witness prevents cleanup from removing a registration that
-    /// predated archive (including a live terminal registration retained by its
-    /// owning host).
+    /// must not rewrite that terminal truth. The exact runtime and driver
+    /// identity prevent cleanup from removing a registration that predated the
+    /// archive or replaced its recovered incarnation.
+    async fn remove_archive_recovered_registration_exact(
+        &self,
+        session_id: &SessionId,
+        runtime_id: &LogicalRuntimeId,
+        driver: &SharedDriver,
+    ) -> Result<(), RuntimeControlPlaneError> {
+        let state = driver.lock().await.runtime_state();
+        if !matches!(state, RuntimeState::Retired | RuntimeState::Destroyed) {
+            return Err(RuntimeControlPlaneError::InvalidState { state });
+        }
+
+        let removed = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get(session_id) else {
+                // Another terminal cleanup already removed the reconstructable
+                // entry. Durable truth remains untouched, so this is converged.
+                return Ok(());
+            };
+            if &entry.runtime_id != runtime_id || !Arc::ptr_eq(&entry.driver, driver) {
+                return Err(RuntimeControlPlaneError::Internal(format!(
+                    "archive-recovered runtime {runtime_id} was replaced before quiescent cleanup"
+                )));
+            }
+            if entry.wake_sender().is_some() || entry.publication_handle().is_some() {
+                return Err(RuntimeControlPlaneError::Internal(format!(
+                    "archive-recovered quiescent runtime {runtime_id} acquired a live attachment before cleanup"
+                )));
+            }
+            sessions.remove(session_id)
+        };
+        drop(removed);
+        Ok(())
+    }
+
+    /// Release a quiescent archive lease and discard only the reconstructable
+    /// in-memory registration inserted by archive preparation itself.
     pub async fn release_quiescent_session_archive_lease(
         &self,
         lease: super::MachineSessionArchiveLease,
@@ -1035,37 +1059,13 @@ impl MeerkatMachine {
             return Ok(());
         }
 
-        let state = driver.lock().await.runtime_state();
-        if !matches!(state, RuntimeState::Retired | RuntimeState::Destroyed) {
-            return Err(RuntimeControlPlaneError::InvalidState { state });
-        }
         if wake_tx.is_some() || publication_handle.is_some() {
             return Err(RuntimeControlPlaneError::Internal(format!(
                 "archive-recovered quiescent runtime {runtime_id} acquired a live attachment before cleanup"
             )));
         }
-
-        let removed = {
-            let mut sessions = self.sessions.write().await;
-            let Some(entry) = sessions.get(&session_id) else {
-                // Another terminal cleanup already removed the reconstructable
-                // entry. Durable truth remains untouched, so this is converged.
-                return Ok(());
-            };
-            if entry.runtime_id != runtime_id || !Arc::ptr_eq(&entry.driver, &driver) {
-                return Err(RuntimeControlPlaneError::Internal(format!(
-                    "archive-recovered runtime {runtime_id} was replaced before quiescent cleanup"
-                )));
-            }
-            if entry.wake_sender().is_some() || entry.publication_handle().is_some() {
-                return Err(RuntimeControlPlaneError::Internal(format!(
-                    "archive-recovered quiescent runtime {runtime_id} acquired a live attachment before cleanup"
-                )));
-            }
-            sessions.remove(&session_id)
-        };
-        drop(removed);
-        Ok(())
+        self.remove_archive_recovered_registration_exact(&session_id, &runtime_id, &driver)
+            .await
     }
 
     /// Realize Retire using a previously acquired archive lease without
@@ -1187,7 +1187,7 @@ impl MeerkatMachine {
             completions,
             wake_tx,
             publication_handle,
-            recovered_registration_for_archive: _,
+            recovered_registration_for_archive,
             _registration_transaction_guard,
             _live_lifecycle_lease,
             _mutation_guard,
@@ -1313,6 +1313,10 @@ impl MeerkatMachine {
         }
         if let Some(reason) = commit_error {
             return Err(RuntimeControlPlaneError::Internal(reason));
+        }
+        if recovered_registration_for_archive {
+            self.remove_archive_recovered_registration_exact(&session_id, &runtime_id, &driver)
+                .await?;
         }
         Ok(report)
     }

@@ -1409,13 +1409,7 @@ impl MeerkatMachine {
                 .state()
                 .current_run_id
                 .as_ref()
-                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl)
-                .ok_or_else(|| {
-                    RuntimeDriverError::Internal(
-                        "CancelAfterBoundary committed a live dispatch without an exact active run id"
-                            .to_string(),
-                    )
-                })?;
+                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl);
             let dispatch_generation = staged
                 .committed_snapshot
                 .state()
@@ -1504,7 +1498,7 @@ impl MeerkatMachine {
                 boundary_handle,
                 member_authority,
                 pending_dispatch,
-                &expected_run_id,
+                expected_run_id.as_ref(),
                 projected_effect,
                 dispatch_generation,
                 dispatch_lifecycle_phase,

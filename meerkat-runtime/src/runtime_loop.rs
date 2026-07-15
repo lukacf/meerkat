@@ -3124,6 +3124,15 @@ impl RuntimeLoopAuthorityBinding {
         }
     }
 
+    #[cfg(test)]
+    async fn run_before_queue_authority_test_hook(&self) {
+        if let Some(machine) = self.machine.upgrade() {
+            machine
+                .run_runtime_loop_before_queue_authority_test_hook(&self.session_id)
+                .await;
+        }
+    }
+
     async fn lock_current_driver_authority(
         &self,
         driver: &crate::meerkat_machine::SharedDriver,
@@ -4109,6 +4118,11 @@ async fn process_queue(
             Err(_) => return true,
         }
 
+        #[cfg(test)]
+        authority_binding
+            .run_before_queue_authority_test_hook()
+            .await;
+
         let queue_authority_guard = match authority_binding
             .lock_current_driver_authority(driver, "runtime loop queue processing")
             .await
@@ -4131,6 +4145,15 @@ async fn process_queue(
             }
             Ok(false) => {}
             Err(_) => return true,
+        }
+
+        // Effect publication also commits under this exact mutation gate. A
+        // cancel can become ready after the first drain but before queue
+        // authority is acquired. Keep this consumed wake inside process_queue:
+        // the next lap drains the effect and then resumes the same queued work.
+        if !effect_rx.is_empty() {
+            drop(queue_authority_guard);
+            continue;
         }
 
         enum RuntimeLoopDequeueOutcome {

@@ -11,6 +11,18 @@ enum UnregisterTeardownCaller {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum UnregisterTeardownAdmission {
+    AnyCurrentRegistration,
+    ExactTerminalUnattachedRegistration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnregisterTeardownWait {
+    CallerGrace,
+    UntilTerminal,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RuntimeStopCleanupCaller {
     ExplicitStop,
     ExplicitUnregister,
@@ -408,7 +420,7 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
             }
         };
         machine
-            .unregister_terminalized_runtime_loop_if_current_with_guard(
+            .complete_terminalized_runtime_loop_cleanup_if_current_with_guard(
                 &self.session_id,
                 self.attachment_id,
                 gate_guard,
@@ -3513,6 +3525,55 @@ impl MeerkatMachine {
         ))
     }
 
+    /// Return the exact machine registration currently occupying
+    /// `session_id`, independently of whether it has an executor attachment.
+    ///
+    /// The witness combines durable epoch identity with opaque in-process
+    /// entry identity and is suitable only for APIs that revalidate both
+    /// against this machine. It is not attachment authority and cannot be used
+    /// to publish or clean attachment-local state.
+    pub async fn current_session_registration_witness(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<RuntimeSessionRegistrationWitness> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id)?;
+        Some(RuntimeSessionRegistrationWitness::new(
+            Arc::downgrade(&self.shared),
+            session_id.clone(),
+            entry.epoch_id.clone(),
+            Arc::downgrade(&entry.mutation_gate),
+        ))
+    }
+
+    /// Unregister only when `witness` still names this machine's exact current
+    /// terminal registration and that registration has no executor, retained
+    /// attachment cleanup, or actor-materialization owner.
+    ///
+    /// `Stopped` and `Retired` are the two quiescent lifecycle outcomes used
+    /// by runtime disposal. Admission is checked atomically with installation
+    /// of the existing machine-owned unregister coordinator while holding the
+    /// stable registration transaction and the witness's exact mutation gate.
+    /// A stale witness is an idempotent `Ok(false)` and can never remove a
+    /// same-SessionId replacement.
+    pub async fn unregister_terminal_session_registration_if_current(
+        &self,
+        witness: &RuntimeSessionRegistrationWitness,
+    ) -> Result<bool, RuntimeDriverError> {
+        if !witness.belongs_to(self) {
+            return Ok(false);
+        }
+        self.join_or_start_unregister_teardown_with_admission(
+            witness.session_id(),
+            Some(witness.epoch_id()),
+            UnregisterTeardownCaller::Explicit,
+            UnregisterTeardownAdmission::ExactTerminalUnattachedRegistration,
+            Some(witness),
+            UnregisterTeardownWait::CallerGrace,
+        )
+        .await
+    }
+
     /// Unregister only when `witness` still names this machine's exact current
     /// attachment. A stale attachment is an idempotent `Ok(false)` and can
     /// never open the drain window for a same-SessionId replacement.
@@ -4043,10 +4104,13 @@ impl MeerkatMachine {
             .map_err(RuntimeDriverError::Internal)?;
         }
         drop(mutation_guard);
-        self.join_or_start_unregister_teardown(
+        self.join_or_start_unregister_teardown_with_admission(
             witness.session_id(),
             Some(witness.epoch_id()),
             UnregisterTeardownCaller::Explicit,
+            UnregisterTeardownAdmission::AnyCurrentRegistration,
+            None,
+            UnregisterTeardownWait::UntilTerminal,
         )
         .await?;
         Ok(true)
@@ -4125,12 +4189,10 @@ impl MeerkatMachine {
         }
         stop_result?;
         // A failed machine-managed cleanup leaves the exact executor in its
-        // teardown slot for an explicit retry. The loop watcher that observed
-        // the first terminal handoff has already returned by the time that
-        // retry succeeds, so it cannot see the callback's newly staged
-        // Draining transition. Reuse the same epoch-and-slot fenced recheck as
-        // the watcher; this converges the retry without touching a replacement
-        // attachment that may have reused the SessionId.
+        // teardown slot for an explicit retry. Re-check the exact epoch+slot
+        // afterward in case a concurrent explicit unregister opened Draining
+        // while cleanup was in flight; never touch a replacement attachment
+        // that may have reused the SessionId.
         if let Some((observed_epoch, observed_teardown_slot)) = observed_teardown {
             return match self
                 .join_unregister_if_observed_runtime_loop_became_draining(
@@ -4308,9 +4370,9 @@ impl MeerkatMachine {
     }
 
     /// A machine-managed executor can publish its loop handoff while generated
-    /// registration is still Queuing, then stage BeginUnregister from inside
-    /// the exact cleanup callback. Re-check after ordinary stop cleanup
-    /// completes so that transition cannot strand a Draining entry after the
+    /// registration is still Queuing, while a concurrent explicit unregister
+    /// opens Draining against that same exact slot. Re-check after ordinary
+    /// stop cleanup so the newer unregister owner cannot be stranded after the
     /// watcher made its first disposition sample.
     pub(super) async fn join_unregister_if_observed_runtime_loop_became_draining(
         &self,
@@ -4722,6 +4784,93 @@ impl MeerkatMachine {
         expected_epoch: Option<&meerkat_core::RuntimeEpochId>,
         caller: UnregisterTeardownCaller,
     ) -> Result<(), RuntimeDriverError> {
+        self.join_or_start_unregister_teardown_with_admission(
+            session_id,
+            expected_epoch,
+            caller,
+            UnregisterTeardownAdmission::AnyCurrentRegistration,
+            None,
+            UnregisterTeardownWait::CallerGrace,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    fn require_terminal_unattached_registration(
+        session_id: &SessionId,
+        entry: &RuntimeSessionEntry,
+    ) -> Result<(), RuntimeDriverError> {
+        // Generated lifecycle authority is the terminality owner. The coarse
+        // control projection can legitimately remain Idle while recovery's
+        // terminal-precedence arbitration publishes generated Stopped (the
+        // exact ops-only cold-resume shape this cleanup serves).
+        let runtime_state = {
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::dsl_authority::runtime_phase_from_authority(&authority)
+        };
+        if !matches!(runtime_state, RuntimeState::Stopped | RuntimeState::Retired) {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "exact registration cleanup for session {session_id} requires Stopped or Retired runtime authority, found {runtime_state:?}"
+                ),
+            });
+        }
+        let materialization_vacant = {
+            let claim = entry
+                .materialization_claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            claim.current.is_none()
+                && claim.phase == crate::RuntimeActorMaterializationClaimPhase::Vacant
+                && !claim.rollback_registration_available
+        };
+        // An ordinary Stop retains its completed coordinator as an idempotent
+        // result cache. That is terminal shell truth, not an active cleanup
+        // owner; canonical unregister will join the completed result. A
+        // pending or failed stop still rejects exact registration disposal.
+        let runtime_stop_cleanup_quiescent = match &entry.runtime_stop_cleanup_coordinator {
+            None => true,
+            Some(coordinator) => {
+                coordinator.teardown_slot.is_none()
+                    && coordinator
+                        .result_rx
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(Result::is_ok)
+            }
+        };
+        let attachment_local_authority_absent =
+            matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
+                && entry.runtime_loop_teardown.is_none()
+                && runtime_stop_cleanup_quiescent
+                && entry.post_stop_cleanup_handle.is_none()
+                && entry.post_stop_cleanup_attachment_id.is_none()
+                && entry.provisional_interrupt_handle.is_none()
+                && entry.provisional_materialization_claim_id.is_none()
+                && entry.publication_handle.is_none()
+                && materialization_vacant;
+        if !attachment_local_authority_absent {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "exact terminal registration cleanup for session {session_id} requires an unattached registration with no retained attachment or materialization authority"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    async fn join_or_start_unregister_teardown_with_admission(
+        &self,
+        session_id: &SessionId,
+        expected_epoch: Option<&meerkat_core::RuntimeEpochId>,
+        caller: UnregisterTeardownCaller,
+        admission: UnregisterTeardownAdmission,
+        expected_registration: Option<&RuntimeSessionRegistrationWitness>,
+        wait: UnregisterTeardownWait,
+    ) -> Result<bool, RuntimeDriverError> {
         enum CoordinatorDecision {
             Join(crate::tokio::sync::watch::Receiver<Option<UnregisterTeardownResult>>),
             Start {
@@ -4733,6 +4882,7 @@ impl MeerkatMachine {
             },
             AlreadyAbsent,
             EpochChanged,
+            RegistrationChanged,
             Completed(Result<(), RuntimeDriverError>),
             Retry,
         }
@@ -4744,19 +4894,31 @@ impl MeerkatMachine {
         // entry yet. The worker releases this first section after validating
         // its pending-finalization branch, then reacquires a second section
         // after surface cleanup through exact durable removal.
-        let (decision, mut registration_transaction_guard) = loop {
+        let (decision, mut registration_transaction_guard, exact_mutation_guard) = loop {
             let installed_coordinator = {
                 let sessions = self.sessions.read().await;
-                sessions.get(session_id).is_some_and(|entry| {
-                    !expected_epoch.is_some_and(|expected| expected != &entry.epoch_id)
-                        && entry.unregister_coordinator.is_some()
-                })
+                admission == UnregisterTeardownAdmission::AnyCurrentRegistration
+                    && sessions.get(session_id).is_some_and(|entry| {
+                        !expected_epoch.is_some_and(|expected| expected != &entry.epoch_id)
+                            && entry.unregister_coordinator.is_some()
+                    })
             };
             let registration_transaction_guard = if installed_coordinator {
                 None
             } else {
                 Some(self.lock_session_registration_transaction(session_id).await)
             };
+            let exact_mutation_guard =
+                if admission == UnregisterTeardownAdmission::ExactTerminalUnattachedRegistration {
+                    match expected_registration
+                        .and_then(RuntimeSessionRegistrationWitness::registration_gate)
+                    {
+                        Some(gate) => Some(gate.lock_owned().await),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
             let decision = {
                 let mut sessions = self.sessions.write().await;
                 match sessions.get_mut(session_id) {
@@ -4765,6 +4927,14 @@ impl MeerkatMachine {
                         if expected_epoch.is_some_and(|expected| expected != &entry.epoch_id) =>
                     {
                         CoordinatorDecision::EpochChanged
+                    }
+                    Some(entry)
+                        if admission
+                            == UnregisterTeardownAdmission::ExactTerminalUnattachedRegistration
+                            && !expected_registration
+                                .is_some_and(|witness| witness.matches_entry(entry)) =>
+                    {
+                        CoordinatorDecision::RegistrationChanged
                     }
                     Some(entry) => {
                         if let Some(active) = active_runtime_stop_coordinator()
@@ -4808,6 +4978,11 @@ impl MeerkatMachine {
                             // changed entry.
                             CoordinatorDecision::Retry
                         } else {
+                            if admission
+                                == UnregisterTeardownAdmission::ExactTerminalUnattachedRegistration
+                            {
+                                Self::require_terminal_unattached_registration(session_id, entry)?;
+                            }
                             if caller == UnregisterTeardownCaller::Explicit
                                 && let Some(teardown_slot) = entry.runtime_loop_teardown.as_ref()
                             {
@@ -4847,21 +5022,33 @@ impl MeerkatMachine {
                 // the gate before observing absence or installing a successor.
                 continue;
             }
-            break (decision, registration_transaction_guard);
+            break (
+                decision,
+                registration_transaction_guard,
+                exact_mutation_guard,
+            );
         };
+
+        // Exact admission retains T + the witness's exact M through pointer
+        // comparison, quiescence validation, and coordinator installation.
+        // The owned unregister worker reacquires M through its own exact entry
+        // incarnation, so release this admission fence before joining/spawning.
+        drop(exact_mutation_guard);
 
         let mut result_rx = match decision {
             CoordinatorDecision::Join(result_rx) => {
                 drop(registration_transaction_guard.take());
                 result_rx
             }
-            CoordinatorDecision::AlreadyAbsent | CoordinatorDecision::EpochChanged => {
+            CoordinatorDecision::AlreadyAbsent
+            | CoordinatorDecision::EpochChanged
+            | CoordinatorDecision::RegistrationChanged => {
                 drop(registration_transaction_guard.take());
-                return Ok(());
+                return Ok(false);
             }
             CoordinatorDecision::Completed(result) => {
                 drop(registration_transaction_guard.take());
-                return result;
+                return result.map(|()| true);
             }
             CoordinatorDecision::Retry => {
                 drop(registration_transaction_guard.take());
@@ -4942,12 +5129,21 @@ impl MeerkatMachine {
                 })?;
             }
         };
-        match crate::tokio::time::timeout(UNREGISTER_CALLER_WAIT_GRACE, wait_for_owned_result).await
-        {
-            Ok(result) => result,
-            Err(_elapsed) => Err(RuntimeDriverError::UnregisterInProgress {
-                runtime_id: LogicalRuntimeId::for_session(session_id),
-            }),
+        match wait {
+            UnregisterTeardownWait::UntilTerminal => wait_for_owned_result.await.map(|()| true),
+            UnregisterTeardownWait::CallerGrace => {
+                match crate::tokio::time::timeout(
+                    UNREGISTER_CALLER_WAIT_GRACE,
+                    wait_for_owned_result,
+                )
+                .await
+                {
+                    Ok(result) => result.map(|()| true),
+                    Err(_elapsed) => Err(RuntimeDriverError::UnregisterInProgress {
+                        runtime_id: LogicalRuntimeId::for_session(session_id),
+                    }),
+                }
+            }
         }
     }
 
@@ -5029,10 +5225,14 @@ impl MeerkatMachine {
                 .state()
                 .registration_phase;
             (
-                entry.post_stop_cleanup_attachment_id == Some(attachment_id)
-                    && (entry.owns_runtime_loop_attachment(attachment_id)
-                        || registration_phase
-                            == crate::meerkat_machine::dsl::RegistrationPhase::Draining),
+                // The machine-minted cleanup id is the exact attachment
+                // incarnation fence. A task-dead attachment can already have
+                // released its channel slot while its retained cleanup/teardown
+                // handoff is still current; requiring physical slot ownership
+                // here would reject the only owner capable of cleaning it.
+                // Replacement publishes a fresh id under this same mutation
+                // gate, so stale A can never acquire authority over B.
+                entry.post_stop_cleanup_attachment_id == Some(attachment_id),
                 registration_phase == crate::meerkat_machine::dsl::RegistrationPhase::Draining,
             )
         };
@@ -5066,9 +5266,11 @@ impl MeerkatMachine {
         // persistent surface takes its stable turn-finalization boundary before
         // its recovery gate here. Runtime/direct commits use the same outer
         // boundary and then machine mutation -> recovery, so cleanup never
-        // introduces the old recovery -> machine inversion. The generated
-        // Draining phase fences replacement while this attachment-local mutex
-        // makes concurrent loop/external/retry attempts exactly-once.
+        // introduces the old recovery -> machine inversion. Generated Draining
+        // fences explicit unregister; for ordinary stop, the committed Stopped
+        // lifecycle plus the exact cleanup id fence readmission/replacement.
+        // This attachment-local mutex makes concurrent loop/external/retry
+        // attempts exactly-once.
         let cleanup_gate = {
             let sessions = self.sessions.read().await;
             let Some(entry) = sessions.get(session_id) else {
@@ -5126,19 +5328,21 @@ impl MeerkatMachine {
         Ok(())
     }
 
-    /// Close exactly the attachment whose runtime-owned decorator is executing
-    /// post-stop cleanup.
+    /// Complete service/surface cleanup for exactly the attachment whose
+    /// runtime-owned decorator has committed an ordinary stop.
     ///
     /// The opaque attachment ID is minted and retained by this machine. The
     /// mutation gate, exact-ID check, and committed `Stopped` witness together
-    /// prevent a stale loop from unregistering a same-SessionId replacement.
-    async fn unregister_terminalized_runtime_loop_if_current_with_guard(
+    /// prevent stale A from cleaning replacement B. Ordinary stop preserves the
+    /// generated registered `Stopped` state; only an explicit unregister (or an
+    /// abnormal loop-exit disposition) opens the machine-owned `Draining` saga.
+    async fn complete_terminalized_runtime_loop_cleanup_if_current_with_guard(
         &self,
         session_id: &SessionId,
         attachment_id: RuntimeLoopAttachmentId,
         gate_guard: crate::tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<(), RuntimeDriverError> {
-        let (driver, registration_phase, owns_attachment) = {
+        let (driver, registration_phase) = {
             let sessions = self.sessions.read().await;
             let Some(entry) = sessions.get(session_id) else {
                 return Ok(());
@@ -5154,11 +5358,7 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .state()
                 .registration_phase;
-            (
-                Arc::clone(&entry.driver),
-                registration_phase,
-                entry.owns_runtime_loop_attachment(attachment_id),
-            )
+            (Arc::clone(&entry.driver), registration_phase)
         };
         #[cfg(test)]
         {
@@ -5171,7 +5371,7 @@ impl MeerkatMachine {
                 drop(fail_session);
                 drop(gate_guard);
                 return Err(RuntimeDriverError::Internal(
-                    "injected post-stop unregister failure after fence consumption".to_string(),
+                    "injected post-stop cleanup failure after fence consumption".to_string(),
                 ));
             }
         }
@@ -5181,7 +5381,7 @@ impl MeerkatMachine {
         ) {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: format!(
-                    "post-stop unregister for session {session_id} requires committed Stopped or Retired runtime authority"
+                    "post-stop cleanup for session {session_id} requires committed Stopped or Retired runtime authority"
                 ),
             });
         }
@@ -5193,24 +5393,18 @@ impl MeerkatMachine {
             drop(gate_guard);
             return Ok(());
         }
-        if registration_phase != crate::meerkat_machine::dsl::RegistrationPhase::Queuing
-            || !owns_attachment
-        {
+        if registration_phase != crate::meerkat_machine::dsl::RegistrationPhase::Queuing {
+            drop(gate_guard);
             return Ok(());
         }
-        let staged = self
-            .stage_begin_unregister_session_authority(session_id)
-            .await
-            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-        self.commit_session_dsl_transition(session_id, staged, "BeginUnregisterSession")
-            .await
-            .map_err(RuntimeDriverError::Internal)?;
-        // This callback runs inside the exact runtime loop. Starting the owned
-        // teardown coordinator here would make it await its own JoinHandle.
-        // Leave generated Draining durable; the loop-exit watcher joins or
-        // starts the coordinator after the executor has been handed off.
+        // Service cleanup may acquire the stable turn-finalization boundary B.
+        // Release M first, then let the compare-and-remove cleanup revalidate
+        // this exact id before and after its callback. The committed Stopped
+        // phase prevents readmission until the ordinary stop coordinator has
+        // completed, and any later replacement necessarily publishes a new id.
         drop(gate_guard);
-        Ok(())
+        self.complete_post_stop_cleanup_if_needed(session_id, attachment_id, false)
+            .await
     }
 
     #[cfg(test)]

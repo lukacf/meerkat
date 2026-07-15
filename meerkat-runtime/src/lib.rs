@@ -546,9 +546,9 @@ pub use meerkat_machine::{
     PreparedSessionMaterialization, PromotedArchivedResumeCommitLease, RuntimeBindingsError,
     RuntimeCleanupTaskSpawner, RuntimeExecutorAttachmentRetirementCompletion,
     RuntimeExecutorAttachmentWitness, RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan,
-    StandaloneSessionRuntimeAuthorities, classify_runtime_lifecycle_state,
-    classify_runtime_loop_queue_admission, standalone_session_runtime_authorities,
-    standalone_tool_visibility_owner,
+    RuntimeSessionRegistrationWitness, StandaloneSessionRuntimeAuthorities,
+    classify_runtime_lifecycle_state, classify_runtime_loop_queue_admission,
+    standalone_session_runtime_authorities, standalone_tool_visibility_owner,
 };
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ImageOperationRoutingRequest, ImageOperationRoutingResult,

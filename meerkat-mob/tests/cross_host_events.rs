@@ -296,15 +296,19 @@ async fn empty_same_session_resume_page_advances_real_pump_to_resolved_floor() {
     )
     .await
     .expect("seed resumable member-host session through machine commit authority");
-    let latest = member_service
-        .event_log_latest_seq(&session_id)
-        .await
-        .expect("read seeded session durable watermark")
-        .expect("the seeded turn populated the durable log");
     runtime_adapter
         .unregister_session(&session_id)
         .await
         .expect("quiesce generic seed attachment before host-owned explicit resume");
+    member_service
+        .event_log_await_projection_drain(&session_id)
+        .await
+        .expect("drain the quiesced seed incarnation's durable event projection");
+    let latest = member_service
+        .event_log_latest_seq(&session_id)
+        .await
+        .expect("read quiesced seed session durable watermark")
+        .expect("the seeded turn populated the durable log");
 
     let report = controlling.bind_fixture(&fixture).await;
 

@@ -140,9 +140,10 @@ type EventProjectionFaultRegistry = Arc<Mutex<HashMap<SessionId, Arc<SessionErro
 /// gate, no later append for the same session can cross it.
 type EventProjectionGateRegistry = Arc<Mutex<HashMap<SessionId, Arc<Mutex<()>>>>>;
 
-/// Lifecycle of one live session's durable event projection task.
+/// Lifecycle of one phase in a live session's durable event projection.
 ///
-/// Generation cutover waits for `Drained` after closing the live producer,
+/// Generation cutover waits for every registered phase (create-time and
+/// steady-state) to reach `Drained` after closing the live producer,
 /// establishing a real happens-before edge before reading the replacement
 /// generation's durable sequence floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +154,34 @@ enum EventProjectionDrainState {
 }
 
 type EventProjectionDrainRegistry =
-    Arc<Mutex<HashMap<SessionId, watch::Receiver<EventProjectionDrainState>>>>;
+    Arc<Mutex<HashMap<SessionId, Vec<watch::Receiver<EventProjectionDrainState>>>>>;
+
+async fn register_event_projection_drain(
+    registry: &EventProjectionDrainRegistry,
+    session_id: &SessionId,
+    drain: watch::Receiver<EventProjectionDrainState>,
+) {
+    let mut registry = registry.lock().await;
+    let drains = registry.entry(session_id.clone()).or_default();
+    drains.retain(|existing| !matches!(&*existing.borrow(), EventProjectionDrainState::Drained));
+    if !drains.iter().any(|existing| existing.same_channel(&drain)) {
+        drains.push(drain);
+    }
+}
+
+struct CreateTimeEventProjection {
+    session_tx: watch::Sender<Option<SessionId>>,
+    drain_rx: watch::Receiver<EventProjectionDrainState>,
+}
+
+struct CreateTimeEventProjectionLifecycle {
+    projection_faults: EventProjectionFaultRegistry,
+    projection_gates: EventProjectionGateRegistry,
+    drain_registration: Option<(
+        EventProjectionDrainRegistry,
+        watch::Receiver<EventProjectionDrainState>,
+    )>,
+}
 
 /// Typed error surfaced by replay APIs after the session's event-projection
 /// task halted on a durable event-log append failure. The canonical log has a
@@ -463,12 +491,21 @@ async fn project_create_time_events(
     caller_event_tx: Option<
         mpsc::Sender<meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>>,
     >,
-    projection_faults: EventProjectionFaultRegistry,
-    projection_gates: EventProjectionGateRegistry,
+    lifecycle: CreateTimeEventProjectionLifecycle,
 ) {
+    let CreateTimeEventProjectionLifecycle {
+        projection_faults,
+        projection_gates,
+        drain_registration,
+    } = lifecycle;
     let mut session_id = session_rx.borrow().clone();
     let mut projection_admitted = false;
     let mut pending = Vec::new();
+    if let (Some(session_id), Some((registry, drain))) =
+        (session_id.as_ref(), drain_registration.as_ref())
+    {
+        register_event_projection_drain(registry, session_id, drain.clone()).await;
+    }
 
     loop {
         tokio::select! {
@@ -478,6 +515,11 @@ async fn project_create_time_events(
                 };
                 if session_id.is_none() {
                     session_id = session_id_from_event(&envelope.payload);
+                }
+                if let (Some(session_id), Some((registry, drain))) =
+                    (session_id.as_ref(), drain_registration.as_ref())
+                {
+                    register_event_projection_drain(registry, session_id, drain.clone()).await;
                 }
                 if let Some(session_id) = session_id.as_ref()
                     && !projection_admitted
@@ -551,6 +593,9 @@ async fn project_create_time_events(
                 }
                 session_id = session_rx.borrow().clone();
                 if let Some(session_id) = session_id.as_ref() {
+                    if let Some((registry, drain)) = drain_registration.as_ref() {
+                        register_event_projection_drain(registry, session_id, drain.clone()).await;
+                    }
                     if !projection_admitted {
                         if let Some(cause) = event_projection_admission_fault(
                             &projection_faults,
@@ -5944,8 +5989,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(receipts)
     }
 
-    /// Wait until the current live session's durable event projection has
-    /// consumed every envelope and exited after producer closure.
+    /// Wait until every durable event projector for the current live session
+    /// has consumed its envelopes and exited after producer closure.
     ///
     /// The caller must quiesce the runtime and discard the live service
     /// session first. Success is the generation-cutover barrier: no event from
@@ -5954,31 +5999,69 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<bool, SessionError> {
-        let Some(mut drain) = self.event_projection_drains.lock().await.get(id).cloned() else {
-            // No task in this process (for example, a post-restart stored-only
-            // session) means there is no in-process projection to race.
-            return Ok(false);
-        };
+        let mut observed_projection = false;
 
         loop {
-            let state = drain.borrow().clone();
-            match state {
-                EventProjectionDrainState::Drained => return Ok(true),
-                EventProjectionDrainState::Faulted(detail) => {
-                    if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
-                        return Err(event_projection_halted_error(id, Arc::clone(cause)));
-                    }
-                    return Err(SessionError::Agent(AgentError::InternalError(format!(
-                        "event projection faulted while draining session {id}: {detail}"
-                    ))));
+            let drains = self
+                .event_projection_drains
+                .lock()
+                .await
+                .get(id)
+                .cloned()
+                .unwrap_or_default();
+            if drains.is_empty() {
+                if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
+                    return Err(event_projection_halted_error(id, Arc::clone(cause)));
                 }
-                EventProjectionDrainState::Running => {}
+                // No task in this process (for example, a post-restart
+                // stored-only session) means there is no in-process
+                // projection to race.
+                return Ok(observed_projection);
             }
-            drain.changed().await.map_err(|_| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "event projection drain witness closed before reaching a terminal state for session {id}"
-                )))
-            })?;
+            observed_projection = true;
+
+            for mut drain in drains {
+                loop {
+                    let state = drain.borrow().clone();
+                    match state {
+                        EventProjectionDrainState::Drained => break,
+                        EventProjectionDrainState::Faulted(detail) => {
+                            if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
+                                return Err(event_projection_halted_error(id, Arc::clone(cause)));
+                            }
+                            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                                "event projection faulted while draining session {id}: {detail}"
+                            ))));
+                        }
+                        EventProjectionDrainState::Running => {}
+                    }
+                    drain.changed().await.map_err(|_| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "event projection drain witness closed before reaching a terminal state for session {id}"
+                        )))
+                    })?;
+                }
+            }
+
+            if let Some(cause) = self.event_projection_faults.lock().await.get(id) {
+                return Err(event_projection_halted_error(id, Arc::clone(cause)));
+            }
+
+            // Prune only terminal-success witnesses. A projector registered
+            // while the prior set was draining remains in the aggregate and
+            // is observed on the next loop.
+            let mut registry = self.event_projection_drains.lock().await;
+            let remove_entry = if let Some(current) = registry.get_mut(id) {
+                current.retain(|drain| {
+                    !matches!(&*drain.borrow(), EventProjectionDrainState::Drained)
+                });
+                current.is_empty()
+            } else {
+                false
+            };
+            if remove_entry {
+                registry.remove(id);
+            }
         }
     }
 
@@ -6086,10 +6169,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.blob_store.clone()
     }
 
-    fn install_create_time_event_projection(
+    async fn install_create_time_event_projection(
         &self,
         req: &mut CreateSessionRequest,
-    ) -> Option<watch::Sender<Option<SessionId>>> {
+        known_session_id: Option<&SessionId>,
+    ) -> Option<CreateTimeEventProjection> {
         let (Some(event_store), Some(projector)) =
             (self.event_store.clone(), self.projector.clone())
         else {
@@ -6099,19 +6183,43 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let caller_event_tx = req.event_tx.take();
         let (projection_tx, projection_rx) = mpsc::channel(128);
         let (session_tx, session_rx) = watch::channel(None);
+        let (drain_tx, drain_rx) = watch::channel(EventProjectionDrainState::Running);
         req.event_tx = Some(projection_tx);
 
-        tokio::spawn(project_create_time_events(
-            event_store,
-            projector,
-            projection_rx,
-            session_rx,
-            caller_event_tx,
-            Arc::clone(&self.event_projection_faults),
-            Arc::clone(&self.event_projection_gates),
-        ));
+        if let Some(session_id) = known_session_id {
+            register_event_projection_drain(
+                &self.event_projection_drains,
+                session_id,
+                drain_rx.clone(),
+            )
+            .await;
+        }
 
-        Some(session_tx)
+        let drain_registration =
+            Some((Arc::clone(&self.event_projection_drains), drain_rx.clone()));
+        let projection_faults = Arc::clone(&self.event_projection_faults);
+        let projection_gates = Arc::clone(&self.event_projection_gates);
+        tokio::spawn(async move {
+            project_create_time_events(
+                event_store,
+                projector,
+                projection_rx,
+                session_rx,
+                caller_event_tx,
+                CreateTimeEventProjectionLifecycle {
+                    projection_faults,
+                    projection_gates,
+                    drain_registration,
+                },
+            )
+            .await;
+            drain_tx.send_replace(EventProjectionDrainState::Drained);
+        });
+
+        Some(CreateTimeEventProjection {
+            session_tx,
+            drain_rx,
+        })
     }
 
     async fn ensure_event_projection_admitted(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -6145,10 +6253,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         let (drain_tx, drain_rx) = watch::channel(EventProjectionDrainState::Running);
-        self.event_projection_drains
-            .lock()
-            .await
-            .insert(session_id.clone(), drain_rx);
+        register_event_projection_drain(&self.event_projection_drains, &session_id, drain_rx).await;
 
         let projection_faults = Arc::clone(&self.event_projection_faults);
         let projection_gates = Arc::clone(&self.event_projection_gates);
@@ -8038,7 +8143,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             self.ensure_event_projection_admitted(resume_session_id)
                 .await?;
         }
-        let create_projection_session_tx = self.install_create_time_event_projection(&mut req);
+        let create_time_projection = self
+            .install_create_time_event_projection(&mut req, materialization_session_id)
+            .await;
         let callback_session_id = resume_session_id.clone();
         let (result, _actor_witness) = match self
             .inner
@@ -8077,8 +8184,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
                 .insert(result.session_id.clone(), gate);
         }
-        if let Some(session_tx) = create_projection_session_tx {
-            let _ = session_tx.send(Some(result.session_id.clone()));
+        if let Some(create_time_projection) = create_time_projection {
+            // A generated-id create could not register before actor creation.
+            // Publish the same drain witness before returning the SessionId;
+            // the helper deduplicates runtime-bound creates registered above.
+            register_event_projection_drain(
+                &self.event_projection_drains,
+                &result.session_id,
+                create_time_projection.drain_rx.clone(),
+            )
+            .await;
+            let _ = create_time_projection
+                .session_tx
+                .send(Some(result.session_id.clone()));
         }
         if let Err(error) = self.spawn_event_projection_task(&result.session_id).await {
             let _ = self.discard_live_session(&result.session_id).await;
@@ -10006,8 +10124,11 @@ mod tests {
             projection_rx,
             session_rx,
             None,
-            Arc::clone(&service.event_projection_faults),
-            Arc::clone(&service.event_projection_gates),
+            CreateTimeEventProjectionLifecycle {
+                projection_faults: Arc::clone(&service.event_projection_faults),
+                projection_gates: Arc::clone(&service.event_projection_gates),
+                drain_registration: None,
+            },
         ));
         projection_tx
             .send(meerkat_core::event::EventEnvelope::new_session(
@@ -10057,6 +10178,102 @@ mod tests {
                 .event_log_read_from(&other_session, 0)
                 .await?
                 .is_some_and(|events| events.is_empty())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generation_cutover_drain_waits_for_create_time_projection()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let event_store = Arc::new(PausingAppendEventStore::default());
+        let event_store_trait: Arc<dyn EventStore> = event_store.clone();
+        let dir = tempfile::tempdir()?;
+        let service = Arc::new(
+            PersistentSessionService::new(
+                DummyBuilder,
+                4,
+                store,
+                Arc::new(InMemoryRuntimeStore::new()),
+                memory_blob_store(),
+            )
+            .with_event_projection(
+                event_store_trait,
+                Arc::new(SessionProjector::new(dir.path().join(".rkat"))),
+            ),
+        );
+        let session_id = SessionId::new();
+        let mut request = CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "projection-drain-probe".to_string(),
+            prompt: ContentInput::Text("seed".to_string()),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: None,
+            labels: None,
+        };
+        let CreateTimeEventProjection {
+            session_tx,
+            drain_rx: _drain_rx,
+        } = service
+            .install_create_time_event_projection(&mut request, Some(&session_id))
+            .await
+            .expect("persistent event projection is configured");
+        let projection_tx = request
+            .event_tx
+            .take()
+            .expect("create-time projection sender installed");
+        assert!(
+            session_tx.send(Some(session_id.clone())).is_ok(),
+            "create-time projector still owns the session-id receiver"
+        );
+        projection_tx
+            .send(meerkat_core::event::EventEnvelope::new_session(
+                session_id.clone(),
+                1,
+                None,
+                AgentEvent::RunStarted {
+                    session_id: session_id.clone(),
+                    input: meerkat_core::types::RunInput::Content {
+                        content: ContentInput::Text("seed".to_string()),
+                    },
+                },
+            ))
+            .await?;
+        drop(projection_tx);
+        drop(session_tx);
+
+        event_store.wait_for_append().await;
+        let drain_service = Arc::clone(&service);
+        let drain_session_id = session_id.clone();
+        let mut drain_task = tokio::spawn(async move {
+            drain_service
+                .event_log_await_projection_drain(&drain_session_id)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut drain_task)
+                .await
+                .is_err(),
+            "generation cutover must remain blocked while a create-time append is in flight"
+        );
+
+        event_store.release_append();
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(5), &mut drain_task)
+            .await
+            .expect("projection drain completed after the append gate opened")
+            .expect("projection drain task joined")?;
+        assert!(drained, "the create-time projector was part of the drain");
+        let final_seq = event_store.last_seq(&session_id).await?;
+        assert_eq!(final_seq, 1);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            event_store.last_seq(&session_id).await?,
+            final_seq,
+            "no old-incarnation event may append after the drain returns"
         );
         Ok(())
     }
@@ -10187,8 +10404,11 @@ mod tests {
             projection_rx,
             session_rx,
             None,
-            create_faults,
-            create_gates,
+            CreateTimeEventProjectionLifecycle {
+                projection_faults: create_faults,
+                projection_gates: create_gates,
+                drain_registration: None,
+            },
         ));
         projection_tx
             .send(meerkat_core::event::EventEnvelope::new_session(
@@ -10714,6 +10934,83 @@ mod tests {
             Ok(all_events
                 .get(session_id)
                 .map_or(0, |events| events.len() as u64))
+        }
+    }
+
+    struct PausingAppendEventStore {
+        inner: RecordingEventStore,
+        append_entered: AtomicBool,
+        release_append: tokio::sync::Semaphore,
+    }
+
+    impl Default for PausingAppendEventStore {
+        fn default() -> Self {
+            Self {
+                inner: RecordingEventStore::default(),
+                append_entered: AtomicBool::new(false),
+                release_append: tokio::sync::Semaphore::new(0),
+            }
+        }
+    }
+
+    impl PausingAppendEventStore {
+        async fn wait_for_append(&self) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !self.append_entered.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("create-time event append did not reach the test gate");
+        }
+
+        fn release_append(&self) {
+            self.release_append.add_permits(1);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventStore for PausingAppendEventStore {
+        async fn append_envelopes(
+            &self,
+            session_id: &SessionId,
+            envelopes: &[meerkat_core::event::EventEnvelope<AgentEvent>],
+        ) -> Result<u64, EventStoreError> {
+            self.append_entered.store(true, Ordering::Release);
+            self.release_append
+                .acquire()
+                .await
+                .map_err(|_| EventStoreError::Store("append gate closed".to_string()))?
+                .forget();
+            self.inner.append_envelopes(session_id, envelopes).await
+        }
+
+        async fn record_projection_halt(
+            &self,
+            session_id: &SessionId,
+            reason: &str,
+        ) -> Result<(), EventStoreError> {
+            self.inner.record_projection_halt(session_id, reason).await
+        }
+
+        async fn projection_halt(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<crate::event_store::EventProjectionHaltMarker>, EventStoreError>
+        {
+            self.inner.projection_halt(session_id).await
+        }
+
+        async fn read_from(
+            &self,
+            session_id: &SessionId,
+            from_seq: u64,
+        ) -> Result<Vec<StoredEvent>, EventStoreError> {
+            self.inner.read_from(session_id, from_seq).await
+        }
+
+        async fn last_seq(&self, session_id: &SessionId) -> Result<u64, EventStoreError> {
+            self.inner.last_seq(session_id).await
         }
     }
 

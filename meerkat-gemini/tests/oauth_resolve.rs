@@ -7,8 +7,9 @@ use std::sync::Arc;
 use chrono::{Duration as ChronoDuration, Utc};
 
 use meerkat_auth_core::auth_store::{
-    CredentialMutationError, CredentialMutationFn, EphemeralTokenStore, PersistedAuthMode,
-    PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, EphemeralTokenStore,
+    InMemoryCoordinator, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence,
+    RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_core::handles::{AuthLeaseHandle, GeneratedAuthLeaseHandle, LeaseKey};
 use meerkat_core::{
@@ -17,6 +18,10 @@ use meerkat_core::{
 };
 use meerkat_gemini::runtime::oauth;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
+
+fn in_memory_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {
+    ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new()))
+}
 
 fn code_assist_realm() -> RealmConnectionSet {
     code_assist_realm_with_source(CredentialSourceSpec::PlatformDefault)
@@ -199,7 +204,7 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
         &self,
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         mutation_fn().await
     }
 
@@ -222,7 +227,7 @@ impl RefreshCoordinator for FailingRefreshCoordinator {
         &self,
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         mutation_fn().await
     }
 
@@ -266,7 +271,7 @@ async fn google_oauth_fresh_token_resolves_with_auth_lifecycle() {
         .unwrap();
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(auth_lease_handle);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
@@ -292,7 +297,8 @@ async fn google_oauth_rejects_token_without_auth_lifecycle() {
         .await
         .unwrap();
 
-    let env = ResolverEnvironment::testing().with_token_store(store);
+    let env =
+        ResolverEnvironment::testing().with_provider_auth_persistence(in_memory_persistence(store));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let err = registry
@@ -325,7 +331,7 @@ async fn google_oauth_reauth_required_is_typed() {
         .unwrap();
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(reauth_required_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
@@ -367,7 +373,7 @@ async fn google_oauth_rejects_wrong_persisted_mode() {
         .unwrap();
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
@@ -401,7 +407,7 @@ async fn google_oauth_rejects_wrong_source_even_with_matching_mode() {
         .unwrap();
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
@@ -443,8 +449,10 @@ async fn google_oauth_expired_authmachine_lease_refreshes_through_provider_runti
     refreshed.refresh_token = Some("rotated-google-refresh".into());
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(StaticRefreshCoordinator { tokens: refreshed }),
+        ))
         .with_auth_lease_handle(auth_lease_handle);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
@@ -481,10 +489,12 @@ async fn google_oauth_refresh_failure_is_typed() {
     store.save(&key, &marked).await.unwrap();
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
-        .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
-            error: RefreshError::Refresh("google refresh transport failed".into()),
-        }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store,
+            Arc::new(FailingRefreshCoordinator {
+                error: RefreshError::Refresh("google refresh transport failed".into()),
+            }),
+        ))
         .with_auth_lease_handle(auth_lease_handle);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
@@ -515,8 +525,10 @@ async fn google_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() {
     refreshed.refresh_token = Some("forced-google-refresh".into());
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(StaticRefreshCoordinator { tokens: refreshed }),
+        ))
         .with_auth_lease_handle(auth_lease_handle)
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty()
@@ -553,7 +565,7 @@ async fn google_oauth_force_refresh_with_refresh_disallowed_errors_refresh_requi
     store.save(&key, &marked).await.unwrap();
 
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(auth_lease_handle)
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty()

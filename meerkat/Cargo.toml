@@ -21,7 +21,6 @@ meerkat-core = { workspace = true, features = [
 meerkat-llm-core = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-client = { workspace = true, default-features = false }
-meerkat-providers = { workspace = true, default-features = false }
 meerkat-anthropic = { workspace = true, optional = true, default-features = false }
 meerkat-openai = { workspace = true, optional = true, default-features = false }
 meerkat-gemini = { workspace = true, optional = true, default-features = false }
@@ -50,9 +49,11 @@ chrono = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+meerkat-providers = { workspace = true, default-features = false, features = ["refresh-file-lock"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
+meerkat-providers = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }

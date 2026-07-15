@@ -57,7 +57,6 @@ pub use generated::approval_lifecycle;
 pub use generated::session_document;
 pub mod pending_continuation;
 pub mod placement;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod prompt;
 pub mod provider;
 pub mod provider_matrix;
@@ -258,7 +257,6 @@ pub use ops_lifecycle::{
     OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
     WaitAllSatisfied,
 };
-#[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
 pub use realtime_transcript::{
@@ -384,7 +382,8 @@ pub use auth::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use auth::{
     AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
-    rehydrate_marked_tokens_for_status,
+    clear_tokens_and_publish_lifecycle_released_coordinated,
+    rehydrate_durable_predecessor_for_mutation, rehydrate_marked_tokens_for_status,
 };
 pub use connection::{
     AuthBindingRef, AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig,

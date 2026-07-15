@@ -43,7 +43,7 @@ pub type NowFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// returns programmed values; production wiring uses
 /// [`ResolverEnvironment::with_process_env`].
 ///
-/// `token_store` + `refresh_coord` are consulted by OAuth-backed auth
+/// `provider_auth_persistence` is consulted by OAuth-backed auth
 /// methods (Claude.ai, ChatGPT, Google OAuth-personal) to find a
 /// persisted access/refresh token. Absent store → OAuth paths return
 /// `AuthError::InteractiveLoginRequired`.
@@ -55,9 +55,7 @@ pub struct ResolverEnvironment {
     pub force_refresh: bool,
     pub auth_lease_handle: Option<GeneratedAuthLeaseHandle>,
     #[cfg(not(target_arch = "wasm32"))]
-    pub token_store: Option<Arc<dyn meerkat_core::auth::TokenStore>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub refresh_coord: Option<Arc<dyn meerkat_core::auth::RefreshCoordinator>>,
+    provider_auth_persistence: Option<meerkat_core::auth::ProviderAuthPersistence>,
 }
 
 impl ResolverEnvironment {
@@ -71,9 +69,7 @@ impl ResolverEnvironment {
             force_refresh: false,
             auth_lease_handle: None,
             #[cfg(not(target_arch = "wasm32"))]
-            token_store: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            refresh_coord: None,
+            provider_auth_persistence: None,
         }
     }
 
@@ -87,28 +83,30 @@ impl ResolverEnvironment {
             force_refresh: false,
             auth_lease_handle: None,
             #[cfg(not(target_arch = "wasm32"))]
-            token_store: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            refresh_coord: None,
+            provider_auth_persistence: None,
         }
     }
 
-    /// Attach a token store for OAuth-backed auth methods.
+    /// Attach the complete provider-auth persistence capability.
+    ///
+    /// Provider resolution cannot receive a token vault without the matching
+    /// refresh-mutation authority. Ephemeral/test callers must explicitly pair
+    /// their store with an in-memory coordinator before using this seam.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_token_store(mut self, store: Arc<dyn meerkat_core::auth::TokenStore>) -> Self {
-        self.token_store = Some(store);
+    pub fn with_provider_auth_persistence(
+        mut self,
+        persistence: meerkat_core::auth::ProviderAuthPersistence,
+    ) -> Self {
+        self.provider_auth_persistence = Some(persistence);
         self
     }
 
-    /// Attach a refresh coordinator. If `with_token_store` is set but no
-    /// coordinator is, callers fall back to `InMemoryCoordinator::new()`.
+    /// Read the complete persistence capability attached to this environment.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_refresh_coordinator(
-        mut self,
-        coord: Arc<dyn meerkat_core::auth::RefreshCoordinator>,
-    ) -> Self {
-        self.refresh_coord = Some(coord);
-        self
+    pub fn provider_auth_persistence(
+        &self,
+    ) -> Option<&meerkat_core::auth::ProviderAuthPersistence> {
+        self.provider_auth_persistence.as_ref()
     }
 
     /// Register an external auth resolver under a handle name.

@@ -16,30 +16,6 @@ use std::sync::Arc;
 use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
 #[cfg(feature = "openai")]
 use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleClientOptions, OpenAiCompatibleMode};
-use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
-use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
-
-/// Default system prompt for wasm32 builds.
-/// Mirrors `meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT` which is gated
-/// behind `#[cfg(not(target_arch = "wasm32"))]` due to filesystem deps.
-#[cfg(target_arch = "wasm32")]
-const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your task is to accomplish the user's goal by systematically using the tools available to you.
-
-# Core Behavior
-- Break complex tasks into steps and execute them one by one.
-- Use tools to gather information, take actions, and verify results.
-- When multiple tool calls are independent, execute them in parallel.
-- If a tool call fails, analyze the error and try alternative approaches.
-- Continue working until the task is complete or you determine it cannot be completed.
-
-# Decision Making
-- Act on the information you have. Make reasonable assumptions when necessary.
-- If critical information is missing and no tool can provide it, state what you need and why.
-- Prioritize correctness over speed. Verify your work when possible.
-
-# Output
-- When the task is complete, provide a clear summary of what was accomplished.
-- If the task cannot be completed, explain what blocked progress and what was attempted.";
 use meerkat_core::RuntimeBuildMode;
 #[cfg(any(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use meerkat_core::SessionId;
@@ -47,6 +23,8 @@ use meerkat_core::SessionId;
 use meerkat_core::SessionMeta;
 #[cfg(test)]
 use meerkat_core::SessionToolVisibilityState;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentLlmClientDecorator, AgentSessionStore,
     AgentToolDispatcher, AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides,
@@ -1834,7 +1812,7 @@ fn is_openai_realtime_capable(model: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Typed attachment state of the factory's persistent TokenStore.
+/// Typed attachment state of the factory's provider-auth persistence.
 ///
 /// One owner for the three construction outcomes: no store (detached),
 /// an open store (attached), or a default store whose open FAILED. The
@@ -1844,15 +1822,35 @@ fn is_openai_realtime_capable(model: &str) -> bool {
 /// to "no store" and laundered into `AuthError::InteractiveLoginRequired`.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
-enum TokenStoreAttachment {
-    /// No token store attached (minimal builds, callers that deliberately
+enum ProviderAuthPersistenceAttachment {
+    /// No persistence attached (minimal builds, callers that deliberately
     /// resolve without persisted credentials).
     Detached,
-    /// A token store is attached; OAuth-backed bindings read persisted
-    /// tokens from it during `resolve_binding`.
-    Attached(Arc<dyn meerkat_providers::auth_store::TokenStore>),
+    /// The complete token-vault + refresh-authority capability is attached.
+    Attached(meerkat_providers::auth_store::ProviderAuthPersistence),
     /// The default token store failed to open at factory construction.
     OpenFailed(Arc<meerkat_providers::auth_store::TokenStoreError>),
+}
+
+/// Open the native provider-auth persistence pair from one backend decision.
+///
+/// A persisted token store and its refresh coordinator are one capability:
+/// deriving both from the same
+/// [`meerkat_providers::auth_store::TokenStoreBackend`] keeps every factory that
+/// can consume rotating OAuth tokens on the canonical cross-process lock
+/// authority. A backend-open fault remains attached and is surfaced at
+/// resolution time; it is never converted into process-local refresh.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_provider_auth_persistence(
+    backend: Result<
+        meerkat_providers::auth_store::TokenStoreBackend,
+        meerkat_providers::auth_store::TokenStoreError,
+    >,
+) -> ProviderAuthPersistenceAttachment {
+    match backend.and_then(|backend| backend.open_with_refresh_authority()) {
+        Ok(persistence) => ProviderAuthPersistenceAttachment::Attached(persistence),
+        Err(error) => ProviderAuthPersistenceAttachment::OpenFailed(Arc::new(error)),
+    }
 }
 
 /// Factory for creating agents with standard configuration.
@@ -1896,7 +1894,7 @@ pub struct AgentFactory {
     /// the same keypair and TCP listener across session restarts).
     #[cfg(feature = "comms")]
     pub comms_runtime: Option<Arc<meerkat_comms::CommsRuntime>>,
-    /// Persistent TokenStore attachment used by the provider-runtime registry
+    /// Provider-auth persistence attachment used by the provider-runtime registry
     /// when resolving OAuth-backed bindings (Claude.ai / ChatGPT / Google
     /// Code Assist). When detached, OAuth bindings surface
     /// `AuthError::InteractiveLoginRequired` — CLI / REST / RPC surfaces
@@ -1906,13 +1904,7 @@ pub struct AgentFactory {
     /// propagates at the first provider resolution instead of being
     /// laundered into a missing-credential outcome.
     #[cfg(not(target_arch = "wasm32"))]
-    token_store: TokenStoreAttachment,
-    /// Refresh coordinator for OAuth token lifecycle. When `None`, a
-    /// fresh `InMemoryCoordinator` is created per build; callers that
-    /// need cross-process refresh dedup (e.g. concurrent CLI runs) set
-    /// a `FileLockCoordinator` here.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub refresh_coord: Option<Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>>,
+    provider_auth_persistence: ProviderAuthPersistenceAttachment,
     /// External auth resolvers keyed by their typed
     /// [`meerkat_core::ExternalResolverId`] identity. Merged into
     /// `ResolverEnvironment.external_resolvers` during `build_agent`.
@@ -2307,11 +2299,8 @@ impl AgentFactory {
         )
         .map_err(FactoryError::ConnectionTarget)?;
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-        if let Some(store) = self.resolution_token_store()? {
-            env = env.with_token_store(store);
-        }
-        if let Some(coord) = self.refresh_coord.clone() {
-            env = env.with_refresh_coordinator(coord);
+        if let Some(persistence) = self.resolution_provider_auth_persistence()? {
+            env = env.with_provider_auth_persistence(persistence);
         }
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
@@ -2388,14 +2377,11 @@ impl AgentFactory {
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
         // A faulted credential backend is a hard typed fault, never folded
         // into the inherit-mode `Ok(None)` degradation.
-        if let Some(store) = self
-            .resolution_token_store()
+        if let Some(persistence) = self
+            .resolution_provider_auth_persistence()
             .map_err(BuildAgentError::LlmClient)?
         {
-            env = env.with_token_store(store);
-        }
-        if let Some(coord) = self.refresh_coord.clone() {
-            env = env.with_refresh_coordinator(coord);
+            env = env.with_provider_auth_persistence(persistence);
         }
         if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
             && !auth_binding.is_env_default()
@@ -2486,9 +2472,7 @@ impl AgentFactory {
             #[cfg(feature = "comms")]
             comms_runtime: None,
             #[cfg(not(target_arch = "wasm32"))]
-            token_store: TokenStoreAttachment::Detached,
-            #[cfg(not(target_arch = "wasm32"))]
-            refresh_coord: None,
+            provider_auth_persistence: ProviderAuthPersistenceAttachment::Detached,
             external_auth_resolvers: BTreeMap::new(),
             image_generation_machine: None,
         }
@@ -2497,6 +2481,9 @@ impl AgentFactory {
     /// Create a new factory with the required session store path.
     ///
     /// The default file-backed TokenStore is attached when it opens cleanly.
+    /// Its backend-derived file-lock refresh coordinator is attached in the
+    /// same construction step, so separate native processes never fall back to
+    /// independent in-memory refresh ownership for those persisted tokens.
     /// OAuth-backed bindings read persisted tokens written by `rkat auth login`
     /// and REST/RPC OAuth completion handlers out of the box. If the default
     /// TokenStore fails to open (for example a corrupt credential backend),
@@ -2505,12 +2492,9 @@ impl AgentFactory {
     /// `InteractiveLoginRequired`.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let token_store = match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-            .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)
-        {
-            Ok(store) => TokenStoreAttachment::Attached(store),
-            Err(err) => TokenStoreAttachment::OpenFailed(Arc::new(err)),
-        };
+        let provider_auth_persistence = open_provider_auth_persistence(
+            meerkat_providers::auth_store::TokenStoreBackend::default_auto(),
+        );
         Self {
             store_path: store_path.into(),
             runtime_root: None,
@@ -2532,24 +2516,20 @@ impl AgentFactory {
             #[cfg(feature = "comms")]
             comms_runtime: None,
             #[cfg(not(target_arch = "wasm32"))]
-            token_store,
-            #[cfg(not(target_arch = "wasm32"))]
-            refresh_coord: None,
+            provider_auth_persistence,
             external_auth_resolvers: BTreeMap::new(),
             provider_registry: Arc::new(build_provider_registry()),
             image_generation_machine: None,
         }
     }
 
-    /// Attach a persistent `TokenStore` for OAuth-backed bindings. When
-    /// set, the provider-runtime registry reads persisted tokens from
-    /// this store during `resolve_binding`.
+    /// Attach one backend-opened provider-auth persistence capability.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_token_store(
+    pub fn with_provider_auth_persistence(
         mut self,
-        store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
+        persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
     ) -> Self {
-        self.token_store = TokenStoreAttachment::Attached(store);
+        self.provider_auth_persistence = ProviderAuthPersistenceAttachment::Attached(persistence);
         self
     }
 
@@ -2558,9 +2538,25 @@ impl AgentFactory {
     /// pinning the no-store path) use this instead of poking the typed
     /// attachment state directly.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn without_token_store(mut self) -> Self {
-        self.token_store = TokenStoreAttachment::Detached;
+    pub fn without_provider_auth_persistence(mut self) -> Self {
+        self.provider_auth_persistence = ProviderAuthPersistenceAttachment::Detached;
         self
+    }
+
+    /// Resolve the complete persistence capability attached to this factory.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn resolution_provider_auth_persistence(
+        &self,
+    ) -> Result<Option<meerkat_providers::auth_store::ProviderAuthPersistence>, FactoryError> {
+        match &self.provider_auth_persistence {
+            ProviderAuthPersistenceAttachment::Detached => Ok(None),
+            ProviderAuthPersistenceAttachment::Attached(persistence) => {
+                Ok(Some(persistence.clone()))
+            }
+            ProviderAuthPersistenceAttachment::OpenFailed(err) => {
+                Err(FactoryError::TokenStore(Arc::clone(err)))
+            }
+        }
     }
 
     /// Resolve the token store to attach to a `ResolverEnvironment`.
@@ -2575,11 +2571,9 @@ impl AgentFactory {
     pub fn resolution_token_store(
         &self,
     ) -> Result<Option<Arc<dyn meerkat_providers::auth_store::TokenStore>>, FactoryError> {
-        match &self.token_store {
-            TokenStoreAttachment::Detached => Ok(None),
-            TokenStoreAttachment::Attached(store) => Ok(Some(Arc::clone(store))),
-            TokenStoreAttachment::OpenFailed(err) => Err(FactoryError::TokenStore(Arc::clone(err))),
-        }
+        Ok(self
+            .resolution_provider_auth_persistence()?
+            .map(|persistence| persistence.token_store()))
     }
 
     pub fn provider_runtime_registry(
@@ -2610,26 +2604,16 @@ impl AgentFactory {
         self
     }
 
-    /// Attach a refresh coordinator (cross-process dedup via file lock).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_refresh_coordinator(
-        mut self,
-        coord: Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>,
-    ) -> Self {
-        self.refresh_coord = Some(coord);
-        self
-    }
-
     /// Convenience: attach the default file-backed `TokenStore` at the user's
     /// default credential directory ($XDG_CONFIG_HOME/meerkat/credentials).
     /// Surfaces (CLI / REST / RPC) call this during factory construction.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_default_token_store(
-        mut self,
+        self,
     ) -> Result<Self, meerkat_providers::auth_store::TokenStoreError> {
-        let store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()?.open()?;
-        self.token_store = TokenStoreAttachment::Attached(store);
-        Ok(self)
+        let persistence = meerkat_providers::auth_store::TokenStoreBackend::default_auto()?
+            .open_with_refresh_authority()?;
+        Ok(self.with_provider_auth_persistence(persistence))
     }
 
     /// Set a custom skill source (bypasses config-driven repository resolution).
@@ -3245,11 +3229,8 @@ impl AgentFactory {
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(store) = self.resolution_token_store()? {
-                env = env.with_token_store(store);
-            }
-            if let Some(coord) = self.refresh_coord.clone() {
-                env = env.with_refresh_coordinator(coord);
+            if let Some(persistence) = self.resolution_provider_auth_persistence()? {
+                env = env.with_provider_auth_persistence(persistence);
             }
         }
         for (handle, resolver) in &self.external_auth_resolvers {
@@ -3620,11 +3601,8 @@ impl AgentFactory {
             let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
             #[cfg(not(target_arch = "wasm32"))]
             {
-                if let Some(store) = self.resolution_token_store()? {
-                    env = env.with_token_store(store);
-                }
-                if let Some(coord) = self.refresh_coord.clone() {
-                    env = env.with_refresh_coordinator(coord);
+                if let Some(persistence) = self.resolution_provider_auth_persistence()? {
+                    env = env.with_provider_auth_persistence(persistence);
                 }
             }
             if let Some(handle) = auth_lease_handle.clone() {
@@ -4240,14 +4218,11 @@ impl AgentFactory {
                         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            if let Some(store) = self
-                                .resolution_token_store()
+                            if let Some(persistence) = self
+                                .resolution_provider_auth_persistence()
                                 .map_err(BuildAgentError::LlmClient)?
                             {
-                                env = env.with_token_store(store);
-                            }
-                            if let Some(coord) = self.refresh_coord.clone() {
-                                env = env.with_refresh_coordinator(coord);
+                                env = env.with_provider_auth_persistence(persistence);
                             }
                         }
                         for (handle, resolver) in &self.external_auth_resolvers {
@@ -4444,14 +4419,11 @@ impl AgentFactory {
                 let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    if let Some(store) = self
-                        .resolution_token_store()
+                    if let Some(persistence) = self
+                        .resolution_provider_auth_persistence()
                         .map_err(BuildAgentError::LlmClient)?
                     {
-                        env = env.with_token_store(store);
-                    }
-                    if let Some(coord) = self.refresh_coord.clone() {
-                        env = env.with_refresh_coordinator(coord);
+                        env = env.with_provider_auth_persistence(persistence);
                     }
                 }
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
@@ -5597,51 +5569,14 @@ impl AgentFactory {
         };
         #[cfg(target_arch = "wasm32")]
         let system_prompt = if should_apply_system_prompt {
-            Some({
-                // Precedence: Set wins outright; Disable suppresses every
-                // source (empty base); Inherit falls through to config inline
-                // then the default. No AGENTS.md or system_prompt_file on
-                // wasm32 (no filesystem).
-                let base = match &prompt_override {
-                    crate::SystemPromptOverride::Set(prompt) => prompt.clone(),
-                    crate::SystemPromptOverride::Disable => String::new(),
-                    crate::SystemPromptOverride::Inherit => config
-                        .agent
-                        .system_prompt
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_WASM_SYSTEM_PROMPT.to_string()),
-                };
-                let mut prompt = base;
-                // Config-level tool instructions are skipped for an explicit
-                // per-request Set (mirroring the non-wasm path); Disable and
-                // Inherit still append them.
-                let skip_config_tools =
-                    matches!(prompt_override, crate::SystemPromptOverride::Set(_));
-                for section in &extra_sections {
-                    if !section.is_empty() {
-                        if !prompt.is_empty() {
-                            prompt.push_str("\n\n");
-                        }
-                        prompt.push_str(section);
-                    }
-                }
-                if !skip_config_tools
-                    && let Some(ref config_tools) = config.agent.tool_instructions
-                    && !config_tools.is_empty()
-                {
-                    if !prompt.is_empty() {
-                        prompt.push_str("\n\n");
-                    }
-                    prompt.push_str(config_tools);
-                }
-                if !tool_usage_instructions.is_empty() {
-                    if !prompt.is_empty() {
-                        prompt.push_str("\n\n");
-                    }
-                    prompt.push_str(&tool_usage_instructions);
-                }
-                prompt
-            })
+            Some(
+                crate::prompt_policy::assemble_system_prompt_without_filesystem(
+                    config,
+                    &prompt_override,
+                    &extra_sections,
+                    &tool_usage_instructions,
+                ),
+            )
         } else {
             None
         };
@@ -6254,11 +6189,11 @@ mod tests {
     fn faulted_default_token_store_propagates_typed_open_fault() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions"));
-        factory.token_store = TokenStoreAttachment::OpenFailed(Arc::new(
-            meerkat_providers::auth_store::TokenStoreError::Unavailable(
+        factory.provider_auth_persistence = ProviderAuthPersistenceAttachment::OpenFailed(
+            Arc::new(meerkat_providers::auth_store::TokenStoreError::Unavailable(
                 "injected open failure".into(),
-            ),
-        ));
+            )),
+        );
 
         let Err(err) = factory.resolution_token_store() else {
             panic!("a faulted credential backend must fail resolution typed");
@@ -6271,6 +6206,127 @@ mod tests {
         // Deliberately-detached factories resolve cleanly to "no store".
         let detached = AgentFactory::minimal();
         assert!(detached.resolution_token_store().unwrap().is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn provider_auth_persistence_replacement_and_detach_are_atomic() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        assert!(
+            factory
+                .resolution_provider_auth_persistence()
+                .unwrap()
+                .is_some()
+        );
+
+        let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        let factory = factory.with_provider_auth_persistence(persistence);
+        assert!(
+            factory
+                .resolution_provider_auth_persistence()
+                .unwrap()
+                .is_some(),
+            "replacement attaches one complete persistence capability"
+        );
+
+        let factory = factory.without_provider_auth_persistence();
+        assert!(
+            factory
+                .resolution_provider_auth_persistence()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Every shipping native surface (CLI, REST, RPC, and MCP server) enters
+    /// provider auth through `AgentFactory::new`. Two independently-created
+    /// factories over one persisted backend must therefore serialize the
+    /// credential mutation itself, not merely deduplicate within one process
+    /// or one factory instance.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persisted_factories_share_file_lock_refresh_authority() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let default_factory = AgentFactory::new(temp.path().join("sessions"));
+        assert!(
+            default_factory
+                .resolution_provider_auth_persistence()
+                .unwrap()
+                .is_some(),
+            "the production factory constructor must attach refresh authority"
+        );
+        let backend = meerkat_providers::auth_store::TokenStoreBackend::File {
+            root: temp.path().join("credentials"),
+        };
+
+        let mut factories = Vec::new();
+        for _ in 0..2 {
+            let persistence = backend.clone().open_with_refresh_authority().unwrap();
+            let factory = AgentFactory::minimal().with_provider_auth_persistence(persistence);
+            assert!(factory.resolution_token_store().unwrap().is_some());
+            assert!(
+                factory
+                    .resolution_provider_auth_persistence()
+                    .unwrap()
+                    .is_some(),
+                "persisted provider auth must install cross-process refresh authority"
+            );
+            factories.push(factory);
+        }
+
+        let key = meerkat_providers::auth_store::TokenKey::parse("shared", "oauth").unwrap();
+        let start = Arc::new(tokio::sync::Barrier::new(factories.len()));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for factory in factories {
+            let coordinator = factory
+                .resolution_provider_auth_persistence()
+                .unwrap()
+                .unwrap()
+                .refresh_coordinator();
+            let key = key.clone();
+            let start = Arc::clone(&start);
+            let in_flight = Arc::clone(&in_flight);
+            let max_in_flight = Arc::clone(&max_in_flight);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                coordinator
+                    .with_exclusive_mutation(
+                        key,
+                        Box::new(move || {
+                            Box::pin(async move {
+                                let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                                max_in_flight.fetch_max(current, Ordering::SeqCst);
+                                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                                in_flight.fetch_sub(1, Ordering::SeqCst);
+                                Ok::<_, meerkat_providers::auth_store::CredentialMutationError>(
+                                    meerkat_providers::auth_store::CredentialMutationOutcome::Persisted(
+                                        meerkat_providers::auth_store::PersistedTokens::api_key("ok"),
+                                    ),
+                                )
+                            })
+                        }),
+                    )
+                    .await
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            1,
+            "independent persisted factories must share one file-lock refresh authority"
+        );
     }
 
     fn session_with_raw_metadata(
@@ -7471,7 +7527,7 @@ mod tests {
             calls: backup_calls,
         });
         let mut factory = AgentFactory::new(store_path)
-            .without_token_store()
+            .without_provider_auth_persistence()
             .builtins(false);
         factory.provider_registry = Arc::new(
             meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
@@ -7674,7 +7730,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions"))
-            .without_token_store()
+            .without_provider_auth_persistence()
             .builtins(false);
         factory.provider_registry = Arc::new(
             meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
@@ -8315,7 +8371,7 @@ mod tests {
         ) -> (PerOpenCredentialRealtimeSessionFactory, OpenRecorder) {
             let temp = std::env::temp_dir().join("meerkat-realtime-per-open-tests");
             let opens: OpenRecorder = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let mut factory = AgentFactory::new(temp).without_token_store();
+            let mut factory = AgentFactory::new(temp).without_provider_auth_persistence();
             factory.provider_registry = Arc::new(ProviderRuntimeRegistry::empty().with_runtime(
                 Arc::new(RealtimeRecordingOpenAiRuntime {
                     opens: Arc::clone(&opens),
@@ -8461,7 +8517,7 @@ mod tests {
         #[tokio::test]
         async fn open_fails_closed_when_current_config_cannot_be_read() {
             let temp = std::env::temp_dir().join("meerkat-realtime-per-open-tests");
-            let factory = AgentFactory::new(temp).without_token_store();
+            let factory = AgentFactory::new(temp).without_provider_auth_persistence();
             let wrapper = PerOpenCredentialRealtimeSessionFactory::new(
                 factory,
                 Arc::new(FailingRealtimeConfigSource),
@@ -8519,7 +8575,7 @@ mod tests {
             config.realm.insert("dev".to_string(), section);
 
             let temp = std::env::temp_dir().join("meerkat-realtime-per-open-tests");
-            let factory = AgentFactory::new(temp).without_token_store();
+            let factory = AgentFactory::new(temp).without_provider_auth_persistence();
             let wrapper = PerOpenCredentialRealtimeSessionFactory::new(
                 factory,
                 Arc::new(FixedRealtimeConfigSource(config)),
@@ -9692,7 +9748,7 @@ mod tests {
                 auth_binding: binding.auth_binding_ref().clone(),
                 backend_base_url: binding.backend_profile().base_url.clone(),
                 auth_source: binding.auth_profile().source.clone(),
-                token_store_present: env.token_store.is_some(),
+                token_store_present: env.provider_auth_persistence().is_some(),
                 auth_lease_handle_present: env.auth_lease_handle.is_some(),
             });
             let auth_lease: Arc<dyn meerkat_core::AuthLease> = if self.authless {

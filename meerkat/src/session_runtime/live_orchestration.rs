@@ -332,10 +332,12 @@ impl LiveConfigPropagationReport {
     }
 }
 
-/// Build the projection-root system message for a realtime session. The
-/// content is the union of the resolved `system_prompt` (or the first
-/// existing `System`/`SystemNotice` lead) and any session-build
-/// `additional_instructions`.
+/// Build the projection-root system message for a realtime session from the
+/// exact assembled bytes persisted by the canonical factory prompt owner.
+///
+/// Runtime-appended system context is deliberately excluded here. It travels
+/// through the typed `RealtimeSessionOpenConfig.runtime_system_context` field,
+/// so open/refresh cannot duplicate that context into the assembled base.
 pub fn realtime_projection_root_system_message(
     session: &Session,
 ) -> Result<Option<Message>, SessionError> {
@@ -345,40 +347,14 @@ pub fn realtime_projection_root_system_message(
             session.id()
         )))
     })?;
-    let mut content = match build_state.system_prompt.clone() {
-        meerkat_core::SystemPromptOverride::Set(prompt) => prompt,
-        // An explicit Disable means no system prompt; do not fall back to the
-        // transcript lead.
-        meerkat_core::SystemPromptOverride::Disable => String::new(),
-        meerkat_core::SystemPromptOverride::Inherit => session
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                Message::System(system) => Some(system.content.clone()),
-                Message::SystemNotice(notice) => Some(notice.model_projection_text()),
-                _ => None,
-            })
-            .unwrap_or_default(),
-    };
+    let content = build_state.assembled_system_prompt.ok_or_else(|| {
+        SessionError::Agent(AgentError::InternalError(format!(
+            "session {} is missing its canonical assembled system prompt",
+            session.id()
+        )))
+    })?;
 
-    if let Some(additional_instructions) = &build_state.additional_instructions
-        && !additional_instructions.is_empty()
-    {
-        if !content.trim().is_empty() {
-            content.push_str("\n\n");
-        }
-        content.push_str("[Session Build Instructions]");
-        for instruction in additional_instructions {
-            let instruction = instruction.trim();
-            if instruction.is_empty() {
-                continue;
-            }
-            content.push_str("\n- ");
-            content.push_str(instruction);
-        }
-    }
-
-    if content.trim().is_empty() {
+    if content.is_empty() {
         Ok(None)
     } else {
         // Projection must not mint ephemeral metadata: seed-window sizing is
@@ -491,10 +467,22 @@ fn realtime_projection_messages_full_with_root_resolution(
     let mut projected = session.messages().to_vec();
     let resolved_root = realtime_projection_root_system_message(session)?;
     let has_resolved_root = resolved_root.is_some();
-    if let Some(root_system) = resolved_root {
-        match projected.first() {
+    match resolved_root {
+        Some(root_system) => match projected.first() {
             Some(Message::System(_) | Message::SystemNotice(_)) => projected[0] = root_system,
             _ => projected.insert(0, root_system),
+        },
+        None => {
+            // An exactly empty canonical base owns the absence of a seed
+            // system message. Any transcript lead is stale base text or the
+            // runtime-context compatibility projection; runtime context is
+            // already carried by the typed open-config field.
+            if matches!(
+                projected.first(),
+                Some(Message::System(_) | Message::SystemNotice(_))
+            ) {
+                projected.remove(0);
+            }
         }
     }
     Ok((projected, has_resolved_root))
@@ -1825,16 +1813,20 @@ mod prompt_truth_tests {
     use super::{
         LiveSeedProjectionError, LiveSeedProjectionStatus, LiveSeedWindow,
         build_live_projection_snapshot_for_runtime, realtime_projection_messages,
-        realtime_projection_messages_with_window, serialized_message_chars,
+        realtime_projection_messages_with_window, realtime_projection_root_system_message,
+        realtime_projection_runtime_system_context, serialized_message_chars,
     };
     use meerkat_core::types::{
         AssistantBlock, BlockAssistantMessage, Message, SessionId, StopReason, SystemMessage,
         UserMessage,
     };
     use meerkat_core::{
-        Provider, Session, SessionBuildState, SessionLlmIdentity, SystemPromptOverride,
+        PendingSystemContextAppend, Provider, Session, SessionBuildState, SessionLlmIdentity,
+        SystemPromptOverride, lifecycle::run_primitive::CoreRenderable,
+        session::SystemContextSource,
     };
     use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
+    use std::time::SystemTime;
 
     fn test_identity() -> SessionLlmIdentity {
         SessionLlmIdentity {
@@ -1859,7 +1851,10 @@ mod prompt_truth_tests {
     fn window_test_session() -> Session {
         let mut session = Session::new();
         session
-            .set_build_state(SessionBuildState::default())
+            .set_build_state(SessionBuildState {
+                assembled_system_prompt: Some("resolved root".to_string()),
+                ..Default::default()
+            })
             .expect("test build state must serialize");
         session.push_batch(vec![
             Message::System(SystemMessage::new("resolved root")),
@@ -1879,6 +1874,7 @@ mod prompt_truth_tests {
         session
             .set_build_state(SessionBuildState {
                 system_prompt: SystemPromptOverride::Disable,
+                assembled_system_prompt: Some(String::new()),
                 ..Default::default()
             })
             .expect("test build state must serialize");
@@ -1888,6 +1884,140 @@ mod prompt_truth_tests {
             assistant_text("current assistant turn"),
         ]);
         session
+    }
+
+    fn projected_system_content(session: &Session) -> String {
+        match realtime_projection_root_system_message(session)
+            .expect("canonical live root projection")
+            .expect("non-empty canonical live root")
+        {
+            Message::System(system) => system.content,
+            other => panic!("expected a system root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_root_uses_exact_assembled_bytes_not_raw_set_intent() {
+        let canonical =
+            "request base\n\nskill inventory\n\nadditional instruction\n\ndispatcher tools";
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState {
+                system_prompt: SystemPromptOverride::Set("request base".to_string()),
+                additional_instructions: Some(vec!["additional instruction".to_string()]),
+                assembled_system_prompt: Some(canonical.to_string()),
+                ..Default::default()
+            })
+            .expect("test build state must serialize");
+        session.push(Message::System(SystemMessage::new(format!(
+            "{canonical}\n\n[Runtime System Context]\npeer context"
+        ))));
+
+        assert_eq!(projected_system_content(&session), canonical);
+    }
+
+    #[test]
+    fn live_root_neither_duplicates_additional_instructions_nor_absorbs_runtime_context() {
+        let canonical = "configured base\n\nadditional instruction\n\nconfig tools";
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState {
+                system_prompt: SystemPromptOverride::Inherit,
+                additional_instructions: Some(vec!["additional instruction".to_string()]),
+                assembled_system_prompt: Some(canonical.to_string()),
+                ..Default::default()
+            })
+            .expect("test build state must serialize");
+        session.set_system_prompt(canonical.to_string());
+        let runtime_context = PendingSystemContextAppend {
+            content: CoreRenderable::text("peer context".to_string()),
+            source: Some("comms:peer".to_string()),
+            idempotency_key: Some("peer-context-1".to_string()),
+            source_kind: SystemContextSource::Normal,
+            peer_response_terminal: None,
+            accepted_at: SystemTime::UNIX_EPOCH,
+        };
+        session.append_system_context_blocks(std::slice::from_ref(&runtime_context));
+
+        let projected = projected_system_content(&session);
+        assert_eq!(projected, canonical);
+        assert_eq!(projected.matches("additional instruction").count(), 1);
+        assert!(!projected.contains("Runtime System Context"));
+        assert!(!projected.contains("peer context"));
+        assert_eq!(
+            realtime_projection_runtime_system_context(&session)
+                .expect("typed runtime context projection"),
+            vec![runtime_context]
+        );
+    }
+
+    #[test]
+    fn live_root_disable_keeps_canonical_appended_sections() {
+        let canonical =
+            "skill inventory\n\nadditional instruction\n\nconfig tools\n\ndispatcher tools";
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState {
+                system_prompt: SystemPromptOverride::Disable,
+                additional_instructions: Some(vec!["additional instruction".to_string()]),
+                assembled_system_prompt: Some(canonical.to_string()),
+                ..Default::default()
+            })
+            .expect("test build state must serialize");
+        session.push(Message::System(SystemMessage::new(canonical)));
+
+        assert_eq!(projected_system_content(&session), canonical);
+    }
+
+    #[test]
+    fn live_root_disable_projects_runtime_context_only_through_typed_field() {
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState {
+                system_prompt: SystemPromptOverride::Disable,
+                assembled_system_prompt: Some(String::new()),
+                ..Default::default()
+            })
+            .expect("test build state must serialize");
+        session.set_system_prompt(String::new());
+        let runtime_context = PendingSystemContextAppend {
+            content: CoreRenderable::text("peer context".to_string()),
+            source: Some("comms:peer".to_string()),
+            idempotency_key: Some("peer-context-disabled-root".to_string()),
+            source_kind: SystemContextSource::Normal,
+            peer_response_terminal: None,
+            accepted_at: SystemTime::UNIX_EPOCH,
+        };
+        session.append_system_context_blocks(std::slice::from_ref(&runtime_context));
+
+        let projected = realtime_projection_messages(&session).expect("full projection");
+        assert!(
+            projected
+                .iter()
+                .all(|message| !matches!(message, Message::System(_) | Message::SystemNotice(_)))
+        );
+        assert_eq!(
+            realtime_projection_runtime_system_context(&session)
+                .expect("typed runtime context projection"),
+            vec![runtime_context]
+        );
+    }
+
+    #[test]
+    fn live_root_fails_closed_without_canonical_assembled_bytes() {
+        let mut session = Session::new();
+        session
+            .set_build_state(SessionBuildState::default())
+            .expect("test build state must serialize");
+        session.push(Message::System(SystemMessage::new("transcript fallback")));
+
+        let error = realtime_projection_root_system_message(&session)
+            .expect_err("live prompt projection must not reconstruct missing canonical bytes");
+        assert!(
+            error
+                .to_string()
+                .contains("missing its canonical assembled system prompt")
+        );
     }
 
     #[test]
@@ -1924,25 +2054,29 @@ mod prompt_truth_tests {
     fn live_seed_window_does_not_charge_a_disabled_stale_system_lead_as_root() {
         let session = disabled_root_test_session();
         let full = realtime_projection_messages(&session).expect("full projection");
-        let tail_budget = full[1..]
+        assert!(
+            full.iter()
+                .all(|message| !matches!(message, Message::System(_) | Message::SystemNotice(_)))
+        );
+        let full_budget = full
             .iter()
             .map(serialized_message_chars)
             .collect::<Result<Vec<_>, _>>()
-            .expect("serialized tail costs")
+            .expect("serialized projection costs")
             .into_iter()
             .sum::<usize>();
 
         let projection = realtime_projection_messages_with_window(
             &session,
-            LiveSeedWindow::new(tail_budget).expect("positive window"),
+            LiveSeedWindow::new(full_budget - 1).expect("positive window"),
         )
         .expect("a disabled stale lead must not cause root-too-small rejection");
 
-        assert_eq!(projection.messages, full[1..]);
+        assert!(projection.messages.is_empty());
         assert_eq!(
             projection.status,
             LiveSeedProjectionStatus::Windowed {
-                dropped_messages: 1,
+                dropped_messages: 2,
                 included_compaction_summary: false,
             }
         );

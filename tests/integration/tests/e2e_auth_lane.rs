@@ -37,7 +37,8 @@ use meerkat_core::{
 };
 use meerkat_providers::ResolverEnvironment;
 use meerkat_providers::auth_store::{
-    FileTokenStore, InMemoryCoordinator, PersistedTokens, RefreshCoordinator, TokenKey, TokenStore,
+    FileTokenStore, InMemoryCoordinator, PersistedTokens, ProviderAuthPersistence,
+    RefreshCoordinator, TokenKey, TokenStore,
 };
 // RPC-host: this integration test directly drives the JSON-RPC dispatch surface
 // (MethodRouter::method_call with RpcRequest/RpcResponse) to exercise RPC method
@@ -544,7 +545,10 @@ impl AuthHarness {
         let config = openai_oauth_config();
         let token_store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(token_root));
         let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
-            .with_token_store(token_store.clone());
+            .with_provider_auth_persistence(ProviderAuthPersistence::new(
+                token_store.clone(),
+                Arc::new(InMemoryCoordinator::new()),
+            ));
         let registry = factory.provider_runtime_registry();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
@@ -797,15 +801,15 @@ async fn auth_status(harness: &AuthHarness) -> AuthStatusWire {
 async fn resolve_openai_binding(
     harness: &AuthHarness,
     force_refresh: bool,
-    coordinator: Option<Arc<dyn RefreshCoordinator>>,
+    coordinator: Arc<dyn RefreshCoordinator>,
 ) -> Result<meerkat_providers::ResolvedConnection, meerkat_providers::ProviderAuthError> {
-    let mut env = ResolverEnvironment::testing()
-        .with_token_store(harness.token_store.clone())
+    let env = ResolverEnvironment::testing()
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            harness.token_store.clone(),
+            coordinator,
+        ))
         .with_auth_lease_handle(harness.runtime.generated_auth_lease_handle())
         .with_force_refresh(force_refresh);
-    if let Some(coordinator) = coordinator {
-        env = env.with_refresh_coordinator(coordinator);
-    }
     harness
         .registry
         .resolve(&openai_realm(&harness.config), &openai_auth_binding(), &env)
@@ -828,7 +832,7 @@ async fn auth_mock_browser_oauth_login_round_trip() {
     assert_eq!(stored.primary_secret.as_deref(), Some("mock-access-1"));
     assert!(meerkat_core::tokens_lifecycle_published(&stored));
 
-    let resolved = resolve_openai_binding(&harness, false, None)
+    let resolved = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
         .await
         .expect("binding resolves after login");
     assert_eq!(resolved.resolved_secret().as_deref(), Some("mock-access-1"));
@@ -913,10 +917,9 @@ async fn auth_mock_oauth_expired_token_refreshes_and_persists() {
     let harness = AuthHarness::new();
 
     login_through_browser(&harness).await;
-    let resolved =
-        resolve_openai_binding(&harness, false, Some(Arc::new(InMemoryCoordinator::new())))
-            .await
-            .expect("expired OAuth token refreshes during resolve");
+    let resolved = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
+        .await
+        .expect("expired OAuth token refreshes during resolve");
     assert_eq!(
         resolved.resolved_secret().as_deref(),
         Some("mock-refresh-access-1")
@@ -950,7 +953,7 @@ async fn auth_mock_oauth_failed_refresh_surfaces_reauth_required_or_explicit_aut
     let harness = AuthHarness::new();
 
     login_through_browser(&harness).await;
-    let err = resolve_openai_binding(&harness, false, Some(Arc::new(InMemoryCoordinator::new())))
+    let err = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
         .await
         .expect_err("refresh failure must surface an auth error");
     let detail = err.to_string();
@@ -1053,9 +1056,8 @@ async fn auth_mock_concurrent_resolve_dedupes_refresh() {
         let coordinator = coordinator.clone();
         tasks.push(tokio::spawn(async move {
             let env = ResolverEnvironment::testing()
-                .with_token_store(store)
-                .with_auth_lease_handle(auth_lease)
-                .with_refresh_coordinator(coordinator);
+                .with_provider_auth_persistence(ProviderAuthPersistence::new(store, coordinator))
+                .with_auth_lease_handle(auth_lease);
             registry
                 .resolve(&realm, &openai_auth_binding(), &env)
                 .await
@@ -1132,7 +1134,7 @@ async fn auth_mock_oauth_fixture_can_return_malformed_refresh_response() {
     let _env = FixtureEnvGuard::install(fixture.base_url()).await;
     let harness = AuthHarness::new();
     login_through_browser(&harness).await;
-    let err = resolve_openai_binding(&harness, false, Some(Arc::new(InMemoryCoordinator::new())))
+    let err = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
         .await
         .expect_err("malformed refresh should fail");
     assert!(
@@ -1154,10 +1156,9 @@ async fn auth_live_canary_openai_oauth_seeded_token_bundle() {
     );
     let harness = AuthHarness::new();
     save_seeded_tokens_with_lifecycle(&harness, &tokens).await;
-    let resolved =
-        resolve_openai_binding(&harness, true, Some(Arc::new(InMemoryCoordinator::new())))
-            .await
-            .expect("configured OpenAI OAuth seeded refresh must pass");
+    let resolved = resolve_openai_binding(&harness, true, Arc::new(InMemoryCoordinator::new()))
+        .await
+        .expect("configured OpenAI OAuth seeded refresh must pass");
     assert!(
         resolved.resolved_secret().is_some(),
         "OpenAI OAuth seeded refresh resolved without access material"

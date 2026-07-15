@@ -176,10 +176,10 @@ pub struct AppState {
     pub mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
     /// Request-level cancellation executor.
     pub request_executor: Arc<SurfaceRequestExecutor>,
-    /// Persistent TokenStore for OAuth-backed bindings. Shared with the
-    /// AgentFactory so both read and write paths (login, resolve,
-    /// logout) see the same credentials.
-    pub token_store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
+    /// Complete provider-auth persistence capability shared with the
+    /// AgentFactory. REST credential mutations and provider resolution can
+    /// never observe the token vault without its matching mutation authority.
+    pub provider_auth_persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
     /// Process-local AuthMachine lifecycle registry for auth endpoints.
     pub auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
     /// Provider-runtime registry shared with the AgentFactory's auth
@@ -508,11 +508,11 @@ impl AppState {
         // signal to silently run ephemeral: that would launder a real auth
         // backend failure into apparent "no credentials". Propagate the typed
         // TokenStoreError and fail REST startup.
-        let token_store: Arc<dyn meerkat_providers::auth_store::TokenStore> =
-            meerkat_providers::auth_store::TokenStoreBackend::default_auto()
-                .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)?;
+        let provider_auth_persistence =
+            meerkat_providers::auth_store::TokenStoreBackend::default_auto()?
+                .open_with_refresh_authority()?;
         let mut factory = AgentFactory::new(store_path.clone())
-            .with_token_store(Arc::clone(&token_store))
+            .with_provider_auth_persistence(provider_auth_persistence.clone())
             .session_store(session_store.clone())
             .runtime_root(realm_paths.root.clone())
             .builtins(enable_builtins)
@@ -611,7 +611,7 @@ impl AppState {
             request_executor: Arc::new(SurfaceRequestExecutor::new(
                 std::time::Duration::from_secs(5),
             )),
-            token_store,
+            provider_auth_persistence,
             auth_lease,
             provider_registry,
         })
@@ -621,6 +621,10 @@ impl AppState {
         &self,
     ) -> Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> {
         self.runtime_adapter.oauth_flow_authority()
+    }
+
+    pub fn token_store(&self) -> Arc<dyn meerkat_providers::auth_store::TokenStore> {
+        self.provider_auth_persistence.token_store()
     }
 
     fn runtime_executor_context(&self) -> RestRuntimeExecutorContext {

@@ -15,8 +15,9 @@ use std::sync::Arc;
 use chrono::{Duration as ChronoDuration, Utc};
 
 use meerkat_auth_core::auth_store::{
-    CredentialMutationError, CredentialMutationFn, EphemeralTokenStore, PersistedAuthMode,
-    PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, EphemeralTokenStore,
+    InMemoryCoordinator, PersistedAuthMode, PersistedTokens, ProviderAuthPersistence,
+    RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore,
 };
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeaseTransition, GeneratedAuthLeaseHandle, LeaseKey,
@@ -27,6 +28,10 @@ use meerkat_core::{
 };
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 use meerkat_openai::runtime::oauth as o_oauth;
+
+fn in_memory_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {
+    ProviderAuthPersistence::new(store, Arc::new(InMemoryCoordinator::new()))
+}
 
 fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
     openai_realm_with_source(
@@ -258,7 +263,7 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
         &self,
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         mutation_fn().await
     }
 
@@ -281,7 +286,7 @@ impl RefreshCoordinator for FailingRefreshCoordinator {
         &self,
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
-    ) -> Result<PersistedTokens, CredentialMutationError> {
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         mutation_fn().await
     }
 
@@ -326,7 +331,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -371,8 +376,10 @@ async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(StaticRefreshCoordinator { tokens: refreshed }),
+        ))
         .with_auth_lease_handle(auth_lease)
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty()
@@ -423,7 +430,7 @@ async fn openai_managed_chatgpt_oauth_force_refresh_with_refresh_disallowed_erro
 
     let realm = openai_realm_no_refresh("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(auth_lease)
         .with_force_refresh(true);
     let registry = ProviderRuntimeRegistry::empty()
@@ -465,10 +472,12 @@ async fn openai_managed_chatgpt_oauth_refresh_failure_is_typed() {
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
-        .with_refresh_coordinator(Arc::new(FailingRefreshCoordinator {
-            error: RefreshError::Refresh("temporary refresh outage".into()),
-        }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store,
+            Arc::new(FailingRefreshCoordinator {
+                error: RefreshError::Refresh("temporary refresh outage".into()),
+            }),
+        ))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -512,7 +521,8 @@ async fn openai_managed_chatgpt_oauth_rejects_marked_token_without_auth_lease() 
         .unwrap();
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store);
+    let env =
+        ResolverEnvironment::testing().with_provider_auth_persistence(in_memory_persistence(store));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry
@@ -559,7 +569,7 @@ async fn openai_managed_chatgpt_oauth_restores_marker_with_empty_auth_lifecycle(
     let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -607,7 +617,7 @@ async fn openai_managed_chatgpt_oauth_rejects_unmarked_token_after_empty_lifecyc
     let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -675,10 +685,12 @@ async fn openai_managed_chatgpt_oauth_refreshes_expired_marker_with_empty_auth_l
     let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator {
-            tokens: refreshed.clone(),
-        }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(StaticRefreshCoordinator {
+                tokens: refreshed.clone(),
+            }),
+        ))
         .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -732,7 +744,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_persisted_mode() {
 
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -786,7 +798,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_source_even_with_matching_mo
         },
     );
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -851,8 +863,10 @@ async fn openai_managed_chatgpt_oauth_refresh_publishes_through_generated_auth_l
     let refreshed_refresh = refreshed.refresh_token.clone();
     let refreshed_expires_at = refreshed.expires_at;
     let env = ResolverEnvironment::testing()
-        .with_token_store(store.clone())
-        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store.clone(),
+            Arc::new(StaticRefreshCoordinator { tokens: refreshed }),
+        ))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -897,7 +911,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
 
     let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -936,7 +950,7 @@ async fn openai_external_chatgpt_tokens_empty_lifecycle_restores_marker_before_r
     let (auth_lease, generated_auth_lease) = empty_auth_lease_handle_for_test();
     let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(generated_auth_lease);
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -985,7 +999,7 @@ async fn openai_external_chatgpt_tokens_rejects_chatgpt_oauth_mode() {
 
     let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
     let env = ResolverEnvironment::testing()
-        .with_token_store(store)
+        .with_provider_auth_persistence(in_memory_persistence(store))
         .with_auth_lease_handle(valid_auth_lease_handle());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
@@ -1010,7 +1024,8 @@ async fn openai_external_chatgpt_tokens_rejects_chatgpt_oauth_mode() {
 async fn openai_chatgpt_oauth_missing_tokens_surfaces_interactive_login_required() {
     let store = Arc::new(EphemeralTokenStore::new());
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
-    let env = ResolverEnvironment::testing().with_token_store(store);
+    let env =
+        ResolverEnvironment::testing().with_provider_auth_persistence(in_memory_persistence(store));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let err = registry

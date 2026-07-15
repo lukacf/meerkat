@@ -30,8 +30,9 @@ pub use refresh::InMemoryCoordinator;
 
 // Re-exports from meerkat-core (trait + types moved there in B2 split).
 pub use meerkat_core::auth::token_store::{
-    CredentialMutationError, CredentialMutationFn, PersistedAuthMode, PersistedTokens,
-    RefreshCoordinator, RefreshError, RefreshFn, TokenKey, TokenStore, TokenStoreError,
+    CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedAuthMode,
+    PersistedTokens, ProviderAuthPersistence, RefreshCoordinator, RefreshError, RefreshFn,
+    TokenKey, TokenStore, TokenStoreError,
 };
 
 pub fn credential_source_uses_persisted_store(source: &CredentialSourceSpec) -> bool {
@@ -115,6 +116,41 @@ impl TokenStoreBackend {
             Self::Ephemeral => Ok(Arc::new(EphemeralTokenStore::new())),
         }
     }
+
+    /// Open the store together with its canonical refresh-mutation authority.
+    ///
+    /// Persisted stores must never degrade to a process-local coordinator: if
+    /// file locking is unavailable, opening the paired capability fails
+    /// closed. Only [`TokenStoreBackend::Ephemeral`] receives an
+    /// [`InMemoryCoordinator`].
+    pub fn open_with_refresh_authority(self) -> Result<ProviderAuthPersistence, TokenStoreError> {
+        let refresh_coordinator: Arc<dyn RefreshCoordinator> = match &self {
+            Self::Ephemeral => Arc::new(InMemoryCoordinator::new()),
+            _ => {
+                let lock_dir = self.refresh_lock_dir().ok_or_else(|| {
+                    TokenStoreError::Unavailable(
+                        "persisted TokenStore has no refresh-lock authority".into(),
+                    )
+                })?;
+                #[cfg(feature = "file-lock")]
+                {
+                    Arc::new(FileLockCoordinator::new(lock_dir))
+                }
+                #[cfg(not(feature = "file-lock"))]
+                {
+                    let _ = lock_dir;
+                    return Err(TokenStoreError::Unavailable(
+                        "persisted TokenStore requires the file-lock feature".into(),
+                    ));
+                }
+            }
+        };
+        let token_store = self.open()?;
+        Ok(ProviderAuthPersistence::new(
+            token_store,
+            refresh_coordinator,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +223,32 @@ mod tests {
             matches!(backend, TokenStoreBackend::Auto { .. }),
             "keyring fallback should remain available as an explicit backend"
         );
+    }
+
+    #[cfg(feature = "file-lock")]
+    #[test]
+    fn persisted_backend_opens_store_and_refresh_authority_as_one_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let persistence = TokenStoreBackend::File {
+            root: temp.path().join("credentials"),
+        }
+        .open_with_refresh_authority()
+        .unwrap();
+        let env = meerkat_llm_core::provider_runtime::ResolverEnvironment::testing()
+            .with_provider_auth_persistence(persistence);
+
+        assert!(env.provider_auth_persistence().is_some());
+    }
+
+    #[test]
+    fn ephemeral_backend_is_explicitly_paired_with_process_local_authority() {
+        let persistence = TokenStoreBackend::Ephemeral
+            .open_with_refresh_authority()
+            .unwrap();
+        let env = meerkat_llm_core::provider_runtime::ResolverEnvironment::testing()
+            .with_provider_auth_persistence(persistence);
+
+        assert!(env.provider_auth_persistence().is_some());
     }
 
     #[test]

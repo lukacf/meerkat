@@ -171,7 +171,10 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
             std::time::Duration::from_secs(5),
         )),
-        token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        provider_auth_persistence: meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        ),
         auth_lease: runtime_adapter.generated_auth_lease_handle(),
         provider_registry,
         #[cfg(feature = "mob")]

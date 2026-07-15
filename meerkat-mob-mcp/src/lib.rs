@@ -1079,7 +1079,12 @@ impl MobMcpState {
             .handle
             .clone()
             .with_command_authority(CommandAuthority::principal(self.console_principal.clone()));
-        match bound.destroy().await {
+        let destroy_result = bound.destroy().await;
+        // The authority-bound clone retains the SQLite event bus. Release it
+        // before terminal storage deletion so this surface does not extend a
+        // passive watcher's lifetime across the unlink boundary.
+        drop(bound);
+        match destroy_result {
             Ok(report) => {
                 let removed = self.mobs.write().await.remove(mob_id);
                 let storage_path = removed
@@ -9000,12 +9005,11 @@ mod tests {
             )
             .await
             .expect("spawn worker");
-        let handle = state.handle_for(&mob_id).await.expect("mob handle");
-        let bridge_session_id = handle
+        let retained_handle = state.handle_for(&mob_id).await.expect("mob handle");
+        let bridge_session_id = retained_handle
             .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
             .await
             .expect("worker bridge session");
-        drop(handle);
         svc.fail_archive(
             bridge_session_id.clone(),
             "forced archive failure for partial destroy test",
@@ -9089,6 +9093,14 @@ mod tests {
         assert!(
             tokio::fs::metadata(&storage_path).await.is_err(),
             "complete retry should remove persistent mob db"
+        );
+        retained_handle
+            .poll_events(0, 1)
+            .await
+            .expect_err("terminal retained-handle reads must not recreate removed storage");
+        assert!(
+            tokio::fs::metadata(&storage_path).await.is_err(),
+            "terminal retained-handle reads must leave persistent mob storage absent"
         );
         assert!(
             state

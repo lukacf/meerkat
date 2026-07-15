@@ -36,7 +36,9 @@ use crate::run::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use notify::{RecursiveMode, Watcher};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -320,6 +322,23 @@ fn open_connection(path: &Path) -> Result<Connection, MobStoreError> {
     Ok(conn)
 }
 
+/// Open an existing mob database for passive observation without creating the
+/// primary database or running migrations. Event-watch catch-up may race
+/// terminal storage removal, so it must never use the create-capable writer
+/// connection.
+fn open_existing_read_connection(path: &Path) -> Result<Connection, MobStoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(se)?;
+    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
+        .map_err(se)?;
+    Ok(conn)
+}
+
 fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, MobStoreError> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(se)
@@ -332,7 +351,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn latest_event_cursor_sync(path: &Path) -> Result<u64, MobStoreError> {
-    let conn = open_connection(path)?;
+    let conn = open_existing_read_connection(path)?;
     let cursor: Option<i64> = conn
         .query_row("SELECT MAX(cursor) FROM mob_events", [], |row| row.get(0))
         .optional()
@@ -346,7 +365,15 @@ fn poll_events_sync(
     after_cursor: u64,
     limit: usize,
 ) -> Result<Vec<MobEvent>, MobStoreError> {
-    let conn = open_connection(path)?;
+    let conn = open_existing_read_connection(path)?;
+    poll_events_from_connection(&conn, after_cursor, limit)
+}
+
+fn poll_events_from_connection(
+    conn: &Connection,
+    after_cursor: u64,
+    limit: usize,
+) -> Result<Vec<MobEvent>, MobStoreError> {
     let mut stmt = conn
         .prepare("SELECT event_json FROM mob_events WHERE cursor > ?1 ORDER BY cursor LIMIT ?2")
         .map_err(se)?;
@@ -517,7 +544,20 @@ impl SqliteMobEventBus {
         }
         loop {
             let after_cursor = *lock_unpoisoned(&self.latest_broadcast_cursor);
-            let batch = poll_events_sync(&self.path, after_cursor, EVENT_WATCH_CATCH_UP_LIMIT)?;
+            let batch = match poll_events_sync(&self.path, after_cursor, EVENT_WATCH_CATCH_UP_LIMIT)
+            {
+                Ok(batch) => batch,
+                Err(error) => {
+                    if !self.path.try_exists().map_err(se)? {
+                        // The file disappeared after the preflight existence
+                        // check. This is normal terminal destroy, and the
+                        // no-create reader guarantees catch-up cannot resurrect
+                        // the database in this window.
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+            };
             if batch.is_empty() {
                 return Ok(());
             }
@@ -1496,7 +1536,7 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         let mob_id = mob_id.clone();
         let agent_identity = agent_identity.to_string();
         run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_existing_read_connection(&path)?;
             let row: Option<Vec<u8>> = conn
                 .query_row(
                     "SELECT record_json FROM mob_runtime_placed_spawns
@@ -1523,7 +1563,7 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         let path = self.path.clone();
         let mob_id = mob_id.clone();
         run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_existing_read_connection(&path)?;
             let mut stmt = conn
                 .prepare(
                     "SELECT agent_identity, record_json FROM mob_runtime_placed_spawns
@@ -2471,7 +2511,7 @@ impl MobEventStore for SqliteMobEventStore {
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_existing_read_connection(&path)?;
             let mut stmt = conn
                 .prepare("SELECT event_json FROM mob_events ORDER BY cursor")
                 .map_err(se)?;
@@ -2688,7 +2728,7 @@ impl MobRunStore for SqliteMobRunStore {
         let path = self.path.clone();
         let key = run_id.to_string();
         run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_existing_read_connection(&path)?;
             let bytes: Option<Vec<u8>> = conn
                 .query_row(
                     "SELECT run_json FROM mob_runs WHERE run_id = ?1",
@@ -2714,7 +2754,7 @@ impl MobRunStore for SqliteMobRunStore {
         let mob_id = mob_id.clone();
         let flow_id = flow_id.cloned();
         run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_existing_read_connection(&path)?;
             let mut stmt = conn.prepare("SELECT run_json FROM mob_runs").map_err(se)?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, Vec<u8>>(0))
@@ -2827,7 +2867,7 @@ impl MobRunStore for SqliteMobRunStore {
         let path = self.path.clone();
         let run_key = run_id.to_string();
         run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_existing_read_connection(&path)?;
             let mut stmt = conn
                 .prepare(
                     "SELECT intent_json FROM mob_run_remote_turn_intents \
@@ -2937,7 +2977,7 @@ impl MobRunStore for SqliteMobRunStore {
         let path = self.path.clone();
         let run_key = run_id.to_string();
         run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_existing_read_connection(&path)?;
             let mut stmt = conn
                 .prepare(
                     "SELECT receipt_json FROM mob_run_remote_turn_receipts \
@@ -4284,6 +4324,65 @@ mod tests {
         assert!(
             !path.exists(),
             "watcher catch-up must not recreate intentionally deleted mob storage"
+        );
+    }
+
+    #[test]
+    fn test_sqlite_event_bus_catch_up_open_does_not_recreate_database_deleted_after_precheck() {
+        let (_dir, path) = temp_db_path();
+        let _stores = SqliteMobStores::open(&path).unwrap();
+        assert!(
+            path.try_exists().unwrap(),
+            "watcher preflight should observe the database before the simulated race"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        let error = poll_events_sync(&path, 0, EVENT_WATCH_CATCH_UP_LIMIT)
+            .expect_err("open-existing catch-up must reject a concurrently deleted database");
+
+        assert!(
+            !path.exists(),
+            "passive catch-up must not recreate a database deleted after its preflight check: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_terminal_reads_do_not_recreate_deleted_database() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let event_store = stores.event_store();
+        let run_store = stores.run_store();
+        let runtime_store = stores.runtime_metadata_store();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(event_store.poll(0, 1).await.is_err());
+        assert!(event_store.replay_all().await.is_err());
+        assert!(event_store.latest_cursor().await.is_err());
+        let run_id = RunId::new();
+        assert!(run_store.get_run(&run_id).await.is_err());
+        assert!(
+            run_store
+                .list_runs(&MobId::from("deleted-mob"), None)
+                .await
+                .is_err()
+        );
+        assert!(run_store.list_remote_turn_intents(&run_id).await.is_err());
+        assert!(run_store.list_remote_turn_receipts(&run_id).await.is_err());
+        assert!(
+            runtime_store
+                .load_placed_spawn(&MobId::from("deleted-mob"), "deleted-agent")
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime_store
+                .list_placed_spawns(&MobId::from("deleted-mob"))
+                .await
+                .is_err()
+        );
+        assert!(
+            !path.exists(),
+            "terminal storage reads must not recreate removed mob storage"
         );
     }
 

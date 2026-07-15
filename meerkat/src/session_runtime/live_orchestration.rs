@@ -856,6 +856,34 @@ mod orchestrator {
         pub webrtc: Option<&'a meerkat_live::LiveWebrtcState>,
     }
 
+    impl<'a> LiveTransportContext<'a> {
+        /// Construct the transport context without assuming that downstream
+        /// crates compiled the same optional transport feature set. Feature-
+        /// gated fields are initialized inside the owning crate, so Cargo
+        /// feature unification cannot make an external struct literal stale.
+        #[must_use]
+        pub const fn new(ws_state: Option<&'a LiveWsState>, base_url: Option<&'a str>) -> Self {
+            Self {
+                ws_state,
+                base_url,
+                #[cfg(feature = "live-webrtc")]
+                webrtc: None,
+            }
+        }
+
+        /// Attach the optional WebRTC transport when the composing surface
+        /// explicitly enables and owns it.
+        #[cfg(feature = "live-webrtc")]
+        #[must_use]
+        pub const fn with_webrtc(
+            mut self,
+            webrtc: Option<&'a meerkat_live::LiveWebrtcState>,
+        ) -> Self {
+            self.webrtc = webrtc;
+            self
+        }
+    }
+
     /// Caller playback cursor for `live/truncate` (A7): the assistant
     /// item to truncate and how much of its audio the client actually
     /// played — one typed carrier for the three cursor facts.

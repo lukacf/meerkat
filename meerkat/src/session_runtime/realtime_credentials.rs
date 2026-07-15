@@ -364,7 +364,8 @@ mod tests {
         );
 
         let temp = tempfile::TempDir::new().expect("tempdir");
-        let factory = AgentFactory::new(temp.path().join("sessions")).without_token_store();
+        let factory =
+            AgentFactory::new(temp.path().join("sessions")).without_provider_auth_persistence();
         let store = Arc::new(MemoryConfigStore::new(
             Config::default(),
             meerkat_models::canonical(),

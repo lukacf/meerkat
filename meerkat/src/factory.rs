@@ -3349,15 +3349,13 @@ impl AgentFactory {
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(store) = self.resolution_token_store().map_err(|error| {
-                LlmIdentityPreflightError::BindingUnresolvable {
-                    detail: error.to_string(),
-                }
-            })? {
-                env = env.with_token_store(store);
-            }
-            if let Some(coordinator) = self.refresh_coord.clone() {
-                env = env.with_refresh_coordinator(coordinator);
+            if let Some(persistence) =
+                self.resolution_provider_auth_persistence()
+                    .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+                        detail: error.to_string(),
+                    })?
+            {
+                env = env.with_provider_auth_persistence(persistence);
             }
         }
         for (handle, resolver) in &self.external_auth_resolvers {
@@ -7527,8 +7525,12 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let token_store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
-        let factory =
-            AgentFactory::new(temp.path().join("sessions")).with_token_store(token_store.clone());
+        let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            token_store.clone(),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .with_provider_auth_persistence(persistence);
         let preferred_realm = meerkat_core::mob_realm_id("managed-preflight").unwrap();
         let auth_binding = AuthBindingRef {
             realm: preferred_realm.clone(),

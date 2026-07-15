@@ -660,12 +660,9 @@ pub async fn handle_live_open(
         }
     };
 
-    let transport_ctx = LiveTransportContext {
-        ws_state: live_ws,
-        base_url: live_ws_base_url,
-        #[cfg(feature = "live-webrtc")]
-        webrtc: live_webrtc,
-    };
+    let transport_ctx = LiveTransportContext::new(live_ws, live_ws_base_url);
+    #[cfg(feature = "live-webrtc")]
+    let transport_ctx = transport_ctx.with_webrtc(live_webrtc);
     // Validate caller-controlled seed policy before the shared pipeline can
     // mint a candidate channel or ask machine authority to admit the open.
     let seed_window = match live_seed_window_from_params(id.clone(), parsed.seed_max_chars) {
@@ -1047,12 +1044,9 @@ pub async fn handle_live_interrupt(
         Err(resp) => return resp,
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
-    let transport_ctx = LiveTransportContext {
-        ws_state: None,
-        base_url: None,
-        #[cfg(feature = "live-webrtc")]
-        webrtc: webrtc_state,
-    };
+    let transport_ctx = LiveTransportContext::new(None, None);
+    #[cfg(feature = "live-webrtc")]
+    let transport_ctx = transport_ctx.with_webrtc(webrtc_state);
 
     match runtime
         .interrupt_live_channel(host, transport_ctx, &channel_id)
@@ -1096,12 +1090,9 @@ pub async fn handle_live_truncate(
     }
 
     let channel_id = LiveChannelId::new(&parsed.channel_id);
-    let transport_ctx = LiveTransportContext {
-        ws_state: None,
-        base_url: None,
-        #[cfg(feature = "live-webrtc")]
-        webrtc: webrtc_state,
-    };
+    let transport_ctx = LiveTransportContext::new(None, None);
+    #[cfg(feature = "live-webrtc")]
+    let transport_ctx = transport_ctx.with_webrtc(webrtc_state);
 
     match runtime
         .truncate_live_output(

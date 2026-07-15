@@ -171,15 +171,10 @@ impl ServiceMemberLiveHost {
     }
 
     fn transport_context(&self) -> LiveTransportContext<'_> {
-        LiveTransportContext {
-            ws_state: self.ws_state.as_deref(),
-            base_url: self.base_url.as_deref(),
-            // The member host never composes WebRTC (DEC-P6B-L8): a
-            // `transport=webrtc` request degrades typed exactly as the
-            // non-compiled arm.
-            #[cfg(feature = "live-webrtc")]
-            webrtc: None,
-        }
+        // The member host never composes WebRTC (DEC-P6B-L8): `new` leaves
+        // that optional transport absent, so `transport=webrtc` degrades
+        // typed exactly as the non-compiled arm.
+        LiveTransportContext::new(self.ws_state.as_deref(), self.base_url.as_deref())
     }
 }
 

@@ -5230,6 +5230,11 @@ async fn run_host_responder(
     let notify = actor.host_runtime.inbox_notify();
     loop {
         let notified = notify.notified();
+        tokio::pin!(notified);
+        // `inbox_notify` fires with `notify_waiters()`, so merely creating the
+        // future is not enough: arm it before draining or an input arriving
+        // between the empty drain and `select!` can lose its only wakeup.
+        notified.as_mut().enable();
         // Descriptor availability is actor-owned work. At most one synchronous
         // sink attempt runs per due tick/batch boundary, and the pending state
         // retains its capped-backoff deadline across unrelated actor traffic.
@@ -5252,7 +5257,7 @@ async fn run_host_responder(
                     actor.retry_pending_descriptor_refresh_if_due();
                     continue;
                 }
-                () = notified => continue,
+                () = &mut notified => continue,
                 request = observation_pending_rx.recv() => {
                     match request {
                         Some(request) => {

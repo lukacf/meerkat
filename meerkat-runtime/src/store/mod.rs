@@ -1878,9 +1878,11 @@ pub trait RuntimeStore: Send + Sync {
 
     /// Remove the latest committed session snapshot for a runtime.
     ///
-    /// This is used only as a fail-closed quarantine path after a compatibility
-    /// projection write rejects a runtime snapshot that was already staged as
-    /// runtime authority and the service cannot restore the previous snapshot.
+    /// This is used only as a fail-closed quarantine path when transcript
+    /// rewrite audit failure makes the runtime snapshot itself invalid recovery
+    /// authority and the service cannot restore the previous snapshot. An
+    /// ordinary downstream compatibility-projection failure must retain the
+    /// already-committed runtime snapshot for retry.
     async fn clear_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -1889,9 +1891,9 @@ pub trait RuntimeStore: Send + Sync {
     /// Replace the latest committed session snapshot only if it still matches
     /// `expected_current`.
     ///
-    /// Used by fail-closed recovery after a compatibility projection rejected
-    /// a runtime snapshot. Implementations must compare and write atomically so
-    /// recovery cannot overwrite a newer runtime-authoritative snapshot.
+    /// Used by fail-closed recovery when a rejected transcript-rewrite snapshot
+    /// must be restored to its prior audited value. Implementations must compare
+    /// and write atomically so recovery cannot overwrite newer runtime authority.
     async fn replace_session_snapshot_if_current(
         &self,
         runtime_id: &LogicalRuntimeId,

@@ -198,25 +198,30 @@ is_governance_path() {
   return 1
 }
 
-mapfile -t changed < <(collect_changed_paths | awk 'NF' | sort -u)
+changed=()
+while IFS= read -r path; do
+  changed+=("${path}")
+done < <(collect_changed_paths | awk 'NF' | sort -u)
 relevant=()
 governance=()
 generated_contract=()
 global=0
-for path in "${changed[@]}"; do
-  if is_relevant_path "${path}"; then
-    relevant+=("${path}")
-    if is_global_path "${path}"; then
-      global=1
+if [[ "${#changed[@]}" -gt 0 ]]; then
+  for path in "${changed[@]}"; do
+    if is_relevant_path "${path}"; then
+      relevant+=("${path}")
+      if is_global_path "${path}"; then
+        global=1
+      fi
     fi
-  fi
-  if is_governance_path "${path}"; then
-    governance+=("${path}")
-  fi
-  if scripts/generated-contract-ratchet-changed -- "${path}" >/dev/null 2>&1; then
-    generated_contract+=("${path}")
-  fi
-done
+    if is_governance_path "${path}"; then
+      governance+=("${path}")
+    fi
+    if scripts/generated-contract-ratchet-changed -- "${path}" >/dev/null 2>&1; then
+      generated_contract+=("${path}")
+    fi
+  done
+fi
 
 if [[ "${#relevant[@]}" -eq 0 && "${#governance[@]}" -eq 0 && "${#generated_contract[@]}" -eq 0 ]]; then
   echo "BuildBuddy agent gate: no build-relevant changes detected."

@@ -1350,6 +1350,8 @@ impl MeerkatMcpState {
         let skill_runtime = factory.build_skill_runtime(&config).await?;
 
         let max_sessions = config.max_sessions();
+        #[cfg(feature = "mob")]
+        let mob_host_config = config.mob_host.clone();
         let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store)
             .with_realm_inheritance(Arc::clone(&realm_config_source), realm_id.clone());
         builder.default_llm_client = default_llm_client;
@@ -1376,17 +1378,26 @@ impl MeerkatMcpState {
         #[cfg(feature = "mob")]
         let mob_state = {
             let persistent_mob_root = realm_paths.root.clone();
-            let state = Arc::new(
-                meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-                    service.clone(),
-                    Some(runtime_adapter.clone()),
-                    // A16: the local MCP console is the owning operator
-                    // (phase 5 explicit mint, DEC-P5E-8).
-                    meerkat_mob::MobControlPrincipal::Owner,
+            let acceptor_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
+            let controlling_acceptor =
+                meerkat_mob::ControllingAcceptorConfig::from_mob_host_config(
+                    &mob_host_config,
+                    acceptor_service,
                 )
-                .with_persistent_storage_root(Some(persistent_mob_root))
-                .with_workgraph_service(Some(workgraph_service.clone())),
-            );
+                .map_err(|detail| std::io::Error::new(std::io::ErrorKind::InvalidInput, detail))?;
+            let mut state = meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                service.clone(),
+                Some(runtime_adapter.clone()),
+                // A16: the local MCP console is the owning operator
+                // (phase 5 explicit mint, DEC-P5E-8).
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .with_persistent_storage_root(Some(persistent_mob_root))
+            .with_workgraph_service(Some(workgraph_service.clone()));
+            if let Some(acceptor) = controlling_acceptor {
+                state = state.with_controlling_acceptor(acceptor);
+            }
+            let state = Arc::new(state);
             *mob_tools_slot
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(

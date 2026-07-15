@@ -1632,6 +1632,20 @@ impl HostMemberObservation {
                 .await
                 .ok();
         loop {
+            // Outcomes are published through the host projection rather than
+            // the durable event log. Refresh that sidecar on every long-poll
+            // pass; otherwise a terminal outcome committed after the initial
+            // request snapshot cannot resolve this poll when no later event
+            // row wakes it. Keep the refresh fenced to the exact incarnation.
+            let current_facts = self.session_facts(session)?;
+            if current_facts.incarnation != facts.incarnation {
+                return Err(MemberObservationError::StaleIncarnation {
+                    reason: format!(
+                        "poll expected {:?}; host projection changed during durable poll to {:?}",
+                        facts.incarnation, current_facts.incarnation
+                    ),
+                });
+            }
             let rows_all = log
                 .read_from(session, from_seq, max)
                 .await?
@@ -1653,14 +1667,14 @@ impl HostMemberObservation {
                 None => from_seq,
             };
             let (turn_outcomes, outcomes_complete) =
-                Self::outcome_page(facts, max_outcomes, next_seq);
+                Self::outcome_page(&current_facts, max_outcomes, next_seq);
             if !rows.is_empty()
                 || !turn_outcomes.is_empty()
                 || tokio::time::Instant::now() >= deadline
             {
                 return Ok(MemberEventsWindow {
-                    generation: facts.generation,
-                    fence_token: facts.fence_token,
+                    generation: current_facts.generation,
+                    fence_token: current_facts.fence_token,
                     rows,
                     from_seq,
                     next_seq,

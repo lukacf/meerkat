@@ -283,7 +283,8 @@ impl Config {
     /// Merge semantics are field-specific:
     /// - Scalar/option fields: last non-default wins.
     /// - Structured sections (`provider`, `providers`, `store`, `comms`, `compaction`, etc.):
-    ///   whole-section replace when incoming value is non-default.
+    ///   whole-section replace when incoming value is non-default, except
+    ///   `mob_host`, whose optional startup facts inherit field by field.
     /// - Hook entries: append/extend.
     ///
     /// JSON merge-patch semantics are handled separately by `ConfigStore::patch`.
@@ -351,6 +352,46 @@ impl Config {
         }
         if other.comms != CommsRuntimeConfig::default() {
             self.comms = other.comms;
+        }
+        // A child realm commonly tightens one host-process bound while the
+        // parent owns the stable listen/advertise endpoint. Replacing this
+        // whole block would silently remove D1 ingress from the effective
+        // composition, so optional mob-host facts merge field by field.
+        if other.mob_host.realm.is_some() {
+            self.mob_host.realm = other.mob_host.realm;
+        }
+        if other.mob_host.listen_tcp.is_some() {
+            self.mob_host.listen_tcp = other.mob_host.listen_tcp;
+        }
+        if other.mob_host.advertise_tcp.is_some() {
+            self.mob_host.advertise_tcp = other.mob_host.advertise_tcp;
+        }
+        if other.mob_host.live_ws.is_some() {
+            self.mob_host.live_ws = other.mob_host.live_ws;
+        }
+        if other.mob_host.live_ws_advertise.is_some() {
+            self.mob_host.live_ws_advertise = other.mob_host.live_ws_advertise;
+        }
+        if other.mob_host.identity_dir.is_some() {
+            self.mob_host.identity_dir = other.mob_host.identity_dir;
+        }
+        if other.mob_host.descriptor_out.is_some() {
+            self.mob_host.descriptor_out = other.mob_host.descriptor_out;
+        }
+        if other.mob_host.max_connections.is_some() {
+            self.mob_host.max_connections = other.mob_host.max_connections;
+        }
+        if other.mob_host.read_deadline_ms.is_some() {
+            self.mob_host.read_deadline_ms = other.mob_host.read_deadline_ms;
+        }
+        if other.mob_host.pairing_rate.is_some() {
+            self.mob_host.pairing_rate = other.mob_host.pairing_rate;
+        }
+        if other.mob_host.live_buffer_events.is_some() {
+            self.mob_host.live_buffer_events = other.mob_host.live_buffer_events;
+        }
+        if other.mob_host.pairing_password.is_some() {
+            self.mob_host.pairing_password = other.mob_host.pairing_password;
         }
         if other.compaction != CompactionRuntimeConfig::default() {
             self.compaction = other.compaction;
@@ -1573,12 +1614,14 @@ impl Default for CommsRuntimeConfig {
     }
 }
 
-/// `[mob_host]` — `rkat mob host` daemon composition (multi-host mobs §21.3).
+/// `[mob_host]` — host-process ingress composition (multi-host mobs §21.3).
 ///
-/// Every knob here is a startup-composition fact for the member-host daemon;
-/// CLI flags override file values. The daemon's full posture reconstructs
-/// from this block plus the realm-local `runtime_mob_host_bindings` rows —
-/// nothing identity/binding-shaped lives in process memory only.
+/// The TCP listener is shared by the dedicated member-host role and by a
+/// controlling process that must accept reverse lanes for its local members.
+/// CLI flags override file values. A member-host daemon's full posture
+/// reconstructs from this block plus the realm-local
+/// `runtime_mob_host_bindings` rows — nothing identity/binding-shaped lives
+/// in process memory only.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct MobHostConfig {
@@ -2699,6 +2742,37 @@ live_buffer_events = 2048
     fn mob_host_config_defaults_when_absent() {
         let config: Config = toml::from_str("").expect("empty config parses");
         assert_eq!(config.mob_host, MobHostConfig::default());
+    }
+
+    #[test]
+    fn layered_merge_preserves_mob_host_process_ingress() {
+        let mut effective: Config = toml::from_str(
+            r#"
+[mob_host]
+listen_tcp = "0.0.0.0:7801"
+advertise_tcp = "tcp://198.51.100.7:7801"
+"#,
+        )
+        .expect("parent mob host layer parses");
+        let child: Config = toml::from_str(
+            r"
+[mob_host]
+max_connections = 17
+",
+        )
+        .expect("mob host layer parses");
+
+        effective.merge(child);
+
+        assert_eq!(
+            effective.mob_host.listen_tcp.as_deref(),
+            Some("0.0.0.0:7801")
+        );
+        assert_eq!(
+            effective.mob_host.advertise_tcp.as_deref(),
+            Some("tcp://198.51.100.7:7801")
+        );
+        assert_eq!(effective.mob_host.max_connections, Some(17));
     }
 
     #[test]

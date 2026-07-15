@@ -6,8 +6,6 @@ use crate::machines::mob_machine as mob_dsl;
 use crate::run::FlowRunConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Runtime default applied when the flow's `SupervisorSpec` declares no
@@ -15,29 +13,8 @@ use std::time::Duration;
 /// is the typed owner of the escalation deadline.
 const DEFAULT_ESCALATION_TURN_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[cfg(test)]
-static TEST_ESCALATION_TURN_TIMEOUT_MS: AtomicU64 = AtomicU64::new(0);
-
 fn escalation_turn_timeout(declared_ms: Option<u64>) -> Duration {
-    #[cfg(test)]
-    {
-        let override_ms = TEST_ESCALATION_TURN_TIMEOUT_MS.load(Ordering::Relaxed);
-        if override_ms > 0 {
-            return Duration::from_millis(override_ms);
-        }
-    }
-
     declared_ms.map_or(DEFAULT_ESCALATION_TURN_TIMEOUT, Duration::from_millis)
-}
-
-#[cfg(test)]
-pub(crate) fn set_escalation_turn_timeout_for_tests(timeout: Duration) {
-    TEST_ESCALATION_TURN_TIMEOUT_MS.store(timeout.as_millis() as u64, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn reset_escalation_turn_timeout_for_tests() {
-    TEST_ESCALATION_TURN_TIMEOUT_MS.store(0, Ordering::Relaxed);
 }
 
 pub struct Supervisor {
@@ -214,7 +191,6 @@ mod timeout_policy_tests {
 
     #[test]
     fn declared_spec_timeout_owns_the_escalation_deadline() {
-        reset_escalation_turn_timeout_for_tests();
         // Declared flow policy wins over the runtime default.
         assert_eq!(
             escalation_turn_timeout(Some(7_500)),

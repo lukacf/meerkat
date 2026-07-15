@@ -6744,14 +6744,32 @@ impl MobHandle {
 
     /// Shut down the actor. After this, no more commands are accepted.
     pub async fn shutdown(&self) -> Result<(), MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::Shutdown)
-            .await?
-        {
-            MobMachineCommandResult::Unit => Ok(()),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
+        let deadline = Instant::now() + DEFAULT_KICKOFF_WAIT_TIMEOUT;
+        let mut retry_delay = Duration::from_millis(25);
+        loop {
+            match self
+                .execute_machine_command(MobMachineCommand::Shutdown)
+                .await
+            {
+                Ok(MobMachineCommandResult::Unit) => return Ok(()),
+                Ok(_) => {
+                    return Err(MobError::Internal(
+                        "unexpected command result variant".into(),
+                    ));
+                }
+                Err(
+                    error @ (MobError::PlacedCompletionCleanupPending { .. }
+                    | MobError::PlacedKickoffCleanupPending { .. }
+                    | MobError::AutonomousStopInterruptsPending { .. }),
+                ) => {
+                    if Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_millis(250));
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 

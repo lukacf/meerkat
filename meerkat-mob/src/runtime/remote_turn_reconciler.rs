@@ -534,9 +534,17 @@ pub(crate) async fn prepare_remote_turn_recovery_material(
             let current = epoch_run_ids.contains(&obligation.run_id.to_string())
                 && dispatches.contains(&StepDispatchKey::from_obligation(obligation));
             if !current {
-                run_store
-                    .delete_remote_turn_intent(&run.run_id, obligation.dispatch_sequence)
-                    .await?;
+                // Only startup owns an exclusive event/private-row snapshot.
+                // A live scan runs beside flow dispatch: StepDispatched and
+                // the exact private row can land after its event snapshot but
+                // before this row read. Deleting from that torn view would
+                // erase fresh replay custody. Skip it until the next scan;
+                // the pre-actor pass remains the sole destructive scrubber.
+                if repair_missing_records_before_actor_start {
+                    run_store
+                        .delete_remote_turn_intent(&run.run_id, obligation.dispatch_sequence)
+                        .await?;
+                }
                 continue;
             }
             insert_sequence_exact(&mut obligations, obligation, "private intent")?;
@@ -614,9 +622,16 @@ pub(crate) async fn prepare_remote_turn_recovery_material(
             let current = epoch_run_ids.contains(&receipt.obligation.run_id.to_string())
                 && dispatches.contains(&StepDispatchKey::from_obligation(&receipt.obligation));
             if !current {
-                run_store
-                    .delete_remote_turn_receipt(&run.run_id, receipt.obligation.dispatch_sequence)
-                    .await?;
+                // As above, a live event snapshot cannot authorize destructive
+                // cleanup of a private row observed later in the scan.
+                if repair_missing_records_before_actor_start {
+                    run_store
+                        .delete_remote_turn_receipt(
+                            &run.run_id,
+                            receipt.obligation.dispatch_sequence,
+                        )
+                        .await?;
+                }
                 continue;
             }
             insert_sequence_exact(&mut obligations, &receipt.obligation, "private receipt")?;
@@ -2202,6 +2217,80 @@ mod tests {
                 .is_empty(),
             "same run/step/identity at a different generation must not seed custody or replay"
         );
+    }
+
+    #[tokio::test]
+    async fn live_scan_stale_event_snapshot_preserves_fresh_private_rows() {
+        let mob_id = MobId::from("reconcile-live-stale-snapshot");
+        let run_id = RunId::new();
+        let raw_runs: Arc<dyn MobRunStore> = Arc::new(InMemoryMobRunStore::new());
+        let run_store = authority_validating_mob_run_store(raw_runs);
+        let event_store: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+        seed_run_and_dispatch(&run_store, &event_store, &mob_id, &run_id).await;
+
+        // Model a periodic scan that captured the epoch immediately before
+        // this dispatch. Its later private-row read races with the actor's
+        // intent/receipt persistence and therefore cannot authorize deletion.
+        let stale_epoch_events = event_store
+            .replay_all()
+            .await
+            .expect("epoch events")
+            .into_iter()
+            .filter(|event| !matches!(event.kind, MobEventKind::StepDispatched { .. }))
+            .collect::<Vec<_>>();
+        let intent = test_intent(&mob_id, &run_id, 41);
+        let receipt = MobRunRemoteTurnReceipt {
+            obligation: intent.obligation.clone(),
+            outcome: MobRunRemoteTurnReceiptOutcome::Completed {
+                value: serde_json::json!({"ok": true}),
+            },
+        };
+        run_store
+            .put_remote_turn_intent(&run_id, &intent)
+            .await
+            .expect("put fresh intent after event snapshot");
+        run_store
+            .put_remote_turn_receipt(&run_id, &receipt)
+            .await
+            .expect("put fresh receipt after event snapshot");
+
+        let stale = prepare_remote_turn_recovery_material(
+            run_store.clone(),
+            event_store.clone(),
+            &mob_id,
+            &stale_epoch_events,
+            false,
+        )
+        .await
+        .expect("live stale snapshot is non-destructive");
+        assert!(stale.intents.is_empty());
+        assert!(stale.receipts.is_empty());
+        assert_eq!(
+            run_store
+                .list_remote_turn_intents(&run_id)
+                .await
+                .expect("preserved intent"),
+            vec![intent.clone()]
+        );
+        assert_eq!(
+            run_store
+                .list_remote_turn_receipts(&run_id)
+                .await
+                .expect("preserved receipt"),
+            vec![receipt.clone()]
+        );
+
+        let fresh = prepare_remote_turn_recovery_material(
+            run_store,
+            event_store.clone(),
+            &mob_id,
+            &event_store.replay_all().await.expect("fresh epoch events"),
+            false,
+        )
+        .await
+        .expect("next live scan adopts the exact rows");
+        assert_eq!(fresh.intents, vec![intent]);
+        assert_eq!(fresh.receipts, vec![receipt]);
     }
 
     #[tokio::test]

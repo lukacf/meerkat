@@ -37,8 +37,8 @@ use meerkat_contracts::{
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{
-    AgentToolDispatcher, BindOutcome, CommsRuntime as CoreCommsRuntime, DispatcherCapabilities,
-    OpsLifecycleBindError,
+    AgentToolDispatcher, BindOutcome, CommsCapabilityError, CommsRuntime as CoreCommsRuntime,
+    DispatcherCapabilities, OpsLifecycleBindError,
 };
 use meerkat_core::comms::{
     CommsCommand, CommsTrustMutation, CommsTrustMutationResult,
@@ -321,6 +321,10 @@ pub struct MobMcpState {
     /// typed `LiveTransportUnavailable` (honest degradation).
     member_live_host:
         std::sync::RwLock<Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>>,
+    /// One host-process reverse-lane acceptor shared by every mob builder in
+    /// this surface. Absent is honest fail-closed degradation for mixed-host
+    /// edges; surfaces must supply an explicit dialable composition.
+    controlling_acceptor: Option<meerkat_mob::ControllingAcceptorConfig>,
     /// The console principal this state serves (phase 5, chokepoint (b) —
     /// DEC-P5E-8). Injected at construction, never ambient (gotcha #19):
     /// every v1 local surface (RPC/REST/stdio/public-MCP/CLI/embedder)
@@ -366,7 +370,18 @@ impl MobMcpState {
             )),
             realm_skill_sources: BTreeMap::new(),
             member_live_host: std::sync::RwLock::new(None),
+            controlling_acceptor: None,
         }
+    }
+
+    /// Install the process-scoped reverse-lane acceptor used by every mob
+    /// created or resumed through this state.
+    pub fn with_controlling_acceptor(
+        mut self,
+        config: meerkat_mob::ControllingAcceptorConfig,
+    ) -> Self {
+        self.controlling_acceptor = Some(config);
+        self
     }
 
     /// Phase 6b (ADJ-P6B-16): install the local-branch member live host.
@@ -554,6 +569,9 @@ impl MobMcpState {
             .clone()
         {
             builder = builder.with_member_live_host(live_host);
+        }
+        if let Some(acceptor) = &self.controlling_acceptor {
+            builder = builder.with_controlling_acceptor(acceptor.clone());
         }
         builder
     }
@@ -2906,22 +2924,18 @@ impl LocalCommsRuntime {
         source_kind: GeneratedCommsTrustAuthoritySourceKind,
     ) -> bool {
         let mut trusted = self.trusted.write().await;
+        let mut descriptors = self.trusted_descriptors.write().await;
+        let mut private_trusted = self.private_trusted.write().await;
         let removed = remove_trust_source(&mut trusted, peer_id, source_kind);
         if !removed {
             return false;
         }
-        drop(trusted);
-
-        let mut descriptors = self.trusted_descriptors.write().await;
         if let Some(by_source) = descriptors.get_mut(peer_id) {
             by_source.remove(&source_kind);
             if by_source.is_empty() {
                 descriptors.remove(peer_id);
             }
         }
-        drop(descriptors);
-
-        let mut private_trusted = self.private_trusted.write().await;
         if let Some(sources) = private_trusted.get_mut(peer_id) {
             sources.remove(&source_kind);
             if sources.is_empty() {
@@ -3061,6 +3075,28 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 Ok(CommsTrustMutationResult::Removed { removed })
             }
         }
+    }
+
+    async fn trusted_peer_projection_snapshot_for_source(
+        &self,
+        source_kind: GeneratedCommsTrustAuthoritySourceKind,
+    ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+        let descriptors = self.trusted_descriptors.read().await;
+        let private_trusted = self.private_trusted.read().await;
+        let mut peers = descriptors
+            .iter()
+            .filter_map(|(peer_id, by_source)| {
+                if private_trusted
+                    .get(peer_id)
+                    .is_some_and(|sources| sources.contains(&source_kind))
+                {
+                    return None;
+                }
+                by_source.get(&source_kind).cloned()
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| left.peer_id.as_str().cmp(&right.peer_id.as_str()));
+        Ok(peers)
     }
 
     async fn install_generated_mob_trust_owner(
@@ -5271,6 +5307,110 @@ mod tests {
         assert_eq!(descriptor.address.to_string(), "inproc://peer");
     }
 
+    #[tokio::test]
+    async fn test_local_comms_runtime_source_snapshot_excludes_private_trust() {
+        let runtime = LocalCommsRuntime::new("local");
+        let source_kind = GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection;
+        let public_key = [46u8; 32];
+        let private_key = [47u8; 32];
+        let public_peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "public-peer".to_string(),
+            PeerId::from_ed25519_pubkey(&public_key).to_string(),
+            public_key,
+            "inproc://public-peer",
+        )
+        .expect("valid public peer descriptor");
+        let private_peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "private-peer".to_string(),
+            PeerId::from_ed25519_pubkey(&private_key).to_string(),
+            private_key,
+            "inproc://private-peer",
+        )
+        .expect("valid private peer descriptor");
+
+        runtime
+            .add_generated_trust_source(public_peer.clone(), source_kind, false)
+            .await
+            .expect("install public generated trust row");
+        runtime
+            .add_generated_trust_source(private_peer, source_kind, true)
+            .await
+            .expect("install private generated trust row");
+
+        let snapshot = runtime
+            .trusted_peer_projection_snapshot_for_source(source_kind)
+            .await
+            .expect("read public source projection");
+        assert_eq!(snapshot, vec![public_peer]);
+    }
+
+    #[tokio::test]
+    async fn test_local_comms_runtime_source_removal_is_cancellation_safe() {
+        let runtime = Arc::new(LocalCommsRuntime::new("local"));
+        let source_kind = GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection;
+        let public_key = [48u8; 32];
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "public-peer".to_string(),
+            PeerId::from_ed25519_pubkey(&public_key).to_string(),
+            public_key,
+            "inproc://public-peer",
+        )
+        .expect("valid public peer descriptor");
+        let peer_id = peer.peer_id.as_str().to_string();
+        runtime
+            .add_generated_trust_source(peer.clone(), source_kind, false)
+            .await
+            .expect("install generated trust row");
+
+        let descriptor_guard = runtime.trusted_descriptors.write().await;
+        let removal = {
+            let runtime = Arc::clone(&runtime);
+            let peer_id = peer_id.clone();
+            tokio::spawn(async move {
+                runtime
+                    .remove_generated_trust_source(&peer_id, source_kind)
+                    .await
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if tokio::time::timeout(Duration::from_millis(10), runtime.trusted.read())
+                .await
+                .is_err()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "removal should acquire the membership guard before waiting for descriptors"
+            );
+            tokio::task::yield_now().await;
+        }
+        removal.abort();
+        let _ = removal.await;
+        drop(descriptor_guard);
+
+        assert!(
+            runtime.trusted.read().await.contains_key(&peer_id),
+            "cancellation before all trust guards are acquired must leave membership intact"
+        );
+        assert!(
+            !runtime
+                .add_generated_trust_source(peer.clone(), source_kind, false)
+                .await
+                .expect("the retained row should remain idempotent"),
+            "cancellation must not leave an orphan descriptor that rejects the original row"
+        );
+        assert_eq!(
+            runtime
+                .trusted_peer_projection_snapshot_for_source(source_kind)
+                .await
+                .expect("read public source projection"),
+            vec![peer]
+        );
+    }
+
     #[test]
     fn mob_spawn_member_args_accept_canonical_external_runtime_binding() {
         let args = serde_json::from_value::<SpawnManyMeerkatsArgs>(json!({
@@ -5468,6 +5608,10 @@ mod tests {
         address: String,
         key: String,
         trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
+        trusted_descriptors: RwLock<
+            HashMap<String, HashMap<GeneratedCommsTrustAuthoritySourceKind, TrustedPeerDescriptor>>,
+        >,
+        private_trusted: RwLock<HashMap<String, BTreeSet<GeneratedCommsTrustAuthoritySourceKind>>>,
         mob_machine_trust_owner: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
         notify: Arc<Notify>,
     }
@@ -5545,6 +5689,8 @@ mod tests {
                 address: format!("inproc://{name}"),
                 key: super::encode_ed25519_public_key(&public_key_bytes),
                 trusted: RwLock::new(HashMap::new()),
+                trusted_descriptors: RwLock::new(HashMap::new()),
+                private_trusted: RwLock::new(HashMap::new()),
                 mob_machine_trust_owner: RwLock::new(None),
                 notify: Arc::new(Notify::new()),
             }
@@ -5561,6 +5707,79 @@ mod tests {
             authority
                 .validate_raw_source_owner_token(expected.as_ref())
                 .map_err(SendError::Validation)
+        }
+
+        async fn add_generated_trust_source(
+            &self,
+            peer: TrustedPeerDescriptor,
+            source_kind: GeneratedCommsTrustAuthoritySourceKind,
+            private: bool,
+        ) -> Result<bool, SendError> {
+            let peer_id = peer.peer_id.as_str().to_string();
+            let mut trusted = self.trusted.write().await;
+            let mut descriptors = self.trusted_descriptors.write().await;
+            let mut private_trusted = self.private_trusted.write().await;
+            let source_exists = trusted
+                .get(&peer_id)
+                .is_some_and(|sources| sources.contains(&source_kind));
+            let existing_descriptor = descriptors
+                .get(&peer_id)
+                .and_then(|by_source| by_source.get(&source_kind));
+            let private_source_exists = private_trusted
+                .get(&peer_id)
+                .is_some_and(|sources| sources.contains(&source_kind));
+            match (source_exists, existing_descriptor) {
+                (true, Some(existing)) if existing == &peer && private_source_exists == private => {
+                    return Ok(false);
+                }
+                (false, None) if !private_source_exists => {}
+                _ => {
+                    return Err(SendError::Validation(format!(
+                        "generated trust source {source_kind:?} for {peer_id} already owns different trust material"
+                    )));
+                }
+            }
+            descriptors
+                .entry(peer_id.clone())
+                .or_default()
+                .insert(source_kind, peer);
+            let created = trusted
+                .entry(peer_id.clone())
+                .or_default()
+                .insert(source_kind);
+            if private {
+                private_trusted
+                    .entry(peer_id)
+                    .or_default()
+                    .insert(source_kind);
+            }
+            Ok(created)
+        }
+
+        async fn remove_generated_trust_source(
+            &self,
+            peer_id: &str,
+            source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        ) -> bool {
+            let mut trusted = self.trusted.write().await;
+            let mut descriptors = self.trusted_descriptors.write().await;
+            let mut private_trusted = self.private_trusted.write().await;
+            if !remove_trust_source(&mut trusted, peer_id, source_kind) {
+                return false;
+            }
+            if let Some(by_source) = descriptors.get_mut(peer_id) {
+                by_source.remove(&source_kind);
+                if by_source.is_empty() {
+                    descriptors.remove(peer_id);
+                }
+            }
+            if let Some(sources) = private_trusted.get_mut(peer_id) {
+                sources.remove(&source_kind);
+                if sources.is_empty() {
+                    private_trusted.remove(peer_id);
+                }
+            }
+            true
         }
     }
 
@@ -5602,12 +5821,8 @@ mod tests {
                     )
                     .map_err(SendError::Validation)?;
                     let created = self
-                        .trusted
-                        .write()
-                        .await
-                        .entry(peer.peer_id.as_str().to_string())
-                        .or_default()
-                        .insert(authority.trust_row_owner_kind());
+                        .add_generated_trust_source(peer, authority.trust_row_owner_kind(), false)
+                        .await?;
                     Ok(CommsTrustMutationResult::Added { created })
                 }
                 CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
@@ -5617,12 +5832,9 @@ mod tests {
                     authority
                         .validate_public_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
-                    let mut trusted = self.trusted.write().await;
-                    let removed = remove_trust_source(
-                        &mut trusted,
-                        &peer_id,
-                        authority.trust_row_owner_kind(),
-                    );
+                    let removed = self
+                        .remove_generated_trust_source(&peer_id, authority.trust_row_owner_kind())
+                        .await;
                     Ok(CommsTrustMutationResult::Removed { removed })
                 }
                 CommsTrustMutation::AddPrivateTrustedPeer { peer, authority } => {
@@ -5635,7 +5847,10 @@ mod tests {
                         &peer.pubkey,
                     )
                     .map_err(SendError::Validation)?;
-                    Ok(CommsTrustMutationResult::Added { created: true })
+                    let created = self
+                        .add_generated_trust_source(peer, authority.trust_row_owner_kind(), true)
+                        .await?;
+                    Ok(CommsTrustMutationResult::Added { created })
                 }
                 CommsTrustMutation::RemovePrivateTrustedPeer { peer_id, authority } => {
                     self.validate_mob_trust_authority_owner(&authority).await?;
@@ -5644,9 +5859,34 @@ mod tests {
                     authority
                         .validate_private_remove(self.peer_id(), parsed_peer_id)
                         .map_err(SendError::Validation)?;
-                    Ok(CommsTrustMutationResult::Removed { removed: false })
+                    let removed = self
+                        .remove_generated_trust_source(&peer_id, authority.trust_row_owner_kind())
+                        .await;
+                    Ok(CommsTrustMutationResult::Removed { removed })
                 }
             }
+        }
+
+        async fn trusted_peer_projection_snapshot_for_source(
+            &self,
+            source_kind: GeneratedCommsTrustAuthoritySourceKind,
+        ) -> Result<Vec<TrustedPeerDescriptor>, CommsCapabilityError> {
+            let descriptors = self.trusted_descriptors.read().await;
+            let private_trusted = self.private_trusted.read().await;
+            let mut peers = descriptors
+                .iter()
+                .filter_map(|(peer_id, by_source)| {
+                    if private_trusted
+                        .get(peer_id)
+                        .is_some_and(|sources| sources.contains(&source_kind))
+                    {
+                        return None;
+                    }
+                    by_source.get(&source_kind).cloned()
+                })
+                .collect::<Vec<_>>();
+            peers.sort_by(|left, right| left.peer_id.as_str().cmp(&right.peer_id.as_str()));
+            Ok(peers)
         }
 
         async fn install_generated_mob_trust_owner(
@@ -5827,11 +6067,11 @@ mod tests {
             actor_witness_slot: &meerkat_session::LiveSessionActorWitnessSlot,
         ) -> Result<RunResult, SessionError> {
             let build = req.build;
-            let sid = build
+            let mut persisted_session = build
                 .as_ref()
-                .and_then(|build| build.resume_session.as_ref())
-                .map(|session| session.id().clone())
+                .and_then(|build| build.resume_session.clone())
                 .unwrap_or_default();
+            let sid = persisted_session.id().clone();
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
             let is_keep_alive = build
                 .as_ref()
@@ -5848,6 +6088,100 @@ mod tests {
                 .as_ref()
                 .and_then(|build| build.comms_name.clone())
                 .unwrap_or_else(|| format!("s-{n}"));
+            if persisted_session.session_metadata().is_none() {
+                persisted_session
+                    .set_session_metadata(SessionMetadata {
+                        schema_version: meerkat_core::session_metadata_schema_version(),
+                        model: req.model.clone(),
+                        max_tokens: req.max_tokens.unwrap_or(4096),
+                        structured_output_retries: build
+                            .as_ref()
+                            .and_then(|options| options.structured_output_retries)
+                            .unwrap_or_else(
+                                meerkat_core::config::default_structured_output_retries,
+                            ),
+                        provider: build
+                            .as_ref()
+                            .and_then(|options| options.provider)
+                            .unwrap_or(Provider::Anthropic),
+                        self_hosted_server_id: build
+                            .as_ref()
+                            .and_then(|options| options.self_hosted_server_id.clone()),
+                        provider_params: build
+                            .as_ref()
+                            .and_then(|options| options.provider_params.clone()),
+                        tooling: SessionTooling {
+                            builtins: build
+                                .as_ref()
+                                .map(|options| options.override_builtins)
+                                .unwrap_or_default(),
+                            shell: build
+                                .as_ref()
+                                .map(|options| options.override_shell)
+                                .unwrap_or_default(),
+                            comms: build
+                                .as_ref()
+                                .map(|options| options.override_comms)
+                                .unwrap_or_default(),
+                            mob: build
+                                .as_ref()
+                                .map(|options| options.override_mob)
+                                .unwrap_or_default(),
+                            memory: build
+                                .as_ref()
+                                .map(|options| options.override_memory)
+                                .unwrap_or_default(),
+                            schedule: build
+                                .as_ref()
+                                .map(|options| options.override_schedule)
+                                .unwrap_or_default(),
+                            workgraph: build
+                                .as_ref()
+                                .map(|options| options.override_workgraph)
+                                .unwrap_or_default(),
+                            image_generation: build
+                                .as_ref()
+                                .map(|options| options.override_image_generation)
+                                .unwrap_or_default(),
+                            web_search: build
+                                .as_ref()
+                                .map(|options| options.override_web_search)
+                                .unwrap_or_default(),
+                            tool_access_policy: build
+                                .as_ref()
+                                .and_then(|options| options.tool_access_policy.clone()),
+                            active_skills: build
+                                .as_ref()
+                                .and_then(|options| options.preload_skills.clone()),
+                        },
+                        keep_alive: is_keep_alive,
+                        comms_name: build
+                            .as_ref()
+                            .and_then(|options| options.comms_name.clone()),
+                        peer_meta: build.as_ref().and_then(|options| options.peer_meta.clone()),
+                        realm_id: build.as_ref().and_then(|options| options.realm_id.clone()),
+                        instance_id: build
+                            .as_ref()
+                            .and_then(|options| options.instance_id.clone()),
+                        backend: build.as_ref().and_then(|options| {
+                            options.backend.map(|kind| kind.as_str().to_string())
+                        }),
+                        config_generation: build
+                            .as_ref()
+                            .and_then(|options| options.config_generation),
+                        auth_binding: build
+                            .as_ref()
+                            .and_then(|options| options.auth_binding.clone()),
+                        mob_member_binding: build
+                            .as_ref()
+                            .and_then(|options| options.mob_member_binding.clone()),
+                    })
+                    .map_err(|error| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!("failed to seed mock persisted session metadata: {error}"),
+                        ))
+                    })?;
+            }
             let comms = Arc::new(MockComms::new(&name));
             let actor_witness = {
                 let mut sessions = self.sessions.write().await;
@@ -5875,6 +6209,10 @@ mod tests {
                 &actor_witness,
             )
             .await?;
+            self.persisted_sessions
+                .write()
+                .await
+                .insert(sid.clone(), persisted_session);
             if is_keep_alive {
                 self.keep_alive_notifiers
                     .write()
@@ -8543,6 +8881,14 @@ mod tests {
             "scheduled identity delivery failed: {terminal:?}"
         );
         assert_eq!(dispatch.correlation_id.as_deref(), Some("worker-1"));
+        let delivery_deadline = Instant::now() + Duration::from_secs(2);
+        while svc.start_turn_call_count() <= before_turns {
+            assert!(
+                Instant::now() < delivery_deadline,
+                "accepted scheduled delivery should reach the restored member session"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(
             svc.start_turn_call_count(),
             before_turns + 1,

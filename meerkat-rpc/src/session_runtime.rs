@@ -3192,10 +3192,11 @@ impl SessionRuntime {
         let Some(hook) = hook else {
             return;
         };
+        let released = hook.release.notified();
         hook.reached_flag
             .store(true, std::sync::atomic::Ordering::SeqCst);
         hook.reached.notify_waiters();
-        hook.release.notified().await;
+        released.await;
     }
 
     #[cfg(test)]
@@ -3371,7 +3372,7 @@ impl SessionRuntime {
         let runtime_adapter = Arc::clone(&self.runtime_adapter);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = match {
+            let materialize_result = {
                 let session = create_req
                     .build
                     .as_ref()
@@ -3412,7 +3413,8 @@ impl SessionRuntime {
                     }
                     Err(error) => Err(error),
                 }
-            } {
+            };
+            let result = match materialize_result {
                 Ok(_) => {
                     service
                         .apply_runtime_context_appends_with_boundary(

@@ -203,9 +203,7 @@ fn has_nonempty_ws_authority(url: &str) -> bool {
     if !matches!(scheme.to_ascii_lowercase().as_str(), "ws" | "wss") {
         return false;
     }
-    let authority_end = remainder
-        .find(|character| matches!(character, '/' | '?' | '#'))
-        .unwrap_or(remainder.len());
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
     authority_end > 0
 }
 

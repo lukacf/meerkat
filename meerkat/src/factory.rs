@@ -7537,11 +7537,23 @@ mod tests {
             origin: BindingOrigin::Configured,
         };
         let token_key = meerkat_core::auth::TokenKey::from_auth_binding(&auth_binding);
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let auth_lease_handle = runtime.generated_auth_lease_handle();
+        let tokens = meerkat_core::auth::PersistedTokens::api_key("sk-managed-preflight");
+        let transition = meerkat_core::publish_token_lifecycle_acquired(
+            &auth_lease_handle,
+            &auth_binding,
+            &tokens,
+        )
+        .expect("fixture AuthMachine must admit the managed credential lifecycle");
+        let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &token_key,
+            &tokens,
+            &transition,
+        )
+        .expect("fixture token must carry the durable lifecycle marker");
         token_store
-            .save(
-                &token_key,
-                &meerkat_core::auth::PersistedTokens::api_key("sk-managed-preflight"),
-            )
+            .save(&token_key, &committed_tokens)
             .await
             .unwrap();
 
@@ -7586,7 +7598,6 @@ mod tests {
             provider_params: None,
             auth_binding: Some(auth_binding),
         };
-        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
 
         factory
             .preflight_llm_identity(
@@ -7594,7 +7605,7 @@ mod tests {
                 &identity,
                 &BTreeMap::new(),
                 Some(&preferred_realm),
-                Some(runtime.generated_auth_lease_handle()),
+                Some(auth_lease_handle),
             )
             .await
             .expect(

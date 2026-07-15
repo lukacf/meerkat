@@ -1774,6 +1774,10 @@ mod tests {
                 !entry.has_live_attachment(),
                 "completed exact stop cleanup must leave no live executor"
             );
+            assert!(
+                matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty),
+                "completed exact stop cleanup must retire its attachment slot"
+            );
         }
 
         // Re-admit first, as the delivery path can do before its later local

@@ -360,16 +360,6 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
         visitor.visit_file(&parsed);
     }
 
-    if rel == "meerkat-runtime/src/runtime_loop.rs" {
-        let mut visitor = CalleeNameVisitor {
-            rel,
-            banned: &["stop_runtime_executor"],
-            label: "runtime_loop must not call executor stop_runtime_executor directly",
-            findings,
-        };
-        visitor.visit_file(&parsed);
-    }
-
     if rel == "meerkat-runtime/src/effect.rs" {
         audit_effect_module_visibility(rel, &parsed, findings);
     }
@@ -387,6 +377,16 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
     // Rules below operate on the production view: `#[cfg(test)]` items are
     // dropped structurally before the walk.
     strip_cfg_test_items(&mut parsed.items);
+
+    if rel == "meerkat-runtime/src/runtime_loop.rs" {
+        let mut visitor = CalleeNameVisitor {
+            rel,
+            banned: &["stop_runtime_executor"],
+            label: "runtime_loop must not call executor stop_runtime_executor directly",
+            findings,
+        };
+        visitor.visit_file(&parsed);
+    }
 
     // Phase 6 (§10.6) sanctions exactly one hard-cancel SENDER (the
     // provisioner's hard_cancel_member/hard_cancel_placed_member verbs) and
@@ -691,7 +691,7 @@ fn collect_core_executor_decorator_findings(root: &Path, findings: &mut Vec<Stri
         && !block_has_method_call_on_receiver(
             &method.block,
             "machine",
-            "unregister_terminalized_runtime_loop_if_current_with_guard",
+            "complete_terminalized_runtime_loop_cleanup_if_current_with_guard",
         )
     {
         findings.push(format!(

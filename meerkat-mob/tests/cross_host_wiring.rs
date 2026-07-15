@@ -29,12 +29,10 @@ use meerkat_core::{HandlingMode, SendReceipt};
 use meerkat_mob::MobError;
 use meerkat_mob::runtime::bridge_protocol::BridgeRejectionCause;
 use meerkat_mob::{AgentIdentity, MobEventKind, SpawnMemberSpec};
-#[cfg(feature = "test-support")]
-use support::spawn_scripted_member_turn_responder;
 use support::{
     ControllingMob, HostFixtureOptions, PeerCommsEndpoint, REAL_COMMS_TEST_LOCK, ScriptedHostPeer,
     create_controlling_mob, member_identity_of, send_peer_text, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint, spawn_scripted_host_peer,
+    spawn_peer_comms_endpoint, spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
 };
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -1251,6 +1249,7 @@ async fn placed_retirement_removes_only_surviving_placed_target_trust() {
         BridgeRejectionCause::Unavailable,
         "retiring runtime intentionally unavailable",
     );
+    let b2_responder = spawn_scripted_member_turn_responder(Arc::clone(&b2));
     controlling
         .handle
         .retire(identity("b2"))
@@ -1282,6 +1281,7 @@ async fn placed_retirement_removes_only_surviving_placed_target_trust() {
         "retired b2 must no longer be admitted by c3",
     )
     .await;
+    b2_responder.shutdown();
     scripted.shutdown();
 }
 
@@ -1320,6 +1320,7 @@ async fn placed_retirement_unwire_failure_retains_non_routable_retry_anchor() {
         BridgeRejectionCause::Unavailable,
         "injected survivor remove failure",
     );
+    let b2_responder = spawn_scripted_member_turn_responder(Arc::clone(&b2));
     let unwire_error = controlling
         .handle
         .retire(identity("b2"))
@@ -1407,5 +1408,6 @@ async fn placed_retirement_unwire_failure_retains_non_routable_retry_anchor() {
             .is_none(),
         "retry completes terminal removal"
     );
+    b2_responder.shutdown();
     scripted.shutdown();
 }

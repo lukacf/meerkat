@@ -5586,7 +5586,7 @@ async fn concurrent_unregister_callers_join_original_drain_result() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.apply_started.notify_waiters();
+            self.apply_started.notify_one();
             self.allow_finish
                 .take()
                 .expect("blocking executor should only apply once")
@@ -5640,7 +5640,7 @@ async fn concurrent_unregister_callers_join_original_drain_result() {
         .accept_input(&session_id, make_prompt("block unregister drain"))
         .await
         .expect("prompt should start attached runtime");
-    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
         .await
         .expect("runtime should enter blocking apply");
 
@@ -6148,7 +6148,7 @@ async fn concurrent_unregister_retry_does_not_commit_feedback_until_original_dra
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.apply_started.notify_waiters();
+            self.apply_started.notify_one();
             self.allow_finish
                 .take()
                 .expect("blocking executor should only apply once")
@@ -8594,8 +8594,9 @@ async fn retire_recaptures_wake_sender_after_pending_attachment_commits() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let allowed_to_finish = self.allow_finish.notified();
             self.apply_started.notify_one();
-            self.allow_finish.notified().await;
+            allowed_to_finish.await;
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
@@ -9842,9 +9843,10 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -10017,9 +10019,10 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -10082,13 +10085,15 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
     registry
         .register_operation(OperationSpec {
             id: operation_id.clone(),
-            kind: OperationKind::BackgroundToolOp,
+            // Isolate completion-vs-wait_all ordering from the independent
+            // detached background-operation wake path.
+            kind: OperationKind::MobMemberChild,
             owner_session_id: session_id.clone(),
             display_name: "attached steered wait target".into(),
             source_label: "meerkat_machine_test".into(),
             operation_source: None,
             child_session_id: None,
-            expect_peer_channel: false,
+            expect_peer_channel: true,
         })
         .expect("operation should register");
     registry
@@ -10275,9 +10280,10 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -10544,9 +10550,10 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -11113,9 +11120,10 @@ async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_app
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -11420,9 +11428,10 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -11494,7 +11503,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
     let completion_handle =
         completion_handle.expect("attached steered prompt should expose a completion waiter");
 
-    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
         .await
         .expect("attached steered prompt should request immediate processing");
 
@@ -11791,7 +11800,7 @@ mod stop_teardown_coordinator_class {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             if let Some((started, release)) = &self.block_apply {
-                started.notify_waiters();
+                started.notify_one();
                 release.notified().await;
             }
             Ok(CoreApplyOutput {
@@ -13327,7 +13336,7 @@ mod stop_under_gate_deadlock_class {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             if let Some((started, release)) = &self.block_apply {
-                started.notify_waiters();
+                started.notify_one();
                 release.notified().await;
             }
             Ok(CoreApplyOutput {
@@ -13643,6 +13652,39 @@ mod stop_under_gate_deadlock_class {
             "stop with machine-re-entrant cleanup must complete: a hang means a stop path \
              ran executor cleanup while holding the session mutation gate",
         );
+    }
+
+    #[tokio::test]
+    async fn exact_terminal_registration_cleanup_accepts_completed_stop_residue() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_ran = Arc::new(AtomicUsize::new(0));
+        register(&machine, &session_id, &cleanup_ran, None, false).await;
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("machine-managed runtime must expose its exact registration");
+
+        machine
+            .stop_runtime_executor(&session_id, "exact terminal registration cleanup")
+            .await
+            .expect("ordinary stop must converge before exact disposal");
+        assert_eq!(cleanup_ran.load(Ordering::SeqCst), 1);
+        assert!(
+            machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "completed stop residue must not remain a serving attachment"
+        );
+
+        assert!(
+            machine
+                .unregister_terminal_session_registration_if_current(&registration)
+                .await
+                .expect("exact terminal cleanup must consume completed stop residue")
+        );
+        assert!(!machine.contains_session(&session_id).await);
     }
 
     /// Path 2: stop requested while a turn is mid-apply (stop effect drained
@@ -14167,8 +14209,9 @@ async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispat
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
@@ -14224,7 +14267,7 @@ async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispat
         .expect("prompt should be accepted");
     assert!(outcome.is_accepted());
     let completion = completion.expect("prompt should register completion");
-    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
         .await
         .expect("turn should start running");
 
@@ -14262,7 +14305,7 @@ async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispat
         .expect("second prompt should be accepted");
     assert!(outcome.is_accepted());
     let completion = completion.expect("second prompt should register completion");
-    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
         .await
         .expect("second turn should start running");
 
@@ -14394,9 +14437,9 @@ async fn cancel_after_boundary_callback_failure_after_unrelated_advance_rearms_r
 }
 
 /// Destroy may commit while the live embedder callback is outside the
-/// session mutation gate. That lifecycle advance converges the cancellation,
-/// but the exact pending dispatch generation must still be cleared from the
-/// captured authority without trying to enqueue into the destroyed runtime.
+/// session mutation gate. The old callback must surface stale authority, and
+/// its exact pending dispatch generation must still be cleared without trying
+/// to enqueue into the destroyed runtime.
 #[tokio::test]
 async fn cancel_after_boundary_destroy_during_callback_clears_exact_dispatch() {
     let mut race = start_boundary_cancel_callback_race(false).await;
@@ -14442,11 +14485,17 @@ async fn cancel_after_boundary_destroy_during_callback_clears_exact_dispatch() {
         .expect("race should expose its callback release")
         .send(())
         .expect("live callback should still be waiting");
-    tokio::time::timeout(Duration::from_secs(1), cancel)
+    let cancel_result = tokio::time::timeout(Duration::from_secs(1), cancel)
         .await
         .expect("cancel should return after callback release")
-        .expect("cancel task should not panic")
-        .expect("destroyed lifecycle advance should converge cancellation");
+        .expect("cancel task should not panic");
+    assert!(
+        matches!(
+            cancel_result,
+            Err(RuntimeDriverError::StaleAuthority { .. })
+        ),
+        "destroyed attachment must fence the callback result: {cancel_result:?}"
+    );
 
     let destroyed_after_callback = race
         .adapter
@@ -14674,7 +14723,7 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.apply_started.notify_waiters();
+            self.apply_started.notify_one();
             self.allow_finish
                 .take()
                 .expect("blocking executor should only apply once")
@@ -14748,7 +14797,7 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
     let completion_handle =
         completion_handle.expect("attached steered prompt should expose a completion waiter");
 
-    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
         .await
         .expect("attached steered prompt should request immediate processing");
 
@@ -14835,7 +14884,7 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
                     .lock()
                     .expect("events mutex poisoned")
                     .push("apply1_start");
-                self.first_apply_started.notify_waiters();
+                self.first_apply_started.notify_one();
                 self.allow_first_finish.notified().await;
                 self.events
                     .lock()
@@ -14921,7 +14970,7 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
     let completion_handle =
         completion_handle.expect("attached steered prompt should expose a completion waiter");
 
-    tokio::time::timeout(Duration::from_secs(1), first_apply_started.notified())
+    tokio::time::timeout(Duration::from_secs(5), first_apply_started.notified())
         .await
         .expect("attached steered prompt should request immediate processing");
 
@@ -15116,8 +15165,9 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
@@ -15370,8 +15420,9 @@ impl CoreExecutor for InterruptYieldingBlockingExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
-        self.apply_started.notify_waiters();
-        self.allow_finish.notified().await;
+        let allowed_to_finish = self.allow_finish.notified();
+        self.apply_started.notify_one();
+        allowed_to_finish.await;
         Ok(CoreApplyOutput {
             receipt: RunBoundaryReceiptDraft {
                 run_id,
@@ -15461,7 +15512,7 @@ impl InterruptYieldingTestRig {
             .expect("initial steer prompt should be accepted");
         assert!(outcome.is_accepted());
 
-        tokio::time::timeout(Duration::from_secs(1), self.apply_started.notified())
+        tokio::time::timeout(Duration::from_secs(5), self.apply_started.notified())
             .await
             .expect("first apply should start");
     }
@@ -15775,17 +15826,17 @@ async fn assert_boundary_failure_terminalizes_exact_input(result: BoundaryPrepar
         Some(crate::input_state::InputLifecycleState::Abandoned)
     );
     assert!(
-        during_busy
+        !during_busy
             .completion_waiters
             .waiting_inputs
             .iter()
             .any(|waiting| waiting.input_id == peer_id),
-        "completion publication must remain deferred while the active runtime loop owns B"
+        "failed exact input completion should resolve independently of the unrelated active turn"
     );
+    rig.wait_until_completion_is_resolved(&peer_id).await;
 
     rig.allow_finish.notify_waiters();
     rig.wait_until_attached_and_empty().await;
-    rig.wait_until_completion_is_resolved(&peer_id).await;
     assert_eq!(
         rig.apply_calls.load(Ordering::SeqCst),
         1,
@@ -15822,9 +15873,10 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -16600,8 +16652,9 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -16748,9 +16801,10 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -16939,9 +16993,10 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -18215,9 +18270,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -18289,13 +18345,15 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
     registry
         .register_operation(OperationSpec {
             id: operation_id.clone(),
-            kind: OperationKind::BackgroundToolOp,
+            // Keep the wait_all snapshot proof independent of detached-op
+            // wake injection, which may legally enqueue fresh steer work.
+            kind: OperationKind::MobMemberChild,
             owner_session_id: session_id.clone(),
             display_name: "recover wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
             operation_source: None,
             child_session_id: None,
-            expect_peer_channel: false,
+            expect_peer_channel: true,
         })
         .expect("operation should register");
     registry
@@ -18496,9 +18554,10 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -18571,13 +18630,15 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
     registry
         .register_operation(OperationSpec {
             id: operation_id.clone(),
-            kind: OperationKind::BackgroundToolOp,
+            // Keep the wait_all snapshot proof independent of detached-op
+            // wake injection, which may legally enqueue fresh steer work.
+            kind: OperationKind::MobMemberChild,
             owner_session_id: session_id.clone(),
             display_name: "recover split wait target".into(),
             source_label: "meerkat_machine_test".into(),
             operation_source: None,
             child_session_id: None,
-            expect_peer_channel: false,
+            expect_peer_channel: true,
         })
         .expect("operation should register");
     registry
@@ -18786,9 +18847,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -18860,13 +18922,15 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
     registry
         .register_operation(OperationSpec {
             id: operation_id.clone(),
-            kind: OperationKind::BackgroundToolOp,
+            // Keep the wait_all snapshot proof independent of detached-op
+            // wake injection, which may legally enqueue fresh steer work.
+            kind: OperationKind::MobMemberChild,
             owner_session_id: session_id.clone(),
             display_name: "recycle wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
             operation_source: None,
             child_session_id: None,
-            expect_peer_channel: false,
+            expect_peer_channel: true,
         })
         .expect("operation should register");
     registry
@@ -19038,9 +19102,10 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -19113,13 +19178,16 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
     registry
         .register_operation(OperationSpec {
             id: operation_id.clone(),
-            kind: OperationKind::BackgroundToolOp,
+            // Isolate recycle/completion-waiter lifetime from the independent
+            // detached background-operation wake path. That path may legally
+            // enqueue a fresh steer continuation as soon as the op completes.
+            kind: OperationKind::MobMemberChild,
             owner_session_id: session_id.clone(),
             display_name: "recycle split wait target".into(),
             source_label: "meerkat_machine_test".into(),
             operation_source: None,
             child_session_id: None,
-            expect_peer_channel: false,
+            expect_peer_channel: true,
         })
         .expect("operation should register");
     registry
@@ -19832,13 +19900,15 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
     registry
         .register_operation(OperationSpec {
             id: operation_id.clone(),
-            kind: OperationKind::BackgroundToolOp,
+            // Keep this wait-lifetime proof independent of detached-wake
+            // injection by using a non-waking operation class.
+            kind: OperationKind::MobMemberChild,
             owner_session_id: session_id.clone(),
             display_name: "reset wait target with loop".into(),
             source_label: "meerkat_machine_test".into(),
             operation_source: None,
             child_session_id: None,
-            expect_peer_channel: false,
+            expect_peer_channel: true,
         })
         .expect("operation should register");
     registry
@@ -20054,13 +20124,15 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
     registry
         .register_operation(OperationSpec {
             id: operation_id.clone(),
-            kind: OperationKind::BackgroundToolOp,
+            // Keep this wait-lifetime proof independent of detached-wake
+            // injection by using a non-waking operation class.
+            kind: OperationKind::MobMemberChild,
             owner_session_id: session_id.clone(),
             display_name: "reset split-lifetime wait target".into(),
             source_label: "meerkat_machine_test".into(),
             operation_source: None,
             child_session_id: None,
-            expect_peer_channel: false,
+            expect_peer_channel: true,
         })
         .expect("operation should register");
     registry
@@ -22221,9 +22293,10 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -22384,7 +22457,14 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
                 .meerkat_machine_spine_snapshot(&session_id)
                 .await
                 .expect("snapshot should exist after attached-loop drain");
-            if snapshot.control.phase == RuntimeState::Retired {
+            // `Running + pre_run(Retired)` is deliberately projected as
+            // Retired while the attached loop drains. The executor's
+            // `apply_finished` notification fires before the machine commits
+            // that run terminal, so phase alone is not a quiescence witness.
+            if snapshot.control.phase == RuntimeState::Retired
+                && snapshot.control.current_run_id.is_none()
+                && snapshot.inputs.current_run_id.is_none()
+            {
                 break snapshot;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -22483,9 +22563,10 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
-            self.apply_finished.notify_waiters();
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
+            self.apply_finished.notify_one();
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
@@ -30260,7 +30341,7 @@ async fn retained_publication_callback_panic_keeps_runtime_non_serving_and_resid
 #[tokio::test]
 async fn retained_serving_release_failure_runs_callback_before_residency_rollback() {
     let (machine, session_id, mut publication) = retained_publication_rollback_fixture().await;
-    machine
+    let serving_hold = machine
         .test_fail_next_attachment_serving_release(&session_id)
         .await
         .expect("arm retained serving-release failure");
@@ -30291,6 +30372,7 @@ async fn retained_serving_release_failure_runs_callback_before_residency_rollbac
             .is_none(),
         "failed serving release must not publish an attached witness"
     );
+    drop(serving_hold);
     assert!(
         publication
             .abort_under_runtime_turn_finalization_boundary()
@@ -30327,7 +30409,7 @@ async fn ordinary_serving_release_failure_allows_synchronous_callback_rollback_u
             panic!("fresh ordinary rollback fixture unexpectedly found {witness:?}")
         }
     };
-    machine
+    let serving_hold = machine
         .test_fail_next_attachment_serving_release(&session_id)
         .await
         .expect("arm ordinary serving-release failure");
@@ -30354,6 +30436,7 @@ async fn ordinary_serving_release_failure_allows_synchronous_callback_rollback_u
             .await
             .is_none()
     );
+    drop(serving_hold);
     pending
         .abort_under_runtime_turn_finalization_boundary()
         .await
@@ -31544,7 +31627,7 @@ async fn stale_unserved_teardown_slot_cannot_unregister_same_epoch_attachment() 
 }
 
 #[tokio::test]
-async fn cancelled_executor_setup_before_atomic_claim_preserves_authority_and_retries() {
+async fn cancelled_executor_setup_caller_leaves_process_owned_claim_to_commit() {
     struct NoopExecutor;
 
     #[async_trait::async_trait]
@@ -31598,10 +31681,10 @@ async fn cancelled_executor_setup_before_atomic_claim_preserves_authority_and_re
         (entry.driver.clone(), Arc::clone(&entry.mutation_gate))
     };
 
-    // All awaitable setup happens before the generated claim. Hold the driver
-    // lock to park setup while the session mutation gate is owned, then prove
-    // a synchronous session handle can still advance unrelated authority and
-    // caller cancellation leaves both facts intact.
+    // Hold the driver lock to park setup while the session mutation gate is
+    // owned, then prove a synchronous session handle can still advance
+    // unrelated authority. The ensure saga is process-owned, so cancelling
+    // only the surface waiter must not roll its attachment claim back.
     let driver_guard = driver.lock().await;
     let registration = {
         let adapter = Arc::clone(&adapter);
@@ -31614,7 +31697,14 @@ async fn cancelled_executor_setup_before_atomic_claim_preserves_authority_and_re
     };
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if Arc::clone(&mutation_gate).try_lock_owned().is_err() {
+            let claim_is_staged = adapter
+                .session_dsl_state(&session_id)
+                .await
+                .is_ok_and(|state| {
+                    state.lifecycle_phase == mm_dsl::MeerkatPhase::Attached
+                        && state.registration_phase == mm_dsl::RegistrationPhase::Active
+                });
+            if claim_is_staged && Arc::clone(&mutation_gate).try_lock_owned().is_err() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -31634,12 +31724,19 @@ async fn cancelled_executor_setup_before_atomic_claim_preserves_authority_and_re
         .session_dsl_state(&session_id)
         .await
         .expect("pending session authority");
-    assert_eq!(pending.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+    assert_eq!(pending.lifecycle_phase, mm_dsl::MeerkatPhase::Attached);
     assert_eq!(
         pending.registration_phase,
-        mm_dsl::RegistrationPhase::Queuing
+        mm_dsl::RegistrationPhase::Active
     );
     assert_eq!(pending.last_session_context_updated_at_ms, 77);
+    assert!(
+        adapter
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .is_none(),
+        "the process-owned claim must remain mechanically Pending while the driver lock is held"
+    );
 
     registration.abort();
     assert!(
@@ -31650,14 +31747,27 @@ async fn cancelled_executor_setup_before_atomic_claim_preserves_authority_and_re
     );
     drop(driver_guard);
 
+    let committed_witness = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(witness) = adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+            {
+                break witness;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("process-owned ensure saga should publish its exact attachment");
     let preserved = adapter
         .session_dsl_state(&session_id)
         .await
-        .expect("preserved session authority");
-    assert_eq!(preserved.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+        .expect("committed session authority");
+    assert_eq!(preserved.lifecycle_phase, mm_dsl::MeerkatPhase::Attached);
     assert_eq!(
         preserved.registration_phase,
-        mm_dsl::RegistrationPhase::Queuing
+        mm_dsl::RegistrationPhase::Active
     );
     assert_eq!(preserved.last_session_context_updated_at_ms, 77);
     {
@@ -31665,24 +31775,26 @@ async fn cancelled_executor_setup_before_atomic_claim_preserves_authority_and_re
         let entry = sessions
             .get(&session_id)
             .expect("session remains registered");
-        assert_eq!(entry.control_snapshot().phase, RuntimeState::Idle);
-        assert!(!entry.has_live_attachment());
+        assert_eq!(entry.control_snapshot().phase, RuntimeState::Attached);
+        assert!(entry.has_live_attachment());
     }
     assert!(
-        !adapter
+        adapter
             .session_has_executor(&session_id)
             .await
-            .expect("rolled-back executor query")
+            .expect("committed executor query")
     );
 
-    adapter
-        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await
-        .expect("a fresh executor claim must succeed after cancellation rollback");
+    assert!(
+        adapter
+            .unregister_executor_attachment_if_current(&committed_witness)
+            .await
+            .expect("exact process-owned attachment should unregister")
+    );
     adapter
         .unregister_session(&session_id)
         .await
-        .expect("retried session should unregister cleanly");
+        .expect("session should unregister cleanly");
 }
 
 #[tokio::test]
@@ -31785,6 +31897,7 @@ async fn cancelled_ensure_caller_preserves_queued_input_on_committed_exact_attac
         reconciliation_started: Arc<Notify>,
         allow_reconciliation: Arc<Notify>,
         apply_started: Arc<Notify>,
+        reconciliation_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -31812,8 +31925,10 @@ async fn cancelled_ensure_caller_preserves_queued_input_on_committed_exact_attac
             &mut self,
             _intents: &[meerkat_core::CompactionProjectionIntent],
         ) -> Result<(), CoreExecutorError> {
-            self.reconciliation_started.notify_one();
-            self.allow_reconciliation.notified().await;
+            if self.reconciliation_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.reconciliation_started.notify_one();
+                self.allow_reconciliation.notified().await;
+            }
             Ok(())
         }
 
@@ -31837,6 +31952,7 @@ async fn cancelled_ensure_caller_preserves_queued_input_on_committed_exact_attac
     let reconciliation_started = Arc::new(Notify::new());
     let allow_reconciliation = Arc::new(Notify::new());
     let apply_started = Arc::new(Notify::new());
+    let reconciliation_calls = Arc::new(AtomicUsize::new(0));
     machine
         .register_session(session_id.clone())
         .await
@@ -31858,6 +31974,7 @@ async fn cancelled_ensure_caller_preserves_queued_input_on_committed_exact_attac
         let reconciliation_started = Arc::clone(&reconciliation_started);
         let allow_reconciliation = Arc::clone(&allow_reconciliation);
         let apply_started = Arc::clone(&apply_started);
+        let reconciliation_calls = Arc::clone(&reconciliation_calls);
         tokio::spawn(async move {
             machine
                 .ensure_session_with_executor(
@@ -31866,6 +31983,7 @@ async fn cancelled_ensure_caller_preserves_queued_input_on_committed_exact_attac
                         reconciliation_started,
                         allow_reconciliation,
                         apply_started,
+                        reconciliation_calls,
                     }),
                 )
                 .await
@@ -32933,8 +33051,9 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceiptDraft {
                     run_id,
@@ -33775,8 +33894,9 @@ impl CoreExecutor for RuntimeParityBlockingExecutor {
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         if self.block_first_apply {
             self.block_first_apply = false;
-            self.apply_started.notify_waiters();
-            self.allow_finish.notified().await;
+            let allowed_to_finish = self.allow_finish.notified();
+            self.apply_started.notify_one();
+            allowed_to_finish.await;
         }
         Ok(CoreApplyOutput {
             receipt: RunBoundaryReceiptDraft {
@@ -35442,7 +35562,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
             ("input_id", runtime_modeled_input_id_value()),
             ("request_immediate_processing", KernelValue::Bool(false)),
             ("interrupt_yielding", KernelValue::Bool(false)),
-            ("wake_if_idle", KernelValue::Bool(false)),
+            ("wake_if_idle", KernelValue::Bool(true)),
         ],
     );
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);

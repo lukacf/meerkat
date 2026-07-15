@@ -249,11 +249,12 @@ async fn empty_same_session_resume_page_advances_real_pump_to_resolved_floor() {
             .to_string();
 
     // Seed the member host with a durable session that already owns event
-    // rows, but has never belonged to the controlling mob. The placed spawn
-    // below is therefore the production `Resume` path itself: it quiesces
-    // this live session, captures `latest + 1` as the generation floor, and
-    // rebuilds the exact persisted identity without abusing mob retirement
-    // (which intentionally archives its session).
+    // rows, but has never belonged to the controlling mob. Its generic
+    // surface attachment has no host-materializer sidecar and therefore may
+    // not be adopted by SessionId. Quiesce it through its exact machine owner
+    // first; the placed spawn below then exercises the production explicit
+    // `Resume` path over persisted-only state, captures `latest + 1` as the
+    // generation floor, and rebuilds the exact durable identity.
     let member_service = fixture
         .member_concrete_service
         .as_ref()
@@ -300,6 +301,10 @@ async fn empty_same_session_resume_page_advances_real_pump_to_resolved_floor() {
         .await
         .expect("read seeded session durable watermark")
         .expect("the seeded turn populated the durable log");
+    runtime_adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("quiesce generic seed attachment before host-owned explicit resume");
 
     let report = controlling.bind_fixture(&fixture).await;
 
@@ -586,7 +591,12 @@ async fn long_poll_does_not_block_lifecycle_commands() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_cursor_on_ephemeral_overrun() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
-    let mut opts = HostFixtureOptions::named("xhe-t6-host-b").ephemeral();
+    const RING_CAPACITY: usize = 16;
+    let mut opts = HostFixtureOptions::named("xhe-t6-host-b")
+        .ephemeral()
+        .with_event_ring_capacity(
+            std::num::NonZeroUsize::new(RING_CAPACITY).expect("non-zero test ring capacity"),
+        );
     opts.member_llm_client = Some(scripted_member_client_completing("t6-done"));
     let fixture = spawn_host_daemon_fixture(opts)
         .await
@@ -601,7 +611,7 @@ async fn stale_cursor_on_ephemeral_overrun() {
         member_incarnation_from_ack(&fixture, &mob_id, "ring-member", &ack, 1, 1, 1);
     probe.trust(member.clone()).await;
 
-    // Overrun the 1024-row ring: drive plain (undirected) turns until the
+    // Overrun the bounded ring: drive plain (undirected) turns until the
     // served watermark passes the ring capacity. Directive-bearing turns are
     // machine-rejected for ephemeral hosts (cross-checked in U-3), so this
     // member is events-only by construction.
@@ -609,7 +619,7 @@ async fn stale_cursor_on_ephemeral_overrun() {
     let mut generation = 1u64;
     // Cap generously: the loop breaks as soon as the watermark passes the
     // ring capacity; per-turn event volume is a fixture detail.
-    for turn in 0..1_500u32 {
+    for turn in 0..128u32 {
         let command = raw_deliver_member_input_command(
             &probe,
             &mob_id,
@@ -627,7 +637,7 @@ async fn stale_cursor_on_ephemeral_overrun() {
             "undirected delivery admits on the ephemeral host: {reply:?}"
         );
 
-        if turn % 25 == 24 {
+        if turn % 4 == 3 {
             // Read the current watermark through a Tail poll.
             let poll = raw_poll_member_events_command(
                 &probe,
@@ -646,13 +656,13 @@ async fn stale_cursor_on_ephemeral_overrun() {
                 watermark = page.watermark;
                 generation = page.generation;
             }
-            if watermark > 1_100 {
+            if watermark > (RING_CAPACITY as u64 * 2) {
                 break;
             }
         }
     }
     assert!(
-        watermark > 1_024,
+        watermark > RING_CAPACITY as u64,
         "the ring must overrun its capacity for this row (watermark={watermark})"
     );
 
@@ -683,7 +693,7 @@ async fn stale_cursor_on_ephemeral_overrun() {
         other => panic!("expected typed StaleCursor rejection, got {other:?}"),
     };
     assert!(
-        served_watermark >= 1_024,
+        served_watermark >= RING_CAPACITY as u64,
         "watermark reflects the ring head"
     );
     assert_eq!(served_generation, generation);

@@ -25,6 +25,7 @@ use std::sync::RwLock as StdRwLock;
 use std::sync::{Mutex as StdMutex, OnceLock, Weak};
 
 use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::time_compat::Instant;
 use meerkat_core::tool_scope::ToolScopeTurnOverlay;
 use meerkat_core::types::SessionId;
 use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
@@ -2341,8 +2342,7 @@ impl PendingRuntimeExecutorAttachment {
                 // after M is released. Failure leaves the exact outbox for a
                 // later attachment's ordinary startup recovery.
                 let _terminal_publication = self.cleanup_spawner.spawn(async move {
-                    let deadline = crate::tokio::time::Instant::now()
-                        + std::time::Duration::from_secs(5);
+                    let deadline = Instant::now() + std::time::Duration::from_secs(5);
                     if let Err(error) = crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
                         &driver,
                         None,
@@ -4552,10 +4552,6 @@ impl MeerkatMachine {
             )
             .await;
 
-        if let Err(error) = live_dispatch_result {
-            return Err(error);
-        }
-
         // Reserve bounded-channel capacity without M. A wedged executor may
         // delay this process-owned transaction, but it cannot retain the
         // session mutation authority or block teardown/replacement.
@@ -4565,7 +4561,9 @@ impl MeerkatMachine {
             &dispatch_lifecycle_phase,
             expected_run_id,
         );
-        let effect_permit = if pre_reserve_state == BoundaryCancelDispatchState::Current {
+        let effect_permit = if live_dispatch_result.is_ok()
+            && pre_reserve_state == BoundaryCancelDispatchState::Current
+        {
             Some(witness.effect_tx.clone().reserve_owned().await)
         } else {
             None
@@ -4619,6 +4617,15 @@ impl MeerkatMachine {
                 &member_authority.lease,
                 member_authority.expected_member.as_ref(),
             )?;
+        }
+
+        // Callback failure is meaningful only while the captured attachment
+        // remains current. If replacement B won while A's callback was
+        // outside M, the exact checks above return StaleAuthority first so A's
+        // result cannot be mistaken for B's or trigger a caller-side retry on
+        // B under the old request.
+        if let Err(error) = live_dispatch_result {
+            return Err(error);
         }
 
         // The live turn may have crossed its boundary while M was released.

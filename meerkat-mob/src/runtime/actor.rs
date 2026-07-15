@@ -1274,41 +1274,75 @@ impl BatchWiringEndpoint {
     }
 }
 
-/// Controlling-side reverse-lane acceptor composition (ADJ-P4-2): ONE
-/// phase-2 `HostAcceptor` demux per controlling mob runtime, lazily bound
-/// when the first cross-host lane needs a local member reachable from a
-/// member host. Registry mutations are owner-gated by the mob's generated
-/// DSL authority owner token and happen only while realizing machine-emitted
-/// route-install effects (the machine-effect-witnessed registry discipline).
+/// Per-mob registration view into the process-scoped controlling acceptor.
+/// The shared config owns the single D1 listener; this state remembers only
+/// identities registered by this actor so unwire/shutdown cannot remove a
+/// different mob's rows.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct ControllingAcceptorState {
     config: super::builder::ControllingAcceptorConfig,
-    live: Option<ControllingAcceptorLive>,
+    registered: BTreeMap<String, super::builder::ControllingAcceptorRegistrationLease>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ControllingAcceptorState {
     pub(super) fn new(config: super::builder::ControllingAcceptorConfig) -> Self {
-        Self { config, live: None }
-    }
-
-    /// Stop the accept loop when the actor's run loop exits (Drop of the
-    /// task handle alone would leak a detached listener task).
-    pub(super) async fn shutdown(self) {
-        if let Some(live) = self.live {
-            live.handle.shutdown().await;
+        Self {
+            config,
+            registered: BTreeMap::new(),
         }
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-struct ControllingAcceptorLive {
-    registry: Arc<meerkat_comms::HostAcceptorIdentityRegistry>,
-    advertised_address: String,
-    handle: meerkat_comms::HostAcceptorHandle,
-    /// Pubkeys registered by THIS mob runtime (idempotency + unwire
-    /// deregistration bookkeeping; the registry itself stays owner-gated).
-    registered: BTreeSet<String>,
+    /// Publish current session material and retain the exact lease owned by
+    /// this actor. This deliberately does not treat durable pubkey presence as
+    /// idempotency: session revival preserves the key while replacing inbox.
+    pub(super) async fn refresh_registration(
+        &mut self,
+        logical_owner: String,
+        registration: super::builder::MemberAcceptorRegistration,
+    ) -> Result<String, MobError> {
+        let pubkey_string = registration.pubkey.to_pubkey_string();
+        let lease = self.config.register(logical_owner, registration).await?;
+        let advertised = lease.advertised_address.clone();
+        self.registered.insert(pubkey_string, lease);
+        Ok(advertised)
+    }
+
+    /// Remove this actor's exact registration lease for `pubkey`. If the
+    /// process registry has already advanced to a replacement lease, the
+    /// shared compare-remove is a no-op. Retain the actor lease when removal
+    /// itself fails so lifecycle retry can redrive the same cleanup.
+    pub(super) async fn remove_registration(
+        &mut self,
+        pubkey: &meerkat_comms::PubKey,
+    ) -> Result<(), MobError> {
+        let pubkey_string = pubkey.to_pubkey_string();
+        let Some(lease) = self.registered.remove(&pubkey_string) else {
+            return Ok(());
+        };
+        if let Err(error) = self.config.remove(&lease).await {
+            self.registered.insert(pubkey_string, lease);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn registration_token(&self, pubkey: &str) -> Option<Arc<()>> {
+        self.registered
+            .get(pubkey)
+            .map(|lease| Arc::clone(&lease.token))
+    }
+
+    /// Remove this actor's projections. The process-level listener remains
+    /// live for sibling mobs that share the same config.
+    pub(super) async fn shutdown(self) {
+        for lease in self.registered.into_values() {
+            if let Err(error) = self.config.remove(&lease).await {
+                tracing::warn!(%error, "failed to remove controlling acceptor row at mob shutdown");
+            }
+        }
+    }
 }
 
 struct PeerMessageDeliveryPlan {
@@ -1626,6 +1660,44 @@ fn existing_placed_kickoff_structural_carrier(
         }
     }
     Ok(exact_match)
+}
+
+fn exact_structural_batch_present(
+    events: &[MobEvent],
+    mob_id: &MobId,
+    desired: &[MobEventKind],
+) -> Result<bool, MobError> {
+    let Some(structural_head) = desired.first() else {
+        return Ok(true);
+    };
+    let mob_events = events
+        .iter()
+        .filter(|event| &event.mob_id == mob_id)
+        .collect::<Vec<_>>();
+    let epoch_start = mob_events
+        .iter()
+        .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+        .map_or(0, |index| index + 1);
+    let epoch = &mob_events[epoch_start..];
+    if epoch
+        .windows(desired.len())
+        .any(|window| window.iter().map(|event| &event.kind).eq(desired.iter()))
+    {
+        return Ok(true);
+    }
+
+    // The first event is the correlation-scoped structural carrier. Its
+    // presence without the exact following batch proves a partial or
+    // conflicting write. Trailing projection events are deliberately not
+    // unique: cancellation can first persist `MemberKickoffUpdated(Cancelled)`
+    // and later pair that same projection with the authenticated host outcome.
+    if epoch.iter().any(|event| &event.kind == structural_head) {
+        return Err(MobError::Internal(
+            "durable structural batch is partial or out of order in the current mob epoch"
+                .to_string(),
+        ));
+    }
+    Ok(false)
 }
 
 struct BatchWireTrustApplication {
@@ -3673,9 +3745,9 @@ pub(super) struct MobActor {
     /// one must expose only channel closure so an undurable abandonment is
     /// never laundered into a definitive respawn/lifecycle result.
     pub(super) respawn_topology_reply_withheld: bool,
-    /// Controlling-side reverse-lane acceptor (ADJ-P4-2). `None` ⇒ no
-    /// acceptor composed: cross-host descriptors for local members keep the
-    /// machine-recorded canonical endpoint.
+    /// Controlling-side reverse-lane acceptor (ADJ-P4-2). `None` means a
+    /// mixed-host route that needs a local reverse lane fails closed instead
+    /// of publishing an undialable process-local endpoint.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) controlling_acceptor: Option<ControllingAcceptorState>,
 }
@@ -6091,9 +6163,15 @@ impl MobActor {
                     .member_placement
                     .contains_key(&dsl_identity)
             };
-            if !placed
-                && let Some(advertised) = self.register_local_member_reverse_lane(identity).await?
-            {
+            if !placed {
+                let advertised = self
+                    .register_local_member_reverse_lane(identity)
+                    .await?
+                    .ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "{context}: local member '{identity}' has no process-scoped controlling acceptor; configure an explicit listen and dialable advertised address before installing a cross-host route"
+                        ))
+                    })?;
                 spec.address = PeerAddress::parse(&advertised).map_err(|error| {
                     MobError::WiringError(format!(
                         "{context}: controlling acceptor advertises an invalid address '{advertised}': {error}"
@@ -6574,60 +6652,13 @@ impl MobActor {
     // Controlling-side reverse-lane acceptor (ADJ-P4-2).
     // -----------------------------------------------------------------------
 
-    /// Lazily bind the controlling-side `HostAcceptor` demux (one listener
-    /// per controlling mob runtime; never per-member listeners). Registry
-    /// mutations are owner-gated by the mob's generated DSL authority owner
-    /// token — the DEC-P3H-7 split (typed witness mob-side, Arc-ptr owner
-    /// identity comms-side).
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn ensure_controlling_acceptor_live(&mut self) -> Result<(), MobError> {
-        let Some(state) = self.controlling_acceptor.as_ref() else {
-            return Ok(());
-        };
-        if state.live.is_some() {
-            return Ok(());
-        }
-        let listen_tcp = state.config.listen_tcp;
-        let advertise_address = state.config.advertise_address.clone();
-        let registry = Arc::new(meerkat_comms::HostAcceptorIdentityRegistry::new());
-        registry
-            .install_owner(self.dsl_authority_owner_token.clone())
-            .map_err(|error| {
-                MobError::WiringError(format!(
-                    "controlling acceptor owner install failed: {error}"
-                ))
-            })?;
-        let handle = meerkat_comms::spawn_host_acceptor(meerkat_comms::HostAcceptorConfig {
-            listen_tcp,
-            advertise_address,
-            registry: Arc::clone(&registry),
-            pairing: None,
-            bounds: meerkat_comms::HostAcceptorBounds::default(),
-        })
-        .await
-        .map_err(|error| {
-            MobError::WiringError(format!("controlling acceptor bind failed: {error}"))
-        })?;
-        let advertised_address = handle.advertised_address().to_string();
-        if let Some(state) = self.controlling_acceptor.as_mut() {
-            state.live = Some(ControllingAcceptorLive {
-                registry,
-                advertised_address,
-                handle,
-                registered: BTreeSet::new(),
-            });
-        }
-        Ok(())
-    }
-
     /// Register a local member's inbound identity on the controlling
     /// acceptor so a remote member host can dial it (the reverse lane of a
     /// cross-host edge). Returns the acceptor's advertised address when the
     /// member is registered; `None` when no acceptor is composed or the
-    /// composer supplies no registration material for the session — the
-    /// descriptor then keeps the machine-recorded canonical endpoint
-    /// (in-process routing still works through the process-global inproc
-    /// registry; a real remote process fails closed at the transport).
+    /// composer supplies no registration material for the session. The caller
+    /// turns `None` into a wiring error, so the route obligation remains
+    /// pending rather than publishing a process-local canonical endpoint.
     ///
     /// Called ONLY while realizing a machine-emitted `RouteInstallRequested`
     /// effect — the machine-effect-witnessed registry discipline
@@ -6653,62 +6684,21 @@ impl MobActor {
                 member = %identity,
                 session_id = %session_id,
                 "no controlling-acceptor registration material for local member; \
-                 reverse lane keeps the member's canonical endpoint"
+                 cross-host route installation remains pending"
             );
             return Ok(None);
         };
-        self.ensure_controlling_acceptor_live().await?;
-        let owner = self.dsl_authority_owner_token.clone();
+        let logical_owner = format!("{}\0{}\0{}", self.definition.id, identity, session_id);
         let Some(state) = self.controlling_acceptor.as_mut() else {
             return Ok(None);
         };
-        let Some(live) = state.live.as_mut() else {
-            return Ok(None);
-        };
-        let pubkey_string = registration.pubkey.to_pubkey_string();
-        if !live.registered.contains(&pubkey_string) {
-            match live.registry.register_identity(
-                &owner,
-                registration.pubkey,
-                Arc::clone(&registration.keypair),
-                registration.inbox_sender.clone(),
-            ) {
-                Ok(()) => {
-                    live.registered.insert(pubkey_string);
-                }
-                Err(meerkat_comms::HostAcceptorError::IdentityAlreadyRegistered { .. }) => {
-                    // Stale entry from a previous incarnation (dead inbox);
-                    // the keypair is durable while the inbox is per-runtime —
-                    // replace under the same owner (the host-actor pattern).
-                    live.registry
-                        .remove_identity(&owner, &registration.pubkey)
-                        .map_err(|error| {
-                            MobError::WiringError(format!(
-                                "controlling acceptor stale-identity removal failed: {error}"
-                            ))
-                        })?;
-                    live.registry
-                        .register_identity(
-                            &owner,
-                            registration.pubkey,
-                            registration.keypair,
-                            registration.inbox_sender,
-                        )
-                        .map_err(|error| {
-                            MobError::WiringError(format!(
-                                "controlling acceptor identity registration failed: {error}"
-                            ))
-                        })?;
-                    live.registered.insert(pubkey_string);
-                }
-                Err(error) => {
-                    return Err(MobError::WiringError(format!(
-                        "controlling acceptor identity registration failed: {error}"
-                    )));
-                }
-            }
-        }
-        Ok(Some(live.advertised_address.clone()))
+        // A session revival keeps its durable signing key but constructs a
+        // fresh comms runtime and inbox. Always refresh from current material;
+        // pubkey presence alone is not an attachment-incarnation witness.
+        let advertised = state
+            .refresh_registration(logical_owner, registration)
+            .await?;
+        Ok(Some(advertised))
     }
 
     /// Remove a local member's acceptor registration once it retains no
@@ -6743,33 +6733,15 @@ impl MobActor {
             let Some(state) = self.controlling_acceptor.as_ref() else {
                 return Ok(());
             };
-            if state.live.is_none() {
-                return Ok(());
-            }
             Arc::clone(&state.config.material)
         };
         let Some(registration) = material.registration_for(&session_id).await else {
             return Ok(());
         };
-        let owner = self.dsl_authority_owner_token.clone();
         let Some(state) = self.controlling_acceptor.as_mut() else {
             return Ok(());
         };
-        let Some(live) = state.live.as_mut() else {
-            return Ok(());
-        };
-        let pubkey_string = registration.pubkey.to_pubkey_string();
-        if live.registered.remove(&pubkey_string)
-            && let Err(error) = live.registry.remove_identity(&owner, &registration.pubkey)
-        {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                member = %identity,
-                %error,
-                "failed to deregister reverse-lane member identity from the controlling acceptor"
-            );
-        }
-        Ok(())
+        state.remove_registration(&registration.pubkey).await
     }
 
     async fn load_supervisor_authority_snapshot(
@@ -12991,7 +12963,7 @@ impl MobActor {
         let mut first_infrastructure_error = None;
         for rebuild in rebuild {
             let ExplicitResumeMemberRebuild {
-                entry,
+                mut entry,
                 member_ref,
                 bridge_session_id,
                 requires_materialization,
@@ -13032,6 +13004,58 @@ impl MobActor {
             }
             if !requires_materialization {
                 continue;
+            }
+
+            // A cold actor has no persisted copy of per-spawn external tools.
+            // The public SpawnMemberCustomizer contract explicitly re-supplies
+            // those process-local mechanics at SpawnSource::Resume. Startup
+            // reconciliation already seeds this map for a Running mob; the
+            // explicit Stopped -> Running seam must do the same before its
+            // machine-authorized revival build.
+            let mut restore_spec = super::handle::SpawnMemberSpec::new(
+                entry.role.clone(),
+                entry.agent_identity.clone(),
+            );
+            restore_spec.runtime_mode = Some(entry.runtime_mode);
+            restore_spec.labels = Some(entry.labels.clone());
+            restore_spec.override_profile = entry.effective_profile_override.clone();
+            restore_spec.model_override = entry.effective_model_override.clone();
+            self.customize_spawn_spec(super::handle::SpawnSource::Resume, None, &mut restore_spec)?;
+            if restore_spec.identity != entry.agent_identity {
+                return Err(MobError::Internal(format!(
+                    "spawn customizer cannot change explicit-resume identity from '{}' to '{}'",
+                    entry.agent_identity, restore_spec.identity
+                )));
+            }
+            if restore_spec.role_name != entry.role {
+                return Err(MobError::Internal(format!(
+                    "spawn customizer cannot change explicit-resume profile for '{}' from '{}' to '{}'",
+                    entry.agent_identity, entry.role, restore_spec.role_name
+                )));
+            }
+            entry.effective_profile_override = restore_spec.override_profile.clone();
+            entry.effective_model_override = restore_spec.model_override.clone();
+            entry.labels = restore_spec
+                .labels
+                .clone()
+                .unwrap_or_else(|| entry.labels.clone());
+            {
+                let mut retained = self.per_spawn_external_tools.write().await;
+                if let Some(tools) = restore_spec.external_tools {
+                    retained.insert(entry.agent_identity.clone(), tools);
+                } else {
+                    retained.remove(&entry.agent_identity);
+                }
+            }
+            {
+                let mut roster = self.roster.write().await;
+                let mut snapshot = roster.snapshot();
+                if let Some(roster_entry) = snapshot.get_by_identity_mut(&entry.agent_identity) {
+                    roster_entry.effective_profile_override =
+                        entry.effective_profile_override.clone();
+                    roster_entry.effective_model_override = entry.effective_model_override.clone();
+                }
+                *roster = super::roster_authority::RosterAuthority::from_roster(snapshot);
             }
             match self
                 .revive_member_live_materialization(
@@ -14889,32 +14913,8 @@ impl MobActor {
             return Ok(());
         }
         let mob_id = self.definition.id.clone();
-        let exact_batch_present = |events: &[crate::event::MobEvent]| -> Result<bool, MobError> {
-            let mob_events = events
-                .iter()
-                .filter(|event| event.mob_id == mob_id)
-                .collect::<Vec<_>>();
-            let epoch_start = mob_events
-                .iter()
-                .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
-                .map_or(0, |index| index + 1);
-            let epoch = &mob_events[epoch_start..];
-            if epoch
-                .windows(desired.len())
-                .any(|window| window.iter().map(|event| &event.kind).eq(desired.iter()))
-            {
-                return Ok(true);
-            }
-            if epoch.iter().any(|event| desired.contains(&event.kind)) {
-                return Err(MobError::Internal(
-                    "durable structural batch is partial or out of order in the current mob epoch"
-                        .to_string(),
-                ));
-            }
-            Ok(false)
-        };
         let replay = self.events.replay_all().await?;
-        match exact_batch_present(&replay) {
+        match exact_structural_batch_present(&replay, &mob_id, &desired) {
             Ok(true) => {
                 for kind in &desired {
                     if matches!(
@@ -14966,7 +14966,7 @@ impl MobActor {
                         )));
                     }
                 };
-                match exact_batch_present(&replay) {
+                match exact_structural_batch_present(&replay, &mob_id, &desired) {
                     Ok(true) => {
                         self.placed_completion_durable_index
                             .lock()
@@ -17620,11 +17620,16 @@ impl MobActor {
                                 result = Err(error);
                             }
                         }
-                        if let Err(error) =
-                            self.teardown_session_runtime_bindings_from_machine().await
-                        {
-                            tracing::warn!(error = %error, "shutdown session binding teardown failed");
-                            if result.is_ok() {
+                        // The member-stop phase owns the exact executor
+                        // attachments. Preserve them as retry anchors when an
+                        // interrupt is still pending; tearing them down here
+                        // would make the handle-level lifecycle retry target
+                        // an authority this failed attempt already removed.
+                        if result.is_ok() {
+                            if let Err(error) =
+                                self.teardown_session_runtime_bindings_from_machine().await
+                            {
+                                tracing::warn!(error = %error, "shutdown session binding teardown failed");
                                 result = Err(error);
                             }
                         }
@@ -30345,6 +30350,16 @@ impl MobActor {
             "MobActor::handle_retire_inner checked prior retire event"
         );
         let preserve_topology_for_respawn = preserve_machine_topology;
+        #[cfg(not(target_arch = "wasm32"))]
+        let retiring_reverse_lane_pubkey = if preserve_topology_for_respawn && !member_is_placed {
+            self.machine_member_peer_spec_for(
+                agent_identity,
+                "retiring local reverse-lane endpoint",
+            )?
+            .map(|spec| meerkat_comms::PubKey::new(spec.pubkey))
+        } else {
+            None
+        };
         // K3 (#26): the Retiring marker is owned by MobMachine
         // (`member_state_markers`). Trust that machine fact alone; it has no
         // second source of truth.
@@ -30592,6 +30607,17 @@ impl MobActor {
         self.cleanup_retiring_placed_member_edges(&domain_identity, preserve_topology_for_respawn)
             .await?;
 
+        // A respawn preserves the logical machine edge, so the ordinary
+        // unwire-driven cleanup never runs for the retiring local endpoint.
+        // Remove its exact process-acceptor lease after every remote trust
+        // lane has been removed and before the replacement can be published.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pubkey) = retiring_reverse_lane_pubkey.as_ref()
+            && let Some(state) = self.controlling_acceptor.as_mut()
+        {
+            state.remove_registration(pubkey).await?;
+        }
+
         tracing::debug!(
             agent_identity = %agent_identity,
             "MobActor::handle_retire_inner planning trust cleanup"
@@ -30654,21 +30680,22 @@ impl MobActor {
         // ArchiveSession is critical: a skipped archive means an orphan session
         // the caller believes was cleaned up. Surface the error.
         // Comms steps (NotifyPeers, RemoveTrustEdges) remain best-effort.
-        if let Some((_, error)) = report
+        if let Some(index) = report
             .skipped
             .iter()
-            .find(|(step, _)| *step == DisposalStep::ArchiveSession)
+            .position(|(step, _)| *step == DisposalStep::ArchiveSession)
         {
-            return Err(MobError::Internal(format!(
-                "disposal completed but ArchiveSession failed: {error}"
-            )));
+            // ArchiveSession is the remote ReleaseMember boundary for a
+            // placed member. Preserve its typed bridge/session failure so the
+            // caller can distinguish a certified rejection from transport or
+            // internal failure and decide whether an exact retry is safe.
+            let (_, error) = report.skipped.swap_remove(index);
+            return Err(error);
         }
-        if let Some((step, error)) = &report.aborted_at
-            && *step == DisposalStep::ArchiveSession
+        if let Some((step, error)) = report.aborted_at.take()
+            && step == DisposalStep::ArchiveSession
         {
-            return Err(MobError::Internal(format!(
-                "disposal aborted at ArchiveSession: {error}"
-            )));
+            return Err(error);
         }
 
         let is_placed =
@@ -35447,9 +35474,7 @@ impl MobActor {
             })
             .and_then(|(_, remainder)| remainder.strip_prefix("//"))
             .map(|remainder| {
-                let authority_end = remainder
-                    .find(|ch| matches!(ch, '/' | '?' | '#'))
-                    .unwrap_or(remainder.len());
+                let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
                 let authority = &remainder[..authority_end];
                 !authority.is_empty() && !authority.contains('\\')
             })
@@ -39668,16 +39693,6 @@ impl MobActor {
             ack_mode = ?ack_mode,
             "handle_submit_work started"
         );
-        if lifecycle_origin_fenced(self.dsl_authority.state()) {
-            return Err(MobError::LifecycleOperationPending {
-                intent: self
-                    .dsl_authority
-                    .state()
-                    .placed_completion_lifecycle_intent
-                    .map(|intent| format!("{intent:?}").to_ascii_lowercase())
-                    .unwrap_or_else(|| "unknown".to_string()),
-            });
-        }
         self.ensure_pending_spawn_alignment("handle_submit_work preflight")?;
 
         let agent_identity = runtime_id.identity.clone();
@@ -39709,6 +39724,20 @@ impl MobActor {
                 false
             }
         };
+        // A non-Running lifecycle is rejected above by the canonical
+        // SubmitWork transition. Only after that generated admission probe
+        // may the shell report an in-progress Running-phase quiesce; doing
+        // this first would shadow the machine's Stopped/Completed guard.
+        if lifecycle_origin_fenced(self.dsl_authority.state()) {
+            return Err(MobError::LifecycleOperationPending {
+                intent: self
+                    .dsl_authority
+                    .state()
+                    .placed_completion_lifecycle_intent
+                    .map(|intent| format!("{intent:?}").to_ascii_lowercase())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            });
+        }
 
         // Auto-spawn is an external-only policy seam that runs when the target
         // member is absent and MobMachine accepts typed spawn-policy feedback.
@@ -46629,6 +46658,56 @@ mod kickoff_tests {
             Some(cancelled),
         );
         assert_eq!(events.len(), count, "replay validation must append nothing");
+    }
+
+    #[test]
+    fn structural_batch_allows_repeated_projection_tail_but_rejects_partial_head() {
+        let mob_id = MobId::from("placed-cancelled-batch-head");
+        let identity = AgentIdentity::from("placed-worker");
+        let obligation = placed_obligation(&identity);
+        let cancelled = kickoff_snapshot(
+            &obligation,
+            crate::roster::MobMemberKickoffPhase::Cancelled,
+            None,
+            31,
+        );
+        let head = MobEventKind::PlacedKickoffOutcomeResolved {
+            obligation: obligation.clone(),
+            outcome: crate::event::PlacedKickoffHostOutcomeEvent::InteractionCancelled,
+            kickoff: cancelled.clone(),
+        };
+        let tail = MobEventKind::MemberKickoffUpdated {
+            member: identity,
+            kickoff: cancelled,
+        };
+        let desired = vec![head.clone(), tail.clone()];
+
+        let prior_cancel = vec![kickoff_event(&mob_id, 1, tail.clone())];
+        assert!(
+            !exact_structural_batch_present(&prior_cancel, &mob_id, &desired)
+                .expect("an earlier identical projection is not a partial structural batch")
+        );
+
+        let partial = vec![
+            kickoff_event(&mob_id, 1, tail.clone()),
+            kickoff_event(&mob_id, 2, head.clone()),
+        ];
+        assert!(
+            exact_structural_batch_present(&partial, &mob_id, &desired)
+                .expect_err("a structural head without its exact tail must fail closed")
+                .to_string()
+                .contains("partial or out of order")
+        );
+
+        let complete = vec![
+            kickoff_event(&mob_id, 1, tail.clone()),
+            kickoff_event(&mob_id, 2, head),
+            kickoff_event(&mob_id, 3, tail),
+        ];
+        assert!(
+            exact_structural_batch_present(&complete, &mob_id, &desired)
+                .expect("the exact head-tail batch remains idempotent")
+        );
     }
 
     #[test]

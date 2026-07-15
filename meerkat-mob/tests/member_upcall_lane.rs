@@ -26,7 +26,7 @@ use meerkat_mob::runtime::bridge_protocol::{
 use support::{
     MemberOperatorRequesterResidency, REAL_COMMS_TEST_LOCK, create_controlling_mob,
     member_identity_of, raw_member_operator_command_at, spawn_peer_comms_endpoint,
-    spawn_scripted_host_peer,
+    spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
 };
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -217,10 +217,14 @@ async fn upcall_admission_rejects_map_typed_before_any_execution() {
 
     // SenderKeyMismatch: this sender claims ANOTHER committed member whose
     // recorded key differs. Seed b3 with a different scripted identity.
-    let other_member = spawn_peer_comms_endpoint("upcall-t16-member-b3", true, None).await;
+    let other_member =
+        std::sync::Arc::new(spawn_peer_comms_endpoint("upcall-t16-member-b3", true, None).await);
     harness
         .scripted
         .script_member_identity("b3", member_identity_of(&other_member));
+    harness
+        .scripted
+        .bind_member_endpoint("b3", std::sync::Arc::clone(&other_member));
     harness
         .controlling
         .spawn_placed("worker", "b3", &harness.host_id)
@@ -258,12 +262,18 @@ async fn upcall_admission_rejects_map_typed_before_any_execution() {
 
     // HostRevoked → NotBound: after RevokeHost even a duplicate of a
     // previously-recorded request re-admits FIRST (dedup after admission).
+    let requester_responder =
+        spawn_scripted_member_turn_responder(std::sync::Arc::clone(&harness.member));
+    let other_responder = spawn_scripted_member_turn_responder(other_member);
     harness
         .controlling
         .handle
         .revoke_host(&harness.host_id)
         .await
         .expect("revoke host");
+    // The requester becomes the reply-draining caller again below.
+    requester_responder.shutdown_and_join().await;
+    other_responder.shutdown_and_join().await;
     let reply = harness
         .member
         .send_bridge_command_raw(
@@ -329,12 +339,16 @@ async fn held_envelope_is_fenced_after_same_session_resume_generation_bump() {
         spawn_op("never-from-stale-envelope"),
     );
 
+    let lifecycle_responder =
+        spawn_scripted_member_turn_responder(std::sync::Arc::clone(&harness.member));
     harness
         .controlling
         .handle
         .retire(identity.clone())
         .await
         .expect("retire first incarnation");
+    // Resume reuses this endpoint as the member-originated caller.
+    lifecycle_responder.shutdown_and_join().await;
     let mut replacement = support::placed_spawn_spec("worker", "b2", &harness.host_id);
     replacement.launch_mode = meerkat_mob::launch::MemberLaunchMode::Resume {
         bridge_session_id: old_session.clone(),
@@ -611,6 +625,18 @@ async fn restart_and_reply_loss_replay_the_durable_terminal_without_reexecution(
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let harness = upcall_harness("upcall-t21").await;
 
+    // This member is materialized by the scripted host during the upcall.
+    // Give it a real endpoint so graceful restart can prove the absence of a
+    // live channel instead of dialing the scripted synthetic port 1.
+    let spawned_member =
+        std::sync::Arc::new(spawn_peer_comms_endpoint("upcall-t21-member-b21", true, None).await);
+    harness
+        .scripted
+        .script_member_identity("b21", member_identity_of(&spawned_member));
+    harness
+        .scripted
+        .bind_member_endpoint("b21", std::sync::Arc::clone(&spawned_member));
+
     let command = harness.member_command("req-restart-1", spawn_op("b21"));
     let first = harness
         .member
@@ -629,7 +655,17 @@ async fn restart_and_reply_loss_replay_the_durable_terminal_without_reexecution(
 
     // Treat the first reply as lost by the caller, then restart the
     // controlling runtime over the same metadata store.
+    // Both placed endpoints must serve the ordinary structural
+    // LiveTransportUnavailable reply while graceful shutdown reconciles live
+    // channels. The requester cannot run this responder while it is itself
+    // waiting for the upcall reply, so install it only after that reply lands.
+    let requester_responder =
+        spawn_scripted_member_turn_responder(std::sync::Arc::clone(&harness.member));
+    let spawned_responder = spawn_scripted_member_turn_responder(spawned_member);
     let controlling = harness.controlling.restart().await;
+    // The probe becomes the reply-draining caller again below. Join the
+    // temporary responder first so the two consumers cannot race.
+    requester_responder.shutdown_and_join().await;
     let supervisor = controlling
         .handle
         .routable_supervisor_peer()
@@ -662,6 +698,7 @@ async fn restart_and_reply_loss_replay_the_durable_terminal_without_reexecution(
         "restart replay must not duplicate the spawn effect"
     );
 
+    spawned_responder.shutdown();
     harness.scripted.shutdown();
 }
 

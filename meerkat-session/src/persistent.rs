@@ -7393,6 +7393,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await
                     .map_err(|error| (error, None))
+                } else if matches!(
+                    error,
+                    SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
+                ) {
+                    // The runtime loop still owns the turn-finalization
+                    // boundary and must publish this exact directed terminal
+                    // through the live actor before cleanup can remove it.
+                    Err((error, None))
                 } else {
                     tracing::debug!(
                         session_id = %id,
@@ -7488,6 +7496,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         pre_turn_context_events,
                     )
                     .await
+                } else if matches!(
+                    error,
+                    SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
+                ) {
+                    // Preserve the actor until the runtime loop publishes the
+                    // exact cancellation terminal under its existing boundary.
+                    Err(error)
                 } else {
                     if let Err(discard_error) = self.discard_live_session_unfenced(id).await {
                         tracing::warn!(
@@ -16024,10 +16039,18 @@ mod tests {
         });
 
         builder.wait_for_entered_runs(1).await;
-        service
-            .discard_live_session(&staged.session_id)
-            .await
-            .expect("discard should request shutdown while first turn runs");
+        let service_for_discard = Arc::clone(&service);
+        let session_for_discard = staged.session_id.clone();
+        let discard = tokio::spawn(async move {
+            service_for_discard
+                .discard_live_session(&session_for_discard)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !discard.is_finished(),
+            "discard must wait for the active turn's stable finalization boundary"
+        );
         let blocked = service
             .create_session(create_request("blocked", InitialTurnPolicy::Defer))
             .await;
@@ -16041,6 +16064,10 @@ mod tests {
 
         builder.release_notify.add_permits(1);
         let _ = first_turn.await.expect("first turn task should join");
+        discard
+            .await
+            .expect("discard task should join")
+            .expect("discard should complete after the active turn stops");
         service
             .create_session(create_request("after turn", InitialTurnPolicy::Defer))
             .await
@@ -17408,13 +17435,31 @@ mod tests {
             store_trait.load(&created.session_id).await?.is_none(),
             "failed audit rollback must not leave the unaudited rewrite as store fallback"
         );
+        let retained_snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await?
+            .ok_or_else(|| {
+                std::io::Error::other(
+                    "the committed runtime snapshot must remain authoritative for audit retry",
+                )
+            })?;
+        assert_eq!(retained_snapshot, snapshot);
+        let outage_error = service
+            .load_authoritative_session_base(&created.session_id)
+            .await
+            .expect_err("missing rewrite audit must remain unreadable during the outage");
         assert!(
-            runtime_store
-                .load_session_snapshot(&runtime_id)
-                .await?
-                .is_none(),
-            "runtime snapshot should be quarantined after failed checkpoint projection update"
+            outage_error
+                .to_string()
+                .contains("synthetic transcript rewrite audit append failure"),
+            "unexpected outage error: {outage_error}"
         );
+        event_store.allow_appends();
+        let recovered = service
+            .load_authoritative_session_base(&created.session_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("runtime snapshot should remain recoverable"))?;
+        assert_eq!(recovered.transcript_revision()?, commit.revision);
         assert_ne!(original.transcript_revision()?, commit.revision);
         Ok(())
     }
@@ -24459,6 +24504,63 @@ mod tests {
     /// interaction terminal.
     #[tokio::test]
     async fn test_machine_archive_drains_stored_only_pending_terminal_exactly_once() {
+        struct InvalidReceiptArchiveTerminalPublisher;
+
+        #[async_trait::async_trait]
+        impl CoreExecutorPublicationHandle for InvalidReceiptArchiveTerminalPublisher {
+            async fn publish_interaction_terminals(
+                &self,
+                _events: &[AgentEvent],
+            ) -> Result<
+                Vec<CoreInteractionTerminalPublicationReceipt>,
+                meerkat_core::lifecycle::CoreExecutorError,
+            > {
+                // Terminalization has already committed the durable outbox.
+                // Return a corrupt receipt set so convergence fails closed
+                // without an unbounded retry, modeling a process cut with the
+                // unpublished carrier left for restart recovery.
+                Ok(Vec::new())
+            }
+        }
+
+        struct ArchiveFixtureExecutor {
+            publisher: Arc<InvalidReceiptArchiveTerminalPublisher>,
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::lifecycle::CoreExecutor for ArchiveFixtureExecutor {
+            fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+                Some(Arc::clone(&self.publisher) as Arc<_>)
+            }
+
+            async fn apply(
+                &mut self,
+                _run_id: RunId,
+                _primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+            ) -> Result<
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+                meerkat_core::lifecycle::CoreExecutorError,
+            > {
+                Err(meerkat_core::lifecycle::CoreExecutorError::Internal(
+                    "archive fixture input must remain queued until stop".to_string(),
+                ))
+            }
+
+            async fn cancel_after_boundary(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+                Ok(())
+            }
+        }
+
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let event_store = Arc::new(RecordingEventStore::default());
@@ -24482,14 +24584,23 @@ mod tests {
             .await
             .expect("seed the durable session document");
 
-        let before_restart = meerkat_runtime::MeerkatMachine::persistent(
+        let before_restart = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
             Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
             memory_blob_store(),
-        );
+        ));
         before_restart
             .prepare_bindings(id.clone())
             .await
             .expect("prepare durable runtime authority");
+        before_restart
+            .ensure_session_with_executor(
+                id.clone(),
+                Box::new(ArchiveFixtureExecutor {
+                    publisher: Arc::new(InvalidReceiptArchiveTerminalPublisher),
+                }),
+            )
+            .await
+            .expect("attach exact publication capability before directed admission");
         let stable_input_id = InputId::new().0;
         let directed = meerkat_runtime::mob_adapter::create_tracked_flow_step_input(
             "archive-terminal-step",
@@ -24499,20 +24610,21 @@ mod tests {
             &stable_input_id.to_string(),
         )
         .expect("build tracked directed input");
-        let (_accepted, completion) = before_restart
-            .accept_input_with_completion(&id, directed)
+        let accepted = before_restart
+            .accept_input_without_wake(&id, directed)
             .await
             .expect("admit the directed input");
-        assert!(completion.is_some(), "directed input should own a waiter");
+        assert!(accepted.is_accepted(), "directed input should be queued");
         let stop_error = before_restart
             .stop_runtime_executor(&id, "archive fixture stop")
             .await
-            .expect_err("no attached publisher must leave the durable outbox pending");
+            .expect_err("invalid exact receipts must leave the durable outbox pending");
         assert!(
-            stop_error.to_string().contains("publication capability"),
+            stop_error
+                .to_string()
+                .contains("publication receipts did not exactly match finalized outbox batch"),
             "unexpected stop failure: {stop_error}"
         );
-        drop(completion);
         drop(before_restart);
 
         let after_restart = meerkat_runtime::MeerkatMachine::persistent(
@@ -25572,7 +25684,7 @@ mod tests {
             DummyBuilder,
             4,
             Arc::clone(&store),
-            runtime_store,
+            runtime_store.clone(),
             memory_blob_store(),
         );
 
@@ -25638,6 +25750,20 @@ mod tests {
                 .any(|append| append.content.render_text().contains("birch seventeen")),
             "no-pending terminal snapshot should preserve pre-turn context: {context:?}"
         );
+
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id),
+                SessionDelta {
+                    session_snapshot: snapshot.clone(),
+                },
+            )
+            .await
+            .expect("commit no-pending context snapshot");
+        service
+            .checkpoint_committed_runtime_session_snapshot(&session_id, snapshot)
+            .await
+            .expect("post-commit checkpoint should publish no-pending context events");
 
         let started = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
             .await

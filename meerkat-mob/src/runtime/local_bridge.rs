@@ -241,11 +241,22 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
         match self.machine.cancel_after_boundary(&self.session_id).await {
             Ok(()) => {}
             Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Retired,
+                state:
+                    meerkat_runtime::RuntimeState::Idle
+                    | meerkat_runtime::RuntimeState::Retired
+                    | meerkat_runtime::RuntimeState::Stopped,
             }) => {
-                // Destroy admission can retire the runtime before disposal asks
-                // the host loop to stop. Retired is already terminal for the
-                // loop, so interrupt is satisfied.
+                // No executor is running in these states. Destroy admission
+                // can retire the runtime before disposal asks the host loop
+                // to stop; an exact callback can likewise observe the old
+                // loop detach into Idle before its acknowledgement returns.
+            }
+            Err(meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }) => {
+                // The exact attachment targeted by this interrupt was replaced
+                // while its callback ran. The machine fenced that callback, so
+                // the old request has converged without authority to cancel the
+                // replacement. A caller may issue a new interrupt for the new
+                // attachment; never transfer this request to it implicitly.
             }
             Err(error) => {
                 return Err(MobError::Internal(format!(
@@ -357,6 +368,21 @@ mod tests {
 
         let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         bridge.retire_member().await.unwrap();
+        let ack = bridge.interrupt_member().await.unwrap();
+
+        assert!(ack.ok);
+    }
+
+    #[tokio::test]
+    async fn local_bridge_interrupt_unattached_idle_runtime_is_noop() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+
+        let bridge = LocalMobRuntimeBridge::new(machine, session_id);
         let ack = bridge.interrupt_member().await.unwrap();
 
         assert!(ack.ok);
@@ -485,13 +511,16 @@ mod tests {
                     },
                 ),
             ));
+        let apply_started_wait = apply_started.notified();
+        tokio::pin!(apply_started_wait);
+        apply_started_wait.as_mut().enable();
         let (outcome, _completion) = machine
             .accept_input_with_completion(&session_id, input)
             .await
             .expect("attached prompt should be accepted");
         assert!(outcome.is_accepted());
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), apply_started.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut apply_started_wait)
             .await
             .expect("attached prompt should start running");
 
@@ -510,8 +539,11 @@ mod tests {
             "local bridge interrupt must not mint user hard-cancel authority"
         );
 
+        let apply_finished_wait = apply_finished.notified();
+        tokio::pin!(apply_finished_wait);
+        apply_finished_wait.as_mut().enable();
         allow_finish.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(1), apply_finished.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut apply_finished_wait)
             .await
             .expect("attached prompt should finish after release");
     }
@@ -634,12 +666,15 @@ mod tests {
                     },
                 ),
             ));
+        let apply_started_wait = apply_started.notified();
+        tokio::pin!(apply_started_wait);
+        apply_started_wait.as_mut().enable();
         let (outcome, _completion) = machine
             .accept_input_with_completion(&session_id, input)
             .await
             .expect("member prompt should be accepted");
         assert!(outcome.is_accepted());
-        tokio::time::timeout(std::time::Duration::from_secs(1), apply_started.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(1), apply_started_wait)
             .await
             .expect("member turn should start running");
 

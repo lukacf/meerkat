@@ -333,6 +333,10 @@ pub struct HostFixtureOptions {
     /// member/host advertised addresses stay reachable (a real daemon binds
     /// a configured address; `None` ⇒ ephemeral port).
     pub listen_tcp: Option<std::net::SocketAddr>,
+    /// Override the ephemeral member-event ring capacity. Production exposes
+    /// the same composition seam; tests use a small ring when the behavior
+    /// under test is cursor overrun rather than the default 1024-row bound.
+    pub event_ring_capacity: Option<std::num::NonZeroUsize>,
 }
 
 impl HostFixtureOptions {
@@ -360,6 +364,7 @@ impl HostFixtureOptions {
             member_llm_client: None,
             failing_member_region_persistence: false,
             listen_tcp: None,
+            event_ring_capacity: None,
         }
     }
 
@@ -384,6 +389,11 @@ impl HostFixtureOptions {
     pub fn ephemeral(mut self) -> Self {
         self.member_substrate = MemberSubstrateOption::Ephemeral;
         self.durable_sessions = false;
+        self
+    }
+
+    pub fn with_event_ring_capacity(mut self, capacity: std::num::NonZeroUsize) -> Self {
+        self.event_ring_capacity = Some(capacity);
         self
     }
 }
@@ -1831,22 +1841,25 @@ pub async fn spawn_host_daemon_fixture(
     // Ephemeral substrates install it WITHOUT a durable log (the bounded
     // ring substitutes; directive-bearing turns are machine-rejected for
     // such hosts anyway).
-    let member_observation_recovery =
-        if let (Some(service), Some(adapter)) = (&member_service, &member_runtime_adapter) {
-            let observation = Arc::new(
-                meerkat_mob::runtime::host_observation::HostMemberObservation::new(
-                    Arc::clone(service),
-                    member_durable_log.clone(),
-                    actor.observation_watch(),
-                    actor.observation_pending_sender(),
-                    actor.observation_ack_sender(),
-                ),
-            );
-            adapter.set_member_observation_host(observation.clone());
-            observation.recover_pending_turns().await
-        } else {
-            None
-        };
+    let member_observation_recovery = if let (Some(service), Some(adapter)) =
+        (&member_service, &member_runtime_adapter)
+    {
+        let mut observation = meerkat_mob::runtime::host_observation::HostMemberObservation::new(
+            Arc::clone(service),
+            member_durable_log.clone(),
+            actor.observation_watch(),
+            actor.observation_pending_sender(),
+            actor.observation_ack_sender(),
+        );
+        if let Some(capacity) = opts.event_ring_capacity {
+            observation = observation.with_event_ring_capacity(capacity);
+        }
+        let observation = Arc::new(observation);
+        adapter.set_member_observation_host(observation.clone());
+        observation.recover_pending_turns().await
+    } else {
+        None
+    };
 
     Ok(HostDaemonFixture {
         actor,
@@ -2355,9 +2368,11 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
         let notify = runtime.inbox_notify();
         loop {
             let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let candidates = runtime.drain_peer_input_candidates().await;
             if candidates.is_empty() {
-                notified.await;
+                (&mut notified).await;
                 continue;
             }
             for candidate in candidates {
@@ -3202,6 +3217,11 @@ async fn create_controlling_mob_composed(
     let runtime_adapter = mob_service
         .runtime_adapter()
         .expect("persistent service exposes a runtime adapter");
+    let controlling_acceptor = meerkat_mob::ControllingAcceptorConfig::for_session_service(
+        "127.0.0.1:0".parse().expect("loopback acceptor address"),
+        None,
+        Arc::clone(&mob_service),
+    );
     let mut definition = controlling_mob_definition(mob_id.clone());
     mutate_definition(&mut definition);
     // NO actor-level `with_default_llm_client`: an installed actor override
@@ -3211,6 +3231,7 @@ async fn create_controlling_mob_composed(
     let builder = meerkat_mob::MobBuilder::new(definition, storage)
         .with_session_service(mob_service)
         .with_runtime_adapter(runtime_adapter)
+        .with_controlling_acceptor(controlling_acceptor)
         // §19.L5 invariant: `member_placement ≠ ∅ ⇒ owner_bridge_session_id ≠
         // None` — a mob without owner-bridge authority typed-rejects every
         // placed spawn, so the fixture binds one at create.
@@ -3411,11 +3432,17 @@ impl ControllingMob {
         let runtime_adapter = mob_service
             .runtime_adapter()
             .expect("persistent service exposes a runtime adapter");
+        let controlling_acceptor = meerkat_mob::ControllingAcceptorConfig::for_session_service(
+            "127.0.0.1:0".parse().expect("loopback acceptor address"),
+            None,
+            Arc::clone(&mob_service),
+        );
         // Same rule as `create_controlling_mob`: no actor-level LLM client
         // override, or placed spawns typed-reject (plan §18.9).
         let builder = meerkat_mob::MobBuilder::for_resume(storage)
             .with_session_service(mob_service)
             .with_runtime_adapter(runtime_adapter)
+            .with_controlling_acceptor(controlling_acceptor)
             .with_spawn_base_prompt_source(Arc::new(meerkat_mob::StaticSpawnBasePromptSource(
                 CONTROLLING_BASE_PROMPT.to_string(),
             )))
@@ -4242,10 +4269,12 @@ impl StallGate {
     async fn wait(&self) {
         while !self.released.load(Ordering::SeqCst) {
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.released.load(Ordering::SeqCst) {
                 return;
             }
-            notified.await;
+            (&mut notified).await;
         }
     }
 }
@@ -4438,6 +4467,7 @@ struct ScriptedMemberTurnState {
     accepted_input_ids: std::collections::BTreeSet<String>,
     emit_interaction_terminal: bool,
     terminal_rows: Vec<meerkat_mob::runtime::bridge_protocol::WireEventRow>,
+    terminal_outcomes: Vec<meerkat_mob::runtime::bridge_protocol::BridgeTurnOutcomeRecord>,
     /// Exact materialized incarnation served before the first delivery.
     /// The event pump may poll immediately after placement, so it cannot
     /// derive this solely from a later delivery payload.
@@ -4479,7 +4509,8 @@ impl ScriptedMemberTurnResponder {
     /// Reject the next `n` deliveries with the command-level wire
     /// `Unavailable` shape. Each rejection certifies that no member input was
     /// admitted; the controller must still apply ADJ-4's one exact resend
-    /// before treating the repeated rejection as terminal no-effect.
+    /// while retaining custody afterward because this command-level shape is
+    /// not durable no-effect proof.
     pub fn reject_next_deliver_unavailable(&self, n: u32) {
         self.state().reject_next_deliver_unavailable = n;
     }
@@ -4519,6 +4550,13 @@ impl ScriptedMemberTurnResponder {
     pub fn shutdown(&self) {
         self.task.abort();
     }
+
+    /// Abort and join the responder before handing its endpoint back to a
+    /// caller that will drain replies itself.
+    pub async fn shutdown_and_join(self) {
+        self.task.abort();
+        let _ = self.task.await;
+    }
 }
 
 /// Spawn the scripted member-turn responder loop over `endpoint`.
@@ -4536,9 +4574,11 @@ pub fn spawn_scripted_member_turn_responder(
         let notify = runtime.inbox_notify();
         loop {
             let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let candidates = runtime.drain_peer_input_candidates().await;
             if candidates.is_empty() {
-                notified.await;
+                (&mut notified).await;
                 continue;
             }
             for candidate in candidates {
@@ -4641,6 +4681,19 @@ pub fn spawn_scripted_member_turn_responder(
                                         ),
                                     },
                                 );
+                                let expected_member = payload
+                                    .expected_member
+                                    .as_ref()
+                                    .expect("tracked plain delivery carries an exact incarnation");
+                                guard.terminal_outcomes.push(
+                                    meerkat_mob::runtime::bridge_protocol::BridgeTurnOutcomeRecord {
+                                        input_id: payload.input_id.clone(),
+                                        generation: expected_member.generation,
+                                        fence_token: expected_member.fence_token,
+                                        terminal_seq: durable_seq,
+                                        outcome: meerkat_mob::runtime::bridge_protocol::WireFlowTurnOutcome::InteractionComplete,
+                                    },
+                                );
                             }
                             if guard.drop_next_deliver_replies > 0 {
                                 guard.drop_next_deliver_replies -= 1;
@@ -4660,9 +4713,16 @@ pub fn spawn_scripted_member_turn_responder(
                         }
                     }
                     Ok(BridgeCommand::PollMemberEvents(payload)) => {
-                        let guard = responder_state
+                        let mut guard = responder_state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        for ack in &payload.outcome_acks {
+                            guard.terminal_outcomes.retain(|record| {
+                                record.input_id != ack.input_id
+                                    || record.generation != ack.generation
+                                    || record.fence_token != ack.fence_token
+                            });
+                        }
                         let (generation, fence_token) = guard
                             .received
                             .last()
@@ -4695,6 +4755,15 @@ pub fn spawn_scripted_member_turn_responder(
                             .last()
                             .map_or(start_seq, |row| row.durable_seq.saturating_add(1));
                         let watermark = guard.terminal_rows.last().map_or(0, |row| row.durable_seq);
+                        let max_outcomes = payload.max_outcomes.unwrap_or(256) as usize;
+                        let turn_outcomes = guard
+                            .terminal_outcomes
+                            .iter()
+                            .take(max_outcomes)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let outcomes_complete =
+                            turn_outcomes.len() == guard.terminal_outcomes.len();
                         Some(
                             serde_json::to_value(BridgeReply::MemberEventsPage(
                                 meerkat_mob::runtime::bridge_protocol::BridgeMemberEventsPage {
@@ -4704,23 +4773,32 @@ pub fn spawn_scripted_member_turn_responder(
                                     from_seq: start_seq,
                                     next_seq,
                                     watermark,
-                                    turn_outcomes: Vec::new(),
-                                    outcomes_complete: true,
+                                    turn_outcomes,
+                                    outcomes_complete,
                                 },
                             ))
                             .expect("scripted member events page"),
                         )
                     }
-                    // The scripted member serves no event/history/turn
-                    // machinery: everything else is honestly Unsupported (a
-                    // pump polling this member backs off / stops; a flow step
+                    Ok(
+                        BridgeCommand::OpenMemberLiveChannel(_)
+                        | BridgeCommand::CloseMemberLiveChannel(_)
+                        | BridgeCommand::MemberLiveChannelStatus(_)
+                        | BridgeCommand::ControlMemberLiveChannel(_),
+                    ) => Some(
+                        serde_json::to_value(BridgeReply::Rejected {
+                            cause: BridgeRejectionCause::LiveTransportUnavailable,
+                            reason: "scripted member serves no live substrate".to_string(),
+                        })
+                        .expect("scripted absent live-substrate reply"),
+                    ),
+                    // Everything else is honestly Unsupported (a flow step
                     // resolves through the timeout ladder).
                     Ok(_) | Err(_) => Some(
                         serde_json::to_value(BridgeReply::Rejected {
                             cause: BridgeRejectionCause::Unsupported,
-                            reason:
-                                "scripted member serves AuthorizeSupervisor/DeliverMemberInput only"
-                                    .to_string(),
+                            reason: "scripted member does not serve this bridge command"
+                                .to_string(),
                         })
                         .expect("unsupported rejection"),
                     ),

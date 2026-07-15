@@ -55,7 +55,7 @@ impl CoreExecutor for MachineManagedPostStopExecutor {
         machine.lock_post_stop_cleanup_attachment();
     }
     fn cleanup_after_runtime_stop_terminalized(&mut self) {
-        machine.unregister_terminalized_runtime_loop_if_current_with_guard();
+        machine.complete_terminalized_runtime_loop_cleanup_if_current_with_guard();
     }
 }
 
@@ -211,7 +211,7 @@ fn core_executor_decorator_rejects_missing_override_seams() {
             "machine.unrelated_stop_hook()",
         )
         .replace(
-            "machine.unregister_terminalized_runtime_loop_if_current_with_guard()",
+            "machine.complete_terminalized_runtime_loop_cleanup_if_current_with_guard()",
             "machine.unrelated_cleanup_hook()",
         );
     let findings =
@@ -382,6 +382,24 @@ async fn bad(executor: &mut dyn CoreExecutor) {
         .await;
 }
 "#,
+    );
+}
+
+#[test]
+fn cfg_test_runtime_loop_executor_stop_override_is_clean() {
+    expect_clean(
+        "cfg-test runtime-loop executor stop override",
+        "meerkat-runtime/src/runtime_loop.rs",
+        r"
+#[cfg(test)]
+mod tests {
+    impl CoreExecutor for ProbeExecutor {
+        async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+}
+",
     );
 }
 

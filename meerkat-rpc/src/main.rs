@@ -242,10 +242,33 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let config_store: Arc<dyn ConfigStore> = Arc::new(tagged);
-    let mut config = config_store
+    // Compose inherited startup facts before building any process-owned
+    // runtime capability. In particular, `[mob_host]` listen/advertise may
+    // live in a parent realm while the head only tightens a resource bound.
+    let global_doc = Config::global_config_path()
+        .unwrap_or_else(|| locator.state_root.join("global").join("config.toml"));
+    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            locator.state_root.clone(),
+            global_doc,
+            meerkat_models::canonical(),
+        ));
+    let head_config = config_store
         .get()
         .await
         .unwrap_or_else(|_| Config::default());
+    let mut config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&realm_config_source))
+        .effective_config_over_head(&locator.realm, head_config)
+        .await
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "failed to compose effective config for realm '{}': {err}",
+                    locator.realm
+                ),
+            )
+        })?;
     config.apply_env_overrides()?;
     config
         .validate(meerkat_models::canonical())
@@ -354,14 +377,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // `config_runtime` (read/write split). The reserved `global` realm maps to the
     // HOME-rooted doc; when no home is resolvable, fall back to a path under the
     // state root that will not exist, so `global` yields `None` (today's behavior).
-    let global_doc = Config::global_config_path()
-        .unwrap_or_else(|| locator.state_root.join("global").join("config.toml"));
-    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
-        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
-            locator.state_root.clone(),
-            global_doc,
-            meerkat_models::canonical(),
-        ));
     runtime.set_realm_config_source(Arc::clone(&realm_config_source));
 
     // Per-open realtime credential resolution reads the SAME live config
@@ -387,6 +402,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let runtime = Arc::new(runtime);
+
+    #[cfg(feature = "mob")]
+    {
+        let controlling_acceptor = meerkat_mob::ControllingAcceptorConfig::from_mob_host_config(
+            &config.mob_host,
+            runtime.session_service(),
+        )
+        .map_err(|detail| std::io::Error::new(std::io::ErrorKind::InvalidInput, detail))?;
+        let mob_state = meerkat_rpc::router::compose_rpc_mob_state(
+            &runtime,
+            &config_store,
+            controlling_acceptor,
+        );
+        runtime.set_mob_state(mob_state);
+    }
 
     let lease = meerkat_store::start_realm_lease_in(
         &locator.state_root,

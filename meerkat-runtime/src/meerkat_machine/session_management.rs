@@ -3525,6 +3525,35 @@ impl MeerkatMachine {
         ))
     }
 
+    /// Return whether `witness` still names attachment-local cleanup authority
+    /// owned by the exact `registration`.
+    ///
+    /// The serving-witness projection intentionally disappears once canonical
+    /// unregister enters `Draining`, but a retry still needs to join that same
+    /// attachment's retained post-stop cleanup.  This predicate exposes only
+    /// exact compare authority: it validates the machine, registration entry,
+    /// epoch, and opaque attachment id without minting a new serving witness.
+    pub async fn executor_attachment_cleanup_is_current_for_registration(
+        self: &Arc<Self>,
+        witness: &RuntimeExecutorAttachmentWitness,
+        registration: &RuntimeSessionRegistrationWitness,
+    ) -> bool {
+        if !witness.belongs_to(self)
+            || !registration.belongs_to(self)
+            || witness.session_id() != registration.session_id()
+            || witness.epoch_id() != registration.epoch_id()
+        {
+            return false;
+        }
+        let sessions = self.sessions.read().await;
+        sessions.get(witness.session_id()).is_some_and(|entry| {
+            entry.epoch_id == witness.epoch_id
+                && registration.matches_entry(entry)
+                && (entry.owns_runtime_loop_attachment(witness.attachment_id)
+                    || entry.post_stop_cleanup_attachment_id == Some(witness.attachment_id))
+        })
+    }
+
     /// Return the exact machine registration currently occupying
     /// `session_id`, independently of whether it has an executor attachment.
     ///
@@ -3547,8 +3576,11 @@ impl MeerkatMachine {
     }
 
     /// Unregister only when `witness` still names this machine's exact current
-    /// terminal registration and that registration has no executor, retained
-    /// attachment cleanup, or actor-materialization owner.
+    /// terminal registration and that registration has no executor, active
+    /// attachment cleanup, or actor-materialization owner. Completed cleanup
+    /// and terminal-publication handles remain available to the canonical
+    /// unregister worker; they are mechanical capabilities, not live actor or
+    /// attachment authority.
     ///
     /// `Stopped` and `Retired` are the two quiescent lifecycle outcomes used
     /// by runtime disposal. Admission is checked atomically with installation
@@ -4306,6 +4338,16 @@ impl MeerkatMachine {
             let cleanup_result = observed_teardown_slot.cleanup_once(&driver).await;
             observed_teardown_slot.acknowledge_runtime_stop_result(cleanup_result.clone());
             cleanup_result?;
+            if disposition
+                == crate::runtime_loop::RuntimeLoopTeardownDisposition::PreserveRegistration
+            {
+                self.retire_exact_spontaneous_runtime_loop_shell_after_cleanup(
+                    session_id,
+                    &observed_epoch,
+                    &observed_teardown_slot,
+                )
+                .await;
+            }
         }
         self.join_unregister_if_observed_runtime_loop_became_draining(
             session_id,
@@ -4653,6 +4695,103 @@ impl MeerkatMachine {
         .await
     }
 
+    /// Retire only the runtime-loop attachment whose executor handoff was
+    /// successfully cleaned by this stop operation.
+    ///
+    /// `RuntimeLoopTeardownSlot::publish` is the loop body's final action, but
+    /// the task's channel receivers are dropped only when that task returns. A
+    /// cleanup worker can therefore win scheduling after the handoff and before
+    /// sender-side channel closure. Revalidate the entry epoch and exact handoff
+    /// slot under the session mutation gate instead of inferring attachment
+    /// identity from channel liveness. A replacement necessarily installs a
+    /// different teardown slot and is left untouched.
+    async fn retire_exact_runtime_loop_attachment_after_stop_cleanup(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        teardown_slot: &Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>,
+    ) {
+        let Some(mutation_gate) = self.session_mutation_gate(session_id).await else {
+            return;
+        };
+        let _mutation_guard = Arc::clone(&mutation_gate).lock_owned().await;
+        let retired_attachment = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return;
+            };
+            let exact_slot_is_current = entry
+                .runtime_loop_teardown
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, teardown_slot));
+            if entry.epoch_id != *epoch_id
+                || !Arc::ptr_eq(&entry.mutation_gate, &mutation_gate)
+                || !exact_slot_is_current
+            {
+                return;
+            }
+            entry.take_runtime_loop_attachment()
+        };
+        // The loop has already published its executor as its final action. Drop
+        // the remaining channel/join shell outside the session map lock; this
+        // cannot cancel the task and cannot target a successor attachment.
+        drop(retired_attachment);
+    }
+
+    /// Retire the dead attachment and teardown shell after a spontaneous loop
+    /// exit has completed its exact surface cleanup without an ordinary-stop
+    /// coordinator.
+    ///
+    /// The preserved terminal registration remains the durable recovery
+    /// anchor. Clearing only this exact mechanical shell lets a later caller
+    /// compare-and-remove that registration before rebuilding. If unregister
+    /// has already committed `Draining`, or an explicit stop coordinator won
+    /// the race, that owner retains the shell instead.
+    async fn retire_exact_spontaneous_runtime_loop_shell_after_cleanup(
+        &self,
+        session_id: &SessionId,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        teardown_slot: &Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>,
+    ) {
+        let Some(mutation_gate) = self.session_mutation_gate(session_id).await else {
+            return;
+        };
+        let _mutation_guard = Arc::clone(&mutation_gate).lock_owned().await;
+        let retired_shell = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return;
+            };
+            let exact_slot_is_current = entry
+                .runtime_loop_teardown
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, teardown_slot));
+            let registration_phase = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                .registration_phase;
+            if entry.epoch_id != *epoch_id
+                || !Arc::ptr_eq(&entry.mutation_gate, &mutation_gate)
+                || !exact_slot_is_current
+                || registration_phase != crate::meerkat_machine::dsl::RegistrationPhase::Queuing
+                || entry.runtime_stop_cleanup_coordinator.is_some()
+                || !entry.post_stop_cleanup_complete
+            {
+                return;
+            }
+            (
+                entry.take_runtime_loop_attachment(),
+                entry.runtime_loop_teardown.take(),
+            )
+        };
+        // `cleanup_once` has already consumed the executor and completed the
+        // exact surface callback. Drop only the closed channel/join shell and
+        // its cleaned handoff outside the session map lock.
+        drop(retired_shell);
+    }
+
     async fn run_owned_runtime_stop_cleanup(
         &self,
         session_id: &SessionId,
@@ -4696,6 +4835,18 @@ impl MeerkatMachine {
             )
             .await
             .map(|_guard| ()),
+        };
+        let cleanup_result = match (cleanup_result, teardown_slot.as_ref()) {
+            (Ok(()), Some(teardown_slot)) => {
+                self.retire_exact_runtime_loop_attachment_after_stop_cleanup(
+                    session_id,
+                    epoch_id,
+                    teardown_slot,
+                )
+                .await;
+                Ok(())
+            }
+            (result, _) => result,
         };
         if let Some(teardown_slot) = teardown_slot.as_ref() {
             teardown_slot.acknowledge_runtime_stop_result(cleanup_result.clone());
@@ -4827,14 +4978,30 @@ impl MeerkatMachine {
                 && claim.phase == crate::RuntimeActorMaterializationClaimPhase::Vacant
                 && !claim.rollback_registration_available
         };
-        // An ordinary Stop retains its completed coordinator as an idempotent
-        // result cache. That is terminal shell truth, not an active cleanup
-        // owner; canonical unregister will join the completed result. A
-        // pending or failed stop still rejects exact registration disposal.
+        // An ordinary Stop retains its closed channel slot, cleaned teardown
+        // handoff, and completed coordinator as one idempotent result cache.
+        // That exact residue is terminal shell truth, not a serving executor:
+        // canonical unregister consumes it idempotently. Require the entry and
+        // coordinator to name the same teardown slot and successful epoch so a
+        // pending, failed, or torn stop still rejects exact disposal.
         let runtime_stop_cleanup_quiescent = match &entry.runtime_stop_cleanup_coordinator {
-            None => true,
+            None => {
+                matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
+                    && entry.runtime_loop_teardown.is_none()
+            }
             Some(coordinator) => {
-                coordinator.teardown_slot.is_none()
+                let teardown_matches = match (
+                    coordinator.teardown_slot.as_ref(),
+                    entry.runtime_loop_teardown.as_ref(),
+                ) {
+                    (None, None) => true,
+                    (Some(coordinator_slot), Some(entry_slot)) => {
+                        Arc::ptr_eq(coordinator_slot, entry_slot)
+                    }
+                    _ => false,
+                };
+                coordinator.epoch_id == entry.epoch_id
+                    && teardown_matches
                     && coordinator
                         .result_rx
                         .borrow()
@@ -4842,20 +5009,28 @@ impl MeerkatMachine {
                         .is_some_and(Result::is_ok)
             }
         };
-        let attachment_local_authority_absent =
-            matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty)
-                && entry.runtime_loop_teardown.is_none()
-                && runtime_stop_cleanup_quiescent
-                && entry.post_stop_cleanup_handle.is_none()
-                && entry.post_stop_cleanup_attachment_id.is_none()
-                && entry.provisional_interrupt_handle.is_none()
-                && entry.provisional_materialization_claim_id.is_none()
-                && entry.publication_handle.is_none()
-                && materialization_vacant;
+        // A machine-managed stop intentionally retains cloneable cleanup and
+        // terminal-publication handles after the loop detaches. Once the exact
+        // post-stop callback completed, those handles are inputs to canonical
+        // unregister, not owners that can revive or replace an attachment.
+        // A half-installed pair or an unfinished callback still fails closed.
+        let post_stop_cleanup_quiescent = match (
+            entry.post_stop_cleanup_handle.as_ref(),
+            entry.post_stop_cleanup_attachment_id,
+        ) {
+            (None, None) => true,
+            (Some(_), Some(_)) => entry.post_stop_cleanup_complete,
+            _ => false,
+        };
+        let attachment_local_authority_absent = runtime_stop_cleanup_quiescent
+            && post_stop_cleanup_quiescent
+            && entry.provisional_interrupt_handle.is_none()
+            && entry.provisional_materialization_claim_id.is_none()
+            && materialization_vacant;
         if !attachment_local_authority_absent {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: format!(
-                    "exact terminal registration cleanup for session {session_id} requires an unattached registration with no retained attachment or materialization authority"
+                    "exact terminal registration cleanup for session {session_id} requires an unattached registration with no active attachment or materialization authority"
                 ),
             });
         }
@@ -5437,52 +5612,65 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<StagedSessionDslInput, String> {
-        let (begin_input, context) = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions.get(session_id).ok_or_else(|| {
-                RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                }
-                .to_string()
-            })?;
-            let unserved_attachment =
-                matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Pending(_));
-            let authority = entry
-                .dsl_authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let state = authority.state();
-            let session_id = crate::meerkat_machine::dsl::SessionId::from_domain(session_id);
-            let agent_runtime_id = state.active_runtime_id.clone();
-            let fence_token = state.active_fence_token;
-            let generation = state.active_runtime_generation;
-            let runtime_epoch_id = state.active_runtime_epoch_id.clone();
-            if unserved_attachment {
-                (
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterUnservedAttachment {
-                        session_id,
-                        agent_runtime_id,
-                        fence_token,
-                        generation,
-                        runtime_epoch_id,
-                    },
-                    "BeginUnregisterUnservedAttachment",
-                )
-            } else {
-                (
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterSession {
-                        session_id,
-                        agent_runtime_id,
-                        fence_token,
-                        generation,
-                        runtime_epoch_id,
-                    },
-                    "BeginUnregisterSession",
-                )
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
             }
+            .to_string()
+        })?;
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+            return Err(error.to_string());
+        }
+        let mechanically_pending_attachment =
+            matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Pending(_));
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        // A pre-serving loop can close its serving receiver and commit Stopped
+        // before the pending publication owner begins abort. The terminal
+        // lifecycle fact then selects ordinary retained-snapshot unregister;
+        // the Unserved arm applies only while the runtime remains live.
+        // Select and stage under the same DSL mutex so watcher feedback cannot
+        // move live -> Stopped between classification and transition.
+        let unserved_attachment = mechanically_pending_attachment
+            && matches!(
+                state.lifecycle_phase,
+                crate::meerkat_machine::dsl::MeerkatPhase::Idle
+                    | crate::meerkat_machine::dsl::MeerkatPhase::Attached
+                    | crate::meerkat_machine::dsl::MeerkatPhase::Running
+            );
+        let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(session_id);
+        let agent_runtime_id = state.active_runtime_id.clone();
+        let fence_token = state.active_fence_token;
+        let generation = state.active_runtime_generation;
+        let runtime_epoch_id = state.active_runtime_epoch_id.clone();
+        let (begin_input, context) = if unserved_attachment {
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterUnservedAttachment {
+                    session_id: dsl_session_id,
+                    agent_runtime_id,
+                    fence_token,
+                    generation,
+                    runtime_epoch_id,
+                },
+                "BeginUnregisterUnservedAttachment",
+            )
+        } else {
+            (
+                crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterSession {
+                    session_id: dsl_session_id,
+                    agent_runtime_id,
+                    fence_token,
+                    generation,
+                    runtime_epoch_id,
+                },
+                "BeginUnregisterSession",
+            )
         };
-        self.stage_session_dsl_transition(session_id, begin_input, context)
-            .await
+        Self::stage_dsl_transition_on_locked_authority(&mut authority, begin_input, context)
     }
 
     async fn stage_unregister_session_authority(
@@ -7100,9 +7288,10 @@ impl MeerkatMachine {
     /// Check whether a session has an active RuntimeLoop or attachment in
     /// progress.
     ///
-    /// `Ok(false)` means only `Queuing` (registered via `prepare_bindings()`
-    /// with no executor) or unknown. Driver faults are returned explicitly so
-    /// callers cannot accidentally treat a control-plane fault as absence.
+    /// `Ok(false)` means unknown, `Queuing` (registered via
+    /// `prepare_bindings()` with no executor), or a registration whose exact
+    /// attachment channels have closed. Driver faults are returned explicitly
+    /// so callers cannot accidentally treat a control-plane fault as absence.
     pub async fn session_has_executor(
         &self,
         session_id: &SessionId,
@@ -7225,35 +7414,67 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<bool, RuntimeDriverError> {
-        let handle = {
-            let mut sessions = self.sessions.write().await;
+        let attachment_id = {
+            let sessions = self.sessions.read().await;
             let entry = sessions
-                .get_mut(session_id)
+                .get(session_id)
                 .ok_or(RuntimeDriverError::NotReady {
                     state: RuntimeState::Destroyed,
                 })?;
-            match std::mem::replace(&mut entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty) {
+            match &entry.attachment_slot {
                 RuntimeLoopAttachmentSlot::Pending(attachment)
                 | RuntimeLoopAttachmentSlot::Attached(attachment) => {
-                    // Abort while the task's channel senders are still retained
-                    // by `attachment`, then drop those mechanics only after the
-                    // cancellation request is committed.
+                    // A real task panic closes the loop while the machine keeps
+                    // the exact attachment slot until canonical cleanup. Keep
+                    // that witness here as well; erasing it would manufacture
+                    // an ownerless state that production cannot reach.
                     attachment.loop_handle.abort();
-                    Some(attachment.loop_handle)
+                    Some(attachment.id)
                 }
                 RuntimeLoopAttachmentSlot::Empty => None,
             }
         };
-        let Some(handle) = handle else {
+        let Some(attachment_id) = attachment_id else {
             return Ok(false);
         };
-        match handle.await {
-            Ok(()) => Ok(true),
-            Err(error) if error.is_cancelled() => Ok(true),
-            Err(error) => Err(RuntimeDriverError::Internal(format!(
-                "fault-injected runtime loop ended unexpectedly: {error}"
-            ))),
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let finished = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions.get(session_id).ok_or_else(|| {
+                        RuntimeDriverError::StaleAuthority {
+                            reason: format!(
+                                "fault-injected attachment for session {session_id} disappeared before task exit"
+                            ),
+                        }
+                    })?;
+                    match &entry.attachment_slot {
+                        RuntimeLoopAttachmentSlot::Pending(attachment)
+                        | RuntimeLoopAttachmentSlot::Attached(attachment)
+                            if attachment.id == attachment_id =>
+                        {
+                            attachment.loop_handle.is_finished()
+                        }
+                        _ => {
+                            return Err(RuntimeDriverError::StaleAuthority {
+                                reason: format!(
+                                    "fault-injected attachment for session {session_id} changed before task exit"
+                                ),
+                            });
+                        }
+                    }
+                };
+                if finished {
+                    return Ok(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| RuntimeDriverError::Internal(format!(
+            "fault-injected runtime loop for session {session_id} did not stop within 5s"
+        )))??;
+        Ok(true)
     }
 
     /// Unit-test fault injector for the exact final-publication rollback path.
@@ -7263,7 +7484,7 @@ impl MeerkatMachine {
     pub(crate) async fn test_fail_next_attachment_serving_release(
         &self,
         session_id: &SessionId,
-    ) -> Result<(), RuntimeDriverError> {
+    ) -> Result<crate::runtime_loop::RuntimeLoopServingRelease, RuntimeDriverError> {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .get_mut(session_id)
@@ -7277,17 +7498,17 @@ impl MeerkatMachine {
                 ),
             });
         };
-        let original = attachment
-            .serving_release
-            .replace(crate::runtime_loop::RuntimeLoopServingRelease::closed_receiver_for_test());
-        // Keep the real startup receiver waiting so the attachment's other
-        // channels remain live through validation. Exact abort terminates the
-        // loop after this one-shot fault; leaking this test-only sender avoids
-        // adding fault state to the production attachment representation.
-        if let Some(original) = original {
-            std::mem::forget(original);
-        }
-        Ok(())
+        let original = attachment.serving_release.take().ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "pending attachment for session {session_id} lost its serving release"
+            ))
+        })?;
+        attachment.serving_release =
+            Some(crate::runtime_loop::RuntimeLoopServingRelease::closed_receiver_for_test());
+        // The caller retains the real sender through the failed-publication
+        // assertions, then drops it before abort so the parked runtime loop can
+        // observe closure and publish its teardown handoff.
+        Ok(original)
     }
 
     /// Wake the attached runtime loop when machine-owned input truth already

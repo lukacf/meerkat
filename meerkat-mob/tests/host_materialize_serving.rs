@@ -2509,20 +2509,37 @@ async fn host_status_marks_dead_runtime_loop_unhealthy_and_exact_replay_repairs_
             .expect("abort runtime loop without cooperative cleanup"),
         "materialized member must have had a runtime-loop task to abort"
     );
+    // Select the cleanup-winning ordering deterministically: the loop watcher
+    // has compare-removed the old actor/sidecar, while the preserved terminal
+    // machine registration remains the recovery anchor for exact replay.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture
+                .member_session_service()
+                .live_session_actor_registered(&session_id)
+                .await
+                .expect("read live member actor during watcher cleanup")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("runtime-loop watcher should clean the dead actor");
     assert!(
         adapter
-            .session_has_executor(&session_id)
+            .current_session_registration_witness(&session_id)
             .await
-            .expect("read stale generated executor registration"),
-        "fault injection deliberately leaves the generated registration Active"
+            .is_some(),
+        "fault injection must retain the exact machine registration for canonical cleanup"
     );
     assert!(
-        fixture
-            .member_session_service()
-            .has_live_session(&session_id)
+        adapter
+            .current_executor_attachment_witness(&session_id)
             .await
-            .expect("read lingering service actor"),
-        "fault injection deliberately bypasses terminal cleanup and leaves the service actor live"
+            .is_none(),
+        "the aborted loop must no longer qualify as a serving executor attachment"
     );
     assert!(
         !host_status_member_health(&probe, &fixture, "mob-health-dead-loop", "b2").await,
@@ -2534,7 +2551,7 @@ async fn host_status_marks_dead_runtime_loop_unhealthy_and_exact_replay_repairs_
     assert_eq!(replayed, ack, "repair returns the exact recorded ack");
     assert!(
         host_status_member_health(&probe, &fixture, "mob-health-dead-loop", "b2").await,
-        "exact replay must explicitly discard dead-loop service residue and rebuild within the request"
+        "exact replay must rebuild the non-serving attachment within the request"
     );
 
     fixture.shutdown().await;
@@ -2571,30 +2588,41 @@ async fn host_status_remains_healthy_while_the_session_actor_is_busy() {
         .expect("busy-session delivery reply");
     assert!(matches!(reply, BridgeReply::Delivery(_)));
 
-    let poll = raw_poll_member_events_command(
-        &probe,
-        "mob-health-busy-service",
-        1,
-        expected_member,
-        BridgeEventCursor::At {
-            generation: 1,
-            seq: 1,
-        },
-        Some(64),
-        Some(5_000),
-    );
-    let reply = probe
-        .send_bridge_command_raw(&member, &poll, REPLY_TIMEOUT)
-        .await
-        .expect("busy-session event poll");
-    let BridgeReply::MemberEventsPage(page) = reply else {
-        panic!("expected busy-session event page, got {reply:?}");
-    };
+    let mut cursor = 1;
+    let mut saw_run_started = false;
+    for _ in 0..8 {
+        let poll = raw_poll_member_events_command(
+            &probe,
+            "mob-health-busy-service",
+            1,
+            expected_member.clone(),
+            BridgeEventCursor::At {
+                generation: 1,
+                seq: cursor,
+            },
+            Some(64),
+            Some(5_000),
+        );
+        let reply = probe
+            .send_bridge_command_raw(&member, &poll, REPLY_TIMEOUT)
+            .await
+            .expect("busy-session event poll");
+        let BridgeReply::MemberEventsPage(page) = reply else {
+            panic!("expected busy-session event page, got {reply:?}");
+        };
+        saw_run_started |= page.events.iter().any(|row| {
+            matches!(
+                row.envelope.payload,
+                meerkat_core::AgentEvent::RunStarted { .. }
+            )
+        });
+        cursor = page.next_seq;
+        if saw_run_started {
+            break;
+        }
+    }
     assert!(
-        page.events.iter().any(|row| matches!(
-            row.envelope.payload,
-            meerkat_core::AgentEvent::RunStarted { .. }
-        )),
+        saw_run_started,
         "the actor must be parked inside a live provider turn before health observation"
     );
 

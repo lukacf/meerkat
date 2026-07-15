@@ -2703,6 +2703,7 @@ async fn apply_runtime_loop_effect_and_record_handoff(
         Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
     >,
 ) -> bool {
+    let effect_is_stop = effect.is_stop();
     let stop_completion = effect.take_stop_completion();
     match crate::control_plane::apply_runtime_loop_executor_effect(
         driver,
@@ -2727,13 +2728,55 @@ async fn apply_runtime_loop_effect_and_record_handoff(
                 error = %failure.error,
                 "failed to apply runtime-loop executor effect"
             );
-            handoff.stop_completion = stop_completion;
-            handoff.executor_stop_retry_reason = failure.executor_stop_retry_reason;
-            handoff.deferred_executor_stop_error = handoff
-                .executor_stop_retry_reason
-                .as_ref()
-                .map(|_| failure.error);
+            record_runtime_loop_effect_failure_handoff(
+                handoff,
+                stop_completion,
+                effect_is_stop,
+                failure,
+            );
             true
+        }
+    }
+}
+
+fn record_runtime_loop_effect_failure_handoff(
+    handoff: &mut RuntimeLoopTerminalHandoff,
+    stop_completion: Option<crate::effect::StopEffectCompletion>,
+    effect_is_stop: bool,
+    failure: crate::control_plane::RuntimeLoopEffectFailure,
+) {
+    handoff.stop_completion = stop_completion;
+    match (failure.executor_stop_retry_reason, effect_is_stop) {
+        (Some(reason), _) => {
+            // Preserve the existing stop-hook retry contract: the first
+            // cleanup attempt reports the original stop error, while the
+            // retained exact executor remains available for an explicit retry
+            // of that same stop request.
+            handoff.executor_stop_retry_reason = Some(reason);
+            handoff.deferred_executor_stop_error = Some(failure.error);
+        }
+        (None, true) => {
+            // The stop hook succeeded, but machine terminalization failed.
+            // Machine-managed executors now retain the exact mutation fence;
+            // invoking the stop hook again would try to reacquire that same
+            // non-reentrant fence. Preserve the established cleanup contract:
+            // the retained handoff immediately retries terminalization without
+            // repeating Stop.
+            handoff.executor_stop_retry_reason = None;
+            handoff.deferred_executor_stop_error = None;
+        }
+        (None, false) => {
+            // A failed non-stop effect also exits the runtime loop, but it has
+            // not yet crossed the canonical executor-stop seam. Retain that
+            // obligation so post-loop cleanup first runs the stop hook (and,
+            // for machine-managed executors, mints the exact post-stop
+            // mutation fence) instead of invoking cleanup against an executor
+            // that is still AwaitingStop.
+            handoff.executor_stop_retry_reason = Some(format!(
+                "runtime executor effect failed before canonical stop: {}",
+                failure.error
+            ));
+            handoff.deferred_executor_stop_error = None;
         }
     }
 }
@@ -5465,6 +5508,45 @@ mod tests {
         )
     }
 
+    struct BoundaryCancelFailingExecutor {
+        cancel_calls: Arc<AtomicUsize>,
+        stop_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for BoundaryCancelFailingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: meerkat_core::lifecycle::RunId,
+            _primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::CoreExecutorError,
+        > {
+            unreachable!("effect handoff regression does not apply queued work")
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Err(
+                meerkat_core::lifecycle::CoreExecutorError::control_failed_runtime(
+                    "synthetic missing session actor",
+                ),
+            )
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn teardown_publication_notify_race_does_not_miss_wakeups() {
         for _ in 0..256 {
@@ -5637,6 +5719,81 @@ mod tests {
             .await
             .expect("unregister cleanup must realize the retained stop obligation");
         assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_boundary_cancel_retains_canonical_stop_before_cleanup() {
+        let driver = make_shared_ephemeral_driver("boundary-cancel-stop-handoff");
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = BoundaryCancelFailingExecutor {
+            cancel_calls: Arc::clone(&cancel_calls),
+            stop_calls: Arc::clone(&stop_calls),
+        };
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
+
+        let should_stop = apply_runtime_loop_effect_and_record_handoff(
+            &driver,
+            None,
+            &mut executor,
+            crate::effect::runtime_effect_for_test(
+                crate::meerkat_machine::dsl::RuntimeEffectKind::CancelAfterBoundary,
+                "boundary cancel",
+            ),
+            &mut terminal_handoff,
+            None,
+        )
+        .await;
+
+        assert!(should_stop, "failed boundary cancel must stop the loop");
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            terminal_handoff
+                .executor_stop_retry_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed before canonical stop")),
+            "non-stop effect failure must retain the canonical stop obligation"
+        );
+        assert!(
+            terminal_handoff.deferred_executor_stop_error.is_none(),
+            "the abnormal-exit stop hook should run on the first cleanup attempt"
+        );
+
+        let slot = RuntimeLoopTeardownSlot::pending();
+        slot.publish(RuntimeLoopExitHandoff {
+            executor: Box::new(executor),
+            terminal: terminal_handoff,
+        });
+        slot.cleanup_once(&driver)
+            .await
+            .expect("cleanup must realize the retained canonical stop first");
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_stop_terminalization_does_not_rearm_the_stop_hook() {
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
+        record_runtime_loop_effect_failure_handoff(
+            &mut terminal_handoff,
+            None,
+            true,
+            crate::control_plane::RuntimeLoopEffectFailure {
+                error: crate::RuntimeDriverError::Internal(
+                    "synthetic post-stop terminalization failure".to_string(),
+                ),
+                executor_stop_retry_reason: None,
+            },
+        );
+
+        assert!(
+            terminal_handoff.executor_stop_retry_reason.is_none(),
+            "a successful stop hook must not be repeated after terminalization fails"
+        );
+        assert!(
+            terminal_handoff.deferred_executor_stop_error.is_none(),
+            "the retained handoff must retry terminalization immediately"
+        );
     }
 
     #[tokio::test]

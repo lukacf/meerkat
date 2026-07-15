@@ -230,7 +230,7 @@ async fn accept_peer_terminal_running_queues_wake_for_next_idle() {
 }
 
 #[tokio::test]
-async fn accept_progress_policy_no_wake_but_idle_admission_wakes() {
+async fn accept_progress_policy_no_wake_keeps_idle_admission_passive() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = make_peer_progress();
     let result = driver.accept_input(input).await.unwrap();
@@ -239,10 +239,10 @@ async fn accept_progress_policy_no_wake_but_idle_admission_wakes() {
     let signal = driver.take_post_admission_signal();
     assert_eq!(
         signal,
-        PostAdmissionSignal::WakeLoop,
-        "ResponseProgress should stage on the checkpoint lane and use the generated idle admission wake"
+        PostAdmissionSignal::None,
+        "ResponseProgress should stage on the checkpoint lane without waking an idle runtime"
     );
-    assert!(signal.should_wake());
+    assert!(!signal.should_wake());
 }
 
 #[tokio::test]
@@ -481,10 +481,10 @@ async fn progress_peer_staged_boundary() {
     let signal = driver.take_post_admission_signal();
     assert_eq!(
         signal,
-        PostAdmissionSignal::WakeLoop,
-        "ResponseProgress policy remains passive while generated idle admission wakes the loop"
+        PostAdmissionSignal::None,
+        "ResponseProgress policy remains passive while queued for a later run boundary"
     );
-    assert!(signal.should_wake());
+    assert!(!signal.should_wake());
 }
 
 #[tokio::test]

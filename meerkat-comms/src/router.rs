@@ -868,6 +868,7 @@ impl Router {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
     !matches!(kind, MessageKind::Ack { .. } | MessageKind::Response { .. })
 }
@@ -1542,51 +1543,30 @@ mod tests {
     }
 
     /// The declared-route deadline covers the frame write too, not just the
-    /// socket connect. A callback can accept a connection and then stop
-    /// reading; without this bound, a response larger than the socket buffer
-    /// strands the responder indefinitely.
+    /// socket connect. Use a deliberately tiny in-memory stream so the test
+    /// does not depend on platform TCP autotuning or kernel buffer sizes.
     #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test]
-    async fn declared_tcp_reply_frame_write_is_bounded() {
+    #[tokio::test(start_paused = true)]
+    async fn declared_socket_reply_frame_write_is_bounded() {
         let router = test_router();
         let recipient = Keypair::generate().public_key();
-        let dest = recipient.to_peer_id();
         let correlation = Uuid::new_v4();
-        let listener_socket = tokio::net::TcpSocket::new_v4().expect("create listener socket");
-        listener_socket
-            .set_recv_buffer_size(1024)
-            .expect("bound listener receive buffer");
-        listener_socket
-            .bind("127.0.0.1:0".parse().expect("loopback socket address"))
-            .expect("bind listener socket");
-        let listener = listener_socket.listen(1).expect("listen for callback");
-        let callback_address = listener.local_addr().expect("callback listener address");
-        router.stage_correlated_reply_endpoint(
-            dest,
-            correlation,
-            DeclaredReplyEndpoint {
-                pubkey: recipient,
-                address: format!("tcp://{callback_address}"),
-            },
-        );
-        let trap = tokio::spawn(async move {
-            let (_nonreading_receiver, _) = listener.accept().await.expect("accept callback");
-            std::future::pending::<()>().await;
-        });
-
-        // Stay below the protocol's 1 MiB frame ceiling while exceeding
-        // normal socket buffers after the trap advertises its tiny window.
+        let (mut sender, _nonreading_receiver) = tokio::io::duplex(1024);
         let marker = "x".repeat(900 * 1024);
-        let error = router
-            .send_with_id(
-                dest,
-                Uuid::new_v4(),
-                response_kind_for(correlation, &marker),
-                None,
-            )
-            .await
-            .expect_err("non-reading correlated TCP callback must time out");
-        trap.abort();
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: router.keypair.public_key(),
+            to: recipient,
+            kind: response_kind_for(correlation, &marker),
+            sig: crate::identity::Signature::new([0u8; 64]),
+        };
+        envelope.sign(&router.keypair);
+
+        let error = run_socket_route_operation("tcp://declared-callback", true, async {
+            router.send_on_stream(&mut sender, envelope, false).await
+        })
+        .await
+        .expect_err("non-reading declared callback must time out");
         assert!(matches!(
             error,
             SendError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut

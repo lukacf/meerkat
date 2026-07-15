@@ -13,6 +13,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::agent::CommsRuntime as _;
@@ -25,8 +26,8 @@ use meerkat_mob::runtime::bridge_protocol::{
 };
 use support::{
     HostFixtureOptions, REAL_COMMS_TEST_LOCK, bind_then_materialize, create_controlling_mob,
-    raw_release_member_command, spawn_host_daemon_fixture, spawn_peer_comms_endpoint,
-    spawn_scripted_host_peer,
+    member_identity_of, raw_release_member_command, spawn_host_daemon_fixture,
+    spawn_peer_comms_endpoint, spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
 };
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -162,6 +163,10 @@ async fn remote_retire_on_ephemeral_host_is_typed_degradation_not_failure() {
 async fn failed_release_is_typed_and_retry_converges_at_the_recorded_tuple() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let scripted = spawn_scripted_host_peer("rel-t7-scripted").await;
+    let member = Arc::new(spawn_peer_comms_endpoint("rel-t7-member", true, None).await);
+    scripted.script_member_identity("b2", member_identity_of(&member));
+    scripted.bind_member_endpoint("b2", Arc::clone(&member));
+    let _member_responder = spawn_scripted_member_turn_responder(member);
     let controlling = create_controlling_mob("rel-t7").await;
     let report = controlling.bind_scripted(&scripted).await;
 
@@ -180,8 +185,14 @@ async fn failed_release_is_typed_and_retry_converges_at_the_recorded_tuple() {
         .await
         .expect_err("a failed release must surface typed — ArchiveSession is critical");
     assert!(
-        !format!("{error:?}").is_empty(),
-        "typed bridge cause expected"
+        matches!(
+            &error,
+            meerkat_mob::MobError::BridgeCommandRejected {
+                cause: BridgeRejectionCause::Unavailable,
+                reason,
+            } if reason.contains("injected release failure")
+        ),
+        "the injected authenticated rejection must surface unchanged, got {error:?}"
     );
     assert_eq!(
         scripted.release_count(),
@@ -238,6 +249,10 @@ async fn failed_release_is_typed_and_retry_converges_at_the_recorded_tuple() {
 async fn destroy_releases_placed_members_and_reports_clean() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let scripted = spawn_scripted_host_peer("rel-t9-scripted").await;
+    let member = Arc::new(spawn_peer_comms_endpoint("rel-t9-member", true, None).await);
+    scripted.script_member_identity("b2", member_identity_of(&member));
+    scripted.bind_member_endpoint("b2", Arc::clone(&member));
+    let _member_responder = spawn_scripted_member_turn_responder(member);
     let controlling = create_controlling_mob("rel-t9").await;
     let report = controlling.bind_scripted(&scripted).await;
 

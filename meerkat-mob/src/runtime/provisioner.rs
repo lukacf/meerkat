@@ -888,6 +888,7 @@ enum RuntimeSessionDisposalTarget {
     Absent,
     ExactAttachment {
         witness: RuntimeExecutorAttachmentWitness,
+        registration: RuntimeSessionRegistrationWitness,
         sidecar: Option<Arc<RuntimeSessionState>>,
     },
     ExactRegistration(RuntimeSessionRegistrationWitness),
@@ -1015,17 +1016,37 @@ impl MemberSessionDisposalArc {
         let Some(adapter) = &self.runtime_adapter else {
             return Ok(RuntimeSessionDisposalTarget::Absent);
         };
+        let registration_before = adapter
+            .current_session_registration_witness(session_id)
+            .await;
         let current = adapter
             .current_executor_attachment_witness(session_id)
             .await;
+        let state = self.runtime_sessions.read().await.get(session_id).cloned();
         let registration = adapter
             .current_session_registration_witness(session_id)
             .await;
-        let state = self.runtime_sessions.read().await.get(session_id).cloned();
-        match (current, state, registration) {
-            (Some(witness), Some(state), Some(_)) if state.witness() == &witness => {
+        if registration_before != registration {
+            return Err(Self::runtime_archive_error(format!(
+                "runtime disposal for {session_id} observed a registration replacement while capturing exact attachment state"
+            )));
+        }
+        let retained_cleanup_is_exact = match (&current, &state, &registration) {
+            (None, Some(state), Some(registration)) if state.cleanup_scheduled() => {
+                adapter
+                    .executor_attachment_cleanup_is_current_for_registration(
+                        state.witness(),
+                        registration,
+                    )
+                    .await
+            }
+            _ => false,
+        };
+        match (current, state, registration, retained_cleanup_is_exact) {
+            (Some(witness), Some(state), Some(registration), _) if state.witness() == &witness => {
                 Ok(RuntimeSessionDisposalTarget::ExactAttachment {
                     witness,
+                    registration,
                     sidecar: Some(state),
                 })
             }
@@ -1035,15 +1056,30 @@ impl MemberSessionDisposalArc {
             // the attachment was created through another shared surface).
             // Preserve the exact machine witness and retire by compare-and-
             // remove; never require the optional index to manufacture proof.
-            (Some(witness), None, Some(_)) => Ok(RuntimeSessionDisposalTarget::ExactAttachment {
-                witness,
-                sidecar: None,
-            }),
-            (None, None, Some(registration)) => Ok(
+            (Some(witness), None, Some(registration), _) => {
+                Ok(RuntimeSessionDisposalTarget::ExactAttachment {
+                    witness,
+                    registration,
+                    sidecar: None,
+                })
+            }
+            // Canonical unregister hides the serving projection as soon as it
+            // enters Draining.  If post-stop cleanup then fails transiently,
+            // the exact sidecar remains the retry anchor.  Re-admit it only
+            // after the machine proves that both opaque witnesses still name
+            // the same registration and retained cleanup attachment.
+            (None, Some(state), Some(registration), true) => {
+                Ok(RuntimeSessionDisposalTarget::ExactAttachment {
+                    witness: state.witness().clone(),
+                    registration,
+                    sidecar: Some(state),
+                })
+            }
+            (None, None, Some(registration), _) => Ok(
                 RuntimeSessionDisposalTarget::ExactRegistration(registration),
             ),
-            (None, None, None) => Ok(RuntimeSessionDisposalTarget::Absent),
-            (current, state, registration) => Err(Self::runtime_archive_error(format!(
+            (None, None, None, _) => Ok(RuntimeSessionDisposalTarget::Absent),
+            (current, state, registration, _) => Err(Self::runtime_archive_error(format!(
                 "runtime disposal for {session_id} cannot capture an exact machine/sidecar pair: attachment={current:?}, registration={registration:?}, sidecar={:?}",
                 state.as_ref().map(|state| state.witness()),
             ))),
@@ -1102,39 +1138,11 @@ impl MemberSessionDisposalArc {
                     }
                     return Ok(());
                 }
-                RuntimeSessionDisposalTarget::ExactAttachment { witness, sidecar } => {
-                    let current = adapter
-                        .current_executor_attachment_witness(session_id)
-                        .await;
-                    if current.as_ref() != Some(witness) {
-                        return Err(Self::runtime_archive_error(format!(
-                            "runtime attachment for {session_id} changed before exact disposal"
-                        )));
-                    }
-                    if let Some(expected_state) = sidecar {
-                        let exact_sidecar = self
-                            .runtime_sessions
-                            .read()
-                            .await
-                            .get(session_id)
-                            .is_some_and(|current| {
-                                same_runtime_attachment(current, expected_state)
-                            });
-                        if !exact_sidecar {
-                            return Err(Self::runtime_archive_error(format!(
-                                "runtime sidecar for {session_id} changed before exact disposal"
-                            )));
-                        }
-                        let operation_guard = expected_state.operation_guard().await;
-                        expected_state.mark_cleanup_scheduled();
-                        expected_state.clear_queued_turns().await;
-                        drop(operation_guard);
-                    } else if self.runtime_sessions.read().await.contains_key(session_id) {
-                        return Err(Self::runtime_archive_error(format!(
-                            "runtime sidecar for {session_id} appeared after exact sidecar absence capture"
-                        )));
-                    }
-
+                RuntimeSessionDisposalTarget::ExactAttachment {
+                    witness,
+                    registration,
+                    sidecar,
+                } => {
                     let retirement = adapter
                         .prepare_executor_attachment_retirement_under_runtime_turn_boundary(witness)
                         .await
@@ -1142,31 +1150,109 @@ impl MemberSessionDisposalArc {
                             Self::runtime_archive_error(format!(
                                 "failed to prepare exact runtime disposal for {session_id}: {error}"
                             ))
-                        })?
-                        .ok_or_else(|| {
-                            Self::runtime_archive_error(format!(
-                                "runtime attachment for {session_id} disappeared before exact disposal"
-                            ))
                         })?;
-                    drop(boundary);
-                    let removed = retirement
-                        .commit()
-                        .map_err(|error| {
-                            Self::runtime_archive_error(format!(
-                                "failed to start exact runtime disposal for {session_id}: {error}"
-                            ))
-                        })?
-                        .wait()
-                        .await
-                        .map_err(|error| {
-                            Self::runtime_archive_error(format!(
-                                "failed to complete exact runtime disposal for {session_id}: {error}"
-                            ))
-                        })?;
-                    if !removed {
-                        return Err(Self::runtime_archive_error(format!(
-                            "exact runtime disposal for {session_id} lost its attachment incarnation"
-                        )));
+                    if let Some(retirement) = retirement {
+                        if let Some(expected_state) = sidecar {
+                            let exact_sidecar = self
+                                .runtime_sessions
+                                .read()
+                                .await
+                                .get(session_id)
+                                .is_some_and(|current| {
+                                    same_runtime_attachment(current, expected_state)
+                                });
+                            if !exact_sidecar {
+                                return Err(Self::runtime_archive_error(format!(
+                                    "runtime sidecar for {session_id} changed before exact disposal"
+                                )));
+                            }
+                            let operation_guard = expected_state.operation_guard().await;
+                            expected_state.mark_cleanup_scheduled();
+                            expected_state.clear_queued_turns().await;
+                            drop(operation_guard);
+                        } else if self.runtime_sessions.read().await.contains_key(session_id) {
+                            return Err(Self::runtime_archive_error(format!(
+                                "runtime sidecar for {session_id} appeared after exact sidecar absence capture"
+                            )));
+                        }
+
+                        drop(boundary);
+                        let removed = retirement
+                            .commit()
+                            .map_err(|error| {
+                                Self::runtime_archive_error(format!(
+                                    "failed to start exact runtime disposal for {session_id}: {error}"
+                                ))
+                            })?
+                            .wait()
+                            .await
+                            .map_err(|error| {
+                                Self::runtime_archive_error(format!(
+                                    "failed to complete exact runtime disposal for {session_id}: {error}"
+                                ))
+                            })?;
+                        if !removed {
+                            return Err(Self::runtime_archive_error(format!(
+                                "exact runtime disposal for {session_id} lost its attachment incarnation"
+                            )));
+                        }
+                    } else {
+                        // `current_executor_attachment_witness` deliberately
+                        // hides an attachment after it enters Draining. Join
+                        // the same machine-owned teardown by exact witness
+                        // instead of misclassifying that state as replacement.
+                        drop(boundary);
+                        let removed = adapter
+                            .unregister_executor_attachment_if_current(witness)
+                            .await
+                            .map_err(|error| {
+                                Self::runtime_archive_error(format!(
+                                    "failed to join exact runtime disposal for {session_id}: {error}"
+                                ))
+                            })?;
+                        if !removed {
+                            match adapter
+                                .current_session_registration_witness(session_id)
+                                .await
+                            {
+                                None => {}
+                                Some(current) if &current == registration => {
+                                    let removed = adapter
+                                        .unregister_terminal_session_registration_if_current(
+                                            registration,
+                                        )
+                                        .await
+                                        .map_err(|error| {
+                                            Self::runtime_archive_error(format!(
+                                                "failed exact terminal registration disposal for {session_id}: {error}"
+                                            ))
+                                        })?;
+                                    if !removed {
+                                        match adapter
+                                            .current_session_registration_witness(session_id)
+                                            .await
+                                        {
+                                            None => {}
+                                            Some(current) if &current != registration => {
+                                                return Err(Self::runtime_archive_error(format!(
+                                                    "runtime registration for {session_id} changed before exact disposal"
+                                                )));
+                                            }
+                                            Some(_) => {
+                                                return Err(Self::runtime_archive_error(format!(
+                                                    "exact terminal runtime registration for {session_id} could not be disposed"
+                                                )));
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(_) => {
+                                    return Err(Self::runtime_archive_error(format!(
+                                        "runtime registration for {session_id} changed before exact disposal"
+                                    )));
+                                }
+                            }
+                        }
                     }
                     if let Some(expected_state) = sidecar {
                         self.remove_runtime_session_state(session_id, Some(expected_state))
@@ -2919,7 +3005,8 @@ async fn create_attached_session_actor_recovery_owned(
                 let cleanup = match actor_witness_slot.witness() {
                     Some(actor_witness) => session_service
                         .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
-                        .await,
+                        .await
+                        .map(|_| ()),
                     None => session_service
                         .discard_live_session_under_runtime_turn_boundary(&session_id)
                         .await,
@@ -2966,7 +3053,8 @@ async fn create_attached_session_actor_recovery_owned(
                     Err(error) => {
                         let cleanup = session_service
                             .discard_live_session_actor_under_runtime_turn_boundary(&actor_witness)
-                            .await;
+                            .await
+                            .map(|_| ());
                         Err(MobError::Internal(match cleanup {
                             Ok(()) | Err(SessionError::NotFound { .. }) => error.to_string(),
                             Err(cleanup_error) => format!(

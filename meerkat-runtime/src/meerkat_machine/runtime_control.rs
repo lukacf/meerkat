@@ -1,4 +1,5 @@
 use super::*;
+use meerkat_core::time_compat::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 type AcceptInputWithCompletionFuture<'a> = std::pin::Pin<
@@ -1655,7 +1656,7 @@ impl MeerkatMachine {
 
         const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
         const RETRY: std::time::Duration = std::time::Duration::from_millis(25);
-        let deadline = crate::tokio::time::Instant::now() + SETTLE;
+        let deadline = Instant::now() + SETTLE;
         loop {
             enum Action {
                 Done,
@@ -1748,13 +1749,14 @@ impl MeerkatMachine {
                     // Retain `authority` across durable publication/waiter
                     // handoff so replacement cannot overtake the exact queued
                     // terminalization interval.
-                    crate::control_plane::publish_and_resolve_runless_runtime_termination(
+                    crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
                         &driver,
                         Some(&completions),
                         publication_handle.as_deref(),
                         &[input_id],
                         candidate_owner_input_id.as_ref(),
                         "tracked input cancelled before run",
+                        Some(deadline),
                     )
                     .await?;
                     drop(authority);
@@ -1773,7 +1775,7 @@ impl MeerkatMachine {
                 }
                 Action::Retry => drop(authority),
             }
-            if crate::tokio::time::Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 return Err(RuntimeDriverError::Internal(format!(
                     "tracked input '{idempotency_key}' did not reach a runtime terminal before the cancellation settle deadline"
                 )));
@@ -1830,7 +1832,7 @@ impl MeerkatMachine {
             session_id,
             input_id,
             reason,
-            crate::tokio::time::Instant::now() + SETTLE,
+            Instant::now() + SETTLE,
         )
         .await
     }
@@ -1840,7 +1842,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         input_id: &meerkat_core::lifecycle::InputId,
         reason: String,
-        deadline: crate::tokio::time::Instant,
+        deadline: Instant,
     ) -> Result<bool, RuntimeDriverError> {
         use crate::input_state::{InputAbandonReason, InputLifecycleState};
 
@@ -2008,7 +2010,7 @@ impl MeerkatMachine {
                 }
             }
 
-            if crate::tokio::time::Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 return Err(RuntimeDriverError::Internal(format!(
                     "input '{input_id}' did not reach a runtime terminal before the cancellation settle deadline"
                 )));

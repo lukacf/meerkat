@@ -1838,7 +1838,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call == 1 {
-                self.first_apply_started.notify_waiters();
+                self.first_apply_started.notify_one();
                 self.release_first_apply.notified().await;
             }
 
@@ -2114,27 +2114,42 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         )],
         "terminal response should render through typed context append"
     );
-    let active_ids = adapter
-        .list_active_inputs(&sid)
-        .await
-        .expect("active inputs after drain");
-    for input_id in active_ids {
-        let state = adapter
-            .input_state(&sid, &input_id)
-            .await
-            .expect("input state")
-            .expect("active input state");
-        assert!(
-            !matches!(
-                state.state.persisted_input.as_ref(),
-                Some(Input::Peer(meerkat_runtime::PeerInput {
-                    convention: Some(PeerConvention::ResponseTerminal { .. }),
-                    ..
-                }))
-            ),
-            "queued peer_response_terminal must not remain stuck after WakeLoop: {state:?}"
-        );
-    }
+    // `terminal_applied` is emitted from inside `CoreExecutor::apply`, before
+    // the runtime loop commits the returned receipt and consumes the staged
+    // input. Observe the authoritative input ledger instead of racing that
+    // post-apply commit under a loaded test runner.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let active_ids = adapter
+                .list_active_inputs(&sid)
+                .await
+                .expect("active inputs after drain");
+            let mut terminal_still_active = false;
+            for input_id in active_ids {
+                let state = adapter
+                    .input_state(&sid, &input_id)
+                    .await
+                    .expect("input state")
+                    .expect("active input state");
+                if matches!(
+                    state.state.persisted_input.as_ref(),
+                    Some(Input::Peer(meerkat_runtime::PeerInput {
+                        convention: Some(PeerConvention::ResponseTerminal { .. }),
+                        ..
+                    }))
+                ) {
+                    terminal_still_active = true;
+                    break;
+                }
+            }
+            if !terminal_still_active {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("queued peer_response_terminal must leave the active ledger after WakeLoop");
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
         "requester executor should run once for prompt and once for terminal response"
@@ -2149,7 +2164,9 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     };
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_runtime::input_state::InputLifecycleState;
-    struct FailingExecutor;
+    struct FailingExecutor {
+        calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait::async_trait]
     impl CoreExecutor for FailingExecutor {
@@ -2158,6 +2175,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
             _run_id: RunId,
             _primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Err(CoreExecutorError::apply_failed_runtime_turn("LLM error"))
         }
 
@@ -2178,8 +2196,14 @@ async fn failed_executor_does_not_strand_input_in_apc() {
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
+    let calls = Arc::new(AtomicUsize::new(0));
     adapter
-        .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(FailingExecutor {
+                calls: Arc::clone(&calls),
+            }),
+        )
         .await
         .expect("runtime executor registration should succeed");
 
@@ -2201,8 +2225,21 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     )
     .await;
 
-    // Runtime should be back to Attached (executor still connected, not stuck in Running)
-    let state = adapter.runtime_state(&sid).await.unwrap();
+    wait_for_atomic_usize_at_least(
+        &calls,
+        1,
+        "failing executor should receive at least one apply attempt",
+    )
+    .await;
+    // Observe the post-failure state, rather than the initial queued state or
+    // a subsequent retry's transient Running phase.
+    let state = wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Attached,
+        "failed executor should return to Attached",
+    )
+    .await;
     assert_eq!(state, RuntimeState::Attached);
 
     // Input should roll back or abandon after retry exhaustion, but never
@@ -3012,10 +3049,13 @@ async fn completed_boundary_commit_failure_unwinds_runtime_loop_state() {
         "boundary commit failures should stop the dead executor path",
     )
     .await;
-    assert_eq!(
-        adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Stopped
-    );
+    wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Stopped,
+        "boundary commit failure should terminalize runtime after the stop hook",
+    )
+    .await;
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(state.seed.phase, InputLifecycleState::Abandoned);
 }

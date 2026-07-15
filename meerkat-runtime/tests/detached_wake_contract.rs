@@ -327,6 +327,8 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
 async fn choke_004_five_completions_produce_one_coalesced_wake() {
     struct CountingExecutor {
         apply_count: Arc<AtomicUsize>,
+        first_apply_started: Arc<Notify>,
+        allow_first_apply: Arc<Notify>,
     }
 
     #[async_trait::async_trait]
@@ -336,7 +338,11 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.apply_count.fetch_add(1, Ordering::SeqCst);
+            let call_index = self.apply_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if call_index == 1 {
+                self.first_apply_started.notify_one();
+                self.allow_first_apply.notified().await;
+            }
             let mut executor = ResultExecutor;
             executor.apply(run_id, primitive).await
         }
@@ -356,6 +362,8 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
     }
 
     let apply_count = Arc::new(AtomicUsize::new(0));
+    let first_apply_started = Arc::new(Notify::new());
+    let allow_first_apply = Arc::new(Notify::new());
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
@@ -364,6 +372,8 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
             session_id.clone(),
             Box::new(CountingExecutor {
                 apply_count: Arc::clone(&apply_count),
+                first_apply_started: Arc::clone(&first_apply_started),
+                allow_first_apply: Arc::clone(&allow_first_apply),
             }),
         )
         .await
@@ -385,15 +395,10 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
         op_ids.push(op_id);
     }
 
-    // Complete all 5 operations — each sets pending=true, but pending is
-    // already true after the first, so only one wake is needed.
-    for op_id in &op_ids {
-        registry
-            .complete_operation(op_id, op_result(op_id, "done"))
-            .unwrap();
-    }
-
-    // Trigger the runtime loop with a prompt so the idle-wake path fires
+    // Hold a prompt turn in Running while all five operations complete. The
+    // runtime then observes one stable buffered batch at the next boundary;
+    // the test does not depend on how concurrent producers interleave with an
+    // otherwise-idle consumer.
     use meerkat_runtime::{Input, InputHeader, PromptInput};
     let trigger_input = Input::Prompt(PromptInput {
         injected_context: Vec::new(),
@@ -416,6 +421,16 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
         .accept_input_with_completion(&session_id, trigger_input)
         .await
         .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), first_apply_started.notified())
+        .await
+        .expect("trigger prompt should enter the executor");
+    for op_id in &op_ids {
+        registry
+            .complete_operation(op_id, op_result(op_id, "done"))
+            .unwrap();
+    }
+    allow_first_apply.notify_one();
 
     if let Some(handle) = handle {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.wait()).await;

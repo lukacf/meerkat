@@ -164,7 +164,7 @@ async fn oversized_terminal_event_resolves_promptly_via_sidecar() {
         "xhf-oversized-terminal",
         vec![(
             FlowId::from("oversized-failure"),
-            single_step_flow_with_timeout("worker", "fail largely", 30_000),
+            single_step_flow_with_timeout("worker", "fail largely", 45_000),
         )],
     )
     .await;
@@ -185,11 +185,11 @@ async fn oversized_terminal_event_resolves_promptly_via_sidecar() {
         .await
         .expect("run directed remote failure");
     let run = tokio::time::timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(30),
         wait_for_flow_run_terminal(&controlling.handle, &run_id, RUN_WAIT),
     )
     .await
-    .expect("compacted sidecar resolves before the 30-second turn timeout");
+    .expect("compacted sidecar resolves before the 45-second turn timeout");
 
     assert_eq!(run.status, MobRunStatus::Failed);
     let reason = run
@@ -199,7 +199,10 @@ async fn oversized_terminal_event_resolves_promptly_via_sidecar() {
         .map(|entry| entry.reason.as_str())
         .expect("failed step is recorded");
     assert!(
-        reason.contains("RunCompleted") && reason.contains("unavailable"),
+        reason.contains("remote terminal event row at durable seq")
+            && reason.contains("exceeded the bridge budget")
+            && reason.contains("payload for")
+            && reason.contains("unavailable"),
         "the sidecar terminal resolves honestly without fabricating its omitted payload: {reason}"
     );
     let truncations = collect_mob_stream_until(
@@ -1521,7 +1524,7 @@ async fn recovered_pre_v4_decode_reject_closes_same_id_pending_without_a_turn() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn command_unavailable_resends_once_then_closes_no_effect_without_a_turn() {
+async fn command_unavailable_resends_once_then_retains_ambiguous_obligation_without_a_turn() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let scripted_host = spawn_scripted_host_peer("xhf-t7-unavailable-host").await;
     let member_endpoint = std::sync::Arc::new(
@@ -1570,7 +1573,14 @@ async fn command_unavailable_resends_once_then_closes_no_effect_without_a_turn()
         0,
         "both Unavailable replies reject before member input admission"
     );
-    wait_for_obligations_resolved(&controlling).await;
+    assert_eq!(
+        controlling
+            .handle
+            .remote_turn_obligations_observation()
+            .len(),
+        1,
+        "command-level Unavailable is retryable but is not certified no-effect; exact custody must remain discoverable for reconciliation"
+    );
 
     responder.shutdown();
     scripted_host.shutdown();

@@ -327,6 +327,10 @@ impl PeerCommsEndpoint {
 
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            let inbox_notify = self.runtime.inbox_notify();
+            let notified = inbox_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             for candidate in self.runtime.drain_peer_input_candidates().await {
                 if let InteractionContent::Response { result, .. } = &candidate.interaction.content
                 {
@@ -340,7 +344,7 @@ impl PeerCommsEndpoint {
             if remaining.is_zero() {
                 return Err("timed out waiting for bridge reply".to_string());
             }
-            let _ = tokio::time::timeout(remaining, self.runtime.inbox_notify().notified()).await;
+            let _ = tokio::time::timeout(remaining, &mut notified).await;
         }
     }
 
@@ -365,6 +369,10 @@ impl PeerCommsEndpoint {
     ) -> Result<String, String> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            let inbox_notify = self.runtime.inbox_notify();
+            let notified = inbox_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             for body in self.drain_message_bodies().await {
                 if body.contains(needle) {
                     return Ok(body);
@@ -376,7 +384,7 @@ impl PeerCommsEndpoint {
             if remaining.is_zero() {
                 return Err(format!("timed out waiting for message body '{needle}'"));
             }
-            let _ = tokio::time::timeout(remaining, self.runtime.inbox_notify().notified()).await;
+            let _ = tokio::time::timeout(remaining, &mut notified).await;
         }
     }
 }

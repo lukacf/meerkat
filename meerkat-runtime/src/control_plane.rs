@@ -9,9 +9,21 @@ use crate::effect::{RuntimeEffect, RuntimeEffectInner};
 use crate::meerkat_machine::{SharedCompletionRegistry, SharedDriver, machine_stop_runtime};
 use crate::tokio::sync::mpsc;
 use crate::traits::RuntimeDriverError;
+use meerkat_core::time_compat::Instant;
 
 const RUNTIME_STOPPED_REASON: &str = "runtime stopped";
 const RUNTIME_UNREGISTERED_REASON: &str = "runtime session unregistered";
+
+async fn await_before_deadline<F>(deadline: Option<Instant>, future: F) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    let Some(deadline) = deadline else {
+        return Some(future.await);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    crate::tokio::time::timeout(remaining, future).await.ok()
+}
 
 fn generated_runtime_termination_reason(
     driver: &crate::meerkat_machine::driver::DriverEntry,
@@ -231,7 +243,7 @@ pub(crate) async fn publish_and_resolve_runless_runtime_termination_before(
     completion_input_ids: &[meerkat_core::lifecycle::InputId],
     candidate_owner_input_id: Option<&meerkat_core::lifecycle::InputId>,
     reason: &str,
-    publication_deadline: Option<crate::tokio::time::Instant>,
+    publication_deadline: Option<Instant>,
 ) -> Result<(), RuntimeDriverError> {
     if completion_input_ids.is_empty() {
         return Ok(());
@@ -315,17 +327,14 @@ pub(crate) async fn publish_and_resolve_runless_runtime_termination_before(
                     .to_string(),
             })?;
         let publication = publication_handle.publish_interaction_terminals(events);
-        let publication = match publication_deadline {
-            Some(deadline) => crate::tokio::time::timeout_at(deadline, publication)
-                .await
-                .map_err(|_| {
-                    RuntimeDriverError::Internal(
-                        "interaction terminal publication did not complete before the convergence deadline"
-                            .to_string(),
-                    )
-                })?,
-            None => publication.await,
-        };
+        let publication = await_before_deadline(publication_deadline, publication)
+            .await
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "interaction terminal publication did not complete before the convergence deadline"
+                        .to_string(),
+                )
+            })?;
         let receipts = publication.map_err(|error| {
             RuntimeDriverError::Internal(format!(
                 "interaction terminal durable publication failed: {error}"
@@ -354,7 +363,7 @@ async fn drain_recovered_runless_runtime_terminations_classified(
     driver: &SharedDriver,
     completions: Option<&SharedCompletionRegistry>,
     publication_handle: Option<&dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
-    publication_deadline: Option<crate::tokio::time::Instant>,
+    publication_deadline: Option<Instant>,
 ) -> Result<(), RunlessTerminalConvergenceError> {
     let batches = driver
         .lock()
@@ -501,17 +510,14 @@ async fn drain_recovered_runless_runtime_terminations_classified(
                 })?;
         }
         let publication = publication_handle.publish_interaction_terminals(events);
-        let publication = match publication_deadline {
-            Some(deadline) => crate::tokio::time::timeout_at(deadline, publication)
-                .await
-                .map_err(|_| {
-                    RunlessTerminalConvergenceError::retryable(
-                        "publishing the exact terminal batch",
-                        "recovered interaction terminal publication did not complete before the convergence deadline",
-                    )
-                })?,
-            None => publication.await,
-        };
+        let publication = await_before_deadline(publication_deadline, publication)
+            .await
+            .ok_or_else(|| {
+                RunlessTerminalConvergenceError::retryable(
+                    "publishing the exact terminal batch",
+                    "recovered interaction terminal publication did not complete before the convergence deadline",
+                )
+            })?;
         let receipts = publication.map_err(|error| {
             RunlessTerminalConvergenceError::retryable(
                 "publishing the exact terminal batch",
@@ -681,11 +687,11 @@ pub(crate) async fn converge_known_committed_runless_runtime_terminations_before
     driver: &SharedDriver,
     completions: Option<&SharedCompletionRegistry>,
     publication_handle: Option<&dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
-    deadline: Option<crate::tokio::time::Instant>,
+    deadline: Option<Instant>,
 ) -> Result<(), RuntimeDriverError> {
     let mut delay_ms = 25_u64;
     loop {
-        if deadline.is_some_and(|deadline| deadline <= crate::tokio::time::Instant::now()) {
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return Err(RuntimeDriverError::Internal(
                 "committed runless terminal recovery did not converge before its deadline"
                     .to_string(),
@@ -734,13 +740,13 @@ pub(crate) async fn converge_known_committed_runless_runtime_terminations_before
 
 fn retry_delay_before_deadline(
     delay_ms: u64,
-    deadline: Option<crate::tokio::time::Instant>,
+    deadline: Option<Instant>,
 ) -> Option<std::time::Duration> {
     let requested = std::time::Duration::from_millis(delay_ms);
     let Some(deadline) = deadline else {
         return Some(requested);
     };
-    let remaining = deadline.checked_duration_since(crate::tokio::time::Instant::now())?;
+    let remaining = deadline.checked_duration_since(Instant::now())?;
     (!remaining.is_zero()).then(|| requested.min(remaining))
 }
 

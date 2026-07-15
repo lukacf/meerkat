@@ -1184,19 +1184,72 @@ impl MeerkatMachine {
                         .await;
                         return Err(err);
                     }
+                }
+
+                // A delivery path may have already applied the machine-owned
+                // Stopped -> Idle/Queuing readmission before it asks for local
+                // bindings. In that case this RegisterSession is idempotent and
+                // emits no Recover notice, but the completed exact stop receipt
+                // still belongs to the old attachment and must be consumed.
+                // MissingLive retains its broader Attached/Active normalization
+                // below; this branch handles only the exact already-re-admitted
+                // shape shared by ordinary and MissingLive preparation.
+                let stop_residue_retirement = {
                     let mut sessions = self.sessions.write().await;
-                    let entry =
-                        sessions
-                            .get_mut(&session_id)
-                            .ok_or(RuntimeDriverError::NotReady {
-                                state: RuntimeState::Destroyed,
-                            })?;
-                    if entry.epoch_id != epoch_id || !Arc::ptr_eq(&entry.driver, &driver_handle) {
-                        return Err(RuntimeDriverError::NotReady {
+                    match sessions.get_mut(&session_id) {
+                        None => Err(RuntimeDriverError::NotReady {
                             state: RuntimeState::Destroyed,
-                        });
+                        }),
+                        Some(entry)
+                            if entry.epoch_id != epoch_id
+                                || !Arc::ptr_eq(&entry.driver, &driver_handle)
+                                || !Arc::ptr_eq(&entry.dsl_authority, &dsl_authority_shared)
+                                || !Arc::ptr_eq(
+                                    &entry.materialization_claim_state,
+                                    &materialization_claim_state,
+                                ) =>
+                        {
+                            Err(RuntimeDriverError::StaleAuthority {
+                                reason: format!(
+                                    "session {session_id} changed before completed stop residue retirement"
+                                ),
+                            })
+                        }
+                        Some(entry) => {
+                            let idle_queuing = {
+                                let authority = entry
+                                    .dsl_authority
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let state = authority.state();
+                                state.lifecycle_phase
+                                    == crate::meerkat_machine::dsl::MeerkatPhase::Idle
+                                    && state.registration_phase
+                                        == crate::meerkat_machine::dsl::RegistrationPhase::Queuing
+                            };
+                            if idle_queuing && entry.runtime_stop_cleanup_coordinator.is_some() {
+                                entry.retire_completed_runtime_stop_after_revival(&session_id)
+                            } else {
+                                Ok(())
+                            }
+                        }
                     }
-                    entry.retire_completed_runtime_stop_after_revival(&session_id)?;
+                };
+                if let Err(error) = stop_residue_retirement {
+                    release_failed_materialization_claim(
+                        &materialization_claim_state,
+                        materialization_claim_id,
+                    );
+                    drop(mutation_guard);
+                    self.cleanup_failed_materialization_claim(
+                        &session_id,
+                        inserted_by_call,
+                        &epoch_id,
+                        materialization_claim_id,
+                        &materialization_claim_state,
+                    )
+                    .await;
+                    return Err(error);
                 }
             }
             Err(reason) => {

@@ -545,6 +545,9 @@ jobs:
       # A dedicated runner has no Cargo lock contention, so keep xtask under
       # the standard cached target root instead of the local /tmp isolation.
       XTASK_TARGET_DIR: ${{ github.workspace }}/target
+      # The generated adaptive composition is large enough that Java's
+      # container-selected ~3.5 GiB heap OOMs during semantic processing.
+      JAVA_TOOL_OPTIONS: -Xmx8g
     steps:
       - name: Checkout
         uses: actions/checkout@v6

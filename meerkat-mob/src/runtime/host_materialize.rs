@@ -1171,10 +1171,10 @@ impl HostMemberMaterializer {
                 Err(error) => Some(error),
             }
         } else {
-            let machine_registered = self
+            let current_attachment = self
                 .substrate
                 .runtime_adapter
-                .contains_session(session_id)
+                .current_executor_attachment_witness(session_id)
                 .await;
             let service_live = self
                 .substrate
@@ -1182,14 +1182,54 @@ impl HostMemberMaterializer {
                 .live_session_actor_registered(session_id)
                 .await
                 .map_err(MaterializeServeError::SessionService)?;
-            if machine_registered || service_live {
+            if current_attachment.is_some() {
                 return Err(MaterializeServeError::Bindings {
                     detail: format!(
-                        "non-serving incarnation {session_id} has process state without its exact host attachment sidecar; explicit recovery is required"
+                        "non-serving incarnation {session_id} has a current executor attachment without its exact host sidecar; refusing to touch a possible replacement"
                     ),
                 });
             }
-            None
+            let registration = self
+                .substrate
+                .runtime_adapter
+                .current_session_registration_witness(session_id)
+                .await;
+            match registration {
+                Some(registration) => match self
+                    .substrate
+                    .runtime_adapter
+                    .unregister_terminal_session_registration_if_current(&registration)
+                    .await
+                {
+                    Ok(true) => None,
+                    Ok(false) => {
+                        return Err(MaterializeServeError::Bindings {
+                            detail: format!(
+                                "non-serving incarnation {session_id} changed terminal registration before exact quiescence"
+                            ),
+                        });
+                    }
+                    // Post-stop cleanup removes the exact actor and sidecar
+                    // before it marks the retained machine registration
+                    // cleanup-complete. Let the bounded exact-witness loop
+                    // below join that in-progress handoff instead of treating
+                    // its transient admission rejection as terminal.
+                    Err(
+                        meerkat_runtime::RuntimeDriverError::ValidationFailed { .. }
+                        | meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }
+                        | meerkat_runtime::RuntimeDriverError::RuntimeStopInProgress { .. },
+                    ) => None,
+                    Err(error) => Some(error),
+                },
+                None if service_live => {
+                    return Err(MaterializeServeError::Bindings {
+                        detail: format!(
+                            "non-serving incarnation {session_id} has a live service actor without exact machine registration authority"
+                        ),
+                    });
+                }
+                None => None,
+            }
         };
 
         let fallback_result = async {
@@ -1215,6 +1255,55 @@ impl HostMemberMaterializer {
                         self.runtime_sessions.read().await.contains_key(session_id);
                     if !runtime_registered && !service_live && !executor_resident {
                         return Ok::<(), MaterializeServeError>(());
+                    }
+                    // A runtime-loop watcher can remove the exact actor and
+                    // sidecar, then yield before publishing cleanup-complete
+                    // on the retained terminal registration. Re-sample and
+                    // compare-remove that exact registration once no serving
+                    // attachment or surface carrier remains. A replacement
+                    // has a different witness (and normally non-terminal
+                    // authority), so this can never erase it.
+                    if runtime_registered && !service_live && !executor_resident {
+                        let current_attachment = self
+                            .substrate
+                            .runtime_adapter
+                            .current_executor_attachment_witness(session_id)
+                            .await;
+                        if current_attachment.is_none()
+                            && let Some(registration) = self
+                                .substrate
+                                .runtime_adapter
+                                .current_session_registration_witness(session_id)
+                                .await
+                        {
+                            match self
+                                .substrate
+                                .runtime_adapter
+                                .unregister_terminal_session_registration_if_current(&registration)
+                                .await
+                            {
+                                Ok(_)
+                                | Err(
+                                    meerkat_runtime::RuntimeDriverError::NotFound { .. }
+                                    | meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                                        ..
+                                    }
+                                    | meerkat_runtime::RuntimeDriverError::UnregisterInProgress {
+                                        ..
+                                    }
+                                    | meerkat_runtime::RuntimeDriverError::RuntimeStopInProgress {
+                                        ..
+                                    },
+                                ) => {}
+                                Err(error) => {
+                                    return Err(MaterializeServeError::Bindings {
+                                        detail: format!(
+                                            "non-serving incarnation {session_id} exact terminal registration cleanup failed: {error}"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }

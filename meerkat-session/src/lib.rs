@@ -104,6 +104,7 @@ inventory::submit! {
 ///
 /// Single shared owner for the ephemeral and persistent services (the
 /// persistent twin previously carried a private copy).
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub(crate) fn control_error_into_session_error(
     err: meerkat_core::service::SessionControlError,
 ) -> meerkat_core::service::SessionError {

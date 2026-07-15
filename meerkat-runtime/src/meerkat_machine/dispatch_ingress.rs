@@ -1,4 +1,5 @@
 use super::*;
+use meerkat_core::time_compat::Instant;
 
 impl MeerkatMachine {
     /// Select whether generated admission should attempt exact live-boundary
@@ -134,7 +135,7 @@ impl MeerkatMachine {
         let candidate_owner_input_id = self
             .commit_failed_accepted_input_terminal(driver, input_id, &reason)
             .await?;
-        let deadline = crate::tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
         let result = if candidate_owner_input_id.is_some() {
             crate::control_plane::converge_known_committed_runless_runtime_terminations_before(
                 driver,

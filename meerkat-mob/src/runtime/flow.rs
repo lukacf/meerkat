@@ -610,6 +610,20 @@ impl FlowEngine {
             targets.truncate(1);
         }
 
+        let target_count = u32::try_from(targets.len()).map_err(|_| {
+            MobError::Internal(format!(
+                "step '{step_id}' selected more targets than the flow authority can represent"
+            ))
+        })?;
+        self.cas_flow_input_with_effects(
+            run_id,
+            MobMachineFlowRunCommand::RegisterTargets(flow_run::inputs::RegisterTargets {
+                step_id: step_id.clone(),
+                target_count,
+            }),
+        )
+        .await?;
+
         let dispatch_effects = self.dispatch_step_effects(run_id, step_id).await?;
         self.apply_dispatch_projection(dispatch_effects, run_id, step_id)
             .await?;

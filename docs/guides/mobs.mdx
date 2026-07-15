@@ -582,6 +582,20 @@ rkat --realm team-alpha mob bind-host release-triage \
 rkat --realm team-alpha mob hosts release-triage --json
 ```
 
+Mixed local/placed edges also need a reverse lane on the controlling process,
+so member hosts can deliver to members that remain local. Configure this in
+the controlling realm's effective configuration:
+
+```toml
+[mob_host]
+listen_tcp = "0.0.0.0:4301"
+advertise_tcp = "tcp://controller.example.com:4301"
+```
+
+`advertise_tcp` must be dialable from every member host. Without an explicit
+controller endpoint, mixed-host route installation remains pending and fails
+closed rather than publishing a process-local address.
+
 The descriptor handoff above does not require network pairing. If you enable
 the host's pairing branch, provide its runtime-only secret through
 `--pairing-password-env <ENV>` or `--pairing-password-file <PATH>` so it stays

@@ -8750,7 +8750,14 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     }
 
     fn machine_managed_post_stop_unregister(&self) -> bool {
-        true
+        #[cfg(feature = "session-store")]
+        {
+            self.persistent_service.is_some()
+        }
+        #[cfg(not(feature = "session-store"))]
+        {
+            false
+        }
     }
 
     fn post_stop_cleanup_handle(
@@ -9559,9 +9566,13 @@ async fn prepare_run_mob_tools(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
 ) -> anyhow::Result<RunMobToolsContext> {
+    let (config, _) = load_config(scope).await?;
+    let controlling_acceptor =
+        controlling_acceptor_from_config(&config, Arc::clone(&session_service))?;
     let state = hydrate_mob_state(
         scope,
         session_service,
+        controlling_acceptor,
         None,
         None,
         None,
@@ -11330,9 +11341,12 @@ async fn hydrate_cli_mob_state_cached(
 
     let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
         Arc::new(MobCliSessionService::new(service));
+    let (config, _) = load_config(scope).await?;
+    let controlling_acceptor = controlling_acceptor_from_config(&config, Arc::clone(&mob_service))?;
     let mob_state = hydrate_mob_state(
         scope,
         mob_service,
+        controlling_acceptor,
         Some(runtime_adapter),
         None,
         None,
@@ -13586,10 +13600,24 @@ fn mob_persistent_runtime_root(scope: &RuntimeScope) -> PathBuf {
 type LlmClientProvider =
     Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>;
 
+/// Compose the controlling process's D1 host acceptor from the same
+/// `[mob_host]` listen/advertise facts used by the dedicated member-host role.
+/// Absence is intentional fail-closed degradation; we never invent a
+/// loopback address that a different machine would dial as its own.
+#[cfg(all(feature = "mob", not(target_arch = "wasm32")))]
+fn controlling_acceptor_from_config(
+    config: &meerkat_core::config::Config,
+    session_service: Arc<dyn meerkat_mob::MobSessionService>,
+) -> anyhow::Result<Option<meerkat_mob::ControllingAcceptorConfig>> {
+    meerkat_mob::ControllingAcceptorConfig::from_mob_host_config(&config.mob_host, session_service)
+        .map_err(anyhow::Error::msg)
+}
+
 #[cfg(feature = "mob")]
 async fn hydrate_mob_state(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
+    controlling_acceptor: Option<meerkat_mob::ControllingAcceptorConfig>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     default_llm_client_provider: Option<LlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
@@ -13597,19 +13625,21 @@ async fn hydrate_mob_state(
 ) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
     let runtime_adapter = runtime_adapter.or_else(|| session_service.runtime_adapter());
     let workgraph_service = open_workgraph_service(scope).await?;
-    let state = Arc::new(
-        meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-            session_service.clone(),
-            runtime_adapter.clone(),
-            // A16: the in-process CLI console is the owning operator
-            // (explicit mint, DEC-P5E-8).
-            meerkat_mob::MobControlPrincipal::Owner,
-        )
-        .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
-        .with_workgraph_service(Some(workgraph_service))
-        .with_default_llm_client_provider(default_llm_client_provider)
-        .with_external_tools_provider(external_tools_provider.clone()),
-    );
+    let mut state = meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        session_service.clone(),
+        runtime_adapter.clone(),
+        // A16: the in-process CLI console is the owning operator
+        // (explicit mint, DEC-P5E-8).
+        meerkat_mob::MobControlPrincipal::Owner,
+    )
+    .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
+    .with_workgraph_service(Some(workgraph_service))
+    .with_default_llm_client_provider(default_llm_client_provider)
+    .with_external_tools_provider(external_tools_provider.clone());
+    if let Some(acceptor) = controlling_acceptor {
+        state = state.with_controlling_acceptor(acceptor);
+    }
+    let state = Arc::new(state);
     for (mob_id, handle) in &seeded_handles {
         state
             .mob_insert_handle(meerkat_mob::MobId::from(mob_id.clone()), handle.clone())
@@ -15527,8 +15557,10 @@ async fn execute_mob_run_pack(
         Arc::new(effective_config.clone()),
         scope.context_root.clone(),
     ));
-    let session_service = build_deploy_mob_session_service(scope, effective_config).await?;
+    let session_service = build_deploy_mob_session_service(scope, effective_config.clone()).await?;
     let run_spec = archive.mob_run_spec();
+    let controlling_acceptor =
+        controlling_acceptor_from_config(&effective_config, Arc::clone(&session_service))?;
     let mut builder = meerkat_mob::MobBuilder::from_mobpack(
         run_spec.definition().clone(),
         run_spec.packed_skills().clone(),
@@ -15540,6 +15572,9 @@ async fn execute_mob_run_pack(
     .with_workgraph_service(Some(open_workgraph_service(scope).await?));
     if let Some(adapter) = session_service.runtime_adapter() {
         builder = builder.with_runtime_adapter(adapter);
+    }
+    if let Some(acceptor) = controlling_acceptor {
+        builder = builder.with_controlling_acceptor(acceptor);
     }
     let handle = builder
         .create()
@@ -15714,6 +15749,8 @@ async fn execute_mob_deploy_internal(
     } else {
         let session_service =
             build_deploy_mob_session_service(scope, effective_config.clone()).await?;
+        let controlling_acceptor =
+            controlling_acceptor_from_config(&effective_config, Arc::clone(&session_service))?;
         let mut builder = meerkat_mob::MobBuilder::from_mobpack(
             archive.definition.clone(),
             archive.skills.clone(),
@@ -15731,6 +15768,9 @@ async fn execute_mob_deploy_internal(
         .with_workgraph_service(Some(open_workgraph_service(scope).await?));
         if let Some(adapter) = session_service.runtime_adapter() {
             builder = builder.with_runtime_adapter(adapter);
+        }
+        if let Some(acceptor) = controlling_acceptor {
+            builder = builder.with_controlling_acceptor(acceptor);
         }
         let handle = builder
             .create()
@@ -16232,6 +16272,8 @@ where
         }
     }));
 
+    let controlling_acceptor =
+        controlling_acceptor_from_config(&config, Arc::clone(&session_service))?;
     let mut builder = meerkat_mob::MobBuilder::from_mobpack(
         archive.definition.clone(),
         archive.skills.clone(),
@@ -16249,6 +16291,9 @@ where
     .with_workgraph_service(Some(open_workgraph_service(scope).await?))
     .with_default_external_tools_provider(external_tools_provider.clone());
     builder = builder.with_runtime_adapter(runtime_adapter.clone());
+    if let Some(acceptor) = &controlling_acceptor {
+        builder = builder.with_controlling_acceptor(acceptor.clone());
+    }
     let handle = builder
         .create()
         .await
@@ -16276,6 +16321,7 @@ where
     let mob_state = hydrate_mob_state(
         scope,
         session_service,
+        controlling_acceptor,
         Some(runtime_adapter),
         default_llm_client_provider,
         external_tools_provider,

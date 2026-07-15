@@ -132,6 +132,65 @@ fn rpc_mob_external_tools_provider_from_parts(
     })
 }
 
+/// Compose the canonical RPC mob state before serving a transport.
+///
+/// Shipping binaries use this seam to install process-scoped capabilities
+/// (such as the one D1 reverse-lane acceptor) on the shared runtime. The
+/// synchronous router fallback calls the same helper with no acceptor and
+/// therefore continues to fail closed for embedders that did not compose one.
+#[cfg(feature = "mob")]
+pub fn compose_rpc_mob_state(
+    runtime: &Arc<SessionRuntime>,
+    config_store: &Arc<dyn ConfigStore>,
+    controlling_acceptor: Option<meerkat_mob::ControllingAcceptorConfig>,
+) -> Arc<meerkat_mob_mcp::MobMcpState> {
+    // RPC mob member MCP config needs a member-session surface handle. Until
+    // an authority-owned handoff exists, configured MCP fails closed instead
+    // of staging facts on a router-local owner.
+    let configured_mcp_tools: Option<Arc<dyn AgentToolDispatcher>> = None;
+    let persistent_mob_root = config_store
+        .metadata()
+        .and_then(|metadata| metadata.resolved_paths)
+        .map(|paths| PathBuf::from(paths.root));
+    let llm_provider: Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync> =
+        Arc::new({
+            let runtime = Arc::clone(runtime);
+            move || runtime.default_llm_client()
+        });
+    let callback_tools_provider: Arc<
+        dyn Fn() -> Option<Arc<dyn AgentToolDispatcher>> + Send + Sync,
+    > = Arc::new({
+        let runtime = Arc::clone(runtime);
+        move || {
+            runtime.callback_request_tx().map(|tx| {
+                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                    runtime.registered_tools(),
+                    tx,
+                    runtime.callback_id_counter(),
+                    vec![],
+                )) as Arc<dyn AgentToolDispatcher>
+            })
+        }
+    });
+    let tools_provider =
+        rpc_mob_external_tools_provider_from_parts(callback_tools_provider, configured_mcp_tools);
+    let mut state = meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        runtime.session_service(),
+        Some(runtime.runtime_adapter()),
+        // A16: the local stdio/loopback RPC console is the owning operator
+        // (explicit mint, DEC-P5E-8; bearer principals are the v2 seam).
+        meerkat_mob::MobControlPrincipal::Owner,
+    )
+    .with_persistent_storage_root(persistent_mob_root)
+    .with_workgraph_service(runtime.workgraph_service().ok())
+    .with_default_llm_client_provider(Some(llm_provider))
+    .with_external_tools_provider(Some(tools_provider));
+    if let Some(acceptor) = controlling_acceptor {
+        state = state.with_controlling_acceptor(acceptor);
+    }
+    Arc::new(state)
+}
+
 #[cfg(feature = "comms")]
 fn send_receipt_json(
     receipt: meerkat_core::comms::SendReceipt,
@@ -1035,53 +1094,7 @@ impl MethodRouter {
         let mob_state = if let Some(existing) = runtime.mob_state() {
             existing
         } else {
-            // RPC mob member MCP config needs a member-session surface handle.
-            // Until an authority-owned handoff exists, configured MCP fails
-            // closed instead of staging facts on a router-local owner.
-            let configured_mcp_tools: Option<Arc<dyn AgentToolDispatcher>> = None;
-            let persistent_mob_root = config_store
-                .metadata()
-                .and_then(|metadata| metadata.resolved_paths)
-                .map(|paths| PathBuf::from(paths.root));
-            let mob_state = Arc::new({
-                let llm_provider: Arc<
-                    dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync,
-                > = Arc::new({
-                    let runtime = runtime.clone();
-                    move || runtime.default_llm_client()
-                });
-                let callback_tools_provider: Arc<
-                    dyn Fn() -> Option<Arc<dyn AgentToolDispatcher>> + Send + Sync,
-                > = Arc::new({
-                    let runtime = runtime.clone();
-                    move || {
-                        runtime.callback_request_tx().map(|tx| {
-                            Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                                runtime.registered_tools(),
-                                tx,
-                                runtime.callback_id_counter(),
-                                vec![],
-                            )) as Arc<dyn AgentToolDispatcher>
-                        })
-                    }
-                });
-                let tools_provider = rpc_mob_external_tools_provider_from_parts(
-                    callback_tools_provider,
-                    configured_mcp_tools.clone(),
-                );
-                meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-                    runtime.session_service(),
-                    Some(runtime_adapter.clone()),
-                    // A16: the local stdio/loopback RPC console is the
-                    // owning operator (explicit mint, DEC-P5E-8; bearer
-                    // principals are the v2 seam).
-                    meerkat_mob::MobControlPrincipal::Owner,
-                )
-                .with_persistent_storage_root(persistent_mob_root)
-                .with_workgraph_service(runtime.workgraph_service().ok())
-                .with_default_llm_client_provider(Some(llm_provider))
-                .with_external_tools_provider(Some(tools_provider))
-            });
+            let mob_state = compose_rpc_mob_state(&runtime, &config_store, None);
             runtime.set_mob_state(mob_state.clone());
             mob_state
         };
@@ -7292,6 +7305,8 @@ mod tests {
         let (mob_run_completed, session_run_completed) = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             async {
+                let mut mob_run_completed = None;
+                let mut session_run_completed = None;
                 loop {
                     let notif = notif_rx.recv().await.expect("notification");
                     if notif.method == "mob/stream_event"
@@ -7299,14 +7314,16 @@ mod tests {
                         && notification_params!(notif)["event"]["payload"]["type"].as_str()
                             == Some("run_completed")
                     {
-                        break (Some(notif), None);
-                    }
-                    if notif.method == "session/stream_event"
+                        mob_run_completed = Some(notif);
+                    } else if notif.method == "session/stream_event"
                         && notification_params!(notif)["stream_id"] == session_stream_id
                         && notification_params!(notif)["event"]["payload"]["type"].as_str()
                             == Some("run_completed")
                     {
-                        break (None, Some(notif));
+                        session_run_completed = Some(notif);
+                    }
+                    if mob_run_completed.is_some() && session_run_completed.is_some() {
+                        break (mob_run_completed, session_run_completed);
                     }
                 }
             },
@@ -7325,15 +7342,12 @@ mod tests {
                     .await
                     .expect("peer ingress runtime snapshot");
                 panic!(
-                    "run_completed notification should arrive on one of the subscribed streams; runtime_state={runtime_state:?}; ingress_snapshot={ingress_snapshot:?}"
+                    "run_completed notification should arrive on both subscribed streams; runtime_state={runtime_state:?}; ingress_snapshot={ingress_snapshot:?}"
                 );
             }
         };
 
-        assert!(
-            mob_run_completed.is_some() || session_run_completed.is_some(),
-            "expected a run_completed notification on either mob or session stream"
-        );
+        assert!(session_run_completed.is_some());
         assert!(
             mob_run_completed.is_some(),
             "session stream received run_completed but mob stream did not; per-member mob stream forwarding is dropping the event"

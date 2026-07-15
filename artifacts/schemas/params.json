@@ -6449,6 +6449,23 @@
             "type": "object"
           },
           {
+            "description": "The machine-owned interaction stream terminal rejected or could not\ndeliver the peer response. Unlike generic runtime abandonment, the\ntyped reason is preserved for stream consumers.",
+            "properties": {
+              "kind": {
+                "const": "interaction_stream_abandoned",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/InteractionStreamAbandonReason"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
             "description": "The interaction's main run completed but turn finalization failed.",
             "properties": {
               "detail": {
@@ -6501,6 +6518,31 @@
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
+      },
+      "InteractionStreamAbandonReason": {
+        "description": "Typed reason an interaction stream was abandoned before normal terminal\ndelivery. This is intentionally distinct from [`InteractionStreamState::Expired`]:\nexpiry proves that the attach TTL elapsed while the stream was still\nreserved, whereas abandonment records an observed failure.",
+        "oneOf": [
+          {
+            "const": "send_failed",
+            "description": "The outbound transport could not send the interaction.",
+            "type": "string"
+          },
+          {
+            "const": "admission_rejected",
+            "description": "A local or remote admission boundary rejected the interaction.",
+            "type": "string"
+          },
+          {
+            "const": "response_rejected",
+            "description": "A peer response could not be admitted as a valid response observation.",
+            "type": "string"
+          },
+          {
+            "const": "terminal_delivery_failed",
+            "description": "A terminal event could not be delivered to the interaction stream.",
+            "type": "string"
+          }
+        ]
       },
       "LiveCloseStatus": {
         "description": "Typed public result class for `live/close`.\n\nToday generated runtime authority emits only `Closed`. The enum is\n`#[non_exhaustive]` so future generated contracts can add explicit result\nclasses without changing the object shape.",

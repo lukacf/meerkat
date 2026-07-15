@@ -1158,31 +1158,6 @@ impl McpRuntimeIngressContext {
                 .await);
         }
 
-        if self
-            .runtime_adapter
-            .current_executor_attachment_witness(session_id)
-            .await
-            .as_ref()
-            != Some(attachment.witness())
-            || self.current_attachment_witness(session_id).await.as_ref()
-                != Some(attachment.witness())
-        {
-            drop(_registration_guard);
-            drop(registration_lease);
-            drop(actor_lease);
-            let primary = explicit_resume_required(
-                session_id,
-                "executor attachment changed immediately after exact MCP sidecar activation",
-            );
-            return Err(self
-                .fail_committed_attachment(
-                    session_id,
-                    attachment.witness(),
-                    &actor_witness,
-                    primary,
-                )
-                .await);
-        }
         Ok(attachment)
     }
 
@@ -1882,6 +1857,7 @@ impl McpRuntimeIngressContext {
         drop(queued_context_registration);
 
         drop(attachment_operation_guard);
+        drop(acquisition);
         drop(registration_lease);
 
         Ok((outcome, handle))

@@ -1147,6 +1147,10 @@ pub trait SessionAgent: Send {
     fn cancel(&mut self);
 
     /// Typed command sender for cancel-after-boundary requests.
+    ///
+    /// Implementations expose a supported exact-cancellation capability only
+    /// when this sender is paired with [`Self::turn_state_handle`]. A sender
+    /// alone cannot prove which run owns a queued command.
     fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
         None
     }
@@ -1430,10 +1434,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "cancel_after_boundary".to_string(),
             ));
         };
-        let current_run_id = handle
-            .turn_state_handle
-            .as_deref()
-            .and_then(|turn_state| turn_state.snapshot().active_run_id);
+        let Some(turn_state_handle) = handle.turn_state_handle.as_deref() else {
+            return Err(SessionError::Unsupported(
+                "cancel_after_boundary_exact_run_authority".to_string(),
+            ));
+        };
+        let current_run_id = turn_state_handle.snapshot().active_run_id;
         if current_run_id.as_ref() != Some(expected_run_id) {
             return Err(SessionError::NotRunning { id: id.clone() });
         }
@@ -3830,10 +3836,17 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             let handle = sessions
                 .get(id)
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            handle
-                .turn_state_handle
-                .as_deref()
-                .and_then(|turn_state| turn_state.snapshot().active_run_id)
+            if handle.cancel_after_boundary_handle.is_none() {
+                return Err(SessionError::Unsupported(
+                    "cancel_after_boundary".to_string(),
+                ));
+            }
+            let turn_state_handle = handle.turn_state_handle.as_deref().ok_or_else(|| {
+                SessionError::Unsupported("cancel_after_boundary_exact_run_authority".to_string())
+            })?;
+            turn_state_handle
+                .snapshot()
+                .active_run_id
                 .ok_or_else(|| SessionError::NotRunning { id: id.clone() })?
         };
         self.cancel_after_boundary_for_run(id, &expected_run_id)
@@ -7579,7 +7592,7 @@ mod admission_window_tests {
     }
 
     #[tokio::test]
-    async fn boundary_cancel_during_admission_delivers_command_to_agent() {
+    async fn boundary_cancel_during_admission_requires_exact_run_authority() {
         let run_calls = Arc::new(AtomicUsize::new(0));
         let (cancel_after_boundary_tx, mut cancel_after_boundary_rx) =
             tokio::sync::mpsc::unbounded_channel();
@@ -7594,14 +7607,19 @@ mod admission_window_tests {
         );
         let (session_id, command_tx) = create_admitted_session(&service).await;
 
-        service
+        let error = service
             .cancel_after_boundary(&session_id)
             .await
-            .expect("admitted turn accepts boundary cancel");
-        // The surface delivered exactly one typed command on the agent-owned
-        // carrier; assert delivery on the test-held receiver rather than a
-        // shared bool.
-        assert!(cancel_after_boundary_rx.try_recv().is_ok());
+            .expect_err("a sender without exact run authority must be unsupported");
+        assert!(matches!(
+            error,
+            SessionError::Unsupported(operation)
+                if operation == "cancel_after_boundary_exact_run_authority"
+        ));
+        assert!(matches!(
+            cancel_after_boundary_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
 
         let result = deliver_start_turn(command_tx)
             .await
@@ -7659,7 +7677,7 @@ mod admission_window_tests {
     }
 
     #[tokio::test]
-    async fn boundary_cancel_on_aborted_admission_delivers_command_once() {
+    async fn boundary_cancel_on_aborted_admission_requires_exact_run_authority() {
         let run_calls = Arc::new(AtomicUsize::new(0));
         let (cancel_after_boundary_tx, mut cancel_after_boundary_rx) =
             tokio::sync::mpsc::unbounded_channel();
@@ -7674,12 +7692,19 @@ mod admission_window_tests {
         );
         let (session_id, _command_tx) = create_admitted_session(&service).await;
 
-        service
+        let error = service
             .cancel_after_boundary(&session_id)
             .await
-            .expect("admitted turn accepts boundary cancel");
-        // The boundary-cancel delivered exactly one typed command.
-        assert!(cancel_after_boundary_rx.try_recv().is_ok());
+            .expect_err("a sender without exact run authority must be unsupported");
+        assert!(matches!(
+            error,
+            SessionError::Unsupported(operation)
+                if operation == "cancel_after_boundary_exact_run_authority"
+        ));
+        assert!(matches!(
+            cancel_after_boundary_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
         {
             let sessions = service.sessions.read().await;
             let handle = sessions.get(&session_id).expect("session handle");

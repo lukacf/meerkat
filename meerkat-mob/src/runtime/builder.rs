@@ -479,8 +479,8 @@ pub struct MobBuilder {
     /// TCP orchestration.
     realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     /// Controlling-side reverse-lane acceptor composition (ADJ-P4-2).
-    /// `None` ⇒ cross-host descriptors for local members keep their
-    /// machine-recorded canonical endpoints.
+    /// `None` means mixed-host routes that need a local reverse lane fail
+    /// closed instead of publishing the member's process-local endpoint.
     controlling_acceptor: Option<ControllingAcceptorConfig>,
     /// Phase 6b (ADJ-P6B-1/-16): the LOCAL-branch live gateway for the
     /// identity-addressed `member_live_*` verbs — the session-id-addressed
@@ -561,20 +561,289 @@ impl LocalMemberAcceptorMaterialSource for SessionServiceAcceptorMaterialSource 
     }
 }
 
-/// Controlling-side reverse-lane acceptor composition input (ADJ-P4-2):
-/// where the ONE per-mob-runtime demux listener binds, what it advertises,
-/// and where local-member registration material comes from. The acceptor is
-/// bound lazily by the actor when the first cross-host lane needs a local
-/// member reachable from a member host.
+/// Process-scoped controlling-side reverse-lane acceptor. One instance is
+/// shared by every mob runtime hosted in the process (D1); actors hold only a
+/// registration capability and never create their own listeners.
+#[cfg(not(target_arch = "wasm32"))]
+struct SharedControllingAcceptor {
+    listen_tcp: std::net::SocketAddr,
+    advertise_address: Option<String>,
+    bounds: meerkat_comms::HostAcceptorBounds,
+    live: tokio::sync::Mutex<Option<SharedControllingAcceptorLive>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SharedControllingAcceptorLive {
+    registry: Arc<meerkat_comms::HostAcceptorIdentityRegistry>,
+    owner: Arc<dyn std::any::Any + Send + Sync>,
+    advertised_address: String,
+    leases: BTreeMap<String, SharedControllingAcceptorRegistration>,
+    _handle: meerkat_comms::HostAcceptorHandle,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SharedControllingAcceptorRegistration {
+    logical_owner: String,
+    token: Arc<()>,
+}
+
+/// Exact registration incarnation. Compare-remove prevents an old mob actor
+/// from deleting the replacement inbox for the same durable signing key.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub(super) struct ControllingAcceptorRegistrationLease {
+    pubkey: meerkat_comms::PubKey,
+    pub(super) advertised_address: String,
+    key: String,
+    pub(super) token: Arc<()>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SharedControllingAcceptor {
+    fn new(
+        listen_tcp: std::net::SocketAddr,
+        advertise_address: Option<String>,
+        bounds: meerkat_comms::HostAcceptorBounds,
+    ) -> Self {
+        Self {
+            listen_tcp,
+            advertise_address,
+            bounds,
+            live: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn register(
+        &self,
+        logical_owner: String,
+        registration: MemberAcceptorRegistration,
+    ) -> Result<ControllingAcceptorRegistrationLease, MobError> {
+        let mut live = self.live.lock().await;
+        if live.is_none() {
+            let registry = Arc::new(meerkat_comms::HostAcceptorIdentityRegistry::new());
+            let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new(());
+            registry
+                .install_owner(Arc::clone(&owner))
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "controlling acceptor owner install failed: {error}"
+                    ))
+                })?;
+            let handle = meerkat_comms::spawn_host_acceptor(meerkat_comms::HostAcceptorConfig {
+                listen_tcp: self.listen_tcp,
+                advertise_address: self.advertise_address.clone(),
+                registry: Arc::clone(&registry),
+                pairing: None,
+                bounds: self.bounds,
+            })
+            .await
+            .map_err(|error| {
+                MobError::WiringError(format!("controlling acceptor bind failed: {error}"))
+            })?;
+            let advertised_address = handle.advertised_address().to_string();
+            *live = Some(SharedControllingAcceptorLive {
+                registry,
+                owner,
+                advertised_address,
+                leases: BTreeMap::new(),
+                _handle: handle,
+            });
+        }
+        let live = live
+            .as_mut()
+            .expect("controlling acceptor initialized above");
+        let key = registration.pubkey.to_pubkey_string();
+        if let Some(existing) = live.leases.get(&key)
+            && existing.logical_owner != logical_owner
+        {
+            return Err(MobError::WiringError(format!(
+                "controlling acceptor identity '{key}' is already owned by a different mob member"
+            )));
+        }
+        match live.registry.register_identity(
+            &live.owner,
+            registration.pubkey,
+            Arc::clone(&registration.keypair),
+            registration.inbox_sender.clone(),
+        ) {
+            Ok(()) => {}
+            Err(meerkat_comms::HostAcceptorError::IdentityAlreadyRegistered { .. }) => {
+                // A durable session key can survive an actor replacement while
+                // its inbox cannot. Refresh the stale projection under the
+                // process acceptor capability; a lookup in the narrow
+                // remove/register handoff may reject and be retried.
+                live.registry
+                    .remove_identity(&live.owner, &registration.pubkey)
+                    .and_then(|_| {
+                        live.registry.register_identity(
+                            &live.owner,
+                            registration.pubkey,
+                            registration.keypair,
+                            registration.inbox_sender,
+                        )
+                    })
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "controlling acceptor identity replacement failed: {error}"
+                        ))
+                    })?;
+            }
+            Err(error) => {
+                return Err(MobError::WiringError(format!(
+                    "controlling acceptor identity registration failed: {error}"
+                )));
+            }
+        }
+        let token = Arc::new(());
+        live.leases.insert(
+            key.clone(),
+            SharedControllingAcceptorRegistration {
+                logical_owner,
+                token: Arc::clone(&token),
+            },
+        );
+        Ok(ControllingAcceptorRegistrationLease {
+            pubkey: registration.pubkey,
+            advertised_address: live.advertised_address.clone(),
+            key,
+            token,
+        })
+    }
+
+    async fn remove(&self, lease: &ControllingAcceptorRegistrationLease) -> Result<(), MobError> {
+        let mut live = self.live.lock().await;
+        let Some(live) = live.as_mut() else {
+            return Ok(());
+        };
+        let Some(current) = live.leases.get(&lease.key) else {
+            return Ok(());
+        };
+        if !Arc::ptr_eq(&current.token, &lease.token) {
+            return Ok(());
+        }
+        live.registry
+            .remove_identity(&live.owner, &lease.pubkey)
+            .map_err(|error| {
+                MobError::WiringError(format!(
+                    "controlling acceptor identity removal failed: {error}"
+                ))
+            })?;
+        live.leases.remove(&lease.key);
+        Ok(())
+    }
+}
+
+/// Controlling-side reverse-lane composition input (ADJ-P4-2): a shared
+/// host-process listener plus the local session material source. Clone this
+/// value into every [`MobBuilder`] in one process so all mobs use one ingress.
+#[derive(Clone)]
 pub struct ControllingAcceptorConfig {
-    /// TCP bind address for the demux listener (port 0 = ephemeral).
-    pub listen_tcp: std::net::SocketAddr,
-    /// Address remote hosts dial; REQUIRED for non-loopback binds (the
-    /// phase-2 acceptor rule — loopback binds default to
-    /// `tcp://<local_addr>`).
-    pub advertise_address: Option<String>,
     /// Registration material source for local members.
     pub material: Arc<dyn LocalMemberAcceptorMaterialSource>,
+    #[cfg(not(target_arch = "wasm32"))]
+    shared: Arc<SharedControllingAcceptor>,
+}
+
+impl ControllingAcceptorConfig {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(
+        listen_tcp: std::net::SocketAddr,
+        advertise_address: Option<String>,
+        material: Arc<dyn LocalMemberAcceptorMaterialSource>,
+    ) -> Self {
+        Self {
+            material,
+            shared: Arc::new(SharedControllingAcceptor::new(
+                listen_tcp,
+                advertise_address,
+                meerkat_comms::HostAcceptorBounds::default(),
+            )),
+        }
+    }
+
+    /// Build the ordinary process acceptor from the same session substrate
+    /// that owns local mob member runtimes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn for_session_service(
+        listen_tcp: std::net::SocketAddr,
+        advertise_address: Option<String>,
+        service: Arc<dyn MobSessionService>,
+    ) -> Self {
+        Self::new(
+            listen_tcp,
+            advertise_address,
+            Arc::new(SessionServiceAcceptorMaterialSource { service }),
+        )
+    }
+
+    /// Resolve the process host-ingress composition from effective config.
+    /// The same `[mob_host]` listener facts serve both a dedicated member-host
+    /// daemon and a controlling process that owns local mob members.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_mob_host_config(
+        config: &meerkat_core::config::MobHostConfig,
+        service: Arc<dyn MobSessionService>,
+    ) -> Result<Option<Self>, String> {
+        let Some(listen) = config.listen_tcp.as_deref() else {
+            if config.advertise_tcp.is_some() {
+                return Err(
+                    "[mob_host].advertise_tcp requires [mob_host].listen_tcp for host-process ingress"
+                        .to_string(),
+                );
+            }
+            return Ok(None);
+        };
+        let listen_tcp = listen
+            .parse::<std::net::SocketAddr>()
+            .map_err(|error| format!("invalid [mob_host].listen_tcp '{listen}': {error}"))?;
+        let mut bounds = meerkat_comms::HostAcceptorBounds::default();
+        if let Some(max_connections) = config.max_connections {
+            if max_connections == 0 {
+                return Err("[mob_host].max_connections must be greater than zero".to_string());
+            }
+            bounds.max_connections = max_connections;
+        }
+        if let Some(read_deadline_ms) = config.read_deadline_ms {
+            if read_deadline_ms == 0 {
+                return Err("[mob_host].read_deadline_ms must be greater than zero".to_string());
+            }
+            bounds.read_deadline = std::time::Duration::from_millis(read_deadline_ms);
+        }
+        if let Some(pairing_rate) = config.pairing_rate {
+            if pairing_rate == 0 {
+                return Err("[mob_host].pairing_rate must be greater than zero".to_string());
+            }
+            bounds.pairing_rate = meerkat_comms::PairingRateLimit {
+                max_attempts: pairing_rate,
+                window: std::time::Duration::from_secs(60),
+            };
+        }
+        Ok(Some(Self {
+            material: Arc::new(SessionServiceAcceptorMaterialSource { service }),
+            shared: Arc::new(SharedControllingAcceptor::new(
+                listen_tcp,
+                config.advertise_tcp.clone(),
+                bounds,
+            )),
+        }))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn register(
+        &self,
+        logical_owner: String,
+        registration: MemberAcceptorRegistration,
+    ) -> Result<ControllingAcceptorRegistrationLease, MobError> {
+        self.shared.register(logical_owner, registration).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn remove(
+        &self,
+        lease: &ControllingAcceptorRegistrationLease,
+    ) -> Result<(), MobError> {
+        self.shared.remove(lease).await
+    }
 }
 
 fn seed_mob_authority() -> crate::machines::mob_machine::MobMachineAuthority {
@@ -4471,9 +4740,6 @@ async fn seed_mob_authority_sync_from_flow_runs(
     });
 
     for mut run in runs {
-        super::recovery::reconcile_run_state(&mut run).map_err(|error| {
-            MobError::Internal(format!("cannot resume flow run '{}': {error}", run.run_id))
-        })?;
         let run_terminal =
             crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)?;
         let terminal_key = (run.run_id.clone(), run.flow_id.clone());
@@ -4536,6 +4802,17 @@ async fn seed_mob_authority_sync_from_flow_runs(
             }
             continue;
         }
+        // Scheduler/frame cross-projection checks are recovery preconditions
+        // for ACTIVE runs only. Terminalization releases run-level scheduler
+        // slots but deliberately does not rewrite an interrupted frame's
+        // historical node state; applying active-run reconciliation to that
+        // terminal history therefore manufactures a false
+        // `active_node_count` mismatch. The authority-validating run-store
+        // wrapper above has already replayed and verified every terminal
+        // aggregate against its exact persisted MobMachine input log.
+        super::recovery::reconcile_run_state(&mut run).map_err(|error| {
+            MobError::Internal(format!("cannot resume flow run '{}': {error}", run.run_id))
+        })?;
         if run.flow_authority_inputs.is_empty() {
             continue;
         }
@@ -6452,9 +6729,9 @@ impl MobBuilder {
         }
     }
 
-    /// Compose the controlling-side reverse-lane acceptor (ADJ-P4-2): one
-    /// `HostAcceptor` demux listener per mob runtime through which remote
-    /// member hosts reach local members with cross-host edges.
+    /// Compose the controlling-side reverse-lane acceptor (ADJ-P4-2). Cloned
+    /// configs share one host-process `HostAcceptor` demux through which
+    /// remote member hosts reach local members with cross-host edges.
     pub fn with_controlling_acceptor(mut self, config: ControllingAcceptorConfig) -> Self {
         self.controlling_acceptor = Some(config);
         self
@@ -8826,25 +9103,10 @@ impl MobBuilder {
             next_fence_token_seed(wiring.dsl_authority.state()),
             recovered_fence_token_floor,
         );
-        // Controlling-side reverse-lane acceptor (ADJ-P4-2): default the
-        // composition off the session substrate this runtime already owns.
-        // The demux listener stays LAZY (the actor binds it only when a
-        // cross-host lane first needs a local member reachable from a member
-        // host), so mobs without cross-host wiring never pay for a socket.
-        // The loopback-ephemeral bind serves same-machine host processes;
-        // deployments whose member hosts dial over a real network override
-        // it via `MobBuilder::with_controlling_acceptor` (advertise address
-        // policy is surface composition, phase 7).
-        #[cfg(not(target_arch = "wasm32"))]
-        let controlling_acceptor = controlling_acceptor.or_else(|| {
-            Some(ControllingAcceptorConfig {
-                listen_tcp: std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
-                advertise_address: None,
-                material: Arc::new(SessionServiceAcceptorMaterialSource {
-                    service: Arc::clone(&session_service),
-                }),
-            })
-        });
+        // Reverse-lane ingress is an explicit host-process composition fact.
+        // Never invent a loopback listener here: publishing it to a different
+        // machine would make route installation look converged while the peer
+        // dials itself. An absent capability fails the mixed-host route closed.
         let run_store = authority_validating_mob_run_store(run_store);
         let RuntimeWiring {
             roster,
@@ -9350,6 +9612,205 @@ mod tests {
     };
     use chrono::Utc;
     use meerkat_core::time_compat::UNIX_EPOCH;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct NoAcceptorMaterial;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl LocalMemberAcceptorMaterialSource for NoAcceptorMaterial {
+        async fn registration_for(
+            &self,
+            _session_id: &SessionId,
+        ) -> Option<MemberAcceptorRegistration> {
+            None
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn acceptor_registration(keypair: Arc<meerkat_comms::Keypair>) -> MemberAcceptorRegistration {
+        let (_inbox, inbox_sender) = meerkat_comms::Inbox::new();
+        MemberAcceptorRegistration {
+            pubkey: keypair.public_key(),
+            keypair,
+            inbox_sender,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn process_acceptor_is_shared_and_registration_cleanup_is_exact() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let sibling = config.clone();
+        assert!(Arc::ptr_eq(&config.shared, &sibling.shared));
+
+        let durable_key = Arc::new(meerkat_comms::Keypair::generate());
+        let old = config
+            .register(
+                "mob-a/member/session".to_string(),
+                acceptor_registration(Arc::clone(&durable_key)),
+            )
+            .await
+            .expect("first registration");
+        let replacement = sibling
+            .register(
+                "mob-a/member/session".to_string(),
+                acceptor_registration(Arc::clone(&durable_key)),
+            )
+            .await
+            .expect("same logical owner replaces its inbox");
+        assert_eq!(old.advertised_address, replacement.advertised_address);
+
+        config.remove(&old).await.expect("stale cleanup is a no-op");
+        {
+            let live = config.shared.live.lock().await;
+            let current = live
+                .as_ref()
+                .expect("shared listener remains live")
+                .leases
+                .get(&replacement.key)
+                .expect("replacement registration remains");
+            assert!(Arc::ptr_eq(&current.token, &replacement.token));
+        }
+
+        let conflict = config
+            .register(
+                "mob-b/other/session".to_string(),
+                acceptor_registration(durable_key),
+            )
+            .await
+            .expect_err("a different logical owner cannot claim the same key");
+        assert!(conflict.to_string().contains("different mob member"));
+
+        config
+            .remove(&replacement)
+            .await
+            .expect("exact replacement cleanup");
+        let live = config.shared.live.lock().await;
+        assert!(
+            !live
+                .as_ref()
+                .expect("listener remains process-owned")
+                .leases
+                .contains_key(&replacement.key)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn actor_registration_refreshes_same_durable_key_to_current_inbox() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let mut actor_state = super::actor::ControllingAcceptorState::new(config.clone());
+        let durable_key = Arc::new(meerkat_comms::Keypair::generate());
+        let key = durable_key.public_key().to_pubkey_string();
+
+        actor_state
+            .refresh_registration(
+                "mob-a/member/session".to_string(),
+                acceptor_registration(Arc::clone(&durable_key)),
+            )
+            .await
+            .expect("initial actor publication");
+        let first = actor_state
+            .registration_token(&key)
+            .expect("first actor lease");
+
+        actor_state
+            .refresh_registration(
+                "mob-a/member/session".to_string(),
+                acceptor_registration(durable_key),
+            )
+            .await
+            .expect("revived inbox publication");
+        let current = actor_state
+            .registration_token(&key)
+            .expect("replacement actor lease");
+        assert!(
+            !Arc::ptr_eq(&first, &current),
+            "same durable key must mint a fresh lease for the revived inbox"
+        );
+        let live = config.shared.live.lock().await;
+        let shared = live
+            .as_ref()
+            .expect("shared listener")
+            .leases
+            .get(&key)
+            .expect("shared current lease");
+        assert!(Arc::ptr_eq(&shared.token, &current));
+        drop(live);
+
+        actor_state.shutdown().await;
+        let live = config.shared.live.lock().await;
+        assert!(
+            !live
+                .as_ref()
+                .expect("listener remains process-owned")
+                .leases
+                .contains_key(&key)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn actor_registration_rotation_removes_old_key_and_preserves_replacement() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let mut actor_state = super::actor::ControllingAcceptorState::new(config.clone());
+        let old_key = Arc::new(meerkat_comms::Keypair::generate());
+        let replacement_key = Arc::new(meerkat_comms::Keypair::generate());
+        let old_pubkey = old_key.public_key();
+        let replacement_pubkey = replacement_key.public_key();
+        let old_key_string = old_pubkey.to_pubkey_string();
+        let replacement_key_string = replacement_pubkey.to_pubkey_string();
+
+        actor_state
+            .refresh_registration(
+                "mob-a/member/old-session".to_string(),
+                acceptor_registration(old_key),
+            )
+            .await
+            .expect("old incarnation publication");
+        actor_state
+            .remove_registration(&old_pubkey)
+            .await
+            .expect("old incarnation cleanup");
+        actor_state
+            .refresh_registration(
+                "mob-a/member/replacement-session".to_string(),
+                acceptor_registration(replacement_key),
+            )
+            .await
+            .expect("replacement incarnation publication");
+        let replacement_token = actor_state
+            .registration_token(&replacement_key_string)
+            .expect("replacement actor lease");
+
+        actor_state
+            .remove_registration(&old_pubkey)
+            .await
+            .expect("repeated old cleanup is a no-op");
+        let live = config.shared.live.lock().await;
+        let leases = &live.as_ref().expect("shared listener remains live").leases;
+        assert!(!leases.contains_key(&old_key_string));
+        let replacement = leases
+            .get(&replacement_key_string)
+            .expect("replacement registration remains");
+        assert!(Arc::ptr_eq(&replacement.token, &replacement_token));
+        drop(live);
+
+        actor_state.shutdown().await;
+    }
 
     #[cfg(feature = "runtime-adapter")]
     #[test]

@@ -207,6 +207,8 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s89_cli_mobpack_callable_flow_run_live, 89);
             scenario(e2e_smoke_s90_openai_responses_tool_result_image_output, 90);
             scenario(e2e_smoke_s91_live_adapter_image_input, 91);
+            scenario(e2e_smoke_s92_remote_mob_live_placed_overlay_roundtrip, 92);
+            scenario(e2e_smoke_s93_remote_mob_two_host_constellation_join, 93);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -3691,6 +3693,44 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 test_target: "smoke_shared_realm",
                 test_name: "e2e_scenario_91_live_adapter_image_input_dominant_color",
                 features: &[],
+                all_features: false,
+            },
+        }),
+        92 => Some(&Spec {
+            id: Some(92),
+            lane: Lane::Smoke,
+            title: "Real provider-backed placed remote mob roundtrip",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_flow_runtime",
+                test_name: "e2e_smoke_s92_remote_mob_live_placed_overlay_roundtrip",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        93 => Some(&Spec {
+            id: Some(93),
+            lane: Lane::Smoke,
+            title: "Two-host live remote mob parallel branches and join",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_flow_runtime",
+                test_name: "e2e_smoke_s93_remote_mob_two_host_constellation_join",
+                features: &["integration-real-tests"],
                 all_features: false,
             },
         }),

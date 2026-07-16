@@ -48,5 +48,6 @@ pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{
     CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedAuthMode,
     PersistedTokens, ProviderAuthPersistence, RefreshCoordinator, RefreshError,
-    RefreshFailureObservation, RefreshFn, TokenKey, TokenStore, TokenStoreError,
+    RefreshFailureDisposition, RefreshFailureObservation, RefreshFn, TokenKey, TokenStore,
+    TokenStoreError,
 };

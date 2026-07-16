@@ -8949,19 +8949,32 @@ impl MobBuilder {
             topology_epoch,
         )
         .await?;
-        if notify_orchestrator_on_resume
-            && let Some(orchestrator) = &definition.orchestrator
-            && let Some(orchestrator_entry) =
-                roster.by_profile(&orchestrator.profile).next().cloned()
-        {
-            realize_orchestrator_resume_notification(
-                definition,
-                &orchestrator_entry,
-                session_service.as_ref(),
-                provisioner,
-                dsl_authority,
-            )
-            .await?;
+        if notify_orchestrator_on_resume && let Some(orchestrator) = &definition.orchestrator {
+            let orchestrator_entries = dsl_authority
+                .state()
+                .active_member_identities_for_profile(&orchestrator.profile)
+                .into_iter()
+                .map(|orchestrator_identity| {
+                    roster
+                        .get(&orchestrator_identity)
+                        .cloned()
+                        .ok_or_else(|| {
+                            MobError::Internal(format!(
+                                "active MobMachine orchestrator '{orchestrator_identity}' has no mechanical roster entry during resume"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, MobError>>()?;
+            for orchestrator_entry in orchestrator_entries {
+                realize_orchestrator_resume_notification(
+                    definition,
+                    &orchestrator_entry,
+                    session_service.as_ref(),
+                    provisioner,
+                    dsl_authority,
+                )
+                .await?;
+            }
         }
         Ok(())
     }

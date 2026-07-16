@@ -2232,6 +2232,27 @@ impl MobMemberLifecycleMaterial {
 }
 
 impl MobMachineState {
+    /// Project every active identity for a profile from machine-owned
+    /// identity-to-profile and lifecycle facts.
+    ///
+    /// Callers that notify a definition-owned role must fan out to the complete
+    /// result. The vector's deterministic map order is mechanical only and
+    /// never selects one member as a hidden semantic winner.
+    pub fn active_member_identities_for_profile(
+        &self,
+        profile_name: &crate::ids::ProfileName,
+    ) -> Vec<crate::ids::AgentIdentity> {
+        self.member_profile_names
+            .iter()
+            .filter(|(identity, member_profile_name)| {
+                member_profile_name.as_str() == profile_name.as_str()
+                    && self.member_lifecycle_for_identity(identity).status
+                        == MobMemberLifecycleStatus::Active
+            })
+            .map(|(identity, _)| crate::ids::AgentIdentity::from(identity.0.as_str()))
+            .collect()
+    }
+
     /// Project lifecycle truth for an identity from the machine's membership
     /// maps.
     pub fn member_lifecycle_for_identity(
@@ -5684,6 +5705,39 @@ mod tests {
             }
         );
         assert!(completed.is_terminal());
+    }
+
+    #[test]
+    fn active_profile_projection_returns_every_machine_owned_identity() {
+        let profile = crate::ids::ProfileName::from("test");
+        let mut authority = MobMachineAuthority::new();
+        assert_eq!(
+            authority
+                .state()
+                .active_member_identities_for_profile(&profile),
+            Vec::<crate::ids::AgentIdentity>::new()
+        );
+
+        let first = AgentIdentity::from("lead-one");
+        seed_live_member(&mut authority, &first, &AgentRuntimeId::from("lead-one:1"));
+        assert_eq!(
+            authority
+                .state()
+                .active_member_identities_for_profile(&profile),
+            vec![crate::ids::AgentIdentity::from("lead-one")]
+        );
+
+        let second = AgentIdentity::from("lead-two");
+        seed_live_member(&mut authority, &second, &AgentRuntimeId::from("lead-two:1"));
+        assert_eq!(
+            authority
+                .state()
+                .active_member_identities_for_profile(&profile),
+            vec![
+                crate::ids::AgentIdentity::from("lead-one"),
+                crate::ids::AgentIdentity::from("lead-two"),
+            ]
+        );
     }
 
     #[test]

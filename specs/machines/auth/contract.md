@@ -30,7 +30,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ObserveCredentialFreshness`(now_ts: u64, refresh_window_secs: u64)
 - `BeginRefresh`
 - `CompleteRefresh`(new_expires_at: Option<u64>, now_ts: u64, credential_published_at_millis: u64)
-- `RefreshFailed`(http_status: Option<u64>, oauth_error_code: Option<String>, local_credential_unusable: Bool)
+- `RefreshFailed`(disposition: RefreshFailureDisposition)
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
 - `ReleaseCredentialLifecycle`
@@ -54,6 +54,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RestoreOAuthBrowserFlow`(flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64>)
 - `RestoreOAuthDeviceFlow`(flow_id: String, provider: Option<String>, expires_at_millis: Option<u64>)
 - `RestoreOAuthDevicePoll`(flow_id: String)
+- `ResolveRefreshFailureDisposition`(http_status: Option<u64>, oauth_error_code: Option<String>, local_credential_unusable: Bool)
 - `ResolveCredentialUseAdmission`(intent: CredentialUseIntent)
 - `ResolveOAuthLoginCredentialDisposition`(credential_present: Bool, force_refresh: Bool, refresh_allowed: Bool)
 
@@ -62,6 +63,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Effects
 - `EmitLifecycleEvent`(new_state: AuthLifecyclePhase, expires_at: Option<u64>, credential_generation: u64, credential_published_at_millis: Option<u64>)
 - `WakeRefreshLoop`
+- `RefreshFailureDispositionResolved`(disposition: RefreshFailureDisposition)
 - `CredentialUseAdmissionResolved`(disposition: CredentialUseDisposition)
 - `CancelOAuthFlowsForRelease`(browser_flow_ids: Set<String>, device_flow_ids: Set<String>)
 
@@ -173,19 +175,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
-### `RefreshFailedTransient`
+### `ResolveRefreshFailureDispositionTransientRefreshing`
 - From: `Refreshing`
-- On: `RefreshFailed`(http_status, oauth_error_code, local_credential_unusable)
+- On: `ResolveRefreshFailureDisposition`(http_status, oauth_error_code, local_credential_unusable)
 - Guards:
   - `refresh_failure_observation_transient`
+- Emits: `RefreshFailureDispositionResolved`
+- To: `Refreshing`
+
+### `ResolveRefreshFailureDispositionPermanentRefreshing`
+- From: `Refreshing`
+- On: `ResolveRefreshFailureDisposition`(http_status, oauth_error_code, local_credential_unusable)
+- Guards:
+  - `refresh_failure_observation_permanent`
+- Emits: `RefreshFailureDispositionResolved`
+- To: `Refreshing`
+
+### `RefreshFailedTransient`
+- From: `Refreshing`
+- On: `RefreshFailed`(disposition)
+- Guards:
+  - `refresh_failure_disposition_transient`
 - Emits: `EmitLifecycleEvent`
 - To: `Expiring`
 
 ### `RefreshFailedPermanent`
 - From: `Refreshing`
-- On: `RefreshFailed`(http_status, oauth_error_code, local_credential_unusable)
+- On: `RefreshFailed`(disposition)
 - Guards:
-  - `refresh_failure_observation_permanent`
+  - `refresh_failure_disposition_reauth_required`
 - Emits: `EmitLifecycleEvent`
 - To: `ReauthRequired`
 

@@ -63,6 +63,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CompleteRefresh`
   - anchors: (unclaimed)
   - scenarios: `acquire_expire_refresh_complete`
+- `ResolveRefreshFailureDispositionTransientRefreshing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRefreshFailureDispositionPermanentRefreshing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RefreshFailedTransient`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -539,6 +545,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WakeRefreshLoop`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
+- `RefreshFailureDispositionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CredentialUseAdmissionResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

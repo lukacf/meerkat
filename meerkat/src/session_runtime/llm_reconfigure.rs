@@ -83,23 +83,41 @@ pub fn registered_model_provider_mismatch_reason(
     registry.provider_override_mismatch_reason(provider, model)
 }
 
-/// Resolve the durable `auth_binding` for a hot-swap target identity,
-/// mirroring the core resolver (`meerkat-core::resolve_session_llm_identity_override`).
-///
-/// `target_provider` is the provider already resolved for the swap target.
-fn resolve_reconfigure_auth_binding(
-    request: &SessionLlmReconfigureRequest,
+/// Adapt the runtime request's wire-facing provider string onto the core-owned
+/// session identity resolver. Model/provider ownership, self-hosted alias
+/// resolution, metadata tri-state, and stale-auth clearing remain singular in
+/// `meerkat_core::resolve_session_llm_identity_override`.
+fn resolve_reconfigure_target_llm_identity(
+    registry: &ModelRegistry,
     current: &SessionLlmIdentity,
-    target_provider: meerkat_core::Provider,
-) -> Option<meerkat_core::AuthBindingRef> {
-    match &request.auth_binding {
-        Some(TurnMetadataOverride::Clear) => None,
-        Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
-        // Inherit: a provider change without an explicit binding drops the
-        // stale binding; otherwise the durable binding is retained.
-        None if target_provider != current.provider => None,
-        None => current.auth_binding.clone(),
-    }
+    request: &SessionLlmReconfigureRequest,
+) -> Result<SessionLlmIdentity, RuntimeDriverError> {
+    let provider = request
+        .provider
+        .as_deref()
+        .map(parse_provider_override)
+        .transpose()
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+
+    meerkat_core::resolve_session_llm_identity_override(
+        current,
+        registry,
+        meerkat_core::SessionLlmIdentityOverride {
+            model: request.model.as_deref(),
+            provider,
+            provider_params: request
+                .provider_params
+                .as_ref()
+                .map(TurnMetadataOverride::as_ref),
+            auth_binding: request
+                .auth_binding
+                .as_ref()
+                .map(TurnMetadataOverride::as_ref),
+        },
+    )
+    .map_err(|error| RuntimeDriverError::ValidationFailed {
+        reason: error.to_string(),
+    })
 }
 
 /// Surface-agnostic implementation of [`SessionLlmReconfigureHost`].
@@ -320,74 +338,8 @@ impl SessionRuntimeLlmReconfigureHost {
         current: &SessionLlmIdentity,
         request: &SessionLlmReconfigureRequest,
     ) -> Result<SessionLlmIdentity, RuntimeDriverError> {
-        if request.provider.is_some() && request.model.is_none() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason: "provider override requires model on an existing session".to_string(),
-            });
-        }
-        // The illegal "set and clear" fourth state is structurally
-        // unrepresentable in `SessionLlmReconfigureRequest`
-        // (`Option<TurnMetadataOverride<T>>`), and a legacy `clear_* + value`
-        // wire payload is already rejected at the request's serde boundary.
-
         let registry = self.model_registry().await?;
-        let model = request
-            .model
-            .clone()
-            .unwrap_or_else(|| current.model.clone());
-        let provider = if let Some(provider_name) = request.provider.as_ref() {
-            parse_provider_override(provider_name)
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
-        } else {
-            current.provider
-        };
-        if (request.model.is_some() || request.provider.is_some())
-            && let Some(reason) =
-                registered_model_provider_mismatch_reason(&registry, provider, &model)
-        {
-            return Err(RuntimeDriverError::ValidationFailed { reason });
-        }
-        let provider_params = match &request.provider_params {
-            Some(TurnMetadataOverride::Clear) => None,
-            Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
-            None => current.provider_params.clone(),
-        };
-        let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
-            if request.model.is_none() {
-                current.self_hosted_server_id.clone().or_else(|| {
-                    registry
-                        .entry_for_provider(meerkat_core::Provider::SelfHosted, &model)
-                        .and_then(|entry| entry.self_hosted.as_ref())
-                        .map(|server| server.server_id.clone())
-                })
-            } else {
-                match registry.entry_for_provider(meerkat_core::Provider::SelfHosted, &model) {
-                    Some(entry) => entry
-                        .self_hosted
-                        .as_ref()
-                        .map(|server| server.server_id.clone()),
-                    None => {
-                        return Err(RuntimeDriverError::ValidationFailed {
-                            reason: format!(
-                                "self-hosted provider requires a registered model alias; '{model}' is not configured"
-                            ),
-                        });
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
-        let auth_binding = resolve_reconfigure_auth_binding(request, current, provider);
-
-        Ok(SessionLlmIdentity {
-            model,
-            provider,
-            self_hosted_server_id,
-            provider_params,
-            auth_binding,
-        })
+        resolve_reconfigure_target_llm_identity(&registry, current, request)
     }
 }
 
@@ -556,7 +508,7 @@ mod tests {
 
     fn anthropic_identity() -> SessionLlmIdentity {
         SessionLlmIdentity {
-            model: "test-anthropic-default".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
             provider: Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
@@ -564,29 +516,37 @@ mod tests {
         }
     }
 
-    fn request_with_auth_binding(
+    fn model_registry() -> ModelRegistry {
+        ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
+            .expect("canonical model registry")
+    }
+
+    fn reconfigure_request(
+        model: Option<&str>,
+        provider: Option<&str>,
         auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     ) -> SessionLlmReconfigureRequest {
         SessionLlmReconfigureRequest {
-            model: None,
-            provider: None,
+            model: model.map(str::to_string),
+            provider: provider.map(str::to_string),
             provider_params: None,
             auth_binding,
         }
     }
 
-    // Mirrors `meerkat-core::session::llm_identity_model_override_switches_to_catalog_provider`:
-    // a provider change with no explicit binding must drop the stale binding so
-    // materialization never carries a previous provider's auth into the swap.
     #[test]
-    fn provider_change_without_explicit_binding_clears_auth_binding() {
+    fn model_only_reconfigure_uses_catalog_provider_and_clears_stale_binding() {
         let current = anthropic_identity();
-        let request = request_with_auth_binding(None);
+        let request = reconfigure_request(Some("gpt-5.5"), None, None);
 
-        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::OpenAI);
+        let resolved =
+            resolve_reconfigure_target_llm_identity(&model_registry(), &current, &request)
+                .expect("catalog-owned model-only switch");
 
+        assert_eq!(resolved.model, "gpt-5.5");
+        assert_eq!(resolved.provider, Provider::OpenAI);
         assert!(
-            resolved.is_none(),
+            resolved.auth_binding.is_none(),
             "provider switches must not inherit a binding from the previous provider"
         );
     }
@@ -594,21 +554,26 @@ mod tests {
     #[test]
     fn same_provider_without_explicit_binding_inherits_durable_binding() {
         let current = anthropic_identity();
-        let request = request_with_auth_binding(None);
+        let request = reconfigure_request(Some("claude-opus-4-8"), None, None);
 
-        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::Anthropic);
+        let resolved =
+            resolve_reconfigure_target_llm_identity(&model_registry(), &current, &request)
+                .expect("same-provider model-only switch");
 
-        assert_eq!(resolved, Some(anthropic_binding()));
+        assert_eq!(resolved.provider, Provider::Anthropic);
+        assert_eq!(resolved.auth_binding, Some(anthropic_binding()));
     }
 
     #[test]
     fn explicit_clear_drops_binding_even_without_provider_change() {
         let current = anthropic_identity();
-        let request = request_with_auth_binding(Some(TurnMetadataOverride::Clear));
+        let request = reconfigure_request(None, None, Some(TurnMetadataOverride::Clear));
 
-        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::Anthropic);
+        let resolved =
+            resolve_reconfigure_target_llm_identity(&model_registry(), &current, &request)
+                .expect("explicit auth clear");
 
-        assert!(resolved.is_none());
+        assert!(resolved.auth_binding.is_none());
     }
 
     #[test]
@@ -620,10 +585,17 @@ mod tests {
             profile: None,
             origin: BindingOrigin::Configured,
         };
-        let request = request_with_auth_binding(Some(TurnMetadataOverride::Set(target.clone())));
+        let request = reconfigure_request(
+            Some("gpt-5.5"),
+            None,
+            Some(TurnMetadataOverride::Set(target.clone())),
+        );
 
-        let resolved = resolve_reconfigure_auth_binding(&request, &current, Provider::OpenAI);
+        let resolved =
+            resolve_reconfigure_target_llm_identity(&model_registry(), &current, &request)
+                .expect("explicit auth binding on catalog-owned switch");
 
-        assert_eq!(resolved, Some(target));
+        assert_eq!(resolved.provider, Provider::OpenAI);
+        assert_eq!(resolved.auth_binding, Some(target));
     }
 }

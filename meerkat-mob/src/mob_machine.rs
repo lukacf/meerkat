@@ -1139,6 +1139,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordLayerInterrupted,
+        reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RecordLayerResultValidated,
         reason: MobMachineRuntimeInternalReason::AdaptiveFlowAuthority,
     },

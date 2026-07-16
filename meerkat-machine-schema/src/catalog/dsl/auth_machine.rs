@@ -63,6 +63,18 @@ macro_rules! auth_catalog_machine_dsl {
             AlreadyRefreshing,
         }
 
+        /// Machine-owned classification of a provider refresh-failure
+        /// observation. The shell may mirror this verdict to order durable
+        /// cleanup, but it must not re-derive permanent-vs-transient policy.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum RefreshFailureDisposition {
+            /// Retry remains permitted; the lifecycle returns to Expiring.
+            Transient,
+            /// The credential is terminally unusable and interactive
+            /// authorization is required.
+            ReauthRequired,
+        }
+
         meerkat_machine_dsl::machine! {
         machine AuthMachine {
             version: 1,
@@ -129,11 +141,11 @@ macro_rules! auth_catalog_machine_dsl {
                 ObserveCredentialFreshness { now_ts: u64, refresh_window_secs: u64 },
                 BeginRefresh,
                 CompleteRefresh { new_expires_at: Option<u64>, now_ts: u64, credential_published_at_millis: u64 },
-                RefreshFailed {
-                    http_status: Option<u64>,
-                    oauth_error_code: Option<String>,
-                    local_credential_unusable: bool,
-                },
+                // Commit a previously machine-classified refresh-failure
+                // disposition. Raw provider observations are accepted only by
+                // the read-only resolver below, so this lifecycle transition
+                // cannot become a second classification authority.
+                RefreshFailed { disposition: Enum<RefreshFailureDisposition> },
                 MarkReauthRequired,
                 ClearCredentialLifecycle,
                 ReleaseCredentialLifecycle,
@@ -195,6 +207,15 @@ macro_rules! auth_catalog_machine_dsl {
                 FinishOAuthDevicePoll { flow_id: String },
                 ConsumeOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
                 ExpireOAuthDeviceFlow { flow_id: String },
+                // Read-only refresh-failure classification. The provider shell
+                // supplies only typed boundary observations; this machine owns
+                // the complete observation -> disposition policy and emits a
+                // verdict before any durable cleanup or lifecycle commit.
+                ResolveRefreshFailureDisposition {
+                    http_status: Option<u64>,
+                    oauth_error_code: Option<String>,
+                    local_credential_unusable: bool,
+                },
                 // Credential-use admission classification. The resolver shell
                 // (meerkat-auth-core) extracts only the typed `intent` — WHICH
                 // credential gate is asking (use the credential now / hold
@@ -236,6 +257,10 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_published_at_millis: Option<u64>,
                 },
                 WakeRefreshLoop,
+                // Refresh-failure disposition decided by this machine. The
+                // shell mirrors it to order durable credential removal before
+                // committing a terminal RefreshFailed input.
+                RefreshFailureDispositionResolved { disposition: Enum<RefreshFailureDisposition> },
                 // Credential-use disposition decided by this machine. The
                 // resolver shell mirrors `disposition`: Authorized -> use the
                 // credential / proceed, RefreshRequired -> the caller refreshes
@@ -259,6 +284,7 @@ macro_rules! auth_catalog_machine_dsl {
 
             disposition EmitLifecycleEvent => external handoff auth_lease_lifecycle_publication seam SurfaceResultAlignment,
             disposition WakeRefreshLoop => local seam NoOwnerRealization,
+            disposition RefreshFailureDispositionResolved => local seam SurfaceResultAlignment,
             disposition CredentialUseAdmissionResolved => local seam SurfaceResultAlignment,
             disposition CancelOAuthFlowsForRelease => external handoff auth_release_oauth_flow_drain seam NoOwnerRealization,
 
@@ -527,9 +553,16 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
-            transition RefreshFailedTransient {
-                on input RefreshFailed { http_status, oauth_error_code, local_credential_unusable }
-                guard { self.lifecycle_phase == Phase::Refreshing }
+            // --- Refresh-failure classification and commit ---
+            //
+            // Classification self-loops in Refreshing and emits the sole
+            // semantic verdict. The later RefreshFailed commit consumes only
+            // that typed verdict. This separation lets MCP OAuth durably clear
+            // a terminal credential before lifecycle terminality is committed
+            // without duplicating the observation predicate in the shell.
+            transition ResolveRefreshFailureDispositionTransient {
+                per_phase [Refreshing]
+                on input ResolveRefreshFailureDisposition { http_status, oauth_error_code, local_credential_unusable }
                 guard "refresh_failure_observation_transient" {
                     local_credential_unusable == false
                     && http_status != Some(401)
@@ -541,6 +574,41 @@ macro_rules! auth_catalog_machine_dsl {
                     && oauth_error_code != Some("access_denied")
                     && oauth_error_code != Some("permission_denied")
                     && oauth_error_code != Some("expired_token")
+                }
+                update {}
+                to Refreshing
+                emit RefreshFailureDispositionResolved {
+                    disposition: RefreshFailureDisposition::Transient,
+                }
+            }
+
+            transition ResolveRefreshFailureDispositionPermanent {
+                per_phase [Refreshing]
+                on input ResolveRefreshFailureDisposition { http_status, oauth_error_code, local_credential_unusable }
+                guard "refresh_failure_observation_permanent" {
+                    local_credential_unusable == true
+                    || http_status == Some(401)
+                    || http_status == Some(403)
+                    || oauth_error_code == Some("invalid_grant")
+                    || oauth_error_code == Some("invalid_client")
+                    || oauth_error_code == Some("unauthorized_client")
+                    || oauth_error_code == Some("invalid_scope")
+                    || oauth_error_code == Some("access_denied")
+                    || oauth_error_code == Some("permission_denied")
+                    || oauth_error_code == Some("expired_token")
+                }
+                update {}
+                to Refreshing
+                emit RefreshFailureDispositionResolved {
+                    disposition: RefreshFailureDisposition::ReauthRequired,
+                }
+            }
+
+            transition RefreshFailedTransient {
+                on input RefreshFailed { disposition }
+                guard { self.lifecycle_phase == Phase::Refreshing }
+                guard "refresh_failure_disposition_transient" {
+                    disposition == RefreshFailureDisposition::Transient
                 }
                 update {
                     self.refresh_attempt = self.refresh_attempt + 1;
@@ -555,19 +623,10 @@ macro_rules! auth_catalog_machine_dsl {
             }
 
             transition RefreshFailedPermanent {
-                on input RefreshFailed { http_status, oauth_error_code, local_credential_unusable }
+                on input RefreshFailed { disposition }
                 guard { self.lifecycle_phase == Phase::Refreshing }
-                guard "refresh_failure_observation_permanent" {
-                    local_credential_unusable == true
-                    || http_status == Some(401)
-                    || http_status == Some(403)
-                    || oauth_error_code == Some("invalid_grant")
-                    || oauth_error_code == Some("invalid_client")
-                    || oauth_error_code == Some("unauthorized_client")
-                    || oauth_error_code == Some("invalid_scope")
-                    || oauth_error_code == Some("access_denied")
-                    || oauth_error_code == Some("permission_denied")
-                    || oauth_error_code == Some("expired_token")
+                guard "refresh_failure_disposition_reauth_required" {
+                    disposition == RefreshFailureDisposition::ReauthRequired
                 }
                 update {
                     self.refresh_attempt = self.refresh_attempt + 1;

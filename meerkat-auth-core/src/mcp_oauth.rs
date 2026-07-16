@@ -24,6 +24,7 @@ use crate::auth_store::{
     CredentialMutationError, CredentialMutationOutcome, PersistedAuthMode, PersistedTokens,
     ProviderAuthPersistence, RefreshCoordinator, RefreshError, TokenKey, TokenStore,
 };
+use meerkat_core::auth::RefreshFailureDisposition;
 use meerkat_core::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
 use meerkat_core::handles::{
@@ -746,9 +747,10 @@ impl McpOAuthAuthority {
             .load_admitted_stored_credential(target, key)
             .await
             .map_err(refresh_error_from_mcp)?
-            .ok_or_else(|| RefreshError::Observed {
-                message: "stored MCP OAuth credential disappeared before refresh".to_string(),
-                observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(),
+            .ok_or_else(|| {
+                RefreshError::ReauthRequired(
+                    "stored MCP OAuth credential disappeared before refresh".to_string(),
+                )
             })?;
         if admitted.disposition == CredentialUseDisposition::Authorized {
             return Ok(admitted.tokens);
@@ -774,11 +776,9 @@ impl McpOAuthAuthority {
                 ));
             }
             CredentialUseDisposition::ReauthRequired => {
-                return Err(RefreshError::Observed {
-                    message: "MCP OAuth credential requires reauthentication".to_string(),
-                    observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(
-                    ),
-                });
+                return Err(RefreshError::ReauthRequired(
+                    "MCP OAuth credential requires reauthentication".to_string(),
+                ));
             }
             CredentialUseDisposition::Authorized
             | CredentialUseDisposition::RefreshDisallowed
@@ -792,11 +792,13 @@ impl McpOAuthAuthority {
 
         let Some(refresh_token) = admitted.tokens.refresh_token.clone() else {
             let observation = meerkat_core::RefreshFailureObservation::local_credential_unusable();
-            self.close_refresh_failure(key, &lease_key, &observation)
+            let disposition = self
+                .close_refresh_failure(key, &lease_key, &observation)
                 .await?;
-            return Err(RefreshError::Observed {
+            return Err(RefreshError::Classified {
                 message: "stored MCP OAuth credential has no refresh token".to_string(),
                 observation,
+                disposition,
             });
         };
         let metadata = &admitted.metadata;
@@ -825,11 +827,13 @@ impl McpOAuthAuthority {
             Ok(refreshed) => refreshed,
             Err(error) => {
                 let observation = oauth_refresh_observation(&error);
-                self.close_refresh_failure(key, &lease_key, &observation)
+                let disposition = self
+                    .close_refresh_failure(key, &lease_key, &observation)
                     .await?;
-                return Err(RefreshError::Observed {
+                return Err(RefreshError::Classified {
                     message: error.to_string(),
                     observation,
+                    disposition,
                 });
             }
         };
@@ -944,8 +948,12 @@ impl McpOAuthAuthority {
         key: &TokenKey,
         lease_key: &LeaseKey,
         observation: &meerkat_core::RefreshFailureObservation,
-    ) -> Result<(), RefreshError> {
-        if observation.requires_reauth() {
+    ) -> Result<RefreshFailureDisposition, RefreshError> {
+        let disposition = self
+            .auth_lease
+            .resolve_refresh_failure_disposition(lease_key, observation.clone())
+            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+        if disposition == RefreshFailureDisposition::ReauthRequired {
             // Durable terminality commits first. If the process dies after this
             // clear, a new authority observes no credential and cannot restore
             // the permanently rejected marker. The coordinator-owned task then
@@ -964,6 +972,7 @@ impl McpOAuthAuthority {
                         "permanently rejected MCP OAuth credential removal failed: {error}{closure_suffix}"
                     ),
                     observation: observation.clone(),
+                    disposition,
                 });
             }
             if let Err(error) = self
@@ -982,11 +991,12 @@ impl McpOAuthAuthority {
                     "durable credential was removed but AuthMachine refresh closure failed: {error}{reconciliation}"
                 )));
             }
-            return Ok(());
+            return Ok(disposition);
         }
         self.auth_lease
             .refresh_failed(lease_key, observation.clone())
-            .map_err(|error| RefreshError::Refresh(error.to_string()))
+            .map_err(|error| RefreshError::Refresh(error.to_string()))?;
+        Ok(disposition)
     }
 
     async fn rollback_refresh_publication(
@@ -1338,10 +1348,9 @@ fn refresh_error_from_mcp(error: McpOAuthError) -> RefreshError {
     match error {
         McpOAuthError::ReauthRequired { .. }
         | McpOAuthError::MissingStoredToken { .. }
-        | McpOAuthError::MissingStoredMetadata { .. } => RefreshError::Observed {
-            message: error.to_string(),
-            observation: meerkat_core::RefreshFailureObservation::local_credential_unusable(),
-        },
+        | McpOAuthError::MissingStoredMetadata { .. } => {
+            RefreshError::ReauthRequired(error.to_string())
+        }
         other => RefreshError::Refresh(other.to_string()),
     }
 }
@@ -1350,7 +1359,9 @@ fn map_coordinated_refresh_error(target: &McpServerIdentity, error: RefreshError
     if let RefreshError::DurableTerminalCommit { message, .. } = &error {
         return McpOAuthError::TokenStore(message.clone());
     }
-    if error.observation().requires_reauth() {
+    if matches!(&error, RefreshError::ReauthRequired(_))
+        || error.refresh_failure_disposition() == Some(RefreshFailureDisposition::ReauthRequired)
+    {
         McpOAuthError::ReauthRequired {
             server_name: target.server_name().to_string(),
         }
@@ -1563,6 +1574,31 @@ mod tests {
             handle,
         )
         .expect("test auth lease must be certified by generated AuthMachine authority")
+    }
+
+    #[test]
+    fn coordinated_refresh_mapping_uses_machine_disposition_not_raw_observation() {
+        let target = McpServerIdentity::from_server_config("glean", "https://mcp.example.test/mcp");
+        let observation = meerkat_core::RefreshFailureObservation::local_credential_unusable();
+
+        let unclassified = map_coordinated_refresh_error(
+            &target,
+            RefreshError::Observed {
+                message: "unclassified boundary observation".to_string(),
+                observation: observation.clone(),
+            },
+        );
+        assert!(matches!(unclassified, McpOAuthError::RefreshFailed { .. }));
+
+        let classified = map_coordinated_refresh_error(
+            &target,
+            RefreshError::Classified {
+                message: "AuthMachine classified terminal failure".to_string(),
+                observation,
+                disposition: RefreshFailureDisposition::ReauthRequired,
+            },
+        );
+        assert!(matches!(classified, McpOAuthError::ReauthRequired { .. }));
     }
 
     #[derive(Debug, Clone, Copy, Default)]

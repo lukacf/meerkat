@@ -572,6 +572,10 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
                     "AlreadyRefreshing",
                 ],
             ),
+            NamedTypeBinding::string_enum(
+                "RefreshFailureDisposition",
+                &["Transient", "ReauthRequired"],
+            ),
         ],
         vec![
             InputVariantId::from_trusted_catalog_literal("RestoreAuthoritySnapshot"),
@@ -579,6 +583,7 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthBrowserFlow"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthDeviceFlow"),
             InputVariantId::from_trusted_catalog_literal("RestoreOAuthDevicePoll"),
+            InputVariantId::from_trusted_catalog_literal("ResolveRefreshFailureDisposition"),
             InputVariantId::from_trusted_catalog_literal("ResolveCredentialUseAdmission"),
             InputVariantId::from_trusted_catalog_literal("ResolveOAuthLoginCredentialDisposition"),
         ],
@@ -3555,6 +3560,7 @@ runtime_internal_inputs!(
         RecordLayerRunStarted,
         IngestLayerTerminal,
         RecordLayerSetupFault,
+        RecordLayerInterrupted,
         RecordLayerResultValidated,
         RecordLayerResultInvalid,
         RecordLayerMobDestroyed,

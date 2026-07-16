@@ -15,6 +15,34 @@ via cargo-semver-checks against the published baselines).
 
 ### Breaking
 
+- `meerkat_core::RefreshFailureObservation::requires_reauth` was removed;
+  `meerkat_auth_core::auth_oauth::OAuthRefreshPermanence` and
+  `OAuthError::refresh_permanence` were removed with the competing public
+  permanence verdict;
+  AuthMachine now returns the typed `RefreshFailureDisposition` through
+  `AuthLeaseHandle::resolve_refresh_failure_disposition`. The exhaustive
+  `RefreshError` enum gained `Classified` and `ReauthRequired`, and
+  `DurableTerminalCommit` gained the required `disposition` field. Refresh
+  shells must submit boundary observations to AuthMachine and project its
+  verdict instead of classifying permanent failures themselves.
+- `meerkat_mob::AdaptiveDriverRuntime::provision_layer` now returns
+  `AdaptiveLayerProvision<Self::Layer>` instead of `Result<Self::Layer,
+  AdaptiveError>`, so a failed provision can retain teardown ownership of a
+  partially acquired layer. The trait gained the `Capability` associated type,
+  provisioning receives the capability/layer attempt, cleanup borrows an
+  `AdaptiveLayerLease<Self::Layer>`, and provision results now carry that
+  cancellation-safe lease. `AdaptiveKernel` gained the required
+  `record_layer_interrupted` and `cancel_run` methods; its synchronous
+  `initialize_run` now returns `AdaptiveRunInitialization`, whose independent
+  command/reply owner publishes the accepted capability together with an armed
+  run lease. Kernels must retain that ownership from initialization enqueue
+  until the run reaches a machine-owned terminal state.
+- Generated AuthMachine alphabets replaced the raw-observation `RefreshFailed`
+  payload with a typed disposition and gained the runtime-internal
+  `ResolveRefreshFailureDisposition`; generated MobMachine public alphabets
+  gained `RecordLayerInterrupted` plus replay-safe adaptive cancel and cleanup
+  transition variants. Downstream exhaustive matches over the generated input,
+  effect, input-kind, or transition-kind enums must handle the new variants.
 - `meerkat_core::CompactionResult` gained the required
   `summary: CompactionSummary` and `retained: Vec<CompactionRetained>` fields,
   and its `discarded` field is now `Vec<CompactionDiscard>` instead of

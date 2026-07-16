@@ -22,8 +22,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthBindingRef;
-use meerkat_core::RefreshFailureObservation;
-use meerkat_core::auth::TokenKey;
+use meerkat_core::auth::{RefreshFailureDisposition, RefreshFailureObservation, TokenKey};
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker::AuthLeaseDurableRestorePublication;
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot,
@@ -936,6 +935,9 @@ impl RuntimeAuthLeaseHandle {
                 "consume_oauth_device_flow"
             }
             auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow { .. } => "expire_oauth_device_flow",
+            auth_dsl::AuthMachineInput::ResolveRefreshFailureDisposition { .. } => {
+                "resolve_refresh_failure_disposition"
+            }
             auth_dsl::AuthMachineInput::ResolveCredentialUseAdmission { .. } => {
                 "resolve_credential_use_admission"
             }
@@ -997,6 +999,28 @@ fn credential_use_disposition_from_dsl(
         }
         auth_dsl::CredentialUseDisposition::AlreadyRefreshing => {
             meerkat_core::handles::CredentialUseDisposition::AlreadyRefreshing
+        }
+    }
+}
+
+fn refresh_failure_disposition_to_dsl(
+    disposition: RefreshFailureDisposition,
+) -> auth_dsl::RefreshFailureDisposition {
+    match disposition {
+        RefreshFailureDisposition::Transient => auth_dsl::RefreshFailureDisposition::Transient,
+        RefreshFailureDisposition::ReauthRequired => {
+            auth_dsl::RefreshFailureDisposition::ReauthRequired
+        }
+    }
+}
+
+fn refresh_failure_disposition_from_dsl(
+    disposition: auth_dsl::RefreshFailureDisposition,
+) -> RefreshFailureDisposition {
+    match disposition {
+        auth_dsl::RefreshFailureDisposition::Transient => RefreshFailureDisposition::Transient,
+        auth_dsl::RefreshFailureDisposition::ReauthRequired => {
+            RefreshFailureDisposition::ReauthRequired
         }
     }
 }
@@ -1116,10 +1140,9 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         lease_key: &LeaseKey,
         observation: RefreshFailureObservation,
     ) -> Result<(), DslTransitionError> {
+        let disposition = self.resolve_refresh_failure_disposition(lease_key, observation)?;
         let input = auth_dsl::AuthMachineInput::RefreshFailed {
-            http_status: observation.http_status,
-            oauth_error_code: observation.oauth_error_code,
-            local_credential_unusable: observation.local_credential_unusable,
+            disposition: refresh_failure_disposition_to_dsl(disposition),
         };
         self.apply(lease_key, input, "AuthLeaseHandle::refresh_failed", false)
             .map(|_| ())
@@ -1433,6 +1456,62 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             to_phase,
         );
         Ok(auth_transition)
+    }
+
+    fn resolve_refresh_failure_disposition(
+        &self,
+        lease_key: &LeaseKey,
+        observation: RefreshFailureObservation,
+    ) -> Result<RefreshFailureDisposition, DslTransitionError> {
+        const CONTEXT: &str = "AuthLeaseHandle::resolve_refresh_failure_disposition";
+        let guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let authority = guard.authorities.get(lease_key).ok_or_else(|| {
+            DslTransitionError::no_matching(
+                CONTEXT,
+                format!("no AuthMachine authority exists for `{lease_key}`"),
+            )
+        })?;
+        // Read-only classification: apply to recovered authority so neither
+        // lifecycle state nor the registry changes before durable cleanup.
+        let mut transient =
+            auth_dsl::AuthMachineAuthority::recover_from_state(authority.state().clone())
+                .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+        let transition = auth_dsl::AuthMachineMutator::apply(
+            &mut transient,
+            auth_dsl::AuthMachineInput::ResolveRefreshFailureDisposition {
+                http_status: observation.http_status,
+                oauth_error_code: observation.oauth_error_code,
+                local_credential_unusable: observation.local_credential_unusable,
+            },
+        )
+        .map_err(|err| map_auth_machine_error(err, CONTEXT))?;
+
+        let mut resolved = None;
+        for effect in transition.effects() {
+            if let auth_dsl::AuthMachineEffect::RefreshFailureDispositionResolved { disposition } =
+                effect
+                && resolved.replace(*disposition).is_some()
+            {
+                return Err(DslTransitionError::no_matching(
+                    CONTEXT,
+                    format!(
+                        "AuthMachine emitted multiple refresh-failure dispositions for `{lease_key}`"
+                    ),
+                ));
+            }
+        }
+
+        resolved
+            .map(refresh_failure_disposition_from_dsl)
+            .ok_or_else(|| {
+                DslTransitionError::no_matching(
+                    CONTEXT,
+                    format!("AuthMachine emitted no refresh-failure disposition for `{lease_key}`"),
+                )
+            })
     }
 
     fn resolve_credential_use_admission(
@@ -1898,6 +1977,23 @@ mod tests {
 
         h.acquire_lease(&k, 1_800_000_000).unwrap();
         h.begin_refresh(&k).unwrap();
+        let before = h.snapshot(&k);
+        let disposition = h
+            .resolve_refresh_failure_disposition(
+                &k,
+                RefreshFailureObservation::oauth_error_code("invalid_grant"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            disposition,
+            meerkat_core::auth::RefreshFailureDisposition::ReauthRequired
+        );
+        assert_eq!(
+            h.snapshot(&k),
+            before,
+            "the generated classifier must be read-only before durable cleanup"
+        );
         h.refresh_failed(&k, RefreshFailureObservation::local_credential_unusable())
             .unwrap();
 
@@ -1911,6 +2007,20 @@ mod tests {
 
         h.acquire_lease(&k, 1_800_000_000).unwrap();
         h.begin_refresh(&k).unwrap();
+        let before = h.snapshot(&k);
+        let disposition = h
+            .resolve_refresh_failure_disposition(&k, RefreshFailureObservation::transient())
+            .unwrap();
+
+        assert_eq!(
+            disposition,
+            meerkat_core::auth::RefreshFailureDisposition::Transient
+        );
+        assert_eq!(
+            h.snapshot(&k),
+            before,
+            "the generated classifier must be read-only before lifecycle commit"
+        );
         h.refresh_failed(&k, RefreshFailureObservation::transient())
             .unwrap();
 

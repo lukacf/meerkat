@@ -1,12 +1,15 @@
 #[cfg(target_arch = "wasm32")]
+use crate::tokio;
+#[cfg(target_arch = "wasm32")]
 use crate::tokio::time as tokio_time;
 use crate::{
-    FlowId, MobBuilder, MobDefinition, MobError, MobHandle, MobRun, MobSessionService, MobStorage,
-    Profile, ProfileName, RunId, SpawnMemberSpec, mob_machine_run_status_is_terminal,
+    FlowId, MobBuilder, MobDefinition, MobError, MobHandle, MobRun, MobSessionService, MobState,
+    MobStorage, Profile, ProfileName, RunId, SpawnMemberSpec, mob_machine_run_status_is_terminal,
 };
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time as tokio_time;
@@ -89,15 +92,152 @@ pub async fn run_mobpack_callable(
     run_adaptive_callable(spec, control_mob, session_service, objective).await
 }
 
-struct PackAdaptiveRuntime {
-    control_mob: MobHandle,
-    session_service: Arc<dyn MobSessionService>,
+pub(super) struct PackAdaptiveRuntime {
+    pub(super) control_mob: MobHandle,
+    pub(super) session_service: Arc<dyn MobSessionService>,
+    #[cfg(test)]
+    pub(super) layer_created_probe: Option<tokio::sync::mpsc::UnboundedSender<MobHandle>>,
+}
+
+struct PackLayerCancellationOwner {
+    guardian_trigger: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl crate::adaptive::AdaptiveLayerCancellationOwner<MobHandle> for PackLayerCancellationOwner {
+    fn take_layer_for_cancellation(&self, _layer: MobHandle) {
+        // Closing the trigger is a synchronous handoff to a guardian that was
+        // started before the first cancellable post-creation await. The
+        // guardian already owns its own MobHandle, so no async task is created
+        // from this Drop path and teardown authority cannot disappear here.
+        self.guardian_trigger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+
+    fn disarm_after_cleanup(&self) {
+        if let Some(trigger) = self
+            .guardian_trigger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = trigger.send(());
+        }
+    }
+}
+
+async fn run_pack_layer_cancellation_cleanup(
+    driver: crate::adaptive::AdaptiveDriver,
+    capability: crate::AdaptiveDriverCapability,
+    layer_id: crate::adaptive::LayerId,
+    attempt: u64,
+    layer: MobHandle,
+) {
+    // Make one best-effort pass before physical cleanup. Neither response is
+    // allowed to gate destruction; both inputs are replay-safe and are retried
+    // below after the child reaches a proven terminal state.
+    let _ = driver.cancel(&capability).await;
+    let _ = driver
+        .record_layer_interrupted(&capability, &layer_id, attempt)
+        .await;
+
+    loop {
+        let destroyed = layer.destroy().await.is_ok()
+            || matches!(layer.status().await, Ok(MobState::Destroyed));
+        if destroyed {
+            break;
+        }
+
+        // Destroy is idempotent and retryable. Retaining this owned worker is
+        // preferable to reverting to an orphaned self-retaining mob actor.
+        tokio_time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Lost responses are indistinguishable from committed transitions. Retry
+    // the now-idempotent machine inputs until their acknowledgements arrive;
+    // the owned worker continues holding the physically destroyed child while
+    // control-plane truth converges.
+    while driver.cancel(&capability).await.is_err() {
+        tokio_time::sleep(Duration::from_millis(25)).await;
+    }
+    while driver
+        .record_layer_interrupted(&capability, &layer_id, attempt)
+        .await
+        .is_err()
+    {
+        tokio_time::sleep(Duration::from_millis(25)).await;
+    }
+    while driver
+        .record_layer_mob_destroyed(&capability, &layer_id, attempt)
+        .await
+        .is_err()
+    {
+        tokio_time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+impl PackAdaptiveRuntime {
+    fn cancellation_safe_layer(
+        &self,
+        layer: MobHandle,
+        capability: crate::AdaptiveDriverCapability,
+        layer_id: crate::adaptive::LayerId,
+        attempt: u64,
+    ) -> crate::adaptive::AdaptiveLayerLease<MobHandle> {
+        let guardian_layer = layer.clone();
+        let driver = crate::adaptive::AdaptiveDriver::new(self.control_mob.clone());
+        let (guardian_trigger, cancellation) = tokio::sync::oneshot::channel();
+
+        let worker_driver = driver.clone();
+        let worker_capability = capability.clone();
+        let worker_layer_id = layer_id.clone();
+        let guardian = tokio::spawn(async move {
+            if cancellation.await.is_ok() {
+                return;
+            }
+            run_pack_layer_cancellation_cleanup(
+                worker_driver,
+                worker_capability,
+                worker_layer_id,
+                attempt,
+                guardian_layer,
+            )
+            .await;
+        });
+
+        // An owned supervisor awaits the exact guardian task. If that worker
+        // ends abnormally, the supervisor retains independent typed authority
+        // and re-runs the idempotent cleanup rather than silently dropping the
+        // child. The supervisor intentionally outlives PackAdaptiveRuntime.
+        let reaper_layer = layer.clone();
+        tokio::spawn(async move {
+            if guardian.await.is_err() {
+                run_pack_layer_cancellation_cleanup(
+                    driver,
+                    capability,
+                    layer_id,
+                    attempt,
+                    reaper_layer,
+                )
+                .await;
+            }
+        });
+
+        crate::adaptive::AdaptiveLayerLease::new(
+            layer,
+            Arc::new(PackLayerCancellationOwner {
+                guardian_trigger: Mutex::new(Some(guardian_trigger)),
+            }),
+        )
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
+    type Capability = crate::AdaptiveDriverCapability;
     type Layer = MobHandle;
 
     fn now_ms(&mut self) -> u64 {
@@ -141,8 +281,12 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
 
     async fn provision_layer(
         &mut self,
+        capability: &Self::Capability,
+        layer_id: &crate::adaptive::LayerId,
+        attempt: u64,
         compiled: &crate::adaptive::CompiledLayer,
     ) -> crate::adaptive::AdaptiveLayerProvision<Self::Layer> {
+        let requested_members = compiled.spawn_specs.len() as u64;
         let mut builder = match MobBuilder::from_mobpack(
             compiled.definition.clone(),
             BTreeMap::new(),
@@ -151,9 +295,11 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
             Ok(builder) => builder.with_session_service(Arc::clone(&self.session_service)),
             Err(error) => {
                 return crate::adaptive::AdaptiveLayerProvision::Failed {
-                    primary: error.into(),
                     layer: None,
+                    fault: crate::AdaptiveLayerSetupFault::MobCreateFailed,
                     spawned_members: 0,
+                    requested_members,
+                    error: error.into(),
                 };
             }
         };
@@ -164,22 +310,32 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
             Ok(handle) => handle,
             Err(error) => {
                 return crate::adaptive::AdaptiveLayerProvision::Failed {
-                    primary: error.into(),
                     layer: None,
+                    fault: crate::AdaptiveLayerSetupFault::MobCreateFailed,
                     spawned_members: 0,
+                    requested_members,
+                    error: error.into(),
                 };
             }
         };
-        let spawn_results = match handle.spawn_many(compiled.spawn_specs.clone()).await {
-            Ok(spawn_results) => spawn_results,
+        #[cfg(test)]
+        if let Some(probe) = &self.layer_created_probe {
+            let _ = probe.send(handle.clone());
+        }
+        let layer =
+            self.cancellation_safe_layer(handle, capability.clone(), layer_id.clone(), attempt);
+        let spawn_results = match layer.layer().spawn_many(compiled.spawn_specs.clone()).await {
+            Ok(results) => results,
             Err(error) => {
                 return crate::adaptive::AdaptiveLayerProvision::Failed {
-                    primary: error.into(),
-                    layer: Some(handle),
+                    layer: Some(layer),
+                    fault: crate::AdaptiveLayerSetupFault::SpawnFailed,
                     // The aggregate call can fail after provisioning side
-                    // effects but before returning row receipts. Report the
-                    // conservative upper bound; joined destroy owns rollback.
-                    spawned_members: compiled.spawn_specs.len() as u64,
+                    // effects but before returning row receipts. Preserve the
+                    // upstream conservative bound; destroy owns rollback.
+                    spawned_members: requested_members,
+                    requested_members,
+                    error: error.into(),
                 };
             }
         };
@@ -188,17 +344,19 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
             .find_map(|result| result.as_ref().err())
         {
             return crate::adaptive::AdaptiveLayerProvision::Failed {
-                primary: crate::adaptive::AdaptiveError::DriverRuntime(format!(
+                layer: Some(layer),
+                fault: crate::AdaptiveLayerSetupFault::SpawnFailed,
+                // A failed row can be ambiguous after remote provisioning
+                // side effects. Preserve the upstream conservative bound;
+                // joined destroy owns every actual materialization.
+                spawned_members: requested_members,
+                requested_members,
+                error: crate::adaptive::AdaptiveError::DriverRuntime(format!(
                     "mobpack layer spawn failed: {failure}"
                 )),
-                layer: Some(handle),
-                // A failed row can be ambiguous after provisioning side
-                // effects. Report the conservative upper bound; destroy owns
-                // all actual materializations.
-                spawned_members: compiled.spawn_specs.len() as u64,
             };
         }
-        crate::adaptive::AdaptiveLayerProvision::Ready(handle)
+        crate::adaptive::AdaptiveLayerProvision::Ready(layer)
     }
 
     async fn start_layer_flow(
@@ -224,13 +382,13 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
 
     async fn cleanup_layer(
         &mut self,
-        layer: &Self::Layer,
+        layer: &crate::adaptive::AdaptiveLayerLease<Self::Layer>,
         layer_id: &crate::adaptive::LayerId,
         attempt: u64,
     ) -> Result<crate::adaptive::AdaptiveLayerCleanup, crate::adaptive::AdaptiveError> {
         let mut retry_delay = LAYER_DESTROY_RETRY_INITIAL;
         loop {
-            match layer.destroy().await {
+            match layer.layer().destroy().await {
                 Ok(_) => return Ok(crate::adaptive::AdaptiveLayerCleanup::Destroyed),
                 Err(error) => {
                     let actor_channel_closed = matches!(
@@ -241,7 +399,7 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
                     );
                     if actor_channel_closed
                         && matches!(
-                            layer.status().await,
+                            layer.layer().status().await,
                             Ok(crate::runtime::MobState::Destroyed)
                         )
                     {
@@ -255,7 +413,7 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
                         attempt,
                         error = %error,
                         retry_delay_ms = retry_delay.as_millis(),
-                        "adaptive mobpack child destroy incomplete; retaining handle and retrying",
+                        "adaptive mobpack child destroy incomplete; retaining lease and retrying",
                     );
                     tokio_time::sleep(retry_delay).await;
                     retry_delay = retry_delay.saturating_mul(2).min(LAYER_DESTROY_RETRY_MAX);
@@ -277,17 +435,35 @@ async fn run_adaptive_callable(
     let profile_templates = load_profile_templates(spec)?;
     if let Some(callable) = &spec.callable {
         let coordinator_profile = callable.coordinator_profile.clone();
-        let roster = control_mob.roster().await;
-        if roster.by_profile(&coordinator_profile).next().is_none() {
-            control_mob
-                .spawn_spec(SpawnMemberSpec::new(
-                    coordinator_profile,
-                    "adaptive-flowmaster",
-                ))
-                .await
-                .map_err(|err| {
-                    MobError::Internal(format!("mobpack FlowMaster spawn failed: {err}"))
-                })?;
+        let coordinator_identity = crate::AgentIdentity::from("adaptive-flowmaster");
+        control_mob
+            .ensure_member(SpawnMemberSpec::new(
+                coordinator_profile.clone(),
+                coordinator_identity.clone(),
+            ))
+            .await
+            .map_err(|err| {
+                MobError::Internal(format!("mobpack FlowMaster ensure failed: {err}"))
+            })?;
+        let machine_state = control_mob.query_machine_state().await?;
+        let dsl_identity =
+            crate::machines::mob_machine::AgentIdentity::from_domain(&coordinator_identity);
+        let resolved_profile = machine_state
+            .member_profile_name_for_identity(&dsl_identity)
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine retained FlowMaster without a profile binding".to_string(),
+                )
+            })?;
+        if resolved_profile != coordinator_profile.as_str()
+            || machine_state
+                .member_lifecycle_for_identity(&dsl_identity)
+                .status
+                != crate::machines::mob_machine::MobMemberLifecycleStatus::Active
+        {
+            return Err(MobError::Internal(format!(
+                "MobMachine FlowMaster identity '{coordinator_identity}' resolved to profile '{resolved_profile}' with non-callable lifecycle; expected active profile '{coordinator_profile}'"
+            )));
         }
     }
     let adaptive_run_id = fresh_run_id()?;
@@ -302,6 +478,8 @@ async fn run_adaptive_callable(
     let mut runtime = PackAdaptiveRuntime {
         control_mob,
         session_service,
+        #[cfg(test)]
+        layer_created_probe: None,
     };
     let outcome = crate::adaptive::run_adaptive_loop(
         &driver,

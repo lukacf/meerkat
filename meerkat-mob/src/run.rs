@@ -708,6 +708,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::RecordLayerRunStarted { .. }
             | mob_dsl::MobMachineInput::IngestLayerTerminal { .. }
             | mob_dsl::MobMachineInput::RecordLayerSetupFault { .. }
+            | mob_dsl::MobMachineInput::RecordLayerInterrupted { .. }
             | mob_dsl::MobMachineInput::RecordLayerResultValidated { .. }
             | mob_dsl::MobMachineInput::RecordLayerResultInvalid { .. }
             | mob_dsl::MobMachineInput::RecordLayerMobDestroyed { .. }
@@ -1952,6 +1953,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RecordLayerRunStarted { .. }
             | mob_dsl::MobMachineInput::IngestLayerTerminal { .. }
             | mob_dsl::MobMachineInput::RecordLayerSetupFault { .. }
+            | mob_dsl::MobMachineInput::RecordLayerInterrupted { .. }
             | mob_dsl::MobMachineInput::RecordLayerResultValidated { .. }
             | mob_dsl::MobMachineInput::RecordLayerResultInvalid { .. }
             | mob_dsl::MobMachineInput::RecordLayerMobDestroyed { .. }

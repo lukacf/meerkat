@@ -462,7 +462,14 @@ impl TranscriptHistoryState {
         self.revisions
             .retain(|body| retained.contains(&body.revision) && seen.insert(body.revision.clone()));
 
-        validate_transcript_history_state(self)
+        // The full graph was validated before any pruning, so corrupt bodies
+        // cannot be laundered by dropping them. The transformation changes no
+        // message, revision digest, commit, or audited endpoint: it only
+        // de-duplicates bodies by revision, removes non-endpoint mechanical
+        // bodies, and points an unaudited live head directly at the already
+        // validated latest commit. Re-hashing every retained transcript here
+        // would repeat the dominant snapshot cost without adding evidence.
+        Ok(())
     }
 }
 
@@ -1239,12 +1246,26 @@ pub struct Session {
     updated_at: SystemTime,
     /// Arbitrary metadata
     metadata: serde_json::Map<String, serde_json::Value>,
+    /// Whether transcript-history metadata has already crossed a validating,
+    /// compacting authority boundary in this in-memory session.
+    ///
+    /// This is derived cache state only, never persisted authority. Typed
+    /// transcript mutations install validated state; deserialization validates
+    /// before setting it. Any unchecked history mutation invalidates the cache
+    /// so serialization retains the fail-closed corrupt-snapshot contract.
+    transcript_history_metadata_validation: TranscriptHistoryMetadataValidation,
     /// Cumulative token usage across all LLM calls in this session
     usage: Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptHistoryMetadataValidation {
+    Validated,
+    RequiresValidation,
+}
+
 /// Serde helper for Session serialization (flattens Arc)
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct SessionSerde {
     version: u32,
@@ -1258,22 +1279,45 @@ struct SessionSerde {
     usage: Usage,
 }
 
+/// Borrowed serialization view for Session. The persisted shape deliberately
+/// stays lockstep with `SessionSerde`, but large transcripts and metadata are
+/// streamed directly instead of being deep-cloned before serde sees them.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SessionSerdeRef<'a> {
+    version: u32,
+    id: &'a SessionId,
+    messages: &'a [Message],
+    created_at: &'a SystemTime,
+    updated_at: &'a SystemTime,
+    metadata: &'a serde_json::Map<String, serde_json::Value>,
+    usage: &'a Usage,
+}
+
 impl Serialize for Session {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut metadata = self.metadata.clone();
-        compact_transcript_history_metadata_for_snapshot(&mut metadata)
-            .map_err(<S::Error as serde::ser::Error>::custom)?;
-        let serde_repr = SessionSerde {
+        let compacted_metadata = if self.transcript_history_metadata_validation
+            == TranscriptHistoryMetadataValidation::RequiresValidation
+        {
+            let mut metadata = self.metadata.clone();
+            compact_transcript_history_metadata_for_snapshot(&mut metadata)
+                .map_err(<S::Error as serde::ser::Error>::custom)?;
+            Some(metadata)
+        } else {
+            None
+        };
+        let metadata = compacted_metadata.as_ref().unwrap_or(&self.metadata);
+        let serde_repr = SessionSerdeRef {
             version: self.version,
-            id: self.id.clone(),
-            messages: (*self.messages).clone(),
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            id: &self.id,
+            messages: self.messages(),
+            created_at: &self.created_at,
+            updated_at: &self.updated_at,
             metadata,
-            usage: self.usage.clone(),
+            usage: &self.usage,
         };
         serde_repr.serialize(serializer)
     }
@@ -1317,6 +1361,7 @@ impl<'de> Deserialize<'de> for Session {
             created_at: serde_repr.created_at,
             updated_at: serde_repr.updated_at,
             metadata,
+            transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: serde_repr.usage,
         })
     }
@@ -1422,6 +1467,13 @@ impl Session {
             messages: Arc::new(messages),
             created_at,
             updated_at,
+            transcript_history_metadata_validation: if metadata
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            {
+                TranscriptHistoryMetadataValidation::RequiresValidation
+            } else {
+                TranscriptHistoryMetadataValidation::Validated
+            },
             metadata,
             usage,
         })
@@ -3301,6 +3353,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             metadata: serde_json::Map::new(),
+            transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: Usage::default(),
         }
     }
@@ -3469,7 +3522,7 @@ impl Session {
             self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
         }
         if let Some(value) = history_state {
-            self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+            self.set_validated_transcript_history_metadata(value);
         }
         Ok(())
     }
@@ -4277,6 +4330,20 @@ impl Session {
 
     fn set_metadata_unchecked(&mut self, key: &str, value: serde_json::Value) {
         self.metadata.insert(key.to_string(), value);
+        if key == SESSION_TRANSCRIPT_HISTORY_STATE_KEY {
+            self.transcript_history_metadata_validation =
+                TranscriptHistoryMetadataValidation::RequiresValidation;
+        }
+        self.updated_at = SystemTime::now();
+    }
+
+    /// Install transcript history that was produced by a typed path which
+    /// already validated and compacted the graph.
+    fn set_validated_transcript_history_metadata(&mut self, value: serde_json::Value) {
+        self.metadata
+            .insert(SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(), value);
+        self.transcript_history_metadata_validation =
+            TranscriptHistoryMetadataValidation::Validated;
         self.updated_at = SystemTime::now();
     }
 
@@ -4293,6 +4360,10 @@ impl Session {
 
     fn remove_metadata_unchecked(&mut self, key: &str) {
         self.metadata.remove(key);
+        if key == SESSION_TRANSCRIPT_HISTORY_STATE_KEY {
+            self.transcript_history_metadata_validation =
+                TranscriptHistoryMetadataValidation::Validated;
+        }
         self.updated_at = SystemTime::now();
     }
 
@@ -4577,6 +4648,31 @@ impl Session {
             .transpose()
     }
 
+    /// Return the already-validated transcript graph head without cloning and
+    /// deserializing the full history document again.
+    ///
+    /// Store guards use this after typed Session deserialization when they
+    /// only need to prove live-message/head coherence. Unchecked metadata
+    /// still crosses the full graph validator before the borrowed head can be
+    /// observed.
+    pub(crate) fn validated_transcript_history_head(
+        &self,
+    ) -> Result<Option<&str>, TranscriptEditError> {
+        self.validate_transcript_history_state()?;
+        let Some(value) = self.metadata.get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
+            return Ok(None);
+        };
+        value
+            .get("head")
+            .and_then(serde_json::Value::as_str)
+            .map(Some)
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "validated transcript history metadata omitted a string head".to_string(),
+                )
+            })
+    }
+
     /// Load exact compaction projection intents carried to the runtime's
     /// atomic-apply outbox by this session snapshot.
     pub fn compaction_projection_intents(
@@ -4602,6 +4698,9 @@ impl Session {
         self.validate_transcript_history_state()
             .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?;
         let intents = self.compaction_projection_intents()?;
+        if intents.is_empty() {
+            return Ok(intents);
+        }
         let history = self.transcript_history_state()?;
         let commits = history
             .as_ref()
@@ -4713,6 +4812,11 @@ impl Session {
 
     /// Validate the retained transcript revision graph, when present.
     pub fn validate_transcript_history_state(&self) -> Result<(), TranscriptEditError> {
+        if self.transcript_history_metadata_validation
+            == TranscriptHistoryMetadataValidation::Validated
+        {
+            return Ok(());
+        }
         let Some(state) = self
             .transcript_history_state()
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?
@@ -4801,7 +4905,7 @@ impl Session {
             self.reconciled_realtime_transcript_metadata_after_rewrite(&head_body.messages)?;
         let value = serde_json::to_value(&state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+        self.set_validated_transcript_history_metadata(value);
         if let Some(value) = realtime_state {
             self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
         }
@@ -4964,7 +5068,7 @@ impl Session {
         state.compact_mechanical_revision_bodies()?;
         let value = serde_json::to_value(state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+        self.set_validated_transcript_history_metadata(value);
         if let Some(value) = realtime_state {
             self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
         }
@@ -5015,7 +5119,7 @@ impl Session {
         {
             Ok(Some(state)) => match serde_json::to_value(state) {
                 Ok(value) => {
-                    self.set_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
+                    self.set_validated_transcript_history_metadata(value);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -5088,6 +5192,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             metadata: self.fork_metadata_projection(),
+            transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: self.usage.clone(),
         }
     }
@@ -5207,6 +5312,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             metadata: self.fork_metadata_projection(),
+            transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: self.usage.clone(),
         }
     }
@@ -6343,6 +6449,65 @@ mod tests {
             serde_json::to_vec(&session).is_err(),
             "serialization must fail before pruning a corrupt old body"
         );
+    }
+
+    #[test]
+    fn unchecked_valid_history_is_validated_and_compacted_at_snapshot_boundary() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("seed".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("rewritten".to_string()))],
+                TranscriptRewriteReason::new("unit-test-edit"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("seed rewrite");
+        let mut state = session
+            .transcript_history_state()
+            .expect("state")
+            .expect("history");
+        let mut messages = session.messages().to_vec();
+        let mut parent = state.head.clone();
+        for index in 0..8 {
+            messages.push(Message::User(UserMessage::text(format!(
+                "legacy append {index}"
+            ))));
+            let revision = transcript_messages_digest(&messages).expect("revision digest");
+            state.revisions.push(TranscriptRevisionBody {
+                revision: revision.clone(),
+                parent_revision: Some(parent),
+                messages: messages.clone(),
+                created_at: SystemTime::now(),
+            });
+            parent = revision;
+        }
+        state.head = parent;
+        session.messages = Arc::new(messages);
+        session.set_metadata_unchecked_for_test(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+            serde_json::to_value(state).expect("uncompacted history"),
+        );
+        assert_eq!(
+            session.transcript_history_metadata_validation,
+            TranscriptHistoryMetadataValidation::RequiresValidation
+        );
+
+        let snapshot = serde_json::to_vec(&session)
+            .expect("valid unchecked history should serialize after validation");
+        let snapshot: serde_json::Value = serde_json::from_slice(&snapshot).expect("snapshot JSON");
+        let compact: TranscriptHistoryState = serde_json::from_value(
+            snapshot["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone(),
+        )
+        .expect("compacted history");
+
+        assert_eq!(
+            compact.revisions.len(),
+            3,
+            "snapshot boundary should retain two audited endpoints plus the live head"
+        );
+        validate_transcript_history_state(&compact).expect("compacted history remains valid");
     }
 
     #[test]

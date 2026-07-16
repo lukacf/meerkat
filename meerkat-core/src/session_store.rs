@@ -576,6 +576,11 @@ fn is_synthetic_refresh_projection(message: &Message) -> bool {
 /// replacement is rejected, while an incoming snapshot carrying a typed rewrite
 /// commit from the currently persisted head is accepted through the same
 /// rewrite validator as [`SessionStore::save_transcript_rewrite`].
+///
+/// Runtime stores that have independently proved exact persisted-byte identity
+/// can use [`run_boundary_snapshot_head_coherence_guard`] instead: byte
+/// identity proves continuity and retained-history preservation, leaving only
+/// the incoming graph/live-message coherence invariant to check.
 pub fn run_boundary_snapshot_save_guard(
     incoming: &Session,
     previous: Option<&Session>,
@@ -684,6 +689,40 @@ pub fn run_boundary_snapshot_save_guard(
             Ok(())
         }
     }
+}
+
+/// Validate the invariant that a typed Session's live transcript matches its
+/// retained graph head, without materializing the full history document.
+///
+/// This is the narrow residual guard for an exact-byte replay of an already
+/// persisted runtime snapshot. It does not itself prove byte identity; callers
+/// must establish that against their canonical stored row before using it in
+/// place of [`run_boundary_snapshot_save_guard`]. Session deserialization (or
+/// an invalidated in-memory cache) has already validated every retained graph
+/// body, so only one live-transcript digest remains necessary here.
+pub fn run_boundary_snapshot_head_coherence_guard(
+    incoming: &Session,
+) -> Result<(), SessionStoreError> {
+    let Some(head) = incoming
+        .validated_transcript_history_head()
+        .map_err(|err| SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!("incoming transcript history state is malformed: {err}"),
+        })?
+    else {
+        return Ok(());
+    };
+    let incoming_revision =
+        transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
+    if head != incoming_revision {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: incoming.id().clone(),
+            reason: format!(
+                "incoming transcript graph head {head} does not match current message digest {incoming_revision}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn run_boundary_commitless_history_projection_save_guard(
@@ -2228,6 +2267,32 @@ mod tests {
         AssistantBlock, BlockAssistantMessage, StopReason, SystemMessage, SystemNoticeBlock,
         SystemNoticeKind, SystemNoticeMessage, UserMessage,
     };
+
+    #[test]
+    fn exact_snapshot_head_coherence_guard_rejects_live_transcript_forgery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("seed".to_string())));
+        session.commit_transcript_rewrite(
+            crate::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text("rewritten".to_string()))],
+            crate::TranscriptRewriteReason::new("unit-test-edit"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        run_boundary_snapshot_head_coherence_guard(&session)?;
+
+        let mut envelope = serde_json::to_value(&session)?;
+        envelope["messages"] = serde_json::to_value(vec![Message::User(UserMessage::text(
+            "forged live transcript".to_string(),
+        ))])?;
+        let forged: Session = serde_json::from_value(envelope)?;
+        assert!(matches!(
+            run_boundary_snapshot_head_coherence_guard(&forged),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
+        Ok(())
+    }
 
     /// A lagging persisted row must be walkable across chained refresh
     /// commits whose recorded parents were rebookkept (only the fuzzy

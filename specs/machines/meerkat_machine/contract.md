@@ -424,7 +424,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveTurnSurfaceResult`(outcome: TurnTerminalOutcome, cause_class: TerminalCauseClass)
 - `AuthorizeStoredInputStateSeed`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, recovery_lane: Option<InputLane>)
 - `ClassifyRuntimeLifecycleState`(state: RuntimeLifecycleObservedState)
-- `ClassifyRuntimeLifecycleDurability`(state: RuntimeLifecycleObservedState)
+- `ClassifyRuntimeLifecycleDurability`(state: RuntimeLifecycleObservedState, pre_run_phase: Option<PreRunPhase>)
 - `ClassifyRuntimeLoopQueueAdmission`(state: RuntimeLifecycleObservedState, current_run_bound: Bool)
 - `ResolveVisibleRuntimePhase`(dsl_phase: RuntimeLifecycleObservedState, dsl_pre_run_phase: Option<RuntimeLifecycleObservedState>, control_phase: RuntimeLifecycleObservedState, control_pre_run_phase: Option<RuntimeLifecycleObservedState>, has_runtime_persistence: Bool)
 - `Prepare`(session_id: SessionId, run_id: RunId)
@@ -5502,6 +5502,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `binding_identity_present_when_runtime_bound`
 - To: `Attached`
 
+### `RecoverRuntimeAuthorityColdRunning`
+- From: `Initializing`
+- On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
+- Guards:
+  - `observed_running`
+  - `no_run_binding`
+  - `fence_requires_runtime`
+  - `generation_requires_runtime`
+  - `epoch_requires_runtime`
+  - `binding_identity_present_when_runtime_bound`
+- To: `Idle`
+
 ### `RecoverRuntimeAuthorityRunning`
 - From: `Initializing`
 - On: `RecoverRuntimeAuthority`(session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id, pre_run_phase, silent_intent_overrides)
@@ -7038,39 +7050,52 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRuntimeDurabilityInitializingIdle`
 - From: `Idle`
-- On: `ClassifyRuntimeLifecycleDurability`(state)
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
 - Guards:
   - `initializing_state`
+  - `no_pre_run_phase`
 - Emits: `RuntimeLifecycleDurabilityClassified`
 - To: `Idle`
 
 ### `ClassifyRuntimeDurabilityIdleIdle`
 - From: `Idle`
-- On: `ClassifyRuntimeLifecycleDurability`(state)
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
 - Guards:
   - `idle_state`
+  - `no_pre_run_phase`
 - Emits: `RuntimeLifecycleDurabilityClassified`
 - To: `Idle`
 
 ### `ClassifyRuntimeDurabilityAttachedIdle`
 - From: `Idle`
-- On: `ClassifyRuntimeLifecycleDurability`(state)
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
 - Guards:
   - `attached_state`
+  - `no_pre_run_phase`
 - Emits: `RuntimeLifecycleDurabilityClassified`
 - To: `Idle`
 
-### `ClassifyRuntimeDurabilityRunningIdle`
+### `ClassifyRuntimeDurabilityRunningToIdleIdle`
 - From: `Idle`
-- On: `ClassifyRuntimeLifecycleDurability`(state)
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
 - Guards:
   - `running_state`
+  - `non_retired_pre_run_phase`
+- Emits: `RuntimeLifecycleDurabilityClassified`
+- To: `Idle`
+
+### `ClassifyRuntimeDurabilityRunningToRetiredIdle`
+- From: `Idle`
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
+- Guards:
+  - `running_state`
+  - `retired_pre_run_phase`
 - Emits: `RuntimeLifecycleDurabilityClassified`
 - To: `Idle`
 
 ### `ClassifyRuntimeDurabilityRetiredIdle`
 - From: `Idle`
-- On: `ClassifyRuntimeLifecycleDurability`(state)
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
 - Guards:
   - `retired_state`
 - Emits: `RuntimeLifecycleDurabilityClassified`
@@ -7078,17 +7103,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRuntimeDurabilityStoppedIdle`
 - From: `Idle`
-- On: `ClassifyRuntimeLifecycleDurability`(state)
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
 - Guards:
   - `stopped_state`
+  - `no_pre_run_phase`
 - Emits: `RuntimeLifecycleDurabilityClassified`
 - To: `Idle`
 
 ### `ClassifyRuntimeDurabilityDestroyedIdle`
 - From: `Idle`
-- On: `ClassifyRuntimeLifecycleDurability`(state)
+- On: `ClassifyRuntimeLifecycleDurability`(state, pre_run_phase)
 - Guards:
   - `destroyed_state`
+  - `no_pre_run_phase`
 - Emits: `RuntimeLifecycleDurabilityClassified`
 - To: `Idle`
 

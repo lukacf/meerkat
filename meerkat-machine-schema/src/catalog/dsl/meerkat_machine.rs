@@ -3841,6 +3841,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             ClassifyRuntimeLifecycleDurability {
                 state: Enum<RuntimeLifecycleObservedState>,
+                pre_run_phase: Option<Enum<PreRunPhase>>,
             },
             ClassifyRuntimeLoopQueueAdmission {
                 state: Enum<RuntimeLifecycleObservedState>,
@@ -9857,6 +9858,39 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Attached
         }
+        // A cold process cannot retain the executor or run witness that made
+        // a live Running phase authoritative. Lifecycle V3 intentionally
+        // persists neither current_run_id nor pre_run_phase, so an observed
+        // Running row with an absent pair is an interrupted-run recovery
+        // witness, not permission to recreate Running authority. Normalize
+        // it to Idle; recovered input authority independently requeues or
+        // abandons the interrupted work. A partial pair remains corrupt and
+        // matches neither this transition nor the complete-pair transition.
+        transition RecoverRuntimeAuthorityColdRunning {
+            on input RecoverRuntimeAuthority {
+                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
+                pre_run_phase, silent_intent_overrides
+            }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "observed_running" { state == RuntimeLifecycleObservedState::Running }
+            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
+            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
+            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
+            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
+            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
+            update {
+                self.session_id = Some(session_id);
+                self.active_runtime_id = agent_runtime_id;
+                self.active_fence_token = fence_token;
+                self.active_runtime_generation = runtime_generation;
+                self.active_runtime_epoch_id = runtime_epoch_id;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.runtime_stop_deferred = false;
+                self.silent_intent_overrides = silent_intent_overrides;
+            }
+            to Idle
+        }
         transition RecoverRuntimeAuthorityRunning {
             on input RecoverRuntimeAuthority {
                 session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
@@ -11198,14 +11232,16 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // ClassifyRuntimeLifecycleDurability: generated authority for the
-        // store-visible recovery lifecycle projection. Live `Attached` is
-        // process-local executor attachment; the machine maps it to durable
-        // `Idle` for persistence while all other lifecycle states preserve
-        // their observed variant.
+        // store-visible recovery lifecycle projection. Live `Attached` and
+        // `Running` both depend on process-local executor/run witnesses that
+        // lifecycle V3 does not persist. The machine maps both to durable
+        // `Idle`; recovered input authority independently requeues or
+        // abandons interrupted work.
         transition ClassifyRuntimeDurabilityInitializing {
             per_phase [Idle]
-            on input ClassifyRuntimeLifecycleDurability { state }
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
             guard "initializing_state" { state == RuntimeLifecycleObservedState::Initializing }
+            guard "no_pre_run_phase" { pre_run_phase == None }
             update {}
             to Idle
             emit RuntimeLifecycleDurabilityClassified {
@@ -11216,8 +11252,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ClassifyRuntimeDurabilityIdle {
             per_phase [Idle]
-            on input ClassifyRuntimeLifecycleDurability { state }
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
             guard "idle_state" { state == RuntimeLifecycleObservedState::Idle }
+            guard "no_pre_run_phase" { pre_run_phase == None }
             update {}
             to Idle
             emit RuntimeLifecycleDurabilityClassified {
@@ -11228,8 +11265,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ClassifyRuntimeDurabilityAttached {
             per_phase [Idle]
-            on input ClassifyRuntimeLifecycleDurability { state }
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
             guard "attached_state" { state == RuntimeLifecycleObservedState::Attached }
+            guard "no_pre_run_phase" { pre_run_phase == None }
             update {}
             to Idle
             emit RuntimeLifecycleDurabilityClassified {
@@ -11238,21 +11276,43 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        transition ClassifyRuntimeDurabilityRunning {
+        transition ClassifyRuntimeDurabilityRunningToIdle {
             per_phase [Idle]
-            on input ClassifyRuntimeLifecycleDurability { state }
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
             guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            guard "non_retired_pre_run_phase" {
+                pre_run_phase == None
+                || pre_run_phase == Some(PreRunPhase::Idle)
+                || pre_run_phase == Some(PreRunPhase::Attached)
+            }
             update {}
             to Idle
             emit RuntimeLifecycleDurabilityClassified {
                 state: state,
-                durable_state: RuntimeLifecycleObservedState::Running
+                durable_state: RuntimeLifecycleObservedState::Idle
             }
         }
 
+        transition ClassifyRuntimeDurabilityRunningToRetired {
+            per_phase [Idle]
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
+            guard "running_state" { state == RuntimeLifecycleObservedState::Running }
+            guard "retired_pre_run_phase" { pre_run_phase == Some(PreRunPhase::Retired) }
+            update {}
+            to Idle
+            emit RuntimeLifecycleDurabilityClassified {
+                state: state,
+                durable_state: RuntimeLifecycleObservedState::Retired
+            }
+        }
+
+        // Retire is admitted directly from Running and intentionally does not
+        // erase the live run witness before the durable terminal fact commits.
+        // Every closed PreRunPhase value therefore remains compatible with a
+        // durable Retired projection; lifecycle V3 persists no run witness.
         transition ClassifyRuntimeDurabilityRetired {
             per_phase [Idle]
-            on input ClassifyRuntimeLifecycleDurability { state }
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
             guard "retired_state" { state == RuntimeLifecycleObservedState::Retired }
             update {}
             to Idle
@@ -11264,8 +11324,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ClassifyRuntimeDurabilityStopped {
             per_phase [Idle]
-            on input ClassifyRuntimeLifecycleDurability { state }
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
             guard "stopped_state" { state == RuntimeLifecycleObservedState::Stopped }
+            guard "no_pre_run_phase" { pre_run_phase == None }
             update {}
             to Idle
             emit RuntimeLifecycleDurabilityClassified {
@@ -11276,8 +11337,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ClassifyRuntimeDurabilityDestroyed {
             per_phase [Idle]
-            on input ClassifyRuntimeLifecycleDurability { state }
+            on input ClassifyRuntimeLifecycleDurability { state, pre_run_phase }
             guard "destroyed_state" { state == RuntimeLifecycleObservedState::Destroyed }
+            guard "no_pre_run_phase" { pre_run_phase == None }
             update {}
             to Idle
             emit RuntimeLifecycleDurabilityClassified {

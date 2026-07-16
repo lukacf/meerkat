@@ -157,12 +157,15 @@ impl PersistentRuntimeDriver {
     fn runtime_state_for_persistence_from_inner(
         inner: &EphemeralRuntimeDriver,
     ) -> Result<RuntimeState, RuntimeDriverError> {
-        crate::meerkat_machine::classify_runtime_lifecycle_durable_state(inner.runtime_state())
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!(
-                    "generated runtime lifecycle durability classification failed: {err}"
-                ))
-            })
+        crate::meerkat_machine::classify_runtime_lifecycle_durable_state_with_pre_run_phase(
+            inner.runtime_state(),
+            inner.pre_run_phase(),
+        )
+        .map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "generated runtime lifecycle durability classification failed: {err}"
+            ))
+        })
     }
 
     fn lifecycle_commit_for_persistence(
@@ -284,7 +287,10 @@ impl PersistentRuntimeDriver {
         let (checkpoint, input_states, commit) =
             self.lifecycle_persistence_payload_with_rollback(checkpoint, context)?;
         let target_durable_state =
-            match crate::meerkat_machine::classify_runtime_lifecycle_durable_state(target_state) {
+            match crate::meerkat_machine::classify_runtime_lifecycle_durable_state_with_pre_run_phase(
+                target_state,
+                self.inner.pre_run_phase(),
+            ) {
                 Ok(target_durable_state) => target_durable_state,
                 Err(err) => {
                     self.inner.restore_rollback_snapshot(checkpoint);
@@ -1182,6 +1188,98 @@ mod tests {
         assert!(
             driver.input_phase(&input_id).is_some(),
             "staged abandon must be rolled back: the pending input must still be live"
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_active_run_persists_retired_before_dropping_live_witness() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let runtime_id = LogicalRuntimeId::new("retire-active-run-durability");
+        let runtime_store: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut driver =
+            PersistentRuntimeDriver::new(runtime_id.clone(), runtime_store, blob_store);
+        let run_id = RunId::new();
+
+        driver
+            .contract_begin_run_authority(run_id.clone())
+            .expect("contract run admission");
+        assert_eq!(driver.runtime_state(), RuntimeState::Running);
+        assert_eq!(driver.inner_ref().current_run_id(), Some(run_id));
+        assert!(driver.inner_ref().pre_run_phase().is_some());
+
+        let session_id = driver.inner_ref().session_authority_id_for_recovery();
+        {
+            let authority = driver.inner_ref().shared_dsl_authority();
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Retire { session_id },
+            )
+            .expect("machine-authorized mid-run retire transition");
+        }
+        driver.sync_control_projection_from_dsl_authority();
+        assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+        assert!(
+            driver.inner_ref().pre_run_phase().is_some(),
+            "Retire commits before the live run witness is dropped"
+        );
+
+        driver
+            .realize_retire_lifecycle()
+            .await
+            .expect("mid-run retire must durably commit");
+
+        assert_eq!(driver.runtime_state(), RuntimeState::Retired);
+        assert_eq!(
+            crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+                .await
+                .expect("reload durable lifecycle"),
+            Some(RuntimeState::Retired)
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_atomically_rewrites_cold_running_lifecycle_to_idle() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let runtime_id = LogicalRuntimeId::new("rewrite-cold-running-lifecycle");
+        store
+            .commit_machine_lifecycle(
+                &runtime_id,
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Running,
+                    crate::store::MachineLifecycleBindingFacts::new(
+                        Some("rt:cold-running".to_string()),
+                        Some(9),
+                        Some(2),
+                        Some("epoch-cold-running".to_string()),
+                    ),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                &[],
+            )
+            .await
+            .expect("seed legacy cold Running lifecycle");
+
+        let runtime_store: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut driver =
+            PersistentRuntimeDriver::new(runtime_id.clone(), runtime_store, blob_store);
+
+        driver
+            .recover()
+            .await
+            .expect("cold Running recovery should converge durably");
+
+        assert_eq!(driver.runtime_state(), RuntimeState::Idle);
+        assert_eq!(
+            crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+                .await
+                .expect("reload durable lifecycle"),
+            Some(RuntimeState::Idle),
+            "recovery acknowledgement must mean the torn lifecycle row is repaired"
         );
     }
 }

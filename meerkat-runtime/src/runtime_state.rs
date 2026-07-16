@@ -128,7 +128,26 @@ mod tests {
         assert_eq!(
             meerkat_machine::classify_runtime_lifecycle_durable_state(RuntimeState::Running)
                 .expect("running durability classification"),
-            RuntimeState::Running
+            RuntimeState::Idle,
+            "generated durability classification must not persist Running without its process-local run witness"
+        );
+        assert_eq!(
+            meerkat_machine::classify_runtime_lifecycle_durable_state_with_pre_run_phase(
+                RuntimeState::Running,
+                Some(RuntimeState::Retired),
+            )
+            .expect("retired running durability classification"),
+            RuntimeState::Retired,
+            "cold recovery must preserve the retired admission boundary"
+        );
+        assert_eq!(
+            meerkat_machine::classify_runtime_lifecycle_durable_state_with_pre_run_phase(
+                RuntimeState::Retired,
+                Some(RuntimeState::Idle),
+            )
+            .expect("mid-run retire durability classification"),
+            RuntimeState::Retired,
+            "retiring an active run must durably publish Retired before dropping its live witness"
         );
     }
 

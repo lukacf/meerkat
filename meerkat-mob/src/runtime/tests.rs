@@ -1232,6 +1232,14 @@ struct CreateSessionRecord {
     model: String,
 }
 
+struct AtomicInFlightGuard<'a>(&'a AtomicU64);
+
+impl Drop for AtomicInFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// A mock session service that creates sessions with mock comms runtimes.
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
@@ -1321,6 +1329,10 @@ struct MockSessionService {
     flow_turn_in_flight: Arc<AtomicU64>,
     flow_turn_max_in_flight: Arc<AtomicU64>,
     create_session_delay_ms: AtomicU64,
+    load_persisted_session_delay_ms: AtomicU64,
+    load_persisted_session_started: tokio::sync::Notify,
+    load_persisted_session_in_flight: AtomicU64,
+    load_persisted_session_max_in_flight: AtomicU64,
     create_session_in_flight: AtomicU64,
     create_session_max_in_flight: AtomicU64,
     archive_delay_ms: AtomicU64,
@@ -1394,6 +1406,10 @@ impl MockSessionService {
             flow_turn_in_flight: Arc::new(AtomicU64::new(0)),
             flow_turn_max_in_flight: Arc::new(AtomicU64::new(0)),
             create_session_delay_ms: AtomicU64::new(0),
+            load_persisted_session_delay_ms: AtomicU64::new(0),
+            load_persisted_session_started: tokio::sync::Notify::new(),
+            load_persisted_session_in_flight: AtomicU64::new(0),
+            load_persisted_session_max_in_flight: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
             create_session_max_in_flight: AtomicU64::new(0),
             archive_delay_ms: AtomicU64::new(0),
@@ -1760,6 +1776,20 @@ impl MockSessionService {
     fn set_create_session_delay_ms(&self, delay_ms: u64) {
         self.create_session_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn set_load_persisted_session_delay_ms(&self, delay_ms: u64) {
+        self.load_persisted_session_delay_ms
+            .store(delay_ms, Ordering::Relaxed);
+    }
+
+    async fn wait_for_load_persisted_session(&self) {
+        self.load_persisted_session_started.notified().await;
+    }
+
+    fn max_concurrent_load_persisted_session_calls(&self) -> u64 {
+        self.load_persisted_session_max_in_flight
+            .load(Ordering::Relaxed)
     }
 
     fn max_concurrent_create_session_calls(&self) -> u64 {
@@ -2894,12 +2924,26 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
+        self.load_persisted_session_started.notify_one();
+        let in_flight = self
+            .load_persisted_session_in_flight
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        self.load_persisted_session_max_in_flight
+            .fetch_max(in_flight, Ordering::Relaxed);
+        let _in_flight_guard = AtomicInFlightGuard(&self.load_persisted_session_in_flight);
+        let delay_ms = self.load_persisted_session_delay_ms.load(Ordering::Relaxed);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
         // Mirror PersistentSessionService: archived sessions have no loadable
         // durable snapshot (archive is terminal).
-        if self.archived_session_ids.read().await.contains(session_id) {
-            return Ok(None);
-        }
-        Ok(self.persisted_session_clone(session_id).await)
+        let persisted = if self.archived_session_ids.read().await.contains(session_id) {
+            None
+        } else {
+            self.persisted_session_clone(session_id).await
+        };
+        Ok(persisted)
     }
 
     async fn session_known_to_archive_authority(
@@ -17565,6 +17609,154 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
     assert!(
         error.to_string().contains("persisted comms_name"),
         "explicit member resume should fail with the comms_name mismatch"
+    );
+}
+
+#[tokio::test]
+async fn test_explicit_durable_resume_preparation_does_not_block_actor_commands() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let initial = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Set(
+                "Persisted resume prompt".to_string(),
+            ),
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-resume-nonblocking".to_string()),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("seed session");
+    let session_id = initial.session_id.clone();
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("discard live session");
+
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    service.set_load_persisted_session_delay_ms(300);
+
+    let attach_handle = handle.clone();
+    let attach_session_id = session_id.clone();
+    let attach = tokio::spawn(async move {
+        attach_handle
+            .attach_existing_session_as_member(
+                ProfileName::from("worker"),
+                AgentIdentity::from("w-resume-nonblocking"),
+                attach_session_id,
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        service.wait_for_load_persisted_session(),
+    )
+    .await
+    .expect("cold durable load should begin");
+    let state = tokio::time::timeout(Duration::from_millis(100), handle.status())
+        .await
+        .expect("durable resume preparation must not block actor commands")
+        .expect("query mob status");
+    assert_eq!(state, MobState::Running);
+
+    let duplicate = tokio::time::timeout(
+        Duration::from_millis(100),
+        handle.attach_existing_session_as_member(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-resume-nonblocking"),
+            session_id.clone(),
+        ),
+    )
+    .await
+    .expect("duplicate admission must not wait for durable preparation")
+    .expect_err("pending durable resume must reserve its identity");
+    assert!(matches!(duplicate, MobError::MemberAlreadyExists(_)));
+
+    let member_ref = tokio::time::timeout(Duration::from_secs(2), attach)
+        .await
+        .expect("attach should finish")
+        .expect("attach task should not panic")
+        .expect("attach should restore the durable session");
+    assert_eq!(member_ref.bridge_session_id(), Some(&session_id));
+}
+
+#[tokio::test]
+async fn test_explicit_durable_resume_preparation_runs_concurrently() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let mut sessions = Vec::new();
+    for index in 0..4 {
+        let identity = format!("w-resume-parallel-{index}");
+        let initial = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "seed".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Set(
+                    "Persisted resume prompt".to_string(),
+                ),
+                max_tokens: Some(4096),
+                event_tx: None,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    comms_name: Some(format!("test-mob/worker/{identity}")),
+                    ..Default::default()
+                }),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                labels: None,
+            })
+            .await
+            .expect("seed session");
+        MobSessionService::discard_live_session(service.as_ref(), &initial.session_id)
+            .await
+            .expect("discard live session");
+        sessions.push((identity, initial.session_id));
+    }
+
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    service.set_load_persisted_session_delay_ms(300);
+
+    let mut attaches = Vec::new();
+    for (identity, session_id) in sessions {
+        let attach_handle = handle.clone();
+        attaches.push(tokio::spawn(async move {
+            attach_handle
+                .attach_existing_session_as_member(
+                    ProfileName::from("worker"),
+                    AgentIdentity::from(identity),
+                    session_id,
+                )
+                .await
+        }));
+    }
+    for attach in attaches {
+        tokio::time::timeout(Duration::from_secs(2), attach)
+            .await
+            .expect("parallel attach should finish")
+            .expect("attach task should not panic")
+            .expect("attach should restore the durable session");
+    }
+
+    assert!(
+        service.max_concurrent_load_persisted_session_calls() > 1,
+        "cold durable loads should overlap instead of serializing in the actor"
     );
 }
 

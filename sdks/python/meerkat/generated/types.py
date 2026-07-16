@@ -1743,6 +1743,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     output_schema: Optional[Any] = None
     provider: Optional[str] = None
     provider_params: Optional[dict[str, Any]] = None
+    self_hosted_server_id: Optional[str] = None
     skill_refs: Optional[list[SkillKey]] = None
     structured_output_retries: Optional[int] = None
     system_prompt: Optional[str] = None

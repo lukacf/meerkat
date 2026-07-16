@@ -2728,6 +2728,7 @@ class MeerkatClient:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
+        self_hosted_server_id: str | None = None,
         max_tokens: int | None = None,
         system_prompt: str | None = None,
         output_schema: Any | None = None,
@@ -2740,6 +2741,9 @@ class MeerkatClient:
         ``injected_context`` carries host-attached ambient context delivered
         as separate typed transcript messages immediately before the turn's
         user message (excluded from semantic-memory indexing).
+
+        ``self_hosted_server_id`` selects the exact configured local server
+        for a self-hosted model instead of relying on model identity alone.
 
         ``provider_params`` and ``auth_binding`` carry the canonical
         Inherit/Set/Clear tri-state exactly as the wire does: pass
@@ -2759,6 +2763,7 @@ class MeerkatClient:
             keep_alive=keep_alive,
             model=model,
             provider=provider,
+            self_hosted_server_id=self_hosted_server_id,
             max_tokens=max_tokens,
             system_prompt=system_prompt,
             output_schema=output_schema,
@@ -3570,6 +3575,7 @@ class MeerkatClient:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
+        self_hosted_server_id: str | None = None,
         max_tokens: int | None = None,
         system_prompt: str | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -3592,6 +3598,8 @@ class MeerkatClient:
             params["model"] = model
         if provider is not None:
             params["provider"] = provider
+        if self_hosted_server_id is not None:
+            params["self_hosted_server_id"] = self_hosted_server_id
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         if system_prompt is not None:
@@ -3617,6 +3625,7 @@ class MeerkatClient:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
+        self_hosted_server_id: str | None = None,
         max_tokens: int | None = None,
         system_prompt: str | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -3646,6 +3655,8 @@ class MeerkatClient:
             params["model"] = model
         if provider is not None:
             params["provider"] = provider
+        if self_hosted_server_id is not None:
+            params["self_hosted_server_id"] = self_hosted_server_id
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         if system_prompt is not None:

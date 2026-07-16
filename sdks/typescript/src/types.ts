@@ -462,6 +462,8 @@ export interface TurnOptions {
   readonly keepAlive?: boolean;
   readonly model?: string;
   readonly provider?: string;
+  /** Exact configured local-server route for a self-hosted model. */
+  readonly selfHostedServerId?: string;
   readonly maxTokens?: number;
   readonly systemPrompt?: string;
   readonly outputSchema?: Record<string, unknown>;
@@ -648,6 +650,8 @@ export interface MobTurnStartOptions {
   readonly keepAlive?: MobTurnStartWireOptions["keep_alive"];
   readonly model?: MobTurnStartWireOptions["model"];
   readonly provider?: MobTurnStartWireOptions["provider"];
+  /** Exact configured local-server route for a self-hosted model. */
+  readonly selfHostedServerId?: MobTurnStartWireOptions["self_hosted_server_id"];
   readonly maxTokens?: MobTurnStartWireOptions["max_tokens"];
   readonly systemPrompt?: MobTurnStartWireOptions["system_prompt"];
   readonly outputSchema?: MobTurnStartWireOptions["output_schema"];

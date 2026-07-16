@@ -1,6 +1,7 @@
-use meerkat_core::Provider;
 use meerkat_core::lifecycle::run_primitive::{ModelId, TurnMetadataOverride};
+use meerkat_core::{Provider, TurnToolOverlay};
 use meerkat_mob::MemberTurnOptions;
+use std::collections::BTreeMap;
 
 #[test]
 fn downstream_host_can_build_exact_per_turn_llm_identity_options() {
@@ -25,4 +26,25 @@ fn downstream_host_can_build_exact_per_turn_llm_identity_options() {
         options.auth_binding,
         Some(TurnMetadataOverride::Clear)
     ));
+}
+
+#[test]
+fn downstream_host_can_attach_dispatch_context_to_member_turn_options() {
+    let dispatch_context = BTreeMap::from([(
+        "host.routing_hint".to_string(),
+        serde_json::json!({ "shard": "blue" }),
+    )]);
+    let options = MemberTurnOptions::new().with_turn_tool_overlay(TurnToolOverlay {
+        allowed_tools: Some(vec!["search".into()]),
+        dispatch_context: dispatch_context.clone(),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        options
+            .turn_tool_overlay
+            .as_ref()
+            .map(|overlay| &overlay.dispatch_context),
+        Some(&dispatch_context)
+    );
 }

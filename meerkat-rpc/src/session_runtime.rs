@@ -1957,7 +1957,7 @@ impl SessionRuntime {
                 .and_then(|ov| ov.model.clone())
                 .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
             provider,
-            self_hosted_server_id: None,
+            self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params,
             render_metadata: None,
             auth_binding,
@@ -2010,6 +2010,7 @@ impl SessionRuntime {
             provider: metadata
                 .provider
                 .map(|provider| provider.as_str().to_string()),
+            self_hosted_server_id: metadata.self_hosted_server_id.clone(),
             provider_params,
             auth_binding,
             ..Default::default()
@@ -4011,6 +4012,7 @@ impl SessionRuntime {
                     message,
                     data: None,
                 })?,
+            self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
             auth_binding: overrides.and_then(|ov| ov.auth_binding.clone()),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
@@ -4443,7 +4445,7 @@ impl SessionRuntime {
             SessionLlmIdentityOverride {
                 model: ov.model.as_deref(),
                 provider,
-                self_hosted_server_id: None,
+                self_hosted_server_id: ov.self_hosted_server_id.as_deref(),
                 provider_params: ov
                     .provider_params
                     .as_ref()
@@ -4582,7 +4584,7 @@ impl SessionRuntime {
         let request = SessionLlmReconfigureRequest {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
-            self_hosted_server_id: None,
+            self_hosted_server_id: ov.self_hosted_server_id.clone(),
             provider_params: ov.provider_params.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
@@ -6472,6 +6474,7 @@ impl SessionRuntime {
             if let Some(ref ov) = overrides
                 && (ov.model.is_some()
                     || ov.provider.is_some()
+                    || ov.self_hosted_server_id.is_some()
                     || ov.provider_params.is_some()
                     || ov.auth_binding.is_some())
             {
@@ -7417,6 +7420,7 @@ impl SessionRuntime {
         if let Some(ref ov) = overrides
             && (ov.model.is_some()
                 || ov.provider.is_some()
+                || ov.self_hosted_server_id.is_some()
                 || ov.provider_params.is_some()
                 || ov.auth_binding.is_some())
         {
@@ -14108,6 +14112,14 @@ mod tests {
     }
 
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> Arc<SessionRuntime> {
+        make_runtime_with_config(factory, max_sessions, Config::default())
+    }
+
+    fn make_runtime_with_config(
+        factory: AgentFactory,
+        max_sessions: usize,
+        config: Config,
+    ) -> Arc<SessionRuntime> {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
@@ -14115,7 +14127,7 @@ mod tests {
             Arc::new(meerkat_store::MemoryBlobStore::new());
         Arc::new(SessionRuntime::new(
             factory,
-            Config::default(),
+            config,
             max_sessions,
             meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
             crate::router::NotificationSink::noop(),
@@ -15193,6 +15205,71 @@ mod tests {
             resolved.self_hosted_server_id.as_deref(),
             Some("local"),
             "provider-param overrides must preserve the pinned self-hosted server binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_executor_validates_server_only_self_hosted_route_override() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = self_hosted_test_config("local", false);
+        let runtime = make_runtime_with_config(temp_factory(&temp), 10, config.clone());
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(config, meerkat_models::canonical()),
+        );
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            store,
+            temp.path().join("config_state.json"),
+        )));
+
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    ..AgentBuildConfig::new("gemma-4-e2b")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("create pinned self-hosted session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize pinned self-hosted session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize pinned self-hosted session");
+
+        let mut primitive = runtime_content_turn_primitive();
+        let RunPrimitive::StagedInput(staged) = &mut primitive else {
+            unreachable!("runtime content helper must produce a staged primitive");
+        };
+        staged
+            .turn_metadata
+            .as_mut()
+            .expect("content primitive metadata")
+            .self_hosted_server_id = Some("other".to_string());
+
+        let mut executor =
+            crate::session_executor::SessionRuntimeExecutor::new(Arc::clone(&runtime), session_id);
+        let error = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect_err("server-only route metadata must reach reconfigure validation");
+        let message = error.to_string();
+        assert!(
+            message.contains("configured on server 'local'")
+                && message.contains("requested server 'other'"),
+            "executor must not drop the exact route override: {message}"
         );
     }
 
@@ -20726,6 +20803,7 @@ mod tests {
             keep_alive: None,
             model: Some("gpt-5.4".to_string()),
             provider: Some("anthropic".to_string()),
+            self_hosted_server_id: None,
             max_tokens: None,
             system_prompt: None,
             output_schema: None,
@@ -20756,6 +20834,81 @@ mod tests {
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "failed recovered staging should unregister prepared runtime state"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_recovery_validates_route_only_self_hosted_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = self_hosted_test_config("local", false);
+        let runtime = make_runtime_with_config(temp_factory(&temp), 1, config.clone());
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(config, meerkat_models::canonical()),
+        );
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            store,
+            temp.path().join("config_state.json"),
+        )));
+
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    ..AgentBuildConfig::new("gemma-4-e2b")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("create self-hosted session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "persist self-hosted session".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize self-hosted session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live self-hosted session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("unregister self-hosted runtime");
+
+        let overrides = crate::handlers::turn::TurnOverrides {
+            self_hosted_server_id: Some("other".to_string()),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let error = runtime
+            .try_recover_persisted_session(
+                &session_id,
+                ContentInput::Text("recover with exact route".to_string()),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                Some(&overrides),
+            )
+            .await
+            .expect_err("cold recovery must validate a route-only override");
+        assert!(
+            error.message.contains("bound to server 'other'")
+                && error.message.contains("registry resolves to 'local'"),
+            "cold recovery must not drop exact route intent: {}",
+            error.message
         );
     }
 
@@ -23334,6 +23487,32 @@ mod tests {
             .and_then(|o| o.as_set())
             .expect("provider params should survive metadata round trip");
         assert_eq!(round_tripped_params, &provider_params);
+    }
+
+    #[test]
+    fn runtime_turn_metadata_round_trips_exact_self_hosted_server_route() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let overrides = TurnOverrides {
+            self_hosted_server_id: Some("local-b".to_string()),
+            ..Default::default()
+        };
+        let metadata = SessionRuntime::turn_metadata_from_overrides(
+            None,
+            None,
+            None,
+            Some(&overrides),
+            Some("self_hosted"),
+        )
+        .expect("an exact self-hosted route should produce turn metadata");
+
+        assert_eq!(metadata.self_hosted_server_id.as_deref(), Some("local-b"));
+        let round_tripped = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
+            .expect("metadata should reconstruct the exact route override");
+        assert_eq!(
+            round_tripped.self_hosted_server_id.as_deref(),
+            Some("local-b")
+        );
     }
 
     #[test]

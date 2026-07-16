@@ -1315,6 +1315,7 @@ export interface MobTurnStartParams {
   prompt: WireContentInput;
   provider?: string | null;
   provider_params?: Record<string, unknown> | null;
+  self_hosted_server_id?: string | null;
   skill_refs?: SkillKey[] | null;
   structured_output_retries?: number | null;
   system_prompt?: string | null;

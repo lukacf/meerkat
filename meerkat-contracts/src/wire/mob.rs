@@ -1981,6 +1981,9 @@ pub struct MobTurnStartParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Exact configured local-server route for a self-hosted model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

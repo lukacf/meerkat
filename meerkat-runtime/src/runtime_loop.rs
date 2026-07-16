@@ -3167,7 +3167,7 @@ impl RuntimeLoopAuthorityBinding {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     async fn run_before_queue_authority_test_hook(&self) {
         if let Some(machine) = self.machine.upgrade() {
             machine
@@ -4161,7 +4161,7 @@ async fn process_queue(
             Err(_) => return true,
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         authority_binding
             .run_before_queue_authority_test_hook()
             .await;

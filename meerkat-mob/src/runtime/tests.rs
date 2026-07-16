@@ -18499,6 +18499,68 @@ async fn test_flow_step_tool_overlay_changes_runtime_visible_tools_and_restores_
 }
 
 #[tokio::test]
+async fn test_member_turn_options_dispatch_context_reaches_session_dispatcher() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile")
+        .external_addressable = true;
+    let identity = AgentIdentity::from("w-member-turn-dispatch-context");
+    let (handle, _provider_visible_tools, provider_turn_overlays) =
+        create_test_mob_with_overlay_probe_service_and_workgraph(definition, None).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+
+    let dispatch_context = BTreeMap::from([(
+        "host.routing_hint".to_string(),
+        serde_json::json!({ "shard": "blue" }),
+    )]);
+    let turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("preserve trusted dispatch metadata".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::new().with_turn_tool_overlay(TurnToolOverlay {
+                allowed_tools: Some(vec!["alpha".into()]),
+                dispatch_context: dispatch_context.clone(),
+                ..Default::default()
+            }),
+            None,
+        )
+        .await
+        .expect("member turn with dispatch context should be admitted");
+    turn.wait()
+        .await
+        .expect("member turn with dispatch context should execute");
+
+    let applied_overlay = provider_turn_overlays
+        .lock()
+        .expect("provider_turn_overlays lock poisoned")
+        .last()
+        .cloned()
+        .flatten()
+        .expect("session dispatcher should receive the turn overlay");
+    assert_eq!(applied_overlay.dispatch_context, dispatch_context);
+    assert_eq!(
+        applied_overlay.allowed_tools,
+        Some(vec![meerkat_core::ToolName::from("alpha")])
+    );
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[tokio::test]
 async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn() {
     let definition = sample_definition();
     let identity = AgentIdentity::from("w-attention");
@@ -39008,6 +39070,9 @@ struct RuntimeBackedRealCommsSessionService {
     observed_runtime_llm_identities:
         RwLock<HashMap<SessionId, Vec<meerkat_core::SessionLlmIdentity>>>,
     emit_runtime_event_before_completion: AtomicBool,
+    runtime_event_delta_count: AtomicU64,
+    applied_runtime_contributing_input_ids:
+        RwLock<HashMap<SessionId, Vec<Vec<meerkat_core::InputId>>>>,
     turn_finalization_gate: std::sync::RwLock<Option<Arc<tokio::sync::Mutex<()>>>>,
     active_runtime_runs: RwLock<HashMap<SessionId, meerkat_core::RunId>>,
 }
@@ -39039,6 +39104,8 @@ impl RuntimeBackedRealCommsSessionService {
             runtime_llm_identity_probe: std::sync::RwLock::new(None),
             observed_runtime_llm_identities: RwLock::new(HashMap::new()),
             emit_runtime_event_before_completion: AtomicBool::new(false),
+            runtime_event_delta_count: AtomicU64::new(1),
+            applied_runtime_contributing_input_ids: RwLock::new(HashMap::new()),
             turn_finalization_gate: std::sync::RwLock::new(None),
             active_runtime_runs: RwLock::new(HashMap::new()),
         }
@@ -39163,6 +39230,10 @@ impl RuntimeBackedRealCommsSessionService {
             .write()
             .await
             .remove(session_id);
+        self.applied_runtime_contributing_input_ids
+            .write()
+            .await
+            .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
         drop(sessions);
         Ok(true)
@@ -39217,6 +39288,11 @@ impl RuntimeBackedRealCommsSessionService {
             .store(enabled, Ordering::Relaxed);
     }
 
+    fn set_runtime_event_delta_count(&self, count: u64) {
+        self.runtime_event_delta_count
+            .store(count, Ordering::Relaxed);
+    }
+
     fn install_non_reentrant_turn_finalization_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
         let gate = Arc::new(tokio::sync::Mutex::new(()));
         *self
@@ -39240,6 +39316,18 @@ impl RuntimeBackedRealCommsSessionService {
 
     async fn applied_runtime_prompts(&self, session_id: &SessionId) -> Vec<ContentInput> {
         self.applied_runtime_prompts
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn applied_runtime_contributing_input_ids(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<Vec<meerkat_core::InputId>> {
+        self.applied_runtime_contributing_input_ids
             .read()
             .await
             .get(session_id)
@@ -39720,22 +39808,31 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .write()
             .await
             .insert(session_id.clone(), run_id.clone());
+        self.applied_runtime_contributing_input_ids
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push(contributing_input_ids.clone());
 
         if self
             .emit_runtime_event_before_completion
             .load(Ordering::Relaxed)
             && let Some(event_tx) = event_tx
         {
-            let _ = event_tx
-                .send(EventEnvelope::new_session(
-                    session_id.clone(),
-                    1,
-                    None,
-                    AgentEvent::TextDelta {
-                        delta: "runtime event before commit".to_string(),
-                    },
-                ))
-                .await;
+            let delta_count = self.runtime_event_delta_count.load(Ordering::Relaxed);
+            for seq in 1..=delta_count {
+                let _ = event_tx
+                    .send(EventEnvelope::new_session(
+                        session_id.clone(),
+                        seq,
+                        None,
+                        AgentEvent::TextDelta {
+                            delta: format!("runtime event {seq} before commit"),
+                        },
+                    ))
+                    .await;
+            }
             let terminal = if self.return_extraction_failure.load(Ordering::Relaxed) {
                 AgentEvent::ExtractionFailed {
                     session_id: session_id.clone(),
@@ -39756,7 +39853,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             let _ = event_tx
                 .send(EventEnvelope::new_session(
                     session_id.clone(),
-                    2,
+                    delta_count + 1,
                     None,
                     terminal,
                 ))
@@ -39764,7 +39861,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             let _ = event_tx
                 .send(EventEnvelope::new_session(
                     session_id.clone(),
-                    3,
+                    delta_count + 2,
                     None,
                     AgentEvent::InteractionComplete {
                         interaction_id: meerkat_core::interaction::InteractionId(
@@ -58102,6 +58199,188 @@ async fn dispatch_handles_bind_their_authority_lanes() {
 
 // Runtime-backed tracked-turn LLM identity and terminal-event regressions.
 #[tokio::test]
+async fn test_batched_steer_turns_fan_out_complete_commit_gated_event_streams() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-batched-steer-observers");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_emit_runtime_event_before_completion(true);
+    service.set_runtime_event_delta_count(2);
+    service.set_block_runtime_turns(true);
+
+    // Pause after the first admission wakes the loop but before it acquires
+    // queue authority. The second real public Steer admission then shares the
+    // same generated same-boundary batch deterministically.
+    let (queue_gap_entered, queue_gap_release) = service
+        .runtime_adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let member = handle.member(&identity).await.expect("member handle");
+    let (event_a_tx, mut event_a_rx) = tokio::sync::mpsc::channel(1);
+    let mut turn_a = member
+        .start_turn(
+            ContentInput::Text("first batched steer".into()),
+            HandlingMode::Steer,
+            crate::MemberTurnOptions::default(),
+            Some(event_a_tx),
+        )
+        .await
+        .expect("first Steer admission");
+    tokio::time::timeout(Duration::from_secs(2), queue_gap_entered)
+        .await
+        .expect("runtime loop should pause before selecting the Steer batch")
+        .expect("queue-authority hook should remain armed");
+
+    let (event_b_tx, mut event_b_rx) = tokio::sync::mpsc::channel(1);
+    let mut turn_b = member
+        .start_turn(
+            ContentInput::Text("second batched steer".into()),
+            HandlingMode::Steer,
+            crate::MemberTurnOptions::default(),
+            Some(event_b_tx),
+        )
+        .await
+        .expect("second Steer admission");
+
+    assert_eq!(
+        turn_a
+            .wait_for_applied_llm_identity()
+            .await
+            .expect("first Steer identity acknowledgement"),
+        None
+    );
+    assert_eq!(
+        turn_b
+            .wait_for_applied_llm_identity()
+            .await
+            .expect("second Steer identity acknowledgement"),
+        None
+    );
+
+    let runtime_started = service.runtime_turn_started.notified();
+    queue_gap_release
+        .send(())
+        .expect("release runtime-loop queue-authority gap");
+    tokio::time::timeout(Duration::from_secs(2), runtime_started)
+        .await
+        .expect("batched Steer primitive should reach runtime apply");
+
+    let contributors = service
+        .applied_runtime_contributing_input_ids(&session_id)
+        .await;
+    assert_eq!(contributors.len(), 1, "both Steers must form one primitive");
+    assert_eq!(
+        contributors[0].len(),
+        2,
+        "the primitive must retain both contributing input identities"
+    );
+
+    // Capacity-one external receivers force delayed/backpressured delivery
+    // while the service attempts two deltas and both terminal frames. The
+    // fanout must preserve the complete ordered live sequence for each; the
+    // direct router regression separately proves the exact Full boundary.
+    for expected_seq in 1..=2 {
+        let event_a = tokio::time::timeout(Duration::from_secs(2), event_a_rx.recv())
+            .await
+            .expect("first observer should receive live delta")
+            .expect("first observer remains connected");
+        let event_b = tokio::time::timeout(Duration::from_secs(2), event_b_rx.recv())
+            .await
+            .expect("second observer should receive live delta")
+            .expect("second observer remains connected");
+        assert_eq!(event_a.seq, expected_seq);
+        assert_eq!(event_b.seq, expected_seq);
+        assert_eq!(event_a.event_id, event_b.event_id);
+        assert_eq!(event_a.source, event_b.source);
+        assert_eq!(event_a.source.session_id(), Some(&session_id));
+        match (&event_a.payload, &event_b.payload) {
+            (
+                AgentEvent::TextDelta { delta: delta_a },
+                AgentEvent::TextDelta { delta: delta_b },
+            ) => {
+                assert_eq!(delta_a, delta_b);
+            }
+            events => panic!("both observers should receive matching live deltas: {events:?}"),
+        }
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), event_a_rx.recv())
+            .await
+            .is_err(),
+        "first observer terminal must remain commit-gated"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), event_b_rx.recv())
+            .await
+            .is_err(),
+        "second observer terminal must remain commit-gated"
+    );
+
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    let (completion_a, completion_b) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(2), turn_a.wait()),
+        tokio::time::timeout(Duration::from_secs(2), turn_b.wait()),
+    );
+    completion_a
+        .expect("first Steer completion should resolve")
+        .expect("first Steer should succeed");
+    completion_b
+        .expect("second Steer completion should resolve")
+        .expect("second Steer should succeed");
+
+    for expected_seq in 3..=4 {
+        let event_a = tokio::time::timeout(Duration::from_secs(2), event_a_rx.recv())
+            .await
+            .expect("first observer should receive committed terminal")
+            .expect("first observer remains connected");
+        let event_b = tokio::time::timeout(Duration::from_secs(2), event_b_rx.recv())
+            .await
+            .expect("second observer should receive committed terminal")
+            .expect("second observer remains connected");
+        assert_eq!(event_a.seq, expected_seq);
+        assert_eq!(event_b.seq, expected_seq);
+        assert_eq!(event_a.event_id, event_b.event_id);
+        assert_eq!(event_a.source, event_b.source);
+        assert_eq!(event_a.source.session_id(), Some(&session_id));
+        match (expected_seq, &event_a.payload, &event_b.payload) {
+            (
+                3,
+                AgentEvent::RunCompleted {
+                    session_id: session_a,
+                    ..
+                },
+                AgentEvent::RunCompleted {
+                    session_id: session_b,
+                    ..
+                },
+            ) => {
+                assert_eq!(session_a, &session_id);
+                assert_eq!(session_b, &session_id);
+            }
+            (4, AgentEvent::InteractionComplete { .. }, AgentEvent::InteractionComplete { .. }) => {
+            }
+            events => {
+                panic!("both observers should receive matching ordered terminals: {events:?}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_runtime_backed_member_turn_hot_swap_preserves_binding_and_commit_truth() {
     let mut definition = sample_definition();
     definition
@@ -58426,6 +58705,143 @@ async fn test_direct_session_member_rejects_llm_identity_override_before_mob_adm
             context: "member turn LLM identity override",
         } if member_id == &identity
     ));
+}
+
+#[tokio::test]
+async fn test_default_ephemeral_session_service_rejects_llm_override_without_host() {
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        PersistentMockBuilder,
+        16,
+    ));
+    assert!(
+        crate::runtime::MobSessionService::supports_runtime_turn_apply(service.as_ref()),
+        "the production ephemeral service can apply generic runtime turns"
+    );
+    let runtime_adapter = crate::runtime::MobSessionService::runtime_adapter(service.as_ref())
+        .expect("the production ephemeral service exposes a runtime adapter");
+    assert!(
+        !runtime_adapter.has_session_llm_reconfigure_host(),
+        "a default ephemeral adapter must not claim an uninstalled LLM host"
+    );
+
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile")
+        .external_addressable = true;
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create mob with production ephemeral service");
+    let identity = AgentIdentity::from("w-ephemeral-no-llm-host");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn production ephemeral worker");
+
+    let error = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("must reject before runtime admission".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::new().with_model(
+                meerkat_core::lifecycle::run_primitive::ModelId::new("unavailable-model"),
+            ),
+            None,
+        )
+        .await
+        .expect_err("generic runtime-turn support is not LLM-reconfigure support");
+    assert!(matches!(
+        error,
+        MobError::MissingMemberCapability {
+            ref member_id,
+            capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
+            context: "member turn LLM identity override",
+        } if member_id == &identity
+    ));
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[tokio::test]
+async fn test_ephemeral_session_service_accepts_llm_override_with_installed_host() {
+    let provider_visible_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_turn_overlays = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        OverlayProbeSessionAgentBuilder {
+            provider_visible_tools,
+            provider_turn_overlays,
+        },
+        16,
+    ));
+    let runtime_adapter = crate::runtime::MobSessionService::runtime_adapter(service.as_ref())
+        .expect("the production ephemeral service exposes a runtime adapter");
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
+    runtime_adapter.set_session_llm_reconfigure_host(llm_host.clone());
+    assert!(runtime_adapter.has_session_llm_reconfigure_host());
+
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile")
+        .external_addressable = true;
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create mob with configured production ephemeral service");
+    let identity = AgentIdentity::from("w-ephemeral-with-llm-host");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn production ephemeral worker");
+
+    let mut turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("apply through the installed host".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::new().with_model(
+                meerkat_core::lifecycle::run_primitive::ModelId::new("configured-host-model"),
+            ),
+            None,
+        )
+        .await
+        .expect("installed host should make the member capability realizable");
+    let applied = turn
+        .wait_for_applied_llm_identity()
+        .await
+        .expect("installed host should apply the requested identity")
+        .expect("model override should yield an applied identity");
+    assert_eq!(applied.model, "configured-host-model");
+    turn.wait()
+        .await
+        .expect("turn should complete through the production ephemeral service");
+    assert_eq!(llm_host.live_apply_count.load(Ordering::SeqCst), 1);
+    assert_eq!(llm_host.current_identity().model, "configured-host-model");
+    handle.shutdown().await.expect("shutdown test mob");
 }
 
 #[tokio::test]

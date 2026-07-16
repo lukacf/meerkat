@@ -223,6 +223,53 @@ fn deferred_terminal_matches_outcome(
     }
 }
 
+/// Collapse the observer set for one batched runtime primitive into the single
+/// event sender accepted by `StartTurnRequest` without losing request-local
+/// streams. Every destination here is already the output of
+/// `defer_turn_events_until_machine_completion`, so terminal commit gating
+/// remains independent for each contributing input.
+///
+/// Sends for one envelope are polled concurrently so a healthy destination is
+/// not ordered behind a slower sibling. The next envelope waits for every live
+/// destination, preserving the original bounded backpressure contract and a
+/// complete, ordered stream. Only closed destinations are removed.
+#[cfg(feature = "runtime-adapter")]
+fn fan_out_turn_event_txs(event_txs: Vec<TurnEventTx>) -> Option<TurnEventTx> {
+    fan_out_turn_event_txs_with_capacity(event_txs, DEFERRED_TURN_EVENT_CHANNEL_CAPACITY)
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn fan_out_turn_event_txs_with_capacity(
+    mut event_txs: Vec<TurnEventTx>,
+    channel_capacity: usize,
+) -> Option<TurnEventTx> {
+    match event_txs.len() {
+        0 => None,
+        1 => event_txs.pop(),
+        _ => {
+            let (fanout_tx, mut fanout_rx) = mpsc::channel::<
+                meerkat_core::EventEnvelope<meerkat_core::AgentEvent>,
+            >(channel_capacity);
+            tokio::spawn(async move {
+                while let Some(event) = fanout_rx.recv().await {
+                    event_txs = futures::future::join_all(event_txs.drain(..).map(|event_tx| {
+                        let event = event.clone();
+                        async move { event_tx.send(event).await.map(|()| event_tx) }
+                    }))
+                    .await
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .collect();
+                    if event_txs.is_empty() {
+                        break;
+                    }
+                }
+            });
+            Some(fanout_tx)
+        }
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn defer_turn_events_until_machine_completion(
     _session_id: &SessionId,
@@ -2254,7 +2301,7 @@ impl SessionBackend {
         // Terminal dedup: input already processed — idempotent success
         let Some(handle) = handle else {
             if let Some(queued_context) = queued_context.as_mut() {
-                queued_context.resolve_without_execution(Ok(None));
+                queued_context.resolve_without_execution(None);
             }
             drop(queued_context);
             if let Some(delivery) = deferred_delivery {
@@ -2385,7 +2432,7 @@ impl SessionBackend {
                             let _ = queued_context.rekey(input_id.clone());
                         }
                         if resolves_llm_identity_at_admission {
-                            queued_context.resolve_llm_identity_at_admission(Ok(None));
+                            queued_context.resolve_llm_identity_at_admission(None);
                         }
                     }
                     drop(operation_guard);
@@ -2405,7 +2452,7 @@ impl SessionBackend {
                     }
                     Ok((None, mut queued_context)) => {
                         if let Some(queued_context) = queued_context.as_mut() {
-                            queued_context.resolve_without_execution(Ok(None));
+                            queued_context.resolve_without_execution(None);
                         }
                         drop(queued_context);
                         (Ok(()), DeferredTurnEventOutcome::Succeeded)
@@ -2470,14 +2517,14 @@ impl SessionBackend {
                     let _ = queued_context.rekey(input_id.clone());
                 }
                 if resolves_llm_identity_at_admission {
-                    queued_context.resolve_llm_identity_at_admission(Ok(None));
+                    queued_context.resolve_llm_identity_at_admission(None);
                 }
             }
             drop(operation_guard);
 
             let Some(handle) = handle else {
                 if let Some(queued_context) = queued_context.as_mut() {
-                    queued_context.resolve_without_execution(Ok(None));
+                    queued_context.resolve_without_execution(None);
                 }
                 drop(queued_context);
                 if let Some(delivery) = deferred_delivery {
@@ -2663,25 +2710,65 @@ struct RuntimeQueuedTurnOwnerState {
 
 #[cfg(feature = "runtime-adapter")]
 struct QueuedTurnContext {
-    event_tx: Option<TurnEventTx>,
+    event_txs: Vec<TurnEventTx>,
     llm_identity_application: PendingMemberTurnLlmIdentityApplication,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl QueuedTurnContext {
+    fn new(
+        event_tx: Option<TurnEventTx>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    ) -> Self {
+        Self {
+            event_txs: event_tx.into_iter().collect(),
+            llm_identity_application: PendingMemberTurnLlmIdentityApplication::new(
+                llm_identity_applied_tx,
+            ),
+        }
+    }
+
+    fn append(&mut self, mut other: Self) {
+        self.event_txs.append(&mut other.event_txs);
+        self.llm_identity_application
+            .append(&mut other.llm_identity_application);
+    }
+
+    fn into_executor_parts(self) -> (Option<TurnEventTx>, PendingMemberTurnLlmIdentityApplication) {
+        (
+            fan_out_turn_event_txs(self.event_txs),
+            self.llm_identity_application,
+        )
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
 #[derive(Default)]
 struct PendingMemberTurnLlmIdentityApplication {
-    sender: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    senders: Vec<super::handle::MemberTurnLlmIdentityAppliedSender>,
 }
 
 #[cfg(feature = "runtime-adapter")]
 impl PendingMemberTurnLlmIdentityApplication {
     fn new(sender: Option<super::handle::MemberTurnLlmIdentityAppliedSender>) -> Self {
-        Self { sender }
+        Self {
+            senders: sender.into_iter().collect(),
+        }
     }
 
-    fn resolve(&mut self, result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(result);
+    fn append(&mut self, other: &mut Self) {
+        self.senders.append(&mut other.senders);
+    }
+
+    fn resolve_success(&mut self, identity: Option<meerkat_core::SessionLlmIdentity>) {
+        for sender in self.senders.drain(..) {
+            let _ = sender.send(Ok(identity.clone()));
+        }
+    }
+
+    fn resolve_internal_failure(&mut self, reason: String) {
+        for sender in self.senders.drain(..) {
+            let _ = sender.send(Err(MobError::Internal(reason.clone())));
         }
     }
 }
@@ -2689,7 +2776,7 @@ impl PendingMemberTurnLlmIdentityApplication {
 #[cfg(feature = "runtime-adapter")]
 impl Drop for PendingMemberTurnLlmIdentityApplication {
     fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
+        for sender in self.senders.drain(..) {
             let _ = sender.send(Err(MobError::Internal(
                 "member turn ended before reaching the LLM identity application boundary"
                     .to_string(),
@@ -2726,25 +2813,23 @@ impl RuntimeQueuedTurnRegistration {
         }
     }
 
-    fn resolve_without_execution(
-        &mut self,
-        result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>,
-    ) {
+    fn resolve_without_execution(&mut self, identity: Option<meerkat_core::SessionLlmIdentity>) {
         if !self.owns_context {
             return;
         }
         if let Some(mut context) = self.owner.discard_turn_context(&self.input_id) {
-            context.llm_identity_application.resolve(result);
+            context.llm_identity_application.resolve_success(identity);
         }
         self.owns_context = false;
     }
 
     fn resolve_llm_identity_at_admission(
         &self,
-        result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>,
+        identity: Option<meerkat_core::SessionLlmIdentity>,
     ) {
         if self.owns_context {
-            self.owner.resolve_turn_llm_identity(&self.input_id, result);
+            self.owner
+                .resolve_turn_llm_identity(&self.input_id, identity);
         }
     }
 }
@@ -2807,12 +2892,7 @@ impl RuntimeQueuedTurnOwner {
         }
         state.queue.entries.insert(
             input_id.clone(),
-            QueuedTurnContext {
-                event_tx,
-                llm_identity_application: PendingMemberTurnLlmIdentityApplication::new(
-                    llm_identity_applied_tx,
-                ),
-            },
+            QueuedTurnContext::new(event_tx, llm_identity_applied_tx),
         );
         Ok(RuntimeQueuedTurnRegistration {
             owner: Arc::clone(self),
@@ -2833,12 +2913,17 @@ impl RuntimeQueuedTurnOwner {
         if state.attachment_witness != *attachment {
             return None;
         }
-        let mut selected = None;
+        let mut selected: Option<QueuedTurnContext> = None;
         for input_id in contributing_input_ids {
             if let Some(context) = state.queue.entries.remove(input_id) {
-                // A primitive may contribute multiple inputs. Drain every
-                // matching transport entry and prefer the last canonical one.
-                selected = Some(context);
+                // A primitive may contribute multiple independently observed
+                // inputs. Preserve every request-scoped observer in canonical
+                // contribution order; last-wins selection would silently
+                // abandon all earlier event streams and identity waiters.
+                match selected.as_mut() {
+                    Some(selected) => selected.append(context),
+                    None => selected = Some(context),
+                }
             }
         }
         selected
@@ -2879,7 +2964,7 @@ impl RuntimeQueuedTurnOwner {
     fn resolve_turn_llm_identity(
         &self,
         input_id: &InputId,
-        result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>,
+        identity: Option<meerkat_core::SessionLlmIdentity>,
     ) {
         if let Some(context) = self
             .state
@@ -2889,7 +2974,7 @@ impl RuntimeQueuedTurnOwner {
             .entries
             .get_mut(input_id)
         {
-            context.llm_identity_application.resolve(result);
+            context.llm_identity_application.resolve_success(identity);
         }
     }
 
@@ -4899,6 +4984,105 @@ mod tests {
 
     #[cfg(feature = "runtime-adapter")]
     #[tokio::test]
+    async fn batched_turn_context_resolves_every_llm_identity_observer() {
+        let (identity_a_tx, identity_a_rx) = tokio::sync::oneshot::channel();
+        let (identity_b_tx, identity_b_rx) = tokio::sync::oneshot::channel();
+        let mut context = super::QueuedTurnContext::new(None, Some(identity_a_tx));
+        context.append(super::QueuedTurnContext::new(None, Some(identity_b_tx)));
+        let (_, mut identity_application) = context.into_executor_parts();
+        let expected = meerkat_core::SessionLlmIdentity {
+            model: "batched-model".to_string(),
+            provider: meerkat_core::Provider::Other,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        identity_application.resolve_success(Some(expected.clone()));
+
+        assert_eq!(
+            identity_a_rx
+                .await
+                .expect("first identity observer remains live")
+                .expect("first identity application succeeds"),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            identity_b_rx
+                .await
+                .expect("second identity observer remains live")
+                .expect("second identity application succeeds"),
+            Some(expected)
+        );
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn batched_turn_event_fanout_backpressures_without_losing_ordered_events() {
+        let session_id = SessionId::new();
+        let (event_a_tx, mut event_a_rx) = tokio::sync::mpsc::channel(1);
+        let (event_b_tx, mut event_b_rx) = tokio::sync::mpsc::channel(1);
+        let fanout_tx =
+            super::fan_out_turn_event_txs_with_capacity(vec![event_a_tx, event_b_tx], 1)
+                .expect("two destinations require a fanout sender");
+
+        let producer_session_id = session_id.clone();
+        let mut producer = tokio::spawn(async move {
+            for seq in 1..=4 {
+                fanout_tx
+                    .send(meerkat_core::EventEnvelope::new_session(
+                        producer_session_id.clone(),
+                        seq,
+                        None,
+                        meerkat_core::AgentEvent::TextDelta {
+                            delta: format!("delta-{seq}"),
+                        },
+                    ))
+                    .await
+                    .expect("fanout router should remain live");
+            }
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut producer)
+                .await
+                .is_err(),
+            "bounded fanout must backpressure instead of dropping a full destination"
+        );
+
+        for expected_seq in 1..=4 {
+            let event_a =
+                tokio::time::timeout(std::time::Duration::from_secs(1), event_a_rx.recv())
+                    .await
+                    .expect("first destination should make progress")
+                    .expect("first destination remains live");
+            let event_b =
+                tokio::time::timeout(std::time::Duration::from_secs(1), event_b_rx.recv())
+                    .await
+                    .expect("second destination should make progress")
+                    .expect("second destination remains live");
+            assert_eq!(event_a.seq, expected_seq);
+            assert_eq!(event_b.seq, expected_seq);
+            assert_eq!(event_a.event_id, event_b.event_id);
+            assert_eq!(event_a.source, event_b.source);
+            assert_eq!(event_a.source.session_id(), Some(&session_id));
+            match (&event_a.payload, &event_b.payload) {
+                (
+                    meerkat_core::AgentEvent::TextDelta { delta: delta_a },
+                    meerkat_core::AgentEvent::TextDelta { delta: delta_b },
+                ) => assert_eq!(delta_a, delta_b),
+                events => panic!("both destinations should receive matching deltas: {events:?}"),
+            }
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), producer)
+            .await
+            .expect("producer should resume after destination capacity is released")
+            .expect("producer task should succeed");
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
     async fn replacement_attachment_gets_a_fresh_queue_and_old_cleanup_cannot_reach_it() {
         use meerkat_core::lifecycle::core_executor::{
             CoreApplyOutput, CoreExecutor, CoreExecutorError,
@@ -5610,7 +5794,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .take_turn_context_for_inputs(&contributing_input_ids)
             .await;
         let (event_tx, mut llm_identity_application) = match queued_context {
-            Some(context) => (context.event_tx, context.llm_identity_application),
+            Some(context) => context.into_executor_parts(),
             None => (None, PendingMemberTurnLlmIdentityApplication::default()),
         };
         // The runtime has already resolved handling_mode routing (Queue vs
@@ -5662,18 +5846,18 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 )
                 .await
                 .map_err(|error| {
-                    llm_identity_application.resolve(Err(MobError::Internal(format!(
+                    llm_identity_application.resolve_internal_failure(format!(
                         "failed to reconfigure member session '{}' LLM identity for run {run_id}: {error}",
                         self.bridge_session_id
-                    ))));
+                    ));
                     CoreExecutorError::apply_failed_runtime_turn(format!(
                         "failed to reconfigure member session '{}' LLM identity for run {run_id}: {error}",
                         self.bridge_session_id
                     ))
                 })?;
-            llm_identity_application.resolve(Ok(Some(report.new_identity)));
+            llm_identity_application.resolve_success(Some(report.new_identity));
         } else {
-            llm_identity_application.resolve(Ok(None));
+            llm_identity_application.resolve_success(None);
         }
 
         self.session_service
@@ -5772,8 +5956,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 impl MobProvisioner for SessionBackend {
     fn supports_member_turn_llm_reconfigure(&self, member_ref: &MemberRef) -> bool {
         matches!(member_ref, MemberRef::Session { .. })
-            && self.runtime_adapter.is_some()
             && self.session_service.supports_runtime_turn_apply()
+            && self
+                .runtime_adapter
+                .as_ref()
+                .is_some_and(|adapter| adapter.has_session_llm_reconfigure_host())
     }
 
     async fn provision_member(

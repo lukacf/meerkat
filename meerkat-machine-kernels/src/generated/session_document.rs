@@ -867,6 +867,8 @@ pub enum ResumeSelfHostedSelection {
     #[default]
     #[serde(rename = "Clear")]
     Clear,
+    #[serde(rename = "UseOverride")]
+    UseOverride,
     #[serde(rename = "Retain")]
     Retain,
 }
@@ -874,6 +876,7 @@ impl ResumeSelfHostedSelection {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Clear => "Clear",
+            Self::UseOverride => "UseOverride",
             Self::Retain => "Retain",
         }
     }
@@ -883,6 +886,7 @@ impl std::convert::TryFrom<&str> for ResumeSelfHostedSelection {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Clear" => Ok(Self::Clear),
+            "UseOverride" => Ok(Self::UseOverride),
             "Retain" => Ok(Self::Retain),
             other => Err(format!("invalid ResumeSelfHostedSelection value `{other}`")),
         }
@@ -1765,6 +1769,7 @@ pub mod inputs {
     pub struct AuthorizeSessionResumeOverrides {
         pub provider_override_present: bool,
         pub model_override_present: bool,
+        pub self_hosted_server_override_present: bool,
         pub has_build_only_overrides: bool,
         pub first_turn_phase: SessionFirstTurnPhase,
     }
@@ -2315,8 +2320,11 @@ pub enum TransitionId {
     AuthorizeSessionResumeOverridesRejectProviderRequiresModel,
     AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn,
     AuthorizeSessionResumeOverridesAcceptRecomputeProvider,
+    AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride,
     AuthorizeSessionResumeOverridesAcceptUseOverride,
+    AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride,
     AuthorizeSessionResumeOverridesAcceptRetainStored,
+    AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride,
     ClassifyLiveSessionAuthorityLive,
     ClassifyLiveSessionAuthorityDurableArchived,
     ClassifyLiveSessionAuthorityDurableUncommitted,

@@ -1980,8 +1980,11 @@ pub(super) struct MemberTurnObservers {
 /// Host-owned options for one member turn.
 ///
 /// Runtime-authored metadata (execution classification, terminal peer intent,
-/// run identity, and dispatch context) is deliberately absent. The mob runtime
-/// stamps those facts at admission instead of accepting them from callers.
+/// and run identity) is deliberately absent. The mob runtime stamps those
+/// facts at admission instead of accepting them from callers. The full
+/// [`TurnToolOverlay`] remains available to trusted in-process hosts, including
+/// caller-authored dispatch context; public wire surfaces use the narrower
+/// `PublicTurnToolOverlay` instead.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct MemberTurnOptions {
@@ -2086,9 +2089,7 @@ impl MemberTurnOptions {
         RuntimeTurnMetadata {
             handling_mode: Some(handling_mode),
             skill_references: self.skill_references,
-            turn_tool_overlay: self
-                .turn_tool_overlay
-                .map(TurnToolOverlay::without_dispatch_context),
+            turn_tool_overlay: self.turn_tool_overlay,
             additional_instructions: self.additional_instructions,
             model: self.model,
             provider: self.provider,

@@ -190,6 +190,7 @@ pub enum ResumeProviderSelection {
 pub enum ResumeSelfHostedSelection {
     #[default]
     Clear,
+    UseOverride,
     Retain,
 }
 
@@ -425,6 +426,7 @@ pub enum SessionDocumentInput {
     AuthorizeSessionResumeOverrides {
         provider_override_present: bool,
         model_override_present: bool,
+        self_hosted_server_override_present: bool,
         has_build_only_overrides: bool,
         first_turn_phase: SessionFirstTurnPhase,
     },
@@ -716,8 +718,11 @@ enum SessionDocumentTransition {
     AuthorizeSessionResumeOverridesRejectProviderRequiresModel,
     AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn,
     AuthorizeSessionResumeOverridesAcceptRecomputeProvider,
+    AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride,
     AuthorizeSessionResumeOverridesAcceptUseOverride,
+    AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride,
     AuthorizeSessionResumeOverridesAcceptRetainStored,
+    AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride,
     ClassifyLiveSessionAuthorityLive,
     ClassifyLiveSessionAuthorityDurableArchived,
     ClassifyLiveSessionAuthorityDurableUncommitted,
@@ -2845,6 +2850,7 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
+                self_hosted_server_override_present,
                 has_build_only_overrides,
                 first_turn_phase,
             } => {
@@ -2878,7 +2884,7 @@ impl SessionDocumentMachineAuthority {
                     )) && (resume_provider_recompute_from_model(
                         model_override_present,
                         provider_override_present,
-                    )))
+                    )) && (self_hosted_server_override_present == false))
                 {
                     matches.push(SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptRecomputeProvider);
                 }
@@ -2891,8 +2897,22 @@ impl SessionDocumentMachineAuthority {
                     )) && (resume_provider_recompute_from_model(
                         model_override_present,
                         provider_override_present,
+                    )) && (self_hosted_server_override_present))
+                {
+                    matches.push(SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((resume_overrides_admissible(
+                        provider_override_present,
+                        model_override_present,
+                        has_build_only_overrides,
+                        first_turn_phase,
+                    )) && (resume_provider_recompute_from_model(
+                        model_override_present,
+                        provider_override_present,
                     ) == false)
-                        && (provider_override_present))
+                        && (provider_override_present)
+                        && (self_hosted_server_override_present == false))
                 {
                     matches.push(
                         SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptUseOverride,
@@ -2908,9 +2928,40 @@ impl SessionDocumentMachineAuthority {
                         model_override_present,
                         provider_override_present,
                     ) == false)
-                        && (provider_override_present == false))
+                        && (provider_override_present)
+                        && (self_hosted_server_override_present))
+                {
+                    matches.push(SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((resume_overrides_admissible(
+                        provider_override_present,
+                        model_override_present,
+                        has_build_only_overrides,
+                        first_turn_phase,
+                    )) && (resume_provider_recompute_from_model(
+                        model_override_present,
+                        provider_override_present,
+                    ) == false)
+                        && (provider_override_present == false)
+                        && (self_hosted_server_override_present == false))
                 {
                     matches.push(SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptRetainStored);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && ((resume_overrides_admissible(
+                        provider_override_present,
+                        model_override_present,
+                        has_build_only_overrides,
+                        first_turn_phase,
+                    )) && (resume_provider_recompute_from_model(
+                        model_override_present,
+                        provider_override_present,
+                    ) == false)
+                        && (provider_override_present == false)
+                        && (self_hosted_server_override_present))
+                {
+                    matches.push(SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride);
                 }
                 let transition =
                     Self::single_transition(matches, "AuthorizeSessionResumeOverrides")?;
@@ -2933,16 +2984,34 @@ impl SessionDocumentMachineAuthority {
                             SessionDocumentEffect::SessionResumeOverridesAuthorized { provider_selection: ResumeProviderSelection::RecomputeFromModel,  self_hosted_selection: ResumeSelfHostedSelection::Clear,  provider_overridden: true, },
                         ])
                     }
+                    SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionResumeOverridesAuthorized { provider_selection: ResumeProviderSelection::RecomputeFromModel,  self_hosted_selection: ResumeSelfHostedSelection::UseOverride,  provider_overridden: true, },
+                        ])
+                    }
                     SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptUseOverride => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
                             SessionDocumentEffect::SessionResumeOverridesAuthorized { provider_selection: ResumeProviderSelection::UseOverride,  self_hosted_selection: ResumeSelfHostedSelection::Clear,  provider_overridden: true, },
                         ])
                     }
+                    SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionResumeOverridesAuthorized { provider_selection: ResumeProviderSelection::UseOverride,  self_hosted_selection: ResumeSelfHostedSelection::UseOverride,  provider_overridden: true, },
+                        ])
+                    }
                     SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptRetainStored => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
                             SessionDocumentEffect::SessionResumeOverridesAuthorized { provider_selection: ResumeProviderSelection::UseStored,  self_hosted_selection: ResumeSelfHostedSelection::Retain,  provider_overridden: false, },
+                        ])
+                    }
+                    SessionDocumentTransition::AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![
+                            SessionDocumentEffect::SessionResumeOverridesAuthorized { provider_selection: ResumeProviderSelection::UseStored,  self_hosted_selection: ResumeSelfHostedSelection::UseOverride,  provider_overridden: false, },
                         ])
                     }
                     #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "AuthorizeSessionResumeOverrides_transition" }),
@@ -3836,12 +3905,14 @@ impl SessionDocumentMachineAuthority {
         &mut self,
         provider_override_present: bool,
         model_override_present: bool,
+        self_hosted_server_override_present: bool,
         has_build_only_overrides: bool,
         first_turn_phase: SessionFirstTurnPhase,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::AuthorizeSessionResumeOverrides {
             provider_override_present,
             model_override_present,
+            self_hosted_server_override_present,
             has_build_only_overrides,
             first_turn_phase,
         })

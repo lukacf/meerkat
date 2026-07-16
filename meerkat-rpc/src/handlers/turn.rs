@@ -55,6 +55,9 @@ pub struct StartTurnParams {
     pub model: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Exact configured local-server route for a self-hosted model.
+    #[serde(default)]
+    pub self_hosted_server_id: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
@@ -118,6 +121,7 @@ pub struct TurnOverrides {
     pub keep_alive: Option<bool>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    pub self_hosted_server_id: Option<String>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
     pub output_schema: Option<serde_json::Value>,
@@ -133,6 +137,7 @@ impl TurnOverrides {
         self.keep_alive.is_none()
             && self.model.is_none()
             && self.provider.is_none()
+            && self.self_hosted_server_id.is_none()
             && self.max_tokens.is_none()
             && self.system_prompt.is_none()
             && self.output_schema.is_none()
@@ -220,6 +225,7 @@ pub async fn start_turn_with_params(
         keep_alive: params.keep_alive,
         model: params.model,
         provider: params.provider,
+        self_hosted_server_id: params.self_hosted_server_id,
         max_tokens: params.max_tokens,
         system_prompt: params.system_prompt,
         output_schema: params.output_schema,

@@ -31372,6 +31372,21 @@ async fn exact_attachment_accept_rejects_stale_a_after_same_session_replacement_
         matches!(&rejected, RuntimeDriverError::StaleAuthority { .. }),
         "unexpected stale attachment admission error: {rejected}"
     );
+    let combined_rejected = machine
+        .accept_input_with_completion_for_attachment_and_member_residency(
+            &stale_a,
+            make_prompt("stale peer-only attachment A must not enqueue on replacement B"),
+            None,
+        )
+        .await
+        .expect_err("stale attachment A must also fail combined residency admission");
+    assert!(
+        matches!(
+            &combined_rejected,
+            RuntimeDriverError::StaleAuthority { .. }
+        ),
+        "unexpected combined stale attachment admission error: {combined_rejected}"
+    );
     assert_eq!(
         machine
             .current_executor_attachment_witness(&session_id)

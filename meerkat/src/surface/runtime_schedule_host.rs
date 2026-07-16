@@ -104,6 +104,16 @@ struct RuntimeBackedScheduleSessionHost<B: SessionAgentBuilder> {
     workgraph_service: Option<WorkGraphService>,
 }
 
+#[derive(Debug)]
+enum ScheduledSessionAdmission {
+    Ordinary,
+    MobOwned {
+        attachment: meerkat_runtime::RuntimeExecutorAttachmentWitness,
+        expected_member:
+            Option<meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation>,
+    },
+}
+
 fn materialized_build_options(
     template: &SessionBuildOptions,
     create: &SessionMaterializationSpec,
@@ -244,18 +254,133 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
     async fn ensure_runtime_session_registered(
         &self,
         session_id: &SessionId,
-    ) -> Result<(), ScheduleDomainError> {
+    ) -> Result<ScheduledSessionAdmission, ScheduleDomainError> {
         self.ensure_session_target_exists(session_id).await?;
 
-        self.runtime_adapter
-            .ensure_session_with_executor(
-                session_id.clone(),
-                self.runtime_executor(session_id.clone()),
-            )
+        let session = self
+            .service
+            .load_authoritative_session(session_id)
             .await
-            .map_err(schedule_internal)?;
-        self.ensure_schedule_peer_ingress(session_id).await?;
-        Ok(())
+            .map_err(schedule_internal)?
+            .ok_or_else(|| {
+                ScheduleDomainError::InvalidSchedule(format!("session not found: {session_id}"))
+            })?;
+        let mob_member_binding = session
+            .session_metadata()
+            .and_then(|metadata| metadata.mob_member_binding);
+        let admission = if let Some(binding) = mob_member_binding.as_ref() {
+            // A mob member's executor and exact incarnation are owned by the
+            // mob host materializer. The generic schedule surface may use an
+            // already-serving attachment, but must never reconstruct or
+            // replace it with ordinary runtime plumbing.
+            let incarnation = self.runtime_adapter.member_incarnation(session_id);
+            if incarnation.as_ref().is_some_and(|incarnation| {
+                incarnation.mob_id != binding.mob_id
+                    || incarnation.agent_identity != binding.member
+                    || incarnation.member_session_id != session_id.to_string()
+            }) {
+                return Err(ScheduleDomainError::Internal(format!(
+                    "mob-owned session {session_id} is serving an incarnation that does not match its durable owner {}/{}",
+                    binding.mob_id, binding.member
+                )));
+            }
+            let attachment = self
+                .runtime_adapter
+                .current_executor_attachment_witness(session_id)
+                .await
+                .ok_or_else(|| {
+                    ScheduleDomainError::Internal(format!(
+                        "mob-owned session {session_id} has no exact executor attachment"
+                    ))
+                })?;
+            ScheduledSessionAdmission::MobOwned {
+                attachment,
+                // `None` deliberately means true PeerOnly at admission, not
+                // "unfenced". The machine rejects VacantPlaced, preserving
+                // local in-process mob delivery while refusing a failed or
+                // not-yet-revived remote placement.
+                expected_member: incarnation,
+            }
+        } else {
+            self.runtime_adapter
+                .ensure_session_with_executor(
+                    session_id.clone(),
+                    self.runtime_executor(session_id.clone()),
+                )
+                .await
+                .map_err(schedule_internal)?;
+            ScheduledSessionAdmission::Ordinary
+        };
+        self.ensure_schedule_peer_ingress_for_admission(session_id, &admission)
+            .await?;
+        Ok(admission)
+    }
+
+    async fn ensure_schedule_peer_ingress_for_admission(
+        &self,
+        session_id: &SessionId,
+        admission: &ScheduledSessionAdmission,
+    ) -> Result<(), ScheduleDomainError> {
+        if let ScheduledSessionAdmission::MobOwned {
+            expected_member, ..
+        } = admission
+        {
+            // Mob-owned sessions already carry the transport selected by
+            // their owning actor. Scheduling may consume that transport but
+            // must never attach or refresh generic SessionOwned plumbing.
+            #[cfg(feature = "comms")]
+            if let Some(expected_member) = expected_member {
+                return match self.runtime_adapter.peer_ingress_owner(session_id).await {
+                    meerkat_runtime::PeerIngressOwner::MobOwned { mob_id, .. }
+                        if mob_id.0 == expected_member.mob_id =>
+                    {
+                        Ok(())
+                    }
+                    owner => Err(ScheduleDomainError::Internal(format!(
+                        "mob-owned session {session_id} expected peer ingress for mob '{}', found {owner:?}",
+                        expected_member.mob_id
+                    ))),
+                };
+            }
+            #[cfg(not(feature = "comms"))]
+            let _ = expected_member;
+            return Ok(());
+        }
+        self.ensure_schedule_peer_ingress(session_id).await
+    }
+
+    async fn accept_scheduled_input(
+        &self,
+        session_id: &SessionId,
+        input: meerkat_runtime::Input,
+        admission: &ScheduledSessionAdmission,
+    ) -> Result<
+        (
+            meerkat_runtime::AcceptOutcome,
+            Option<meerkat_runtime::CompletionHandle>,
+        ),
+        ScheduleDomainError,
+    > {
+        match admission {
+            ScheduledSessionAdmission::Ordinary => {
+                self.runtime_adapter
+                    .accept_input_with_completion(session_id, input)
+                    .await
+            }
+            ScheduledSessionAdmission::MobOwned {
+                attachment,
+                expected_member,
+            } => {
+                self.runtime_adapter
+                    .accept_input_with_completion_for_attachment_and_member_residency(
+                        attachment,
+                        input,
+                        expected_member.as_ref(),
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))
     }
 
     async fn ensure_schedule_peer_ingress(
@@ -525,7 +650,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         occurrence: &crate::Occurrence,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
-        self.ensure_runtime_session_registered(session_id).await?;
+        let admission = self.ensure_runtime_session_registered(session_id).await?;
 
         let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
@@ -576,11 +701,10 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             occurrence.occurrence_id.0,
         ));
 
+        let input = meerkat_runtime::Input::Prompt(prompt_input);
         let (outcome, handle) = self
-            .runtime_adapter
-            .accept_input_with_completion(session_id, meerkat_runtime::Input::Prompt(prompt_input))
-            .await
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+            .accept_scheduled_input(session_id, input, &admission)
+            .await?;
 
         runtime_delivery_dispatch(
             occurrence,
@@ -599,7 +723,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         materialized_session_id: Option<SessionId>,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
-        self.ensure_runtime_session_registered(session_id).await?;
+        let admission = self.ensure_runtime_session_registered(session_id).await?;
 
         let input = meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
             objective_id: None,
@@ -627,10 +751,8 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         });
 
         let (outcome, handle) = self
-            .runtime_adapter
-            .accept_input_with_completion(session_id, input)
-            .await
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+            .accept_scheduled_input(session_id, input, &admission)
+            .await?;
 
         runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
     }
@@ -775,6 +897,185 @@ mod tests {
             }),
             labels: None,
         }
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn missing_mob_owned_attachment_is_not_rebuilt_by_generic_schedule_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service_runtime = Arc::new(
+            crate::CommsRuntime::inproc_only("schedule-mob-owned-service-runtime")
+                .expect("service comms runtime"),
+        );
+        let (service, runtime_adapter) =
+            build_comms_test_service(&temp, Arc::clone(&service_runtime)).await;
+
+        let mut request = make_runtime_backed_request("mob-owned-scheduled-session", true);
+        request
+            .build
+            .as_mut()
+            .expect("fixture request carries build options")
+            .mob_member_binding = Some(meerkat_core::MobMemberBinding {
+            mob_id: "scheduled-mob".to_string(),
+            role: "worker".to_string(),
+            member: "remote-worker".to_string(),
+        });
+        let created = service
+            .create_session(request)
+            .await
+            .expect("persist mob-owned session without machine attachment");
+        let session_id = created.session_id;
+        assert!(
+            runtime_adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "fixture must begin without an executor attachment"
+        );
+
+        let host = RuntimeBackedScheduleSessionHost::new(
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            SessionBuildOptions::default(),
+            None,
+        );
+        let error = host
+            .ensure_runtime_session_registered(&session_id)
+            .await
+            .expect_err("generic schedule runtime must not claim mob-owned session authority");
+        assert!(
+            error
+                .to_string()
+                .contains("has no exact executor attachment"),
+            "typed refusal should identify the missing owner: {error}"
+        );
+        assert!(
+            runtime_adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "failed schedule delivery must leave mob-owned attachment absent"
+        );
+
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard fixture session");
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn live_peer_only_mob_attachment_is_preserved_and_fenced() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service_runtime = Arc::new(
+            crate::CommsRuntime::inproc_only("schedule-local-mob-service-runtime")
+                .expect("service comms runtime"),
+        );
+        let (service, runtime_adapter) =
+            build_comms_test_service(&temp, Arc::clone(&service_runtime)).await;
+
+        let mut request = make_runtime_backed_request("local-mob-scheduled-session", true);
+        request
+            .build
+            .as_mut()
+            .expect("fixture request carries build options")
+            .mob_member_binding = Some(meerkat_core::MobMemberBinding {
+            mob_id: "local-scheduled-mob".to_string(),
+            role: "worker".to_string(),
+            member: "local-worker".to_string(),
+        });
+        let session = Session::new();
+        let result = Box::pin(materialize_session(
+            &service,
+            &runtime_adapter,
+            session,
+            request,
+            {
+                let service = Arc::clone(&service);
+                let runtime_adapter = Arc::clone(&runtime_adapter);
+                move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize live peer-only mob session");
+        let witness_before = runtime_adapter
+            .current_executor_attachment_witness(&result.session_id)
+            .await
+            .expect("local mob session has a serving attachment");
+        assert!(
+            runtime_adapter
+                .member_incarnation(&result.session_id)
+                .is_none(),
+            "local in-process mob session is peer-only, not remotely placed"
+        );
+
+        let host = RuntimeBackedScheduleSessionHost::new(
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            SessionBuildOptions::default(),
+            None,
+        );
+        let admission = host
+            .ensure_runtime_session_registered(&result.session_id)
+            .await
+            .expect("live peer-only mob attachment remains usable");
+        assert!(matches!(
+            admission,
+            ScheduledSessionAdmission::MobOwned {
+                expected_member: None,
+                ..
+            }
+        ));
+        let occurrence = sample_occurrence();
+        let dispatch = host
+            .deliver_prompt(
+                &result.session_id,
+                &occurrence,
+                ScheduledPromptDispatch {
+                    prompt: ContentInput::Text("scheduled local mob prompt".to_string()),
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                    materialized_session_id: None,
+                },
+            )
+            .await
+            .expect("live peer-only mob schedule delivery is admitted under its residency fence");
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch.completion)
+            .await
+            .expect("scheduled local mob prompt should complete")
+            .expect("delivery terminal should resolve");
+        assert_eq!(
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::Completed)
+        );
+        let witness_after = runtime_adapter
+            .current_executor_attachment_witness(&result.session_id)
+            .await
+            .expect("local mob attachment remains serving");
+        assert_eq!(
+            witness_after, witness_before,
+            "schedule preparation must not replace a live local mob attachment"
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live peer-only mob session");
+        runtime_adapter
+            .unregister_session(&result.session_id)
+            .await
+            .expect("unregister peer-only mob runtime session");
     }
 
     #[cfg(all(

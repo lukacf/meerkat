@@ -21,10 +21,13 @@ use meerkat_core::interaction::InteractionContent;
 use meerkat_core::{CommsCommand, HandlingMode, InputStreamMode, SendReceipt};
 use meerkat_mob::runtime::bridge_protocol::{
     BridgeCommand, BridgeDeliveryPayload, BridgeEventCursor, BridgeHardCancelPayload,
-    BridgeHostStatusPayload, BridgeMemberIncarnation, BridgeMemberOperatorPayload, BridgePeerSpec,
-    BridgePollEventsPayload, BridgeProtocolVersion, BridgeReadHistoryPayload, BridgeReleasePayload,
-    BridgeReply, BridgeTurnDirective, BridgeTurnOutcomeAck, MemberOperatorOp,
-    WireHostBindingDescriptor,
+    BridgeHostStatusPayload, BridgeMaterializePayload, BridgeMemberIncarnation,
+    BridgeMemberOperatorPayload, BridgePeerSpec, BridgePollEventsPayload, BridgeProtocolVersion,
+    BridgeReadHistoryPayload, BridgeReleasePayload, BridgeReply, BridgeTurnDirective,
+    BridgeTurnOutcomeAck, MaterializeLaunchMode, MemberOperatorOp, PortableDefinitionExtract,
+    PortableMemberSpec, PortableProfile, PortableSpawnOverlay, PortableSystemPrompt,
+    PortableToolConfig, WireHostBindingDescriptor, WireMobRuntimeMode, WireSpawnContinuityIntent,
+    portable_member_spec_digest,
 };
 use meerkat_runtime::meerkat_machine::dsl as machine_dsl;
 
@@ -474,6 +477,95 @@ pub fn supervisor_spec_for_endpoint(sender: &PeerCommsEndpoint, mob_id: &str) ->
 // ===========================================================================
 // Phase-3 raw V4 command builders (host-addressed + member-originated)
 // ===========================================================================
+
+/// Minimal portable member spec for raw-process probes. Callers may enable
+/// individual portable tools on the returned profile before computing the
+/// materialize digest.
+pub fn portable_member_spec_for_raw_probe(
+    mob_id: &str,
+    identity: &str,
+    profile_name: &str,
+) -> PortableMemberSpec {
+    PortableMemberSpec {
+        mob_id: mob_id.to_string(),
+        profile_name: profile_name.to_string(),
+        agent_identity: identity.to_string(),
+        profile: PortableProfile {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: Vec::new(),
+            skills: Vec::new(),
+            tools: PortableToolConfig {
+                builtins: false,
+                shell: false,
+                comms: true,
+                memory: false,
+                workgraph: false,
+                mob: false,
+                schedule: false,
+                image_generation: false,
+                mcp_servers: std::collections::BTreeMap::new(),
+                non_portable_disabled: Vec::new(),
+            },
+            peer_description: "portable raw-probe member".to_string(),
+            external_addressable: true,
+            runtime_mode: WireMobRuntimeMode::TurnDriven,
+            max_inline_peer_notifications: None,
+            output_schema: None,
+            provider_params: None,
+        },
+        definition_extract: PortableDefinitionExtract {
+            models: std::collections::BTreeMap::new(),
+            image_generation_provider: None,
+            skills: std::collections::BTreeMap::new(),
+            profile_names: vec![profile_name.to_string()],
+        },
+        overlay: PortableSpawnOverlay {
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            system_prompt: PortableSystemPrompt::Set {
+                text: format!("You are {identity}, a deterministic raw-probe member."),
+            },
+            tool_access_policy: None,
+            mob_tool_authority_context: None,
+            auth_binding: None,
+            budget_limits: None,
+            runtime_mode: WireMobRuntimeMode::TurnDriven,
+            continuity_intent: WireSpawnContinuityIntent::Ephemeral,
+        },
+        required_env_keys: Vec::new(),
+    }
+}
+
+/// Honest raw `MaterializeMember` command with the digest computed after any
+/// caller-owned portable-spec mutations.
+pub fn raw_materialize_member_command(
+    sender: &PeerCommsEndpoint,
+    epoch: u64,
+    binding_generation: u64,
+    spec: PortableMemberSpec,
+    generation: u64,
+    fence_token: u64,
+    launch: MaterializeLaunchMode,
+) -> BridgeCommand {
+    let spec_digest =
+        portable_member_spec_digest(&spec).expect("portable member spec digest computes");
+    BridgeCommand::MaterializeMember(Box::new(BridgeMaterializePayload {
+        supervisor: supervisor_spec_for_endpoint(sender, &spec.mob_id),
+        epoch,
+        binding_generation,
+        protocol_version: BridgeProtocolVersion::V4,
+        generation,
+        fence_token,
+        spec,
+        spec_digest,
+        launch,
+    }))
+}
 
 /// Raw `ReleaseMember` at an explicit idempotency tuple (the fence-matrix and
 /// orphan-reconciliation probe flavor; tests doctor the tuple).

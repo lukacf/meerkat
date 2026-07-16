@@ -80,6 +80,8 @@ pub mod host_materialize;
 pub mod host_observation;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) mod host_reply;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod host_schedule;
 #[cfg(feature = "runtime-adapter")]
 pub mod local_bridge;
 // Member-side operator upcall lane (composed by the materializer, D-X2);
@@ -172,6 +174,8 @@ pub use handle::{
     WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub use host_schedule::HostObservationScheduleMobHost;
 pub use member_history_proxy::MemberHistoryPageDomain;
 pub use member_live_proxy::MemberLiveStatusDomain;
 #[cfg(feature = "runtime-adapter")]

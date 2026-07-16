@@ -1599,6 +1599,50 @@ impl MeerkatMachine {
         }
     }
 
+    /// Accept input only while both the exact executor attachment and the
+    /// expected mob-member residency still own the session. `None` means true
+    /// PeerOnly (never VacantPlaced). Both fences are checked under the same
+    /// session mutation gate before durable admission, so a request cannot be
+    /// transferred to a replacement attachment or member incarnation.
+    pub async fn accept_input_with_completion_for_attachment_and_member_residency(
+        &self,
+        witness: &RuntimeExecutorAttachmentWitness,
+        input: Input,
+        expected_member: Option<
+            &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        >,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        if !witness.belongs_to(self) {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "input admission attachment witness belongs to another machine".to_string(),
+            });
+        }
+        let member_residency = expected_member
+            .map_or(MemberResidencyExpectation::PeerOnly, |expected| {
+                MemberResidencyExpectation::Placed(expected.clone())
+            });
+        match self
+            .execute_meerkat_machine_ingress_command(MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: witness.session_id().clone(),
+                input,
+                register_completion: true,
+                member_residency,
+                expected_attachment: Some(witness.clone()),
+            })
+            .await?
+        {
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome,
+                handle,
+                admission_signal: _,
+            } => Ok((outcome, handle)),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected exact-attachment member-residency accept result: {other:?}"
+            ))),
+        }
+    }
+
     /// Accept one bridge/raw-peer input under an exact member-residency
     /// expectation. `None` means true PeerOnly (never VacantPlaced). The
     /// ingress command holds the stable slot and uses the session gate

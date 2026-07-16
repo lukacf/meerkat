@@ -4,13 +4,14 @@
 //! Composition order (the rkat-rpc main template with the R2 corrections):
 //! realm (workspace-derived; `--isolated` typed-rejects) → realm lease →
 //! persistence + chain-composed config (`[mob_host]`, flags override file) →
-//! factory + runtime-backed session service + `MeerkatMachine` → host
+//! factory + runtime-backed session service + `MeerkatMachine` → optional
+//! live plane → host
 //! identity (0700 dir / 0600 key) → host comms runtime (no listener of its
 //! own) → host acceptor (TcpBindPolicy first) → `MobHostActor`
-//! (recover-or-create, token mint, descriptor publish, responder drain) →
-//! schedule host (real session-target delivery + `NoopScheduleMobHost`) →
-//! optional live plane (DEC-P2-8: inert-but-honest until 6b) → run until
-//! ctrl-c → shutdown in reverse.
+//! (recover-or-create, token mint, descriptor publish, initial member revival)
+//! → member observation recovery → schedule host (real session-target
+//! delivery + actor-projected member identities) → run until ctrl-c →
+//! shutdown in reverse.
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::watch;
 
-use meerkat::surface::spawn_runtime_backed_schedule_host;
+use meerkat::surface::{SurfaceScheduleMobHost, spawn_runtime_backed_schedule_host_with_mobs};
 use meerkat::{AgentFactory, LlmIdentityPreflightError, ScheduleService, ScheduleToolDispatcher};
 use meerkat::{FactoryAgentBuilder, PersistentSessionService};
 use meerkat_core::config::MobHostConfig;
@@ -30,7 +31,6 @@ use meerkat_core::connection::{
 use meerkat_core::service::SessionBuildOptions;
 use meerkat_core::{Config, Provider, RealmId};
 use meerkat_core::{RealmConfig, RealmSelection};
-use meerkat_mob::runtime::MobSessionService;
 use meerkat_mob::runtime::host_actor::{
     HostCapabilityFacts, HostDescriptorSink, MobHostActorConfig, ProviderPresenceProbe,
     ProviderPresenceProbeError, RuntimeStoreHostBindingPersistence, build_host_comms_runtime,
@@ -40,6 +40,7 @@ use meerkat_mob::runtime::host_materialize::{
     HostMemberSubstrate, MaterializeLlmPreflightOutcome, MaterializePreflightProbe,
 };
 use meerkat_mob::runtime::host_observation::HostMemberObservation;
+use meerkat_mob::runtime::{HostObservationScheduleMobHost, MobSessionService};
 use meerkat_rpc::secure_rpc::{TcpBindPolicy, validate_tcp_bind_policy};
 use meerkat_store::{RealmBackend, RealmOrigin};
 
@@ -828,22 +829,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
     );
     let service = Arc::new(service);
 
-    // 6. Schedule host (§18.5): realm-local stores, REAL session-target
-    //    delivery, NoopScheduleMobHost, no runnable registry — a mob-target
-    //    schedule on this daemon fails typed at fire. No workgraph service:
-    //    attention overlays are controlling-host facts (plan A3).
-    let schedule_host = spawn_runtime_backed_schedule_host(
-        Arc::clone(&service),
-        Arc::clone(&runtime_adapter),
-        config.clone(),
-        schedule_service,
-        SessionBuildOptions::default(),
-        None,
-        None,
-        format!("rkat-mob-host:{}", realm_id.as_str()),
-    );
-
-    // 7. Live plane (DEC-P2-8, served since 6b): four facade roles over the
+    // 6. Live plane (DEC-P2-8, served since 6b): four facade roles over the
     //    daemon's session service; the live bridge responder arms serve the
     //    listener through the machine-injected `ServiceMemberLiveHost`, and
     //    the advertised URL is a real bind-ceremony fact.
@@ -935,7 +921,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         .then(|| composition.live_ws_advertise.clone())
         .flatten();
 
-    // 8. Host identity (§20.3): 0700 dir BEFORE key material lands (the key
+    // 7. Host identity (§20.3): 0700 dir BEFORE key material lands (the key
     //    file itself is written 0600 + zeroized by `Keypair::save`).
     tokio::fs::create_dir_all(&composition.identity_dir).await?;
     #[cfg(unix)]
@@ -950,7 +936,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
     let host_keypair =
         Arc::new(meerkat_comms::Keypair::load_or_generate(&composition.identity_dir).await?);
 
-    // 9. Host comms runtime: host identity, machine-gated classification +
+    // 8. Host comms runtime: host identity, machine-gated classification +
     //    peer request/response authority, NO listener of its own — ingress
     //    arrives through the acceptor demux.
     let participant_name = format!("rkat-mob-host/{}", realm_id.as_str());
@@ -959,7 +945,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         meerkat_comms::Keypair::from_secret(host_keypair.secret_bytes()),
     )?;
 
-    // 10. Host acceptor (D1): identity registry + pairing watch slot; the
+    // 9. Host acceptor (D1): identity registry + pairing watch slot; the
     //     §21.2 pre-auth bounds come from `[mob_host]`.
     let registry = Arc::new(meerkat_comms::HostAcceptorIdentityRegistry::new());
     let (descriptor_watch_tx, descriptor_watch_rx) = watch::channel(String::new());
@@ -996,7 +982,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
     .await?;
     let advertised_address = acceptor.advertised_address().to_string();
 
-    // 11. The actor: recover-or-create authority state from the R8 rows,
+    // 10. The actor: recover-or-create authority state from the R8 rows,
     //     register the host identity on the demux, mint the one-time token,
     //     publish the 0600 descriptor, revive recorded members from their
     //     stored specs (A20 — zero bridge traffic), start the bridge
@@ -1013,7 +999,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
                 service: Arc::clone(&service),
             }) as Arc<dyn meerkat_runtime::member_observation::DurableEventLogRead>
         });
-    let actor = spawn_mob_host_actor(MobHostActorConfig {
+    let mut actor = spawn_mob_host_actor(MobHostActorConfig {
         host_runtime: Arc::clone(&host_comms.runtime),
         host_dsl: Arc::clone(&host_comms.dsl),
         host_inbox_sender: host_comms.inbox_sender.clone(),
@@ -1040,8 +1026,14 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         }),
     })
     .await?;
+    // The constructor transfers revival into the actor's owned task before
+    // returning. Do not start the schedule driver until that task has finished
+    // its host-owned A20 revival walk and initial observation publish: an
+    // overdue exact-session schedule must not claim the member's SessionId
+    // ahead of its exact host incarnation.
+    actor.wait_for_initial_revival().await?;
 
-    // 11b. Member observation substrate (§7.4 phase 6, DEC-P6E-2): the
+    // 11. Member observation substrate (§7.4 phase 6, DEC-P6E-2): the
     //      machine-wide injected host serving `ReadMemberHistory` /
     //      `PollMemberEvents` / directed-turn admission over the facade
     //      service's durable event log (None on Memory backends — the
@@ -1060,6 +1052,31 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
     runtime_adapter.set_member_observation_host(observation.clone());
     let member_observation_recovery = observation.recover_pending_turns().await;
 
+    // 12. Schedule host (§18.5): realm-local stores, REAL session-target
+    //     delivery, actor-projected `mob_member:` identity resolution, and no
+    //     runnable registry. Ordinary mob-target schedules remain controller-
+    //     host-only and fail typed at fire. It starts only after host-owned
+    //     member revival and observation recovery, so it can never install
+    //     generic runtime plumbing ahead of an exact member incarnation. No
+    //     workgraph service: attention overlays are controlling-host facts
+    //     (plan A3).
+    let schedule_mob_host: Arc<dyn SurfaceScheduleMobHost> =
+        Arc::new(HostObservationScheduleMobHost::new(
+            actor.observation_watch(),
+            "scheduled mob targets are not supported by a remote member host",
+        ));
+    let schedule_host = spawn_runtime_backed_schedule_host_with_mobs(
+        Arc::clone(&service),
+        Arc::clone(&runtime_adapter),
+        config,
+        schedule_service,
+        SessionBuildOptions::default(),
+        schedule_mob_host,
+        None,
+        None,
+        format!("rkat-mob-host:{}", realm_id.as_str()),
+    );
+
     eprintln!(
         "rkat mob host serving realm '{}' on {} (descriptor: {})",
         realm_id.as_str(),
@@ -1067,17 +1084,17 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         composition.descriptor_out.display()
     );
 
-    // 12. Run until ctrl-c; shutdown in reverse composition order.
+    // 13. Run until ctrl-c; shutdown in reverse composition order.
     tokio::signal::ctrl_c().await?;
     eprintln!("rkat mob host shutting down");
     acceptor.shutdown().await;
+    if let Some(schedule_host) = schedule_host {
+        schedule_host.shutdown().await;
+    }
     if let Some(owner) = member_observation_recovery {
         owner.shutdown().await;
     }
     actor.shutdown().await;
-    if let Some(schedule_host) = schedule_host {
-        schedule_host.shutdown().await;
-    }
     #[cfg(feature = "openai-realtime")]
     if let Some(task) = live {
         task.abort_and_join().await;

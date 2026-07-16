@@ -277,6 +277,18 @@ pub trait SurfaceScheduleMobHost: Send + Sync {
         Ok(None)
     }
 
+    /// Resolve a stable identity owned by the mob host into its exact current
+    /// session. Returning `None` delegates to the ordinary session host.
+    /// Implementations must project actor-owned residency rather than search
+    /// durable sessions heuristically.
+    async fn resolve_identity_target(
+        &self,
+        binding: &IdentityTargetBinding,
+    ) -> Result<Option<SessionId>, ScheduleDomainError> {
+        let _ = binding;
+        Ok(None)
+    }
+
     async fn deliver_identity_target(
         &self,
         occurrence: &Occurrence,
@@ -528,7 +540,24 @@ impl SharedScheduleTargetAdapter {
         occurrence: &Occurrence,
         binding: &IdentityTargetBinding,
     ) -> Result<ResolvedScheduledSession, DeliveryDispatch> {
-        match self.session_host.resolve_identity_target(binding).await {
+        let mob_owned = self
+            .mob_host
+            .resolve_identity_target(binding)
+            .await
+            .map_err(|error| {
+                immediate_delivery_failure(
+                    occurrence,
+                    error.to_string(),
+                    DeliveryFailureReason::TargetMaterializationFailed,
+                    None,
+                    None,
+                )
+            })?;
+        let resolved = match mob_owned {
+            Some(session_id) => Ok(Some(session_id)),
+            None => self.session_host.resolve_identity_target(binding).await,
+        };
+        match resolved {
             Ok(Some(session_id)) => Ok(ResolvedScheduledSession {
                 session_id,
                 materialized_session_id: None,

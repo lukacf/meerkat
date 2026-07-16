@@ -4930,6 +4930,7 @@ pub struct MobHostActorConfig {
 pub struct MobHostActorHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     join: tokio::task::JoinHandle<()>,
+    initial_revival_rx: watch::Receiver<bool>,
     observation_watch_rx: watch::Receiver<HostObservationProjection>,
     observation_pending_tx: mpsc::Sender<HostTurnOutcomePendingRequest>,
     observation_record_tx: mpsc::Sender<HostTurnOutcomeRecordRequest>,
@@ -4937,6 +4938,28 @@ pub struct MobHostActorHandle {
 }
 
 impl MobHostActorHandle {
+    /// Wait until the actor has completed its initial recovered-member revival
+    /// walk and published the first observation projection.
+    ///
+    /// This is a process-readiness barrier, not a claim that every durable
+    /// member revived successfully. Per-member environmental failures remain
+    /// represented by the host's unhealthy observation state. The watch wait
+    /// is cancellation-safe and may be retried on the same handle.
+    pub async fn wait_for_initial_revival(&mut self) -> Result<(), MobHostActorError> {
+        loop {
+            if *self.initial_revival_rx.borrow() {
+                return Ok(());
+            }
+            self.initial_revival_rx
+                .changed()
+                .await
+                .map_err(|_| MobHostActorError::Internal {
+                    detail: "mob host actor exited before initial member revival completed"
+                        .to_string(),
+                })?;
+        }
+    }
+
     /// Stop the responder drain and wait for it to exit.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
@@ -5180,6 +5203,7 @@ pub async fn spawn_mob_host_actor(
     registry_reservation.commit(host_inbox_sender);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (initial_revival_tx, initial_revival_rx) = watch::channel(false);
     // No `.await` is permitted between the public commit above and this task
     // ownership transfer. Boot revival (A20/§14.6) remains ahead of the
     // responder drain *inside* the owned task, so the first post-restart
@@ -5187,6 +5211,8 @@ pub async fn spawn_mob_host_actor(
     // half-start boundary. Revival itself is deliberately not selected
     // against shutdown: it owns async side effects and must reach its normal
     // rollback/commit boundary before the responder observes a closed handle.
+    // The readiness watch publishes only after revival and the first
+    // projection sync; waiting on it never owns those actor-side effects.
     let join = tokio::spawn(async move {
         if let Some(host_id) = revival_host_id.as_deref() {
             actor
@@ -5196,6 +5222,7 @@ pub async fn spawn_mob_host_actor(
         // First projection publish + journal registrations for the revived
         // residency set (materialize/release re-sync per served command).
         actor.sync_member_observation().await;
+        initial_revival_tx.send_replace(true);
         run_host_responder(
             actor,
             shutdown_rx,
@@ -5208,6 +5235,7 @@ pub async fn spawn_mob_host_actor(
     Ok(MobHostActorHandle {
         shutdown_tx: Some(shutdown_tx),
         join,
+        initial_revival_rx,
         observation_watch_rx,
         observation_pending_tx,
         observation_record_tx,
@@ -9989,9 +10017,13 @@ mod tests {
             "failed sink publication must not advance pairing-watch visibility"
         );
 
-        let actor = spawn_mob_host_actor(config())
+        let mut actor = spawn_mob_host_actor(config())
             .await
             .expect("retry with the same once-owned registry must succeed");
+        actor
+            .wait_for_initial_revival()
+            .await
+            .expect("successful startup publishes initial revival readiness");
         assert!(
             !descriptor_watch_rx.borrow().is_empty(),
             "successful retry publishes the descriptor"

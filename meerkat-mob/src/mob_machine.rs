@@ -196,7 +196,11 @@ pub(crate) struct SubmitWorkCommand {
     pub work_ref: WorkRef,
     pub spec: WorkSpec,
     pub handling_mode: meerkat_core::types::HandlingMode,
-    pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    pub turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    pub event_tx:
+        Option<tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>>,
+    pub completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), crate::MobError>>>,
+    pub llm_identity_applied_tx: Option<crate::runtime::MemberTurnLlmIdentityAppliedSender>,
     pub ack_mode: SubmitWorkAckMode,
 }
 

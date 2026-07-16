@@ -171,6 +171,7 @@ async fn happy_path_drives_hydrate_resolve_apply_persist_in_order() {
     let request = SessionLlmReconfigureRequest {
         model: Some("gpt-target".into()),
         provider: None,
+        self_hosted_server_id: None,
         provider_params: None,
         auth_binding: None,
     };
@@ -206,6 +207,7 @@ async fn persist_failure_triggers_rollback_to_previous_identity() {
     let request = SessionLlmReconfigureRequest {
         model: Some("gpt-target".into()),
         provider: None,
+        self_hosted_server_id: None,
         provider_params: None,
         auth_binding: None,
     };

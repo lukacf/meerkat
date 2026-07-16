@@ -21,6 +21,9 @@ pub enum MobMemberCapability {
     /// install on (session-backed members hold one; external members relay
     /// over the supervisor bridge instead).
     OutboundCommsRuntime,
+    /// Runtime-owned live session LLM reconfiguration for exact-turn model,
+    /// provider, provider-parameter, and auth-binding overrides.
+    SessionLlmReconfigure,
 }
 
 /// Typed MobMachine routed-effect kind whose runtime consumer refused the
@@ -76,6 +79,7 @@ impl std::fmt::Display for MobMemberCapability {
         match self {
             Self::InteractionEventInjector => f.write_str("interaction_event_injector"),
             Self::OutboundCommsRuntime => f.write_str("outbound_comms_runtime"),
+            Self::SessionLlmReconfigure => f.write_str("session_llm_reconfigure"),
         }
     }
 }

@@ -28389,6 +28389,13 @@
           }
         ]
       },
+      "self_hosted_server_id": {
+        "description": "Exact configured local-server route for a self-hosted model.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "skill_refs": {
         "items": {
           "$ref": "#/$defs/SkillRef"

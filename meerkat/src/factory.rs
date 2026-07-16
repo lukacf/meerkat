@@ -3109,7 +3109,7 @@ impl AgentFactory {
         if !mask.provider {
             build_config.provider = Some(metadata.provider);
         }
-        if !mask.model && !mask.provider {
+        if !mask.model && !mask.provider && !mask.self_hosted_server_id {
             build_config.self_hosted_server_id = metadata.self_hosted_server_id.clone();
         }
         if !mask.provider_params {

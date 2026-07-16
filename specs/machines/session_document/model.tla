@@ -718,7 +718,7 @@ ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
+AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
     /\ phase = "Ready"
     /\ resume_reject_provider_requires_model(provider_override_present, model_override_present)
     /\ phase' = "Ready"
@@ -726,7 +726,7 @@ AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_pre
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
+AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
     /\ phase = "Ready"
     /\ ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase))
     /\ phase' = "Ready"
@@ -734,25 +734,49 @@ AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_p
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
+AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
     /\ phase = "Ready"
-    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present))
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present) /\ (self_hosted_server_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
+AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
     /\ phase = "Ready"
-    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present)
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present) /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) ==
+AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
     /\ phase = "Ready"
-    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE))
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present /\ (self_hosted_server_override_present = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
+AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present /\ self_hosted_server_override_present)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
+AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE) /\ (self_hosted_server_override_present = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
+
+
+AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
+    /\ phase = "Ready"
+    /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE) /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -995,11 +1019,14 @@ Next ==
     \/ \E source \in SessionSystemPromptSourceValues : \E prompt_present \in BOOLEAN : \E prompt_byte_count \in 0..2 : \E replacing_existing \in BOOLEAN : AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count)
-    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase)
-    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase)
-    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase)
-    \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptUseOverride(TRUE, model_override_present, has_build_only_overrides, first_turn_phase)
-    \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRetainStored(FALSE, model_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E self_hosted_server_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E self_hosted_server_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, FALSE, has_build_only_overrides, first_turn_phase)
+    \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride(provider_override_present, model_override_present, TRUE, has_build_only_overrides, first_turn_phase)
+    \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptUseOverride(TRUE, model_override_present, FALSE, has_build_only_overrides, first_turn_phase)
+    \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride(TRUE, model_override_present, TRUE, has_build_only_overrides, first_turn_phase)
+    \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRetainStored(FALSE, model_override_present, FALSE, has_build_only_overrides, first_turn_phase)
+    \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(FALSE, model_override_present, TRUE, has_build_only_overrides, first_turn_phase)
     \/ ClassifyLiveSessionAuthorityLive(FALSE, FALSE, FALSE, FALSE)
     \/ \E stored_transcript_diverged \in BOOLEAN : \E live_has_uncommitted_transcript \in BOOLEAN : \E runtime_system_context_diverged \in BOOLEAN : ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, TRUE)
     \/ \E stored_transcript_diverged \in BOOLEAN : \E runtime_system_context_diverged \in BOOLEAN : ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, TRUE, runtime_system_context_diverged, FALSE)

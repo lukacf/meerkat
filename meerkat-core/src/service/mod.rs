@@ -1069,6 +1069,9 @@ pub trait MobToolsFactory: Send + Sync {
 pub struct ResumeOverrideMask {
     pub model: bool,
     pub provider: bool,
+    /// Exact self-hosted server routing was supplied explicitly by the
+    /// recovery caller and must not be replaced by durable metadata.
+    pub self_hosted_server_id: bool,
     pub max_tokens: bool,
     pub structured_output_retries: bool,
     pub provider_params: bool,
@@ -1474,14 +1477,19 @@ pub struct TurnToolOverlay {
     /// Optional deny-list for this turn.
     #[serde(default)]
     pub blocked_tools: Option<Vec<crate::types::ToolName>>,
-    /// Tool-dispatch metadata visible only to dispatchers for this turn.
+    /// Host/runtime-supplied tool-dispatch metadata visible only to
+    /// dispatchers for this turn.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub dispatch_context: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl TurnToolOverlay {
-    /// Return a caller-safe overlay by dropping runtime-owned dispatch metadata.
+    /// Return a wire-projectable overlay by explicitly dropping host/runtime
+    /// dispatch metadata.
+    ///
+    /// Trusted in-process host APIs that accept [`TurnToolOverlay`] directly
+    /// must preserve this context instead of calling this lossy helper.
     pub fn without_dispatch_context(mut self) -> Self {
         self.dispatch_context.clear();
         self
@@ -1492,8 +1500,8 @@ impl TurnToolOverlay {
     ///
     /// Flow-lowered overlays always carry an EMPTY `dispatch_context`, so
     /// the projection is lossless for flow steps; a non-empty
-    /// `dispatch_context` is a typed error — runtime-owned dispatch metadata
-    /// must never be silently dropped on its way to a wire directive.
+    /// `dispatch_context` is a typed error — trusted host/runtime dispatch
+    /// metadata must never be silently dropped on its way to a wire directive.
     pub fn into_public(
         self,
     ) -> Result<PublicTurnToolOverlay, TurnToolOverlayPublicProjectionError> {
@@ -1547,10 +1555,10 @@ pub enum TurnToolOverlayComposeError {
 /// Typed error projecting a runtime overlay to [`PublicTurnToolOverlay`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TurnToolOverlayPublicProjectionError {
-    /// The overlay carries runtime-owned dispatch metadata the public shape
-    /// cannot represent; projecting would silently drop it.
+    /// The overlay carries trusted host/runtime dispatch metadata the public
+    /// shape cannot represent; projecting would silently drop it.
     #[error(
-        "turn tool overlay carries {keys} runtime-owned dispatch-context entrie(s); \
+        "turn tool overlay carries {keys} host/runtime dispatch-context entrie(s); \
          the public projection would drop them"
     )]
     DispatchContextPresent { keys: usize },

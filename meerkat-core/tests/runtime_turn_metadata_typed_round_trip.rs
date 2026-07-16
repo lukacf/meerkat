@@ -41,6 +41,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         ]),
         model: Some(ModelId::new("claude-opus-4-8")),
         provider: Some(Provider::Anthropic),
+        self_hosted_server_id: None,
         provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             temperature: Some(0.2),
             top_p: Some(0.9),

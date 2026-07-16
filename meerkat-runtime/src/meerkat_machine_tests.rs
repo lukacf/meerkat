@@ -29659,6 +29659,7 @@ async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reco
         SessionLlmReconfigureRequest {
             model: Some("gpt-5.2".to_string()),
             provider: Some("openai".to_string()),
+            self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
         },
@@ -29729,6 +29730,7 @@ async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_recon
         SessionLlmReconfigureRequest {
             model: Some("gpt-5.2".to_string()),
             provider: Some("openai".to_string()),
+            self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
         },
@@ -29968,6 +29970,7 @@ async fn reconfigure_session_llm_identity_succeeds_on_idle_session() {
             SessionLlmReconfigureRequest {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
+                self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },
@@ -33003,6 +33006,7 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
             SessionLlmReconfigureRequest {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
+                self_hosted_server_id: None,
                 provider_params: Some(TurnMetadataOverride::Set(
                     meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
                         provider_tag: Some(
@@ -33175,6 +33179,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
             SessionLlmReconfigureRequest {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
+                self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },
@@ -33299,6 +33304,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
             SessionLlmReconfigureRequest {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
+                self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },
@@ -33500,6 +33506,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
             SessionLlmReconfigureRequest {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
+                self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },
@@ -36602,6 +36609,7 @@ async fn execute_runtime_parity_probe(
             SessionLlmReconfigureRequest {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
+                self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },

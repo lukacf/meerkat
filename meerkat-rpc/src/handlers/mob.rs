@@ -2358,6 +2358,7 @@ pub async fn handle_mob_turn_start(
         keep_alive: mob_params.keep_alive,
         model: mob_params.model,
         provider: mob_params.provider,
+        self_hosted_server_id: mob_params.self_hosted_server_id,
         max_tokens: mob_params.max_tokens,
         system_prompt: mob_params.system_prompt,
         output_schema: mob_params.output_schema,
@@ -3626,6 +3627,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mob_turn_start_public_overlay_rejects_dispatch_context() {
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "agent_identity": "w1",
+            "prompt": "continue",
+            "turn_tool_overlay": {
+                "allowed_tools": ["read"],
+                "dispatch_context": {
+                    "host.routing_hint": { "shard": "blue" }
+                }
+            }
+        });
+
+        let error = serde_json::from_value::<meerkat_contracts::MobTurnStartParams>(value)
+            .expect_err("public mob RPC must reject trusted dispatch metadata");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `dispatch_context`"),
+            "unexpected public overlay error: {error}"
+        );
+    }
+
     /// `mob/turn_start` must hand `turn/start` typed [`StartTurnParams`] built
     /// directly from [`MobTurnStartParams`] + the resolved session_id — no
     /// `serde_json::Map` round-trip, no `to_value(..).unwrap_or(Null)` /
@@ -3639,6 +3664,8 @@ mod tests {
             "agent_identity": "w1",
             "prompt": [{"type": "text", "text": "continue"}],
             "model": "gpt-test",
+            "provider": "self_hosted",
+            "self_hosted_server_id": "local-b",
             "output_schema": { "type": "object" },
             "provider_params": { "temperature": 0.2 },
             "auth_binding": {
@@ -3663,6 +3690,7 @@ mod tests {
             keep_alive: mob_params.keep_alive,
             model: mob_params.model,
             provider: mob_params.provider,
+            self_hosted_server_id: mob_params.self_hosted_server_id,
             max_tokens: mob_params.max_tokens,
             system_prompt: mob_params.system_prompt,
             output_schema: mob_params.output_schema,
@@ -3675,6 +3703,11 @@ mod tests {
         assert_eq!(turn_params.session_id, "resolved-session-123");
         assert!(matches!(turn_params.prompt, ContentInput::Blocks(_)));
         assert_eq!(turn_params.model.as_deref(), Some("gpt-test"));
+        assert_eq!(turn_params.provider.as_deref(), Some("self_hosted"));
+        assert_eq!(
+            turn_params.self_hosted_server_id.as_deref(),
+            Some("local-b")
+        );
         // output_schema carried verbatim, not collapsed to Null.
         assert_eq!(
             turn_params.output_schema,

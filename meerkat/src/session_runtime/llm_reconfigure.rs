@@ -29,7 +29,7 @@ use meerkat_runtime::{
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureRequest,
 };
-use meerkat_session::PersistentSessionService;
+use meerkat_session::{EphemeralSessionService, PersistentSessionService};
 
 use crate::StagedSessionRegistry;
 use crate::factory::AgentFactory;
@@ -105,6 +105,7 @@ fn resolve_reconfigure_target_llm_identity(
         meerkat_core::SessionLlmIdentityOverride {
             model: request.model.as_deref(),
             provider,
+            self_hosted_server_id: request.self_hosted_server_id.as_deref(),
             provider_params: request
                 .provider_params
                 .as_ref()
@@ -120,6 +121,327 @@ fn resolve_reconfigure_target_llm_identity(
     })
 }
 
+/// Live-session operations required by the runtime-owned LLM reconfigure
+/// transaction.
+///
+/// Keeping this as a surface-agnostic service capability lets embedded hosts
+/// install the same canonical reconfigure host for persistent and ephemeral
+/// session services. Persistence remains owned by the concrete service:
+/// persistent sessions checkpoint the new identity, while ephemeral sessions
+/// intentionally complete that phase as a no-op.
+#[async_trait::async_trait]
+pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
+    /// Acquire the stable outer boundary that serializes live identity changes
+    /// with runtime-turn finalization for this exact session.
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>;
+
+    async fn live_llm_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionLlmIdentity, SessionError>;
+
+    async fn live_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionToolVisibilityState>, SessionError>;
+
+    async fn live_web_search_override(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::ToolCategoryOverride, SessionError>;
+
+    async fn live_tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError>;
+
+    async fn apply_live_llm_identity_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        client: Arc<dyn AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), SessionError>;
+
+    async fn apply_live_tool_visibility_state_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        state: Option<SessionToolVisibilityState>,
+    ) -> Result<(), SessionError>;
+
+    async fn persist_live_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError>;
+
+    async fn discard_live_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError>;
+}
+
+#[async_trait::async_trait]
+impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAgentBuilder> {
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
+    {
+        Ok(Box::new(
+            PersistentSessionService::<FactoryAgentBuilder>::acquire_runtime_turn_finalization_guard(
+                self,
+                session_id,
+            )
+            .await,
+        ))
+    }
+
+    async fn live_llm_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionLlmIdentity, SessionError> {
+        self.live_session_llm_identity(session_id).await
+    }
+
+    async fn live_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionToolVisibilityState>, SessionError> {
+        self.export_live_session(session_id)
+            .await?
+            .try_tool_visibility_state()
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "invalid canonical tool visibility state: {error}"
+                )))
+            })
+    }
+
+    async fn live_web_search_override(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::ToolCategoryOverride, SessionError> {
+        Ok(self
+            .export_live_session(session_id)
+            .await?
+            .session_metadata()
+            .map(|metadata| metadata.tooling.web_search)
+            .unwrap_or(meerkat_core::ToolCategoryOverride::Inherit))
+    }
+
+    async fn live_tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
+        self.tool_scope_snapshot(session_id).await
+    }
+
+    async fn apply_live_llm_identity_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        client: Arc<dyn AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), SessionError> {
+        self.apply_runtime_session_llm_identity_under_runtime_turn_boundary(
+            session_id,
+            client,
+            identity,
+            request_policy,
+        )
+        .await
+    }
+
+    async fn apply_live_tool_visibility_state_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        state: Option<SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        self.apply_runtime_session_tool_visibility_state_under_runtime_turn_boundary(
+            session_id, state,
+        )
+        .await
+    }
+
+    async fn persist_live_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.persist_live_session_now_under_runtime_turn_boundary(session_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn discard_live_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.discard_live_session_under_runtime_turn_boundary(session_id)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionRuntimeLlmReconfigureService for EphemeralSessionService<FactoryAgentBuilder> {
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
+    {
+        Ok(Box::new(
+            EphemeralSessionService::<FactoryAgentBuilder>::acquire_runtime_turn_finalization_guard(
+                self,
+                session_id,
+            )
+            .await,
+        ))
+    }
+
+    async fn live_llm_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionLlmIdentity, SessionError> {
+        self.live_session_llm_identity(session_id).await
+    }
+
+    async fn live_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionToolVisibilityState>, SessionError> {
+        self.export_session(session_id)
+            .await?
+            .try_tool_visibility_state()
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "invalid canonical tool visibility state: {error}"
+                )))
+            })
+    }
+
+    async fn live_web_search_override(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::ToolCategoryOverride, SessionError> {
+        Ok(self
+            .export_session(session_id)
+            .await?
+            .session_metadata()
+            .map(|metadata| metadata.tooling.web_search)
+            .unwrap_or(meerkat_core::ToolCategoryOverride::Inherit))
+    }
+
+    async fn live_tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
+        self.tool_scope_snapshot(session_id).await
+    }
+
+    async fn apply_live_llm_identity_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        client: Arc<dyn AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), SessionError> {
+        self.apply_runtime_session_llm_identity_under_runtime_turn_boundary(
+            session_id,
+            client,
+            identity,
+            request_policy,
+        )
+        .await
+    }
+
+    async fn apply_live_tool_visibility_state_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        state: Option<SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        self.apply_runtime_session_tool_visibility_state_under_runtime_turn_boundary(
+            session_id, state,
+        )
+        .await
+    }
+
+    async fn persist_live_under_runtime_turn_boundary(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Ok(())
+    }
+
+    async fn discard_live_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.discard_live_session(session_id).await
+    }
+}
+
+/// Captured construction inputs for installing the canonical runtime LLM
+/// reconfigure host after a concrete session service has taken ownership of
+/// its [`FactoryAgentBuilder`].
+///
+/// Embedded hosts create this blueprint immediately before moving the builder
+/// into a persistent or ephemeral service, then call [`Self::install`] with
+/// that concrete service. This keeps adapter/config/auth wiring in Meerkat
+/// instead of duplicating it across MobKit and desktop surfaces.
+pub struct SessionRuntimeLlmReconfigureHostBlueprint {
+    factory: AgentFactory,
+    config: Config,
+    config_state_path: std::path::PathBuf,
+    default_llm_client: Arc<std::sync::RwLock<Option<Arc<dyn LlmClient>>>>,
+    agent_llm_client_decorator: Arc<std::sync::RwLock<Option<AgentLlmClientDecorator>>>,
+    realm_inheritance: Arc<std::sync::RwLock<Option<crate::RealmInheritance>>>,
+}
+
+impl SessionRuntimeLlmReconfigureHostBlueprint {
+    pub fn new(
+        builder: &FactoryAgentBuilder,
+        config_state_path: std::path::PathBuf,
+        default_llm_client: Arc<std::sync::RwLock<Option<Arc<dyn LlmClient>>>>,
+    ) -> Self {
+        Self {
+            factory: builder.factory().clone(),
+            config: builder.config().clone(),
+            config_state_path,
+            default_llm_client,
+            agent_llm_client_decorator: Arc::clone(&builder.default_agent_llm_client_decorator),
+            realm_inheritance: Arc::clone(&builder.realm_inheritance),
+        }
+    }
+
+    pub fn install(
+        self,
+        runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+        service: Arc<dyn SessionRuntimeLlmReconfigureService>,
+    ) {
+        let config_runtime = Arc::new(ConfigRuntime::new(
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                self.config,
+                meerkat_models::canonical(),
+            )),
+            self.config_state_path,
+        ));
+        runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
+            SessionRuntimeLlmReconfigureHost {
+                service,
+                staged_sessions: Arc::new(StagedSessionRegistry::new()),
+                factory: self.factory,
+                auth_lease: runtime_adapter.generated_auth_lease_handle(),
+                default_llm_client: self.default_llm_client,
+                agent_llm_client_decorator: self.agent_llm_client_decorator,
+                config_runtime: Arc::new(std::sync::RwLock::new(Some(config_runtime))),
+                realm_inheritance: self.realm_inheritance,
+            },
+        ));
+    }
+}
+
 /// Surface-agnostic implementation of [`SessionLlmReconfigureHost`].
 ///
 /// Surfaces construct one of these per-call (RPC, REST, MCP, …) so the
@@ -127,8 +449,9 @@ fn resolve_reconfigure_target_llm_identity(
 /// identities, build adapters, and apply the swap without depending on
 /// any RPC-specific wire shape.
 pub struct SessionRuntimeLlmReconfigureHost {
-    /// Persistent session service.
-    pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    /// Live session service. Both persistent and ephemeral embedded runtimes
+    /// implement the same reconfigure transaction contract.
+    pub service: Arc<dyn SessionRuntimeLlmReconfigureService>,
     /// Staged session registry; consulted when the live session is
     /// missing but a staged identity is available.
     pub staged_sessions: Arc<StagedSessionRegistry>,
@@ -313,11 +636,8 @@ impl SessionRuntimeLlmReconfigureHost {
         // web-search body that `--no-web-search` suppressed. Read it from the
         // live session metadata; fail closed to `Inherit` only when the metadata
         // is genuinely unavailable.
-        let web_search = match self.service.export_live_session(session_id).await {
-            Ok(session) => session
-                .session_metadata()
-                .map(|metadata| metadata.tooling.web_search)
-                .unwrap_or(meerkat_core::ToolCategoryOverride::Inherit),
+        let web_search = match self.service.live_web_search_override(session_id).await {
+            Ok(web_search) => web_search,
             Err(_) => meerkat_core::ToolCategoryOverride::Inherit,
         };
         self.factory
@@ -353,18 +673,17 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
         RuntimeDriverError,
     > {
-        Ok(Box::new(
-            self.service
-                .acquire_runtime_turn_finalization_guard(session_id)
-                .await,
-        ))
+        self.service
+            .acquire_runtime_turn_finalization_guard(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)
     }
 
     async fn hydrate_session_llm_state(
         &self,
         session_id: &SessionId,
     ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
-        let current_identity = match self.service.live_session_llm_identity(session_id).await {
+        let current_identity = match self.service.live_llm_identity(session_id).await {
             Ok(identity) => identity,
             Err(err) => {
                 if let Some(hydrated) = self.hydrate_staged_session_llm_state(session_id).await? {
@@ -373,26 +692,21 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
                 return Err(session_error_to_runtime_driver(err));
             }
         };
-        let session = match self.service.export_live_session(session_id).await {
-            Ok(session) => session,
-            Err(err) => {
-                if let Some(hydrated) = self.hydrate_staged_session_llm_state(session_id).await? {
-                    return Ok(hydrated);
+        let current_visibility_state =
+            match self.service.live_tool_visibility_state(session_id).await {
+                Ok(state) => state.unwrap_or_default(),
+                Err(err) => {
+                    if let Some(hydrated) =
+                        self.hydrate_staged_session_llm_state(session_id).await?
+                    {
+                        return Ok(hydrated);
+                    }
+                    return Err(session_error_to_runtime_driver(err));
                 }
-                return Err(session_error_to_runtime_driver(err));
-            }
-        };
-        let current_visibility_state = session
-            .try_tool_visibility_state()
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!(
-                    "invalid canonical tool visibility state: {err}"
-                ))
-            })?
-            .unwrap_or_default();
+            };
         let base_tool_names = self
             .service
-            .tool_scope_snapshot(session_id)
+            .live_tool_scope_snapshot(session_id)
             .await
             .map_err(session_error_to_runtime_driver)?
             .ok_or_else(|| {
@@ -452,7 +766,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .build_request_policy_for_llm_identity(session_id, identity)
             .await?;
         self.service
-            .apply_runtime_session_llm_identity_under_runtime_turn_boundary(
+            .apply_live_llm_identity_under_runtime_turn_boundary(
                 session_id,
                 adapter,
                 identity.clone(),
@@ -468,7 +782,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         visibility_state: Option<SessionToolVisibilityState>,
     ) -> Result<(), RuntimeDriverError> {
         self.service
-            .apply_runtime_session_tool_visibility_state_under_runtime_turn_boundary(
+            .apply_live_tool_visibility_state_under_runtime_turn_boundary(
                 session_id,
                 visibility_state,
             )
@@ -478,15 +792,14 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
 
     async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
         self.service
-            .persist_live_session_now_under_runtime_turn_boundary(session_id)
+            .persist_live_under_runtime_turn_boundary(session_id)
             .await
-            .map(|_| ())
             .map_err(session_error_to_runtime_driver)
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
         self.service
-            .discard_live_session_under_runtime_turn_boundary(session_id)
+            .discard_live_under_runtime_turn_boundary(session_id)
             .await
             .map_err(session_error_to_runtime_driver)
     }
@@ -529,6 +842,7 @@ mod tests {
         SessionLlmReconfigureRequest {
             model: model.map(str::to_string),
             provider: provider.map(str::to_string),
+            self_hosted_server_id: None,
             provider_params: None,
             auth_binding,
         }

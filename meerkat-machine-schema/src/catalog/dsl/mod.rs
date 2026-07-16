@@ -722,7 +722,10 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 "ResumeProviderSelection",
                 &["RecomputeFromModel", "UseOverride", "UseStored"],
             ),
-            NamedTypeBinding::string_enum("ResumeSelfHostedSelection", &["Clear", "Retain"]),
+            NamedTypeBinding::string_enum(
+                "ResumeSelfHostedSelection",
+                &["Clear", "UseOverride", "Retain"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveSessionAuthorityKind",
                 &["LiveAuthoritative", "DurableAuthoritative"],

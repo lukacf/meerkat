@@ -529,6 +529,7 @@ function mobTurnStartPayload(
   setIfDefined(payload, "keep_alive", options?.keepAlive);
   setIfDefined(payload, "model", options?.model);
   setIfDefined(payload, "provider", options?.provider);
+  setIfDefined(payload, "self_hosted_server_id", options?.selfHostedServerId);
   setIfDefined(payload, "max_tokens", options?.maxTokens);
   setIfDefined(payload, "system_prompt", options?.systemPrompt);
   setIfDefined(payload, "output_schema", options?.outputSchema);
@@ -3295,6 +3296,9 @@ export class MeerkatClient {
     if (options?.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options?.model) params.model = options.model;
     if (options?.provider) params.provider = options.provider;
+    if (options?.selfHostedServerId != null) {
+      params.self_hosted_server_id = options.selfHostedServerId;
+    }
     if (options?.maxTokens) params.max_tokens = options.maxTokens;
     if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
     if (options?.outputSchema) params.output_schema = options.outputSchema;
@@ -3344,6 +3348,9 @@ export class MeerkatClient {
     if (options?.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options?.model) params.model = options.model;
     if (options?.provider) params.provider = options.provider;
+    if (options?.selfHostedServerId != null) {
+      params.self_hosted_server_id = options.selfHostedServerId;
+    }
     if (options?.maxTokens) params.max_tokens = options.maxTokens;
     if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
     if (options?.outputSchema) params.output_schema = options.outputSchema;

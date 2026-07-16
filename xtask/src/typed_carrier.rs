@@ -52,6 +52,7 @@ pub const TYPED_CARRIER_REGISTRY: &[CarrierEntry] = &[
     // meerkat-core/src/lifecycle/run_primitive.rs
     ("RuntimeTurnMetadata", "model", "ModelId"),
     ("RuntimeTurnMetadata", "provider", "Provider"),
+    ("RuntimeTurnMetadata", "self_hosted_server_id", "String"),
     (
         "RuntimeTurnMetadata",
         "provider_params",

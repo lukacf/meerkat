@@ -1513,6 +1513,8 @@ pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<meerkat_core::Provider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
@@ -1602,6 +1604,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
                 .map(|v| v.into_iter().map(Into::into).collect()),
             model: value.model.map(|m| m.as_str().to_string()),
             provider: value.provider,
+            self_hosted_server_id: value.self_hosted_server_id,
             provider_params: value.provider_params.map(Into::into),
             auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),
@@ -1626,6 +1629,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
                 .map(|v| v.into_iter().map(Into::into).collect()),
             model: value.model.map(ModelId::new),
             provider: value.provider,
+            self_hosted_server_id: value.self_hosted_server_id,
             provider_params: value.provider_params.map(Into::into),
             auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),

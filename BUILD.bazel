@@ -473,6 +473,7 @@ test_suite(
         "//meerkat-mob:kickoff_spawn_teardown_quiesce_test",
         "//meerkat-mob:meerkat_mob_unit_test",
         "//meerkat-mob:member_session_bindings_test",
+        "//meerkat-mob:member_turn_options_public_api_test",
         "//meerkat-mob:member_upcall_lane_test",
         "//meerkat-mob:mob_host_binding_authority_test",
         "//meerkat-mob:mob_orchestrator_kernel_test",

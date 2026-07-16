@@ -3110,6 +3110,10 @@ impl MobSessionService for MockSessionService {
         true
     }
 
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
+    }
+
     async fn live_session_actor_registered(
         &self,
         session_id: &SessionId,
@@ -8501,6 +8505,10 @@ impl MobSessionService for PersistedListingSessionService {
         self.inner.supports_persistent_sessions()
     }
 
+    fn supports_runtime_turn_apply(&self) -> bool {
+        self.inner.supports_runtime_turn_apply()
+    }
+
     async fn live_session_actor_registered(
         &self,
         session_id: &SessionId,
@@ -8777,6 +8785,10 @@ impl MobSessionService for InactiveReadSessionService {
 
     fn supports_persistent_sessions(&self) -> bool {
         self.inner.supports_persistent_sessions()
+    }
+
+    fn supports_runtime_turn_apply(&self) -> bool {
+        self.inner.supports_runtime_turn_apply()
     }
 
     async fn live_session_actor_registered(
@@ -18487,6 +18499,68 @@ async fn test_flow_step_tool_overlay_changes_runtime_visible_tools_and_restores_
 }
 
 #[tokio::test]
+async fn test_member_turn_options_dispatch_context_reaches_session_dispatcher() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile")
+        .external_addressable = true;
+    let identity = AgentIdentity::from("w-member-turn-dispatch-context");
+    let (handle, _provider_visible_tools, provider_turn_overlays) =
+        create_test_mob_with_overlay_probe_service_and_workgraph(definition, None).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+
+    let dispatch_context = BTreeMap::from([(
+        "host.routing_hint".to_string(),
+        serde_json::json!({ "shard": "blue" }),
+    )]);
+    let turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("preserve trusted dispatch metadata".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::new().with_turn_tool_overlay(TurnToolOverlay {
+                allowed_tools: Some(vec!["alpha".into()]),
+                dispatch_context: dispatch_context.clone(),
+                ..Default::default()
+            }),
+            None,
+        )
+        .await
+        .expect("member turn with dispatch context should be admitted");
+    turn.wait()
+        .await
+        .expect("member turn with dispatch context should execute");
+
+    let applied_overlay = provider_turn_overlays
+        .lock()
+        .expect("provider_turn_overlays lock poisoned")
+        .last()
+        .cloned()
+        .flatten()
+        .expect("session dispatcher should receive the turn overlay");
+    assert_eq!(applied_overlay.dispatch_context, dispatch_context);
+    assert_eq!(
+        applied_overlay.allowed_tools,
+        Some(vec![meerkat_core::ToolName::from("alpha")])
+    );
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[tokio::test]
 async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn() {
     let definition = sample_definition();
     let identity = AgentIdentity::from("w-attention");
@@ -22436,6 +22510,55 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         external.delivered_input_ids().await.len(),
         1,
         "peer-only direct turn should use request/ack delivery with one logical input admission"
+    );
+
+    let peer_member = resumed
+        .member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("peer-only member handle");
+    let metadata_error = peer_member
+        .start_turn(
+            ContentInput::from("unsupported peer-only override".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "remote-hot-swap",
+                )),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect_err("peer-only delivery must not silently drop runtime metadata");
+    assert!(matches!(
+        metadata_error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            ref reason,
+        } if reason.contains("tracked turn event streams are not supported")
+            && reason.contains("peer-only")
+    ));
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+    let event_error = peer_member
+        .start_turn(
+            ContentInput::from("unsupported peer-only event stream".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            Some(event_tx),
+        )
+        .await
+        .expect_err("peer-only delivery must reject tracked event streams before admission");
+    assert!(matches!(
+        event_error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            ..
+        }
+    ));
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "unsupported peer-only carriers must be rejected before remote delivery"
     );
 
     let snapshot = resumed
@@ -30147,6 +30270,7 @@ async fn test_external_turn_unknown_meerkat_fails() {
             "Hello".to_string().into(),
             meerkat_core::types::HandlingMode::Queue,
             None,
+            super::handle::MemberTurnObservers::default(),
         )
         .await;
     assert!(matches!(result, Err(MobError::MemberNotFound(_))));
@@ -31361,8 +31485,16 @@ async fn test_flow_dispatch_turn_driven_mode_uses_machine_bound_session() {
         .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
         .await
         .expect("machine binding for turn-driven worker");
-    let baseline_start_turn = service.start_turn_call_count();
-    let baseline_prompt_count = service.recorded_start_turn_prompts().await.len();
+    // The autonomous lead's keep-alive turn is admitted in the background and
+    // may race this snapshot under suite load. Scope the assertion to the
+    // worker binding so it detects duplicate flow dispatches, not unrelated
+    // kickoff scheduling.
+    let baseline_machine_session_turns = service
+        .recorded_start_turn_prompts()
+        .await
+        .iter()
+        .filter(|(session_id, _)| session_id == &machine_session)
+        .count();
 
     let run_id = handle
         .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
@@ -31376,18 +31508,14 @@ async fn test_flow_dispatch_turn_driven_mode_uses_machine_bound_session() {
         terminal.failure_ledger,
         terminal.step_ledger
     );
-    assert_eq!(
-        service.start_turn_call_count(),
-        baseline_start_turn + 1,
-        "turn-driven flow dispatch should issue one start_turn"
-    );
     let prompts = service.recorded_start_turn_prompts().await;
     assert_eq!(
         prompts
-            .get(baseline_prompt_count)
-            .map(|(session_id, _)| session_id),
-        Some(&machine_session),
-        "turn-driven flow dispatch must realize through the MobMachine session binding"
+            .iter()
+            .filter(|(session_id, _)| session_id == &machine_session)
+            .count(),
+        baseline_machine_session_turns + 1,
+        "turn-driven flow dispatch must issue exactly one start_turn through the MobMachine session binding"
     );
 }
 
@@ -38707,6 +38835,214 @@ async fn create_test_mob_with_real_comms(
 /// Uses real inproc comms delivery, a real MeerkatMachine, and records
 /// runtime-applied prompts so tests can prove peer inbox traffic still reaches
 /// `apply_runtime_turn()` after the initial autonomous kickoff turn has exited.
+#[derive(Clone)]
+struct RecordingSessionLlmReconfigureHost {
+    current_identity: Arc<std::sync::Mutex<meerkat_core::SessionLlmIdentity>>,
+    current_visibility: Arc<std::sync::Mutex<meerkat_core::SessionToolVisibilityState>>,
+    live_apply_count: Arc<AtomicU64>,
+    fail_live_apply: Arc<AtomicBool>,
+    boundary_acquire_count: Arc<AtomicU64>,
+    turn_finalization_gate: Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl RecordingSessionLlmReconfigureHost {
+    fn new() -> Self {
+        let current_visibility = meerkat_core::SessionToolVisibilityState {
+            capability_base_filter: meerkat_core::capability_base_filter_for_image_tool_results(
+                false,
+            ),
+            ..Default::default()
+        };
+        Self {
+            current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+                model: "baseline-model".to_string(),
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: Some(Default::default()),
+                auth_binding: None,
+            })),
+            current_visibility: Arc::new(std::sync::Mutex::new(current_visibility)),
+            live_apply_count: Arc::new(AtomicU64::new(0)),
+            fail_live_apply: Arc::new(AtomicBool::new(false)),
+            boundary_acquire_count: Arc::new(AtomicU64::new(0)),
+            turn_finalization_gate: None,
+        }
+    }
+
+    fn with_turn_finalization_gate(gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self {
+            turn_finalization_gate: Some(gate),
+            ..Self::new()
+        }
+    }
+
+    fn current_identity(&self) -> meerkat_core::SessionLlmIdentity {
+        self.current_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_fail_live_apply(&self, enabled: bool) {
+        self.fail_live_apply.store(enabled, Ordering::SeqCst);
+    }
+}
+
+fn test_session_llm_capabilities() -> meerkat_runtime::SessionLlmCapabilitySurface {
+    meerkat_runtime::SessionLlmCapabilitySurface {
+        supports_temperature: true,
+        supports_thinking: true,
+        supports_reasoning: true,
+        inline_video: false,
+        vision: false,
+        image_input: false,
+        image_tool_results: false,
+        supports_web_search: false,
+        image_generation: false,
+        realtime: false,
+        call_timeout_secs: None,
+    }
+}
+
+#[async_trait]
+impl meerkat_runtime::SessionLlmReconfigureHost for RecordingSessionLlmReconfigureHost {
+    async fn acquire_turn_finalization_boundary(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        self.boundary_acquire_count.fetch_add(1, Ordering::SeqCst);
+        match self.turn_finalization_gate.as_ref() {
+            Some(gate) => Ok(Box::new(Arc::clone(gate).lock_owned().await)),
+            None => Ok(Box::new(())),
+        }
+    }
+
+    async fn hydrate_session_llm_state(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<meerkat_runtime::HydratedSessionLlmState, meerkat_runtime::RuntimeDriverError> {
+        Ok(meerkat_runtime::HydratedSessionLlmState {
+            current_identity: self.current_identity(),
+            current_visibility_state: self
+                .current_visibility
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            current_capability_surface: Some(test_session_llm_capabilities()),
+            capability_surface_status: meerkat_runtime::SessionLlmCapabilitySurfaceStatus::Resolved,
+            base_tool_names: Default::default(),
+        })
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &meerkat_runtime::SessionLlmReconfigureRequest,
+        current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<meerkat_runtime::ResolvedSessionLlmReconfigure, meerkat_runtime::RuntimeDriverError>
+    {
+        let provider = request
+            .provider
+            .as_deref()
+            .map(|provider| {
+                Provider::parse_strict(provider).ok_or_else(|| {
+                    meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                        reason: format!("unknown test provider '{provider}'"),
+                    }
+                })
+            })
+            .transpose()?
+            .unwrap_or(current_identity.provider);
+        let provider_params = match request.provider_params.as_ref() {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(value)) => {
+                Some(value.clone())
+            }
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => None,
+            None => current_identity.provider_params.clone(),
+        };
+        let auth_binding = match request.auth_binding.as_ref() {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(value)) => {
+                Some(value.clone())
+            }
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => None,
+            None => current_identity.auth_binding.clone(),
+        };
+        Ok(meerkat_runtime::ResolvedSessionLlmReconfigure {
+            target_identity: meerkat_core::SessionLlmIdentity {
+                model: request
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| current_identity.model.clone()),
+                provider,
+                self_hosted_server_id: if provider == Provider::SelfHosted {
+                    request
+                        .self_hosted_server_id
+                        .clone()
+                        .or_else(|| current_identity.self_hosted_server_id.clone())
+                } else {
+                    None
+                },
+                provider_params,
+                auth_binding,
+            },
+            target_capability_surface: test_session_llm_capabilities(),
+        })
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        if self.fail_live_apply.load(Ordering::SeqCst) {
+            return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                reason: "injected live LLM apply failure".to_string(),
+            });
+        }
+        *self
+            .current_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity.clone();
+        self.live_apply_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        _session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        *self
+            .current_visibility
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            visibility_state.unwrap_or_default();
+        Ok(())
+    }
+
+    async fn persist_live_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        Ok(())
+    }
+
+    async fn discard_live_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeTurnPromptBarrier {
+    prompt_substring: String,
+    entered: Arc<tokio::sync::Notify>,
+}
+
 struct RuntimeBackedRealCommsSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<meerkat_comms::CommsRuntime>>>,
     actor_registry: meerkat_session::LiveSessionActorRegistry,
@@ -38717,7 +39053,11 @@ struct RuntimeBackedRealCommsSessionService {
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     append_system_context_delay_ms: AtomicU64,
     block_runtime_turns: AtomicBool,
+    fail_runtime_turns: AtomicBool,
+    fail_runtime_checkpoint: AtomicBool,
+    return_extraction_failure: AtomicBool,
     runtime_turn_started: tokio::sync::Notify,
+    runtime_turn_prompt_barriers: RwLock<HashMap<SessionId, RuntimeTurnPromptBarrier>>,
     release_runtime_turns: tokio::sync::Notify,
     block_session_reads: AtomicBool,
     session_read_entered: tokio::sync::Notify,
@@ -38726,6 +39066,21 @@ struct RuntimeBackedRealCommsSessionService {
     applied_runtime_context_appends: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     applied_runtime_render_metadata:
         RwLock<HashMap<SessionId, Vec<Option<meerkat_core::types::RenderMetadata>>>>,
+    applied_runtime_turn_metadata: RwLock<
+        HashMap<
+            SessionId,
+            Vec<Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>>,
+        >,
+    >,
+    runtime_llm_identity_probe:
+        std::sync::RwLock<Option<Arc<std::sync::Mutex<meerkat_core::SessionLlmIdentity>>>>,
+    observed_runtime_llm_identities:
+        RwLock<HashMap<SessionId, Vec<meerkat_core::SessionLlmIdentity>>>,
+    emit_runtime_event_before_completion: AtomicBool,
+    runtime_event_delta_count: AtomicU64,
+    applied_runtime_contributing_input_ids:
+        RwLock<HashMap<SessionId, Vec<Vec<meerkat_core::InputId>>>>,
+    turn_finalization_gate: std::sync::RwLock<Option<Arc<tokio::sync::Mutex<()>>>>,
     active_runtime_runs: RwLock<HashMap<SessionId, meerkat_core::RunId>>,
 }
 
@@ -38741,7 +39096,11 @@ impl RuntimeBackedRealCommsSessionService {
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             append_system_context_delay_ms: AtomicU64::new(0),
             block_runtime_turns: AtomicBool::new(false),
+            fail_runtime_turns: AtomicBool::new(false),
+            fail_runtime_checkpoint: AtomicBool::new(false),
+            return_extraction_failure: AtomicBool::new(false),
             runtime_turn_started: tokio::sync::Notify::new(),
+            runtime_turn_prompt_barriers: RwLock::new(HashMap::new()),
             release_runtime_turns: tokio::sync::Notify::new(),
             block_session_reads: AtomicBool::new(false),
             session_read_entered: tokio::sync::Notify::new(),
@@ -38749,6 +39108,13 @@ impl RuntimeBackedRealCommsSessionService {
             applied_runtime_prompts: RwLock::new(HashMap::new()),
             applied_runtime_context_appends: RwLock::new(HashMap::new()),
             applied_runtime_render_metadata: RwLock::new(HashMap::new()),
+            applied_runtime_turn_metadata: RwLock::new(HashMap::new()),
+            runtime_llm_identity_probe: std::sync::RwLock::new(None),
+            observed_runtime_llm_identities: RwLock::new(HashMap::new()),
+            emit_runtime_event_before_completion: AtomicBool::new(false),
+            runtime_event_delta_count: AtomicU64::new(1),
+            applied_runtime_contributing_input_ids: RwLock::new(HashMap::new()),
+            turn_finalization_gate: std::sync::RwLock::new(None),
             active_runtime_runs: RwLock::new(HashMap::new()),
         }
     }
@@ -38864,7 +39230,23 @@ impl RuntimeBackedRealCommsSessionService {
             .write()
             .await
             .remove(session_id);
+        self.applied_runtime_turn_metadata
+            .write()
+            .await
+            .remove(session_id);
+        self.observed_runtime_llm_identities
+            .write()
+            .await
+            .remove(session_id);
+        self.applied_runtime_contributing_input_ids
+            .write()
+            .await
+            .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.runtime_turn_prompt_barriers
+            .write()
+            .await
+            .remove(session_id);
         drop(sessions);
         Ok(true)
     }
@@ -38883,8 +39265,76 @@ impl RuntimeBackedRealCommsSessionService {
         self.block_runtime_turns.store(enabled, Ordering::Relaxed);
     }
 
+    fn set_fail_runtime_turns(&self, enabled: bool) {
+        self.fail_runtime_turns.store(enabled, Ordering::Relaxed);
+    }
+
+    fn set_fail_runtime_checkpoint(&self, enabled: bool) {
+        self.fail_runtime_checkpoint
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    fn set_return_extraction_failure(&self, enabled: bool) {
+        self.return_extraction_failure
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    fn observe_runtime_llm_identity_from(&self, host: &RecordingSessionLlmReconfigureHost) {
+        *self
+            .runtime_llm_identity_probe
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::clone(&host.current_identity));
+    }
+
     fn release_runtime_turns(&self) {
         self.release_runtime_turns.notify_waiters();
+    }
+
+    fn release_one_runtime_turn(&self) {
+        self.release_runtime_turns.notify_one();
+    }
+
+    async fn arm_runtime_turn_prompt_barrier(
+        &self,
+        session_id: &SessionId,
+        prompt_substring: impl Into<String>,
+    ) -> Arc<tokio::sync::Notify> {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        self.runtime_turn_prompt_barriers.write().await.insert(
+            session_id.clone(),
+            RuntimeTurnPromptBarrier {
+                prompt_substring: prompt_substring.into(),
+                entered: Arc::clone(&entered),
+            },
+        );
+        entered
+    }
+
+    async fn clear_runtime_turn_prompt_barrier(&self, session_id: &SessionId) {
+        self.runtime_turn_prompt_barriers
+            .write()
+            .await
+            .remove(session_id);
+    }
+
+    fn set_emit_runtime_event_before_completion(&self, enabled: bool) {
+        self.emit_runtime_event_before_completion
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    fn set_runtime_event_delta_count(&self, count: u64) {
+        self.runtime_event_delta_count
+            .store(count, Ordering::Relaxed);
+    }
+
+    fn install_non_reentrant_turn_finalization_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        *self
+            .turn_finalization_gate
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
     }
 
     fn set_block_session_reads(&self, enabled: bool) {
@@ -38901,6 +39351,18 @@ impl RuntimeBackedRealCommsSessionService {
 
     async fn applied_runtime_prompts(&self, session_id: &SessionId) -> Vec<ContentInput> {
         self.applied_runtime_prompts
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn applied_runtime_contributing_input_ids(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<Vec<meerkat_core::InputId>> {
+        self.applied_runtime_contributing_input_ids
             .read()
             .await
             .get(session_id)
@@ -38925,6 +39387,30 @@ impl RuntimeBackedRealCommsSessionService {
         session_id: &SessionId,
     ) -> Vec<Option<meerkat_core::types::RenderMetadata>> {
         self.applied_runtime_render_metadata
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn applied_runtime_turn_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>> {
+        self.applied_runtime_turn_metadata
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn observed_runtime_llm_identities(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<meerkat_core::SessionLlmIdentity> {
+        self.observed_runtime_llm_identities
             .read()
             .await
             .get(session_id)
@@ -39205,6 +39691,26 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         true
     }
 
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
+    }
+
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
+    {
+        let gate = self
+            .turn_finalization_gate
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match gate {
+            Some(gate) => Ok(Box::new(gate.lock_owned().await)),
+            None => Ok(Box::new(())),
+        }
+    }
+
     async fn live_session_actor_registered(
         &self,
         session_id: &SessionId,
@@ -39265,7 +39771,20 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        let event_tx = req.event_tx.clone();
+        let applied_turn_metadata = req.runtime.turn_metadata.clone();
         let provider_visible_prompt = provider_visible_prompt_from_start_turn_request(&req);
+        let prompt_barrier = self
+            .runtime_turn_prompt_barriers
+            .read()
+            .await
+            .get(session_id)
+            .filter(|barrier| {
+                provider_visible_prompt
+                    .text_content()
+                    .contains(&barrier.prompt_substring)
+            })
+            .cloned();
         let pre_turn_context_appends = req.runtime.pre_turn_context_appends;
         if !pre_turn_context_appends.is_empty() {
             for append in pre_turn_context_appends {
@@ -39289,6 +39808,25 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             }
         }
 
+        let identity_probe = {
+            self.runtime_llm_identity_probe
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        if let Some(identity_probe) = identity_probe {
+            let identity = identity_probe
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            self.observed_runtime_llm_identities
+                .write()
+                .await
+                .entry(session_id.clone())
+                .or_default()
+                .push(identity);
+        }
+
         self.applied_runtime_prompts
             .write()
             .await
@@ -39306,14 +39844,100 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                     .as_ref()
                     .and_then(|meta| meta.render_metadata.clone()),
             );
+        self.applied_runtime_turn_metadata
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push(applied_turn_metadata);
         self.active_runtime_runs
             .write()
             .await
             .insert(session_id.clone(), run_id.clone());
+        self.applied_runtime_contributing_input_ids
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push(contributing_input_ids.clone());
 
-        if self.block_runtime_turns.load(Ordering::Relaxed) {
+        if self
+            .emit_runtime_event_before_completion
+            .load(Ordering::Relaxed)
+            && let Some(event_tx) = event_tx
+        {
+            let delta_count = self.runtime_event_delta_count.load(Ordering::Relaxed);
+            for seq in 1..=delta_count {
+                let _ = event_tx
+                    .send(EventEnvelope::new_session(
+                        session_id.clone(),
+                        seq,
+                        None,
+                        AgentEvent::TextDelta {
+                            delta: format!("runtime event {seq} before commit"),
+                        },
+                    ))
+                    .await;
+            }
+            let terminal = if self.return_extraction_failure.load(Ordering::Relaxed) {
+                AgentEvent::ExtractionFailed {
+                    session_id: session_id.clone(),
+                    last_output: "runtime terminal before commit".to_string(),
+                    attempts: 1,
+                    reason: "injected extraction failure".to_string(),
+                }
+            } else {
+                AgentEvent::RunCompleted {
+                    session_id: session_id.clone(),
+                    result: "runtime terminal before commit".to_string(),
+                    structured_output: None,
+                    extraction_required: false,
+                    usage: Usage::default(),
+                    terminal_cause_kind: None,
+                }
+            };
+            let _ = event_tx
+                .send(EventEnvelope::new_session(
+                    session_id.clone(),
+                    delta_count + 1,
+                    None,
+                    terminal,
+                ))
+                .await;
+            let _ = event_tx
+                .send(EventEnvelope::new_session(
+                    session_id.clone(),
+                    delta_count + 2,
+                    None,
+                    AgentEvent::InteractionComplete {
+                        interaction_id: meerkat_core::interaction::InteractionId(
+                            uuid::Uuid::new_v4(),
+                        ),
+                        result: "runtime interaction terminal before commit".to_string(),
+                        structured_output: None,
+                    },
+                ))
+                .await;
+        }
+
+        let block_all_runtime_turns = self.block_runtime_turns.load(Ordering::Relaxed);
+        if block_all_runtime_turns {
             self.runtime_turn_started.notify_waiters();
+        }
+        if let Some(barrier) = &prompt_barrier {
+            barrier.entered.notify_waiters();
+        }
+        if block_all_runtime_turns || prompt_barrier.is_some() {
             self.release_runtime_turns.notified().await;
+        }
+
+        if self.fail_runtime_turns.load(Ordering::Relaxed) {
+            self.active_runtime_runs.write().await.remove(session_id);
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "injected runtime turn failure".to_string(),
+                ),
+            ));
         }
 
         if let Some(notifier) = self
@@ -39331,17 +39955,69 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
 
         self.active_runtime_runs.write().await.remove(session_id);
 
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
-                run_id,
-                boundary,
-                contributing_input_ids,
-                conversation_digest: None,
-                message_count: 0,
-            },
-            session_snapshot: None,
-            terminal: None,
-        })
+        let inject_checkpoint_failure = self.fail_runtime_checkpoint.load(Ordering::Relaxed);
+        let receipt = meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+            run_id,
+            boundary,
+            contributing_input_ids,
+            conversation_digest: inject_checkpoint_failure.then(|| {
+                // SHA-256 of the serialized empty message list (`[]`) in the
+                // valid synthetic Session witness below.
+                "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945".to_string()
+            }),
+            message_count: 0,
+        };
+        let session_snapshot = if inject_checkpoint_failure {
+            Some(
+                serde_json::to_vec(&Session::with_id(session_id.clone())).map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to build valid injected committed session snapshot: {error}"
+                    )))
+                })?,
+            )
+        } else {
+            None
+        };
+        if self.return_extraction_failure.load(Ordering::Relaxed) {
+            let mut result = mock_run_result(
+                session_id.clone(),
+                "runtime main turn completed".to_string(),
+            );
+            result.extraction_error = Some(meerkat_core::types::ExtractionError {
+                last_output: result.text.clone(),
+                attempts: 1,
+                reason: "injected extraction failure".to_string(),
+            });
+            Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                    receipt,
+                    session_snapshot,
+                    result,
+                ),
+            )
+        } else {
+            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                receipt,
+                session_snapshot,
+                terminal: None,
+            })
+        }
+    }
+
+    async fn checkpoint_committed_runtime_session_snapshot(
+        &self,
+        _session_id: &SessionId,
+        _session_snapshot: &[u8],
+    ) -> Result<(), SessionError> {
+        if self.fail_runtime_checkpoint.load(Ordering::Relaxed) {
+            Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "injected runtime checkpoint failure".to_string(),
+                ),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     async fn apply_runtime_context_appends(
@@ -39437,7 +40113,19 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .write()
             .await
             .remove(session_id);
+        self.applied_runtime_turn_metadata
+            .write()
+            .await
+            .remove(session_id);
+        self.observed_runtime_llm_identities
+            .write()
+            .await
+            .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.runtime_turn_prompt_barriers
+            .write()
+            .await
+            .remove(session_id);
         drop(sessions);
         Ok(())
     }
@@ -40892,8 +41580,7 @@ async fn test_turn_driven_submit_work_steer_queues_when_exact_boundary_is_unavai
 
     service.set_block_session_reads(false);
     service.release_session_reads();
-    service.set_block_runtime_turns(false);
-    service.release_runtime_turns();
+    service.release_one_runtime_turn();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let prompts = service.applied_runtime_prompts(&sid_worker).await;
@@ -41391,8 +42078,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
         .await
         .len();
     let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
-    let delivery_observation_timeout = Duration::from_secs(5);
-    service.set_keep_alive_turns_complete_immediately(false);
+    let delivery_observation_timeout = Duration::from_secs(15);
 
     let requester_comms = service
         .real_comms(&sid_requester)
@@ -41402,6 +42088,13 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
         .real_comms(&sid_responder)
         .await
         .expect("responder comms");
+
+    let requester_runtime_started_notify = service
+        .arm_runtime_turn_prompt_barrier(&sid_requester, "body: keep requester busy")
+        .await;
+    let requester_runtime_started = requester_runtime_started_notify.notified();
+    tokio::pin!(requester_runtime_started);
+    requester_runtime_started.as_mut().enable();
 
     CoreCommsRuntime::send(
         &*responder_comms,
@@ -41421,21 +42114,32 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     .await
     .expect("busy message should send");
 
-    tokio::time::timeout(delivery_observation_timeout, async {
-        loop {
-            let prompts = service.applied_runtime_prompts(&sid_requester).await;
-            if prompts
-                .iter()
-                .skip(requester_prompt_baseline)
-                .any(|prompt| prompt.text_content().contains("body: keep requester busy"))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("requester should be in a running turn before the pong lands");
+    if tokio::time::timeout(delivery_observation_timeout, &mut requester_runtime_started)
+        .await
+        .is_err()
+    {
+        let prompts = service.applied_runtime_prompts(&sid_requester).await;
+        let snapshot = service
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&sid_requester)
+            .await;
+        panic!(
+            "requester runtime apply should start and block before the pong lands; prompts={prompts:?} snapshot={snapshot:?}"
+        );
+    }
+    let requester_prompts = service.applied_runtime_prompts(&sid_requester).await;
+    assert!(
+        requester_prompts
+            .iter()
+            .skip(requester_prompt_baseline)
+            .any(|prompt| prompt.text_content().contains("body: keep requester busy")),
+        "runtime-start barrier fired without recording the busy requester prompt; prompts={requester_prompts:?}"
+    );
+    service.set_keep_alive_turns_complete_immediately(false);
+    service
+        .clear_runtime_turn_prompt_barrier(&sid_requester)
+        .await;
+    service.release_one_runtime_turn();
 
     let request_receipt = CoreCommsRuntime::send(
         &*requester_comms,
@@ -53732,6 +54436,7 @@ async fn mob_runtime_parity_execute_probe(
                 meerkat_core::types::ContentInput::from("mob runtime parity external turn"),
                 meerkat_core::types::HandlingMode::Queue,
                 None,
+                super::handle::MemberTurnObservers::default(),
             )
             .await
             .map(|_| summarize_mob_runtime_success(probe, "member_delivery")),
@@ -57563,4 +58268,1254 @@ async fn dispatch_handles_bind_their_authority_lanes() {
         "dispatcher construction must preserve the exact upcall execution fence"
     );
     handle.shutdown().await.expect("shutdown test mob");
+}
+
+// Runtime-backed tracked-turn LLM identity and terminal-event regressions.
+#[tokio::test]
+async fn test_batched_steer_turns_fan_out_complete_commit_gated_event_streams() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-batched-steer-observers");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_emit_runtime_event_before_completion(true);
+    service.set_runtime_event_delta_count(2);
+    service.set_block_runtime_turns(true);
+
+    // Pause after the first admission wakes the loop but before it acquires
+    // queue authority. The second real public Steer admission then shares the
+    // same generated same-boundary batch deterministically.
+    let (queue_gap_entered, queue_gap_release) = service
+        .runtime_adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let member = handle.member(&identity).await.expect("member handle");
+    let (event_a_tx, mut event_a_rx) = tokio::sync::mpsc::channel(1);
+    let mut turn_a = member
+        .start_turn(
+            ContentInput::Text("first batched steer".into()),
+            HandlingMode::Steer,
+            crate::MemberTurnOptions::default(),
+            Some(event_a_tx),
+        )
+        .await
+        .expect("first Steer admission");
+    tokio::time::timeout(Duration::from_secs(2), queue_gap_entered)
+        .await
+        .expect("runtime loop should pause before selecting the Steer batch")
+        .expect("queue-authority hook should remain armed");
+
+    let (event_b_tx, mut event_b_rx) = tokio::sync::mpsc::channel(1);
+    let mut turn_b = member
+        .start_turn(
+            ContentInput::Text("second batched steer".into()),
+            HandlingMode::Steer,
+            crate::MemberTurnOptions::default(),
+            Some(event_b_tx),
+        )
+        .await
+        .expect("second Steer admission");
+
+    assert_eq!(
+        turn_a
+            .wait_for_applied_llm_identity()
+            .await
+            .expect("first Steer identity acknowledgement"),
+        None
+    );
+    assert_eq!(
+        turn_b
+            .wait_for_applied_llm_identity()
+            .await
+            .expect("second Steer identity acknowledgement"),
+        None
+    );
+
+    let runtime_started = service.runtime_turn_started.notified();
+    queue_gap_release
+        .send(())
+        .expect("release runtime-loop queue-authority gap");
+    tokio::time::timeout(Duration::from_secs(2), runtime_started)
+        .await
+        .expect("batched Steer primitive should reach runtime apply");
+
+    let contributors = service
+        .applied_runtime_contributing_input_ids(&session_id)
+        .await;
+    assert_eq!(contributors.len(), 1, "both Steers must form one primitive");
+    assert_eq!(
+        contributors[0].len(),
+        2,
+        "the primitive must retain both contributing input identities"
+    );
+
+    // Capacity-one external receivers force delayed/backpressured delivery
+    // while the service attempts two deltas and both terminal frames. The
+    // fanout must preserve the complete ordered live sequence for each; the
+    // direct router regression separately proves the exact Full boundary.
+    for expected_seq in 1..=2 {
+        let event_a = tokio::time::timeout(Duration::from_secs(2), event_a_rx.recv())
+            .await
+            .expect("first observer should receive live delta")
+            .expect("first observer remains connected");
+        let event_b = tokio::time::timeout(Duration::from_secs(2), event_b_rx.recv())
+            .await
+            .expect("second observer should receive live delta")
+            .expect("second observer remains connected");
+        assert_eq!(event_a.seq, expected_seq);
+        assert_eq!(event_b.seq, expected_seq);
+        assert_eq!(event_a.event_id, event_b.event_id);
+        assert_eq!(event_a.source, event_b.source);
+        assert_eq!(event_a.source.session_id(), Some(&session_id));
+        match (&event_a.payload, &event_b.payload) {
+            (
+                AgentEvent::TextDelta { delta: delta_a },
+                AgentEvent::TextDelta { delta: delta_b },
+            ) => {
+                assert_eq!(delta_a, delta_b);
+            }
+            events => panic!("both observers should receive matching live deltas: {events:?}"),
+        }
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), event_a_rx.recv())
+            .await
+            .is_err(),
+        "first observer terminal must remain commit-gated"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), event_b_rx.recv())
+            .await
+            .is_err(),
+        "second observer terminal must remain commit-gated"
+    );
+
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    let (completion_a, completion_b) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(2), turn_a.wait()),
+        tokio::time::timeout(Duration::from_secs(2), turn_b.wait()),
+    );
+    completion_a
+        .expect("first Steer completion should resolve")
+        .expect("first Steer should succeed");
+    completion_b
+        .expect("second Steer completion should resolve")
+        .expect("second Steer should succeed");
+
+    for expected_seq in 3..=4 {
+        let event_a = tokio::time::timeout(Duration::from_secs(2), event_a_rx.recv())
+            .await
+            .expect("first observer should receive committed terminal")
+            .expect("first observer remains connected");
+        let event_b = tokio::time::timeout(Duration::from_secs(2), event_b_rx.recv())
+            .await
+            .expect("second observer should receive committed terminal")
+            .expect("second observer remains connected");
+        assert_eq!(event_a.seq, expected_seq);
+        assert_eq!(event_b.seq, expected_seq);
+        assert_eq!(event_a.event_id, event_b.event_id);
+        assert_eq!(event_a.source, event_b.source);
+        assert_eq!(event_a.source.session_id(), Some(&session_id));
+        match (expected_seq, &event_a.payload, &event_b.payload) {
+            (
+                3,
+                AgentEvent::RunCompleted {
+                    session_id: session_a,
+                    ..
+                },
+                AgentEvent::RunCompleted {
+                    session_id: session_b,
+                    ..
+                },
+            ) => {
+                assert_eq!(session_a, &session_id);
+                assert_eq!(session_b, &session_id);
+            }
+            (4, AgentEvent::InteractionComplete { .. }, AgentEvent::InteractionComplete { .. }) => {
+            }
+            events => {
+                panic!("both observers should receive matching ordered terminals: {events:?}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_runtime_backed_member_turn_hot_swap_preserves_binding_and_commit_truth() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-hot-swap");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let before = handle
+        .member_status(&identity)
+        .await
+        .expect("member status before turn");
+    let before_runtime_id = before
+        .agent_runtime_id
+        .clone()
+        .expect("active member runtime id");
+    let before_fence = before.fence_token.expect("active member fence");
+
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
+    service
+        .runtime_adapter
+        .set_session_llm_reconfigure_host(llm_host.clone());
+
+    service.set_block_runtime_turns(true);
+    service.set_emit_runtime_event_before_completion(true);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+    let requested_options = crate::MemberTurnOptions {
+        model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+            "hot-swap-model",
+        )),
+        provider: Some(Provider::OpenAI),
+        provider_params: Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
+        ..Default::default()
+    };
+    let member = handle.member(&identity).await.expect("member handle");
+
+    let (turn, runtime_started) = tokio::join!(
+        member.start_turn(
+            ContentInput::Text("use the hot-swap model".into()),
+            HandlingMode::Queue,
+            requested_options.clone(),
+            Some(event_tx),
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            service.runtime_turn_started.notified(),
+        ),
+    );
+    let turn = turn.expect("runtime-backed hot-swap turn should be admitted");
+    runtime_started.expect("runtime-backed turn should reach the core apply boundary");
+
+    assert_eq!(turn.receipt().agent_runtime_id, before_runtime_id);
+    assert_eq!(turn.receipt().fence_token, before_fence);
+    assert_eq!(
+        handle.resolve_bridge_session_id(&identity).await.as_ref(),
+        Some(&session_id),
+        "per-turn model selection must not replace the member session"
+    );
+
+    let applied = service.applied_runtime_turn_metadata(&session_id).await;
+    let applied = applied
+        .last()
+        .and_then(Option::as_ref)
+        .expect("runtime turn metadata should reach the canonical core boundary");
+    assert_eq!(applied.model, requested_options.model);
+    assert_eq!(applied.provider, requested_options.provider);
+    assert_eq!(
+        applied.provider_params, requested_options.provider_params,
+        "the preserve/set/clear provider-params tri-state must remain typed"
+    );
+
+    let live_event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("nonterminal event should stream before runtime completion")
+        .expect("event sender should remain connected");
+    assert!(matches!(live_event.payload, AgentEvent::TextDelta { .. }));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), event_rx.recv())
+            .await
+            .is_err(),
+        "terminal events must remain commit-gated"
+    );
+
+    let live_identity = llm_host.current_identity();
+    assert_eq!(live_identity.model, "hot-swap-model");
+    assert_eq!(live_identity.provider, Provider::OpenAI);
+    assert_eq!(live_identity.provider_params, None);
+    assert_eq!(llm_host.live_apply_count.load(Ordering::SeqCst), 1);
+
+    let mut completion = Box::pin(turn.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut completion)
+            .await
+            .is_err(),
+        "completion handle must remain pending until the runtime commits"
+    );
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    let delivery = tokio::time::timeout(Duration::from_secs(2), completion)
+        .await
+        .expect("completion handle should resolve after runtime completion")
+        .expect("committed runtime turn should succeed");
+    assert_eq!(delivery.agent_runtime_id, before_runtime_id);
+    assert_eq!(delivery.fence_token, before_fence);
+    let terminal_event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("terminal event should unblock after machine completion")
+        .expect("event sender should remain connected");
+    assert!(matches!(
+        terminal_event.payload,
+        AgentEvent::RunCompleted { .. }
+    ));
+
+    let after = handle
+        .member_status(&identity)
+        .await
+        .expect("member status after turn");
+    assert_eq!(after.agent_runtime_id.as_ref(), Some(&before_runtime_id));
+    assert_eq!(after.fence_token, Some(before_fence));
+    assert_eq!(after.current_bridge_session_id.as_ref(), Some(&session_id));
+}
+
+#[tokio::test]
+async fn test_member_turn_llm_reconfigure_does_not_reacquire_held_finalization_boundary() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-non-reentrant-llm-boundary");
+    handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead");
+
+    // The runtime loop acquires this service-owned gate before CoreExecutor::apply.
+    // The LLM host deliberately exposes the exact same non-reentrant gate so a
+    // call through the public control-plane reconfigure seam would self-deadlock.
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::with_turn_finalization_gate(gate));
+    service
+        .runtime_adapter
+        .set_session_llm_reconfigure_host(llm_host.clone());
+
+    let mut turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("switch under the already-held boundary".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "boundary-safe-model",
+                )),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("turn should be admitted");
+
+    let applied =
+        tokio::time::timeout(Duration::from_secs(2), turn.wait_for_applied_llm_identity())
+            .await
+            .expect("LLM reconfiguration must not deadlock on the held finalization boundary")
+            .expect("LLM reconfiguration should succeed")
+            .expect("identity override should produce an applied identity");
+    assert_eq!(applied.model, "boundary-safe-model");
+    assert_eq!(
+        llm_host.boundary_acquire_count.load(Ordering::SeqCst),
+        0,
+        "the runtime executor must use the under-boundary reconfigure seam"
+    );
+    tokio::time::timeout(Duration::from_secs(2), turn.wait())
+        .await
+        .expect("turn completion must not remain blocked on a nested guard")
+        .expect("turn should complete successfully");
+}
+
+#[tokio::test]
+async fn test_member_turn_reconfigure_failure_resolves_after_admission_without_applying_prompt() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-reconfigure-failure");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let prompts_before = service.applied_runtime_prompts(&session_id).await;
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
+    llm_host.set_fail_live_apply(true);
+    service
+        .runtime_adapter
+        .set_session_llm_reconfigure_host(llm_host.clone());
+
+    let member = handle.member(&identity).await.expect("member handle");
+    let mut turn = member
+        .start_turn(
+            ContentInput::Text("admit but do not apply this turn".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "unavailable-model",
+                )),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("MobMachine ingress must remain admitted before executor realization");
+    let identity_error = turn
+        .wait_for_applied_llm_identity()
+        .await
+        .expect_err("failed reconfiguration must fail the applied-identity acknowledgement");
+    assert!(
+        identity_error
+            .to_string()
+            .contains("injected live LLM apply failure")
+    );
+    let error = turn
+        .wait()
+        .await
+        .expect_err("failed live reconfiguration must fail the completion boundary");
+    assert!(
+        error
+            .to_string()
+            .contains("injected live LLM apply failure"),
+        "unexpected reconfiguration failure: {error}"
+    );
+    assert_eq!(llm_host.live_apply_count.load(Ordering::SeqCst), 0);
+    assert_eq!(llm_host.current_identity().model, "baseline-model");
+    assert_eq!(
+        service.applied_runtime_prompts(&session_id).await,
+        prompts_before,
+        "runtime prompt must not be applied after live reconfiguration fails"
+    );
+}
+
+#[tokio::test]
+async fn test_direct_session_member_rejects_llm_identity_override_before_mob_admission() {
+    let (handle, _service) = create_test_mob_with_real_comms(sample_definition()).await;
+    let identity = AgentIdentity::from("lead-direct-no-reconfigure");
+    handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn direct-session turn-driven member");
+
+    let error = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("must not run on the old model".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "unsupported-direct-model",
+                )),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect_err("direct session service must not silently ignore model override");
+    assert!(matches!(
+        error,
+        MobError::MissingMemberCapability {
+            ref member_id,
+            capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
+            context: "member turn LLM identity override",
+        } if member_id == &identity
+    ));
+
+    let server_only_error = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("must not silently ignore an exact local route".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                self_hosted_server_id: Some("local-b".to_string()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect_err("server-only identity override requires the runtime executor boundary");
+    assert!(matches!(
+        server_only_error,
+        MobError::MissingMemberCapability {
+            ref member_id,
+            capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
+            context: "member turn LLM identity override",
+        } if member_id == &identity
+    ));
+}
+
+#[tokio::test]
+async fn test_default_ephemeral_session_service_rejects_llm_override_without_host() {
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        PersistentMockBuilder,
+        16,
+    ));
+    assert!(
+        crate::runtime::MobSessionService::supports_runtime_turn_apply(service.as_ref()),
+        "the production ephemeral service can apply generic runtime turns"
+    );
+    let runtime_adapter = crate::runtime::MobSessionService::runtime_adapter(service.as_ref())
+        .expect("the production ephemeral service exposes a runtime adapter");
+    assert!(
+        !runtime_adapter.has_session_llm_reconfigure_host(),
+        "a default ephemeral adapter must not claim an uninstalled LLM host"
+    );
+
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile")
+        .external_addressable = true;
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create mob with production ephemeral service");
+    let identity = AgentIdentity::from("w-ephemeral-no-llm-host");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn production ephemeral worker");
+
+    let error = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("must reject before runtime admission".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::new().with_model(
+                meerkat_core::lifecycle::run_primitive::ModelId::new("unavailable-model"),
+            ),
+            None,
+        )
+        .await
+        .expect_err("generic runtime-turn support is not LLM-reconfigure support");
+    assert!(matches!(
+        error,
+        MobError::MissingMemberCapability {
+            ref member_id,
+            capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
+            context: "member turn LLM identity override",
+        } if member_id == &identity
+    ));
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[tokio::test]
+async fn test_ephemeral_session_service_accepts_llm_override_with_installed_host() {
+    let provider_visible_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_turn_overlays = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        OverlayProbeSessionAgentBuilder {
+            provider_visible_tools,
+            provider_turn_overlays,
+        },
+        16,
+    ));
+    let runtime_adapter = crate::runtime::MobSessionService::runtime_adapter(service.as_ref())
+        .expect("the production ephemeral service exposes a runtime adapter");
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
+    runtime_adapter.set_session_llm_reconfigure_host(llm_host.clone());
+    assert!(runtime_adapter.has_session_llm_reconfigure_host());
+
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile")
+        .external_addressable = true;
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create mob with configured production ephemeral service");
+    let identity = AgentIdentity::from("w-ephemeral-with-llm-host");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn production ephemeral worker");
+
+    let mut turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("apply through the installed host".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::new().with_model(
+                meerkat_core::lifecycle::run_primitive::ModelId::new("configured-host-model"),
+            ),
+            None,
+        )
+        .await
+        .expect("installed host should make the member capability realizable");
+    let applied = turn
+        .wait_for_applied_llm_identity()
+        .await
+        .expect("installed host should apply the requested identity")
+        .expect("model override should yield an applied identity");
+    assert_eq!(applied.model, "configured-host-model");
+    turn.wait()
+        .await
+        .expect("turn should complete through the production ephemeral service");
+    assert_eq!(llm_host.live_apply_count.load(Ordering::SeqCst), 1);
+    assert_eq!(llm_host.current_identity().model, "configured-host-model");
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[tokio::test]
+async fn test_queued_member_turns_apply_their_own_llm_identity_at_execution() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-queued-models");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
+    service.observe_runtime_llm_identity_from(&llm_host);
+    service
+        .runtime_adapter
+        .set_session_llm_reconfigure_host(llm_host.clone());
+    service.set_block_runtime_turns(true);
+    let member = handle.member(&identity).await.expect("member handle");
+
+    let (turn_a, turn_b, runtime_a_started) = tokio::join!(
+        member.start_turn(
+            ContentInput::Text("run A".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "shared-local-model",
+                )),
+                provider: Some(Provider::SelfHosted),
+                self_hosted_server_id: Some("local-a".to_string()),
+                ..Default::default()
+            },
+            None,
+        ),
+        member.start_turn(
+            ContentInput::Text("run B".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "shared-local-model",
+                )),
+                provider: Some(Provider::SelfHosted),
+                self_hosted_server_id: Some("local-b".to_string()),
+                ..Default::default()
+            },
+            None,
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            service.runtime_turn_started.notified()
+        ),
+    );
+    let mut turn_a = turn_a.expect("turn A admission");
+    let mut turn_b = turn_b.expect("turn B simultaneous admission");
+    runtime_a_started.expect("turn A should enter actual session apply");
+    let applied_a = turn_a
+        .wait_for_applied_llm_identity()
+        .await
+        .expect("turn A identity application")
+        .expect("turn A requested an identity");
+    assert_eq!(applied_a.model, "shared-local-model");
+    assert_eq!(applied_a.provider, Provider::SelfHosted);
+    assert_eq!(applied_a.self_hosted_server_id.as_deref(), Some("local-a"));
+
+    let mut applied_b = Box::pin(turn_b.wait_for_applied_llm_identity());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut applied_b)
+            .await
+            .is_err(),
+        "turn B identity must not apply while turn A owns the executor"
+    );
+
+    let observed_while_a_blocked = service.observed_runtime_llm_identities(&session_id).await;
+    assert_eq!(observed_while_a_blocked.len(), 1);
+    assert_eq!(observed_while_a_blocked[0].model, "shared-local-model");
+    assert_eq!(observed_while_a_blocked[0].provider, Provider::SelfHosted);
+    assert_eq!(
+        observed_while_a_blocked[0].self_hosted_server_id.as_deref(),
+        Some("local-a")
+    );
+    assert_eq!(
+        llm_host.current_identity().self_hosted_server_id.as_deref(),
+        Some("local-a"),
+        "queued turn B must not mutate the shared session while A executes"
+    );
+
+    service.release_one_runtime_turn();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if service
+                .observed_runtime_llm_identities(&session_id)
+                .await
+                .len()
+                == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("turn B should enter actual session apply after A commits");
+    let observed = service.observed_runtime_llm_identities(&session_id).await;
+    assert_eq!(observed[1].model, "shared-local-model");
+    assert_eq!(observed[1].provider, Provider::SelfHosted);
+    assert_eq!(
+        observed[1].self_hosted_server_id.as_deref(),
+        Some("local-b")
+    );
+    let applied_b = tokio::time::timeout(Duration::from_secs(2), applied_b)
+        .await
+        .expect("turn B identity acknowledgement")
+        .expect("turn B identity application")
+        .expect("turn B requested an identity");
+    assert_eq!(applied_b.model, "shared-local-model");
+    assert_eq!(applied_b.provider, Provider::SelfHosted);
+    assert_eq!(applied_b.self_hosted_server_id.as_deref(), Some("local-b"));
+
+    service.release_one_runtime_turn();
+    turn_a.wait().await.expect("turn A completion");
+    turn_b.wait().await.expect("turn B completion");
+}
+
+#[tokio::test]
+async fn test_finalization_failure_suppresses_buffered_success_terminal() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-finalization-failure");
+    handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead");
+    service.set_emit_runtime_event_before_completion(true);
+    service.set_fail_runtime_checkpoint(true);
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
+    service
+        .runtime_adapter
+        .set_session_llm_reconfigure_host(llm_host);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+
+    let mut turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("fail finalization".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "finalization-model",
+                )),
+                ..Default::default()
+            },
+            Some(event_tx),
+        )
+        .await
+        .expect("turn admission");
+    let applied = turn
+        .wait_for_applied_llm_identity()
+        .await
+        .expect("identity applies before finalization")
+        .expect("identity override");
+    assert_eq!(applied.model, "finalization-model");
+    let error = turn
+        .wait()
+        .await
+        .expect_err("checkpoint failure must fail tracked completion");
+    assert!(
+        error
+            .to_string()
+            .contains("runtime session checkpoint failed after commit"),
+        "unexpected finalization error: {error}"
+    );
+
+    let mut saw_delta = false;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await
+    {
+        saw_delta |= matches!(&event.payload, AgentEvent::TextDelta { .. });
+        assert!(
+            !matches!(
+                &event.payload,
+                AgentEvent::RunCompleted { .. }
+                    | AgentEvent::ExtractionSucceeded { .. }
+                    | AgentEvent::InteractionComplete { .. }
+                    | AgentEvent::InteractionCallbackPending { .. }
+            ),
+            "a success terminal must not escape when completion reports finalization failure"
+        );
+    }
+    assert!(saw_delta, "nonterminal output should still stream live");
+}
+
+#[tokio::test]
+async fn test_extraction_failure_releases_only_extraction_failure_terminal() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-extraction-failure");
+    handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead");
+    service.set_emit_runtime_event_before_completion(true);
+    service.set_return_extraction_failure(true);
+    let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
+    service
+        .runtime_adapter
+        .set_session_llm_reconfigure_host(llm_host);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+
+    let mut turn = handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .start_turn(
+            ContentInput::Text("fail structured extraction".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "extraction-model",
+                )),
+                ..Default::default()
+            },
+            Some(event_tx),
+        )
+        .await
+        .expect("turn admission");
+    let applied = turn
+        .wait_for_applied_llm_identity()
+        .await
+        .expect("identity applies before extraction terminal")
+        .expect("identity override");
+    assert_eq!(applied.model, "extraction-model");
+    turn.wait()
+        .await
+        .expect("main turn completion remains successful after extraction failure");
+
+    let mut saw_extraction_failure = false;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await
+    {
+        saw_extraction_failure |= matches!(&event.payload, AgentEvent::ExtractionFailed { .. });
+        assert!(
+            !matches!(
+                &event.payload,
+                AgentEvent::RunCompleted { .. }
+                    | AgentEvent::ExtractionSucceeded { .. }
+                    | AgentEvent::InteractionComplete { .. }
+                    | AgentEvent::InteractionCallbackPending { .. }
+            ),
+            "extraction failure must not be projected as a success terminal"
+        );
+    }
+    assert!(
+        saw_extraction_failure,
+        "the sole canonical ExtractionFailed terminal must be released"
+    );
+}
+
+#[tokio::test]
+async fn test_member_turn_rejects_conflicting_metadata_handling_mode_before_admission() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-handling-authority");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let prompts_before = service.applied_runtime_prompts(&session_id).await;
+
+    let error = handle
+        .external_turn_for_member(
+            identity,
+            ContentInput::Text("conflicting handling mode".into()),
+            HandlingMode::Queue,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+            super::handle::MemberTurnObservers::default(),
+        )
+        .await
+        .expect_err("flat handling mode must remain the only admission authority");
+    assert!(matches!(
+        error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            ..
+        }
+    ));
+    assert_eq!(
+        service.applied_runtime_prompts(&session_id).await,
+        prompts_before,
+        "handling-mode conflicts must fail before runtime admission"
+    );
+}
+
+#[tokio::test]
+async fn test_member_turn_handle_reports_post_admission_runtime_failure() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-tracked-failure");
+    handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn lead");
+    service
+        .runtime_adapter
+        .set_session_llm_reconfigure_host(Arc::new(RecordingSessionLlmReconfigureHost::new()));
+    service.set_block_runtime_turns(true);
+    service.set_fail_runtime_turns(true);
+
+    let member = handle.member(&identity).await.expect("member handle");
+    let (turn, runtime_started) = tokio::join!(
+        member.start_turn(
+            ContentInput::Text("fail after admission".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "applied-before-runtime-failure",
+                )),
+                ..Default::default()
+            },
+            None,
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            service.runtime_turn_started.notified(),
+        ),
+    );
+    let mut turn = turn.expect("runtime input should be admitted before execution failure");
+    runtime_started.expect("runtime turn should reach apply boundary");
+    assert!(
+        turn.session_id().is_some(),
+        "tracked admission should expose its exact bridge session"
+    );
+    let applied =
+        tokio::time::timeout(Duration::from_secs(2), turn.wait_for_applied_llm_identity())
+            .await
+            .expect("applied identity acknowledgement should resolve")
+            .expect("reconfigure should succeed before runtime apply failure")
+            .expect("turn requested an identity override");
+    assert_eq!(applied.model, "applied-before-runtime-failure");
+
+    service.release_one_runtime_turn();
+    let error = tokio::time::timeout(Duration::from_secs(2), turn.wait())
+        .await
+        .expect("completion should resolve")
+        .expect_err("post-admission runtime failure must reach the completion handle");
+    assert!(
+        error.to_string().contains("injected runtime turn failure"),
+        "unexpected completion error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_autonomous_member_rejects_unrepresentable_turn_overrides_before_admission() {
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    let identity = AgentIdentity::from("lead-autonomous-overrides");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn autonomous lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let member = handle.member(&identity).await.expect("member handle");
+
+    let metadata_error = member
+        .start_turn(
+            ContentInput::Text("unsupported model override".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "hot-swap-model",
+                )),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect_err("autonomous inbox must not silently drop a model override");
+    assert!(matches!(
+        metadata_error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::AutonomousHost,
+            ..
+        }
+    ));
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+    let event_error = member
+        .start_turn(
+            ContentInput::Text("unsupported tracked turn".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            Some(event_tx),
+        )
+        .await
+        .expect_err("autonomous inbox must not silently drop a turn event sender");
+    assert!(matches!(
+        event_error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::AutonomousHost,
+            ..
+        }
+    ));
+    let applied_prompts = service.applied_runtime_prompts(&session_id).await;
+    for rejected in ["unsupported model override", "unsupported tracked turn"] {
+        assert!(
+            !applied_prompts
+                .iter()
+                .any(|prompt| matches!(prompt, ContentInput::Text(text) if text == rejected)),
+            "unsupported carrier prompt '{rejected}' must be rejected before MobMachine ingress admission"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_running_steer_rejects_llm_identity_override_before_admission() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-running-steer-override");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_block_runtime_turns(true);
+    let member = handle.member(&identity).await.expect("member handle");
+
+    let (active_turn, runtime_started) = tokio::join!(
+        member.start_turn(
+            ContentInput::Text("hold the executor boundary".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            service.runtime_turn_started.notified(),
+        ),
+    );
+    let active_turn = active_turn.expect("active turn should be admitted");
+    runtime_started.expect("active turn should reach the executor boundary");
+    let prompts_before = service.applied_runtime_prompts(&session_id).await;
+
+    let error = member
+        .start_turn(
+            ContentInput::Text("must not steer onto a different model".into()),
+            HandlingMode::Steer,
+            crate::MemberTurnOptions {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "forbidden-steer-model",
+                )),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect_err("running Steer has no serialized LLM reconfiguration boundary");
+    assert!(matches!(
+        error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            ref reason,
+        } if reason.contains("queued executor turn")
+    ));
+    assert_eq!(
+        service.applied_runtime_prompts(&session_id).await,
+        prompts_before,
+        "rejected Steer override must not reach runtime execution"
+    );
+
+    service.release_one_runtime_turn();
+    tokio::time::timeout(Duration::from_secs(2), active_turn.wait())
+        .await
+        .expect("active turn should finish after release")
+        .expect("active turn should succeed");
+}
+
+#[tokio::test]
+async fn test_running_steer_without_override_resolves_applied_identity_as_none() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from("lead-running-steer-no-override");
+    handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead");
+    service.set_block_runtime_turns(true);
+    let member = handle.member(&identity).await.expect("member handle");
+
+    let (active_turn, runtime_started) = tokio::join!(
+        member.start_turn(
+            ContentInput::Text("hold the executor boundary".into()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            service.runtime_turn_started.notified(),
+        ),
+    );
+    let active_turn = active_turn.expect("active turn should be admitted");
+    runtime_started.expect("active turn should reach the executor boundary");
+
+    let mut steer = member
+        .start_turn(
+            ContentInput::Text("steer without changing identity".into()),
+            HandlingMode::Steer,
+            crate::MemberTurnOptions::default(),
+            None,
+        )
+        .await
+        .expect("plain running Steer should be admitted");
+    let applied_identity = tokio::time::timeout(
+        Duration::from_secs(2),
+        steer.wait_for_applied_llm_identity(),
+    )
+    .await
+    .expect("Steer applied-identity acknowledgement should resolve")
+    .expect("plain Steer acknowledgement should succeed");
+    assert_eq!(
+        applied_identity, None,
+        "a Steer without an identity override must resolve explicitly as no reconfiguration"
+    );
+    // The identity fact resolves at admission, while the completion-bearing
+    // handle remains correctly tied to the active run's committed terminal.
+    service.set_block_runtime_turns(false);
+    service.release_runtime_turns();
+    let (steer_completion, active_completion) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(2), steer.wait()),
+        tokio::time::timeout(Duration::from_secs(2), active_turn.wait()),
+    );
+    steer_completion
+        .expect("plain Steer completion should resolve with the active run")
+        .expect("plain Steer completion should succeed");
+    active_completion
+        .expect("active turn should finish after release")
+        .expect("active turn should succeed");
 }

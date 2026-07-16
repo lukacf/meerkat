@@ -822,6 +822,7 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   keepAlive: true,
   model: "gpt-test",
   provider: "openai",
+  selfHostedServerId: "local-b",
   maxTokens: 128,
   systemPrompt: "system",
   outputSchema: { type: "object" },
@@ -860,6 +861,7 @@ type MobTurnStartSupportedWireOptionKeys =
   | "output_schema"
   | "provider"
   | "provider_params"
+  | "self_hosted_server_id"
   | "skill_refs"
   | "structured_output_retries"
   | "system_prompt";

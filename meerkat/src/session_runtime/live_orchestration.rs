@@ -1613,6 +1613,7 @@ mod orchestrator {
                     let request = SessionLlmReconfigureRequest {
                         model: Some(new_global_model.clone()),
                         provider: None,
+                        self_hosted_server_id: None,
                         provider_params: None,
                         auth_binding: None,
                     };

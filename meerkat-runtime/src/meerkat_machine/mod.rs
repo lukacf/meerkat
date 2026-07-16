@@ -4049,8 +4049,12 @@ impl MeerkatMachine {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn arm_runtime_loop_before_queue_authority_test_hook(
+    /// Deterministically pause the runtime loop after its ready-effect drain
+    /// and before queue authority is acquired. Exposed only by test builds so
+    /// cross-crate integration tests can admit a complete same-boundary batch.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_runtime_loop_before_queue_authority_test_hook(
         &self,
         session_id: SessionId,
     ) -> (
@@ -4071,7 +4075,7 @@ impl MeerkatMachine {
         (entered_rx, release_tx)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn run_runtime_loop_before_queue_authority_test_hook(
         &self,
         session_id: &SessionId,
@@ -5464,7 +5468,7 @@ pub struct MeerkatMachineShared {
     /// One-shot deterministic gate after the runtime loop's first ready-effect
     /// drain but before it acquires queue authority. Tests publish an executor
     /// effect in this exact gap and prove the consumed wake is retained.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_runtime_loop_before_queue_authority: StdMutex<
         Option<(
             SessionId,
@@ -6397,7 +6401,7 @@ impl MeerkatMachine {
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
@@ -6455,7 +6459,7 @@ impl MeerkatMachine {
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),
@@ -6513,7 +6517,7 @@ impl MeerkatMachine {
                 test_registration_transaction_contention_probe: StdMutex::new(None),
                 #[cfg(test)]
                 test_fail_post_stop_unregister_after_fence: StdMutex::new(None),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(test)]
                 test_control_command_after_logical_lookup: StdMutex::new(None),

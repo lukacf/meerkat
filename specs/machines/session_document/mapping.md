@@ -271,10 +271,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeSessionResumeOverridesAcceptRecomputeProvider`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSessionResumeOverridesAcceptUseOverride`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeSessionResumeOverridesAcceptRetainStored`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyLiveSessionAuthorityLive`

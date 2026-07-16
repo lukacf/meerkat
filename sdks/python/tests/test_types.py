@@ -4196,6 +4196,7 @@ async def test_session_turn_and_stream_support_full_turn_overrides():
         keep_alive=True,
         model="claude-sonnet-4-6",
         provider="anthropic",
+        self_hosted_server_id="local-b",
         max_tokens=512,
         system_prompt="System",
         output_schema={"type": "object"},
@@ -4210,6 +4211,7 @@ async def test_session_turn_and_stream_support_full_turn_overrides():
         keep_alive=False,
         model="gpt-5.4",
         provider="openai",
+        self_hosted_server_id="local-b",
         max_tokens=256,
         system_prompt="Stream system",
         output_schema={"type": "object"},
@@ -4220,9 +4222,49 @@ async def test_session_turn_and_stream_support_full_turn_overrides():
     assert session_calls[0][0] == "turn"
     assert session_calls[0][3]["additional_instructions"] == ["Follow policy A."]
     assert session_calls[0][3]["keep_alive"] is True
+    assert session_calls[0][3]["self_hosted_server_id"] == "local-b"
     assert session_calls[1][0] == "stream"
     assert session_calls[1][3]["additional_instructions"] == ["Follow policy B."]
     assert session_calls[1][3]["model"] == "gpt-5.4"
+    assert session_calls[1][3]["self_hosted_server_id"] == "local-b"
+
+
+@pytest.mark.asyncio
+async def test_client_turn_start_threads_exact_self_hosted_route():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {
+            "session_id": "s1",
+            "text": "ok",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+    await client._start_turn(  # noqa: SLF001
+        "s1",
+        "continue locally",
+        model="shared-local-model",
+        provider="self_hosted",
+        self_hosted_server_id="local-b",
+    )
+
+    assert calls == [
+        (
+            "turn/start",
+            {
+                "session_id": "s1",
+                "prompt": "continue locally",
+                "model": "shared-local-model",
+                "provider": "self_hosted",
+                "self_hosted_server_id": "local-b",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -4316,6 +4358,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         keep_alive=True,
         model="gpt-test",
         provider="openai",
+        self_hosted_server_id="local-b",
         max_tokens=128,
         system_prompt="system",
         output_schema={"type": "object"},
@@ -4349,6 +4392,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
                 "keep_alive": True,
                 "model": "gpt-test",
                 "provider": "openai",
+                "self_hosted_server_id": "local-b",
                 "max_tokens": 128,
                 "system_prompt": "system",
                 "output_schema": {"type": "object"},

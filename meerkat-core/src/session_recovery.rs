@@ -26,6 +26,7 @@ pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens
 pub struct SurfaceSessionRecoveryOverrides {
     pub model: Option<String>,
     pub provider: Option<Provider>,
+    pub self_hosted_server_id: Option<String>,
     pub provider_params:
         Option<TurnMetadataOverride<crate::lifecycle::run_primitive::ProviderParamsOverride>>,
     pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
@@ -289,6 +290,7 @@ pub fn has_build_only_turn_overrides(overrides: &SurfaceSessionRecoveryOverrides
 pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides) -> bool {
     overrides.model.is_some()
         || overrides.provider.is_some()
+        || overrides.self_hosted_server_id.is_some()
         || overrides.provider_params.is_some()
         || overrides.auth_binding.is_some()
         || has_build_only_turn_overrides(overrides)
@@ -372,6 +374,7 @@ fn authorize_resume_overrides(
         .authorize_session_resume_overrides(
             overrides.provider.is_some(),
             overrides.model.is_some(),
+            overrides.self_hosted_server_id.is_some(),
             has_build_only_turn_overrides(overrides),
             first_turn_phase,
         )
@@ -427,6 +430,7 @@ fn authorize_resume_overrides(
     };
     let self_hosted_server_id = match self_hosted_selection {
         ResumeSelfHostedSelection::Clear => None,
+        ResumeSelfHostedSelection::UseOverride => overrides.self_hosted_server_id.clone(),
         ResumeSelfHostedSelection::Retain => stored_self_hosted_server_id,
     };
 
@@ -479,6 +483,7 @@ pub fn resolve_effective_turn_config(
     let resume_override_mask = ResumeOverrideMask {
         model: overrides.model.is_some(),
         provider: llm_binding.provider_overridden,
+        self_hosted_server_id: overrides.self_hosted_server_id.is_some(),
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
         // `Some(_)` is the explicit intent (Set or Clear); `None` inherits.
@@ -1022,6 +1027,39 @@ mod tests {
             recovered.build.resume_override_mask.provider_params,
             "clear provider params must prevent factory metadata rehydration"
         );
+    }
+
+    #[test]
+    fn build_recovered_session_route_only_override_stays_explicit() {
+        let mut session = sample_session();
+        let mut metadata = session.session_metadata().expect("session metadata");
+        metadata.model = "local-model".to_string();
+        metadata.provider = Provider::SelfHosted;
+        metadata.self_hosted_server_id = Some("local-a".to_string());
+        session
+            .set_session_metadata(metadata)
+            .expect("updated self-hosted session metadata");
+
+        let recovered = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides {
+                self_hosted_server_id: Some("local-b".to_string()),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("route-only recovery override");
+
+        assert_eq!(recovered.build.provider, Some(Provider::SelfHosted));
+        assert_eq!(
+            recovered.build.self_hosted_server_id.as_deref(),
+            Some("local-b")
+        );
+        assert!(
+            recovered.build.resume_override_mask.self_hosted_server_id,
+            "the factory must not replace explicit route intent with durable metadata"
+        );
+        assert!(!recovered.build.resume_override_mask.provider);
     }
 
     #[test]

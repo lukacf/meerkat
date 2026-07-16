@@ -296,6 +296,22 @@ mod tests {
             Ok(())
         }
 
+        async fn admit_tracked_turn(
+            &self,
+            _member_ref: &MemberRef,
+            _req: StartTurnRequest,
+            completion_tx: tokio::sync::oneshot::Sender<Result<(), MobError>>,
+            llm_identity_applied_tx: Option<
+                crate::runtime::handle::MemberTurnLlmIdentityAppliedSender,
+            >,
+        ) -> Result<(), MobError> {
+            if let Some(llm_identity_applied_tx) = llm_identity_applied_tx {
+                let _ = llm_identity_applied_tx.send(Ok(None));
+            }
+            let _ = completion_tx.send(Ok(()));
+            Ok(())
+        }
+
         async fn interaction_event_injector(
             &self,
             _session_id: &SessionId,

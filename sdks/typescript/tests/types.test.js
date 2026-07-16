@@ -1794,7 +1794,8 @@ describe("Session wrappers", () => {
         usage: { input_tokens: 1, output_tokens: 1 },
       };
     };
-    client.process = { stdin: { write: () => {} } };
+    const writes = [];
+    client.process = { stdin: { write: (data) => writes.push(data) } };
     client.registerRequest = async () => ({
       session_id: "s1",
       text: "ok",
@@ -1808,6 +1809,7 @@ describe("Session wrappers", () => {
       keepAlive: true,
       model: "m",
       provider: "p",
+      selfHostedServerId: "local-b",
       maxTokens: 42,
       systemPrompt: "sys",
       outputSchema: { type: "object" },
@@ -1819,16 +1821,30 @@ describe("Session wrappers", () => {
       keepAlive: true,
       model: "m",
       provider: "p",
+      selfHostedServerId: "local-b",
       maxTokens: 42,
       systemPrompt: "sys",
       outputSchema: { type: "object" },
       structuredOutputRetries: 3,
       providerParams: { x: 1 },
     });
+    await client._startTurn("s1", "reject empty route", {
+      selfHostedServerId: "",
+    });
 
     assert.equal(calls[0].method, "turn/start");
     assert.equal(calls[0].params.additional_instructions[0], "a");
     assert.equal(calls[0].params.keep_alive, true);
+    assert.equal(calls[0].params.self_hosted_server_id, "local-b");
+    assert.equal(
+      JSON.parse(writes[0]).params.self_hosted_server_id,
+      "local-b",
+    );
+    assert.equal(
+      calls[1].params.self_hosted_server_id,
+      "",
+      "an explicit empty route must reach Rust validation instead of becoming inherit",
+    );
   });
 });
 
@@ -3220,6 +3236,7 @@ describe("Parity wrappers", () => {
 
     // Clear coverage: the tagged `clear` override passes through unchanged.
     await client.mobTurnStart("mob-1", "worker-1", "continue", {
+      selfHostedServerId: "local-b",
       providerParams: { action: "clear" },
       authBinding: { action: "clear" },
     });
@@ -3227,6 +3244,7 @@ describe("Parity wrappers", () => {
       mob_id: "mob-1",
       agent_identity: "worker-1",
       prompt: "continue",
+      self_hosted_server_id: "local-b",
       provider_params: { action: "clear" },
       auth_binding: { action: "clear" },
     });

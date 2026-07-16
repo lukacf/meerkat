@@ -321,6 +321,8 @@ pub enum ResumeSelfHostedSelection {
     /// Clear the persisted self-hosted server binding (model changed).
     #[default]
     Clear,
+    /// Use the explicit self-hosted server route supplied for this recovery.
+    UseOverride,
     /// Retain the persisted self-hosted server binding.
     Retain,
 }
@@ -744,6 +746,7 @@ machine! {
             AuthorizeSessionResumeOverrides {
                 provider_override_present: bool,
                 model_override_present: bool,
+                self_hosted_server_override_present: bool,
                 has_build_only_overrides: bool,
                 first_turn_phase: Enum<SessionFirstTurnPhase>,
             },
@@ -3281,6 +3284,7 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
+                self_hosted_server_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -3303,6 +3307,7 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
+                self_hosted_server_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -3324,12 +3329,14 @@ machine! {
             }
         }
 
-        // Accept (provider recomputed from a model-only change): clears stored
-        // provider + self-hosted binding; provider_overridden is true.
+        // Accept (provider recomputed from a model-only change) without an
+        // exact server override: clears stored provider + self-hosted binding;
+        // provider_overridden is true.
         transition AuthorizeSessionResumeOverridesAcceptRecomputeProvider {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
+                self_hosted_server_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -3345,12 +3352,46 @@ machine! {
                     model_override_present,
                     provider_override_present
                 )
+                && self_hosted_server_override_present == false
             }
             update {}
             to Ready
             emit SessionResumeOverridesAuthorized {
                 provider_selection: ResumeProviderSelection::RecomputeFromModel,
                 self_hosted_selection: ResumeSelfHostedSelection::Clear,
+                provider_overridden: true
+            }
+        }
+
+        // Accept a model-only provider recompute while preserving the caller's
+        // exact self-hosted server route for downstream registry validation.
+        transition AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                self_hosted_server_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_overrides_admissible(
+                    provider_override_present,
+                    model_override_present,
+                    has_build_only_overrides,
+                    first_turn_phase
+                )
+                && resume_provider_recompute_from_model(
+                    model_override_present,
+                    provider_override_present
+                )
+                && self_hosted_server_override_present
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesAuthorized {
+                provider_selection: ResumeProviderSelection::RecomputeFromModel,
+                self_hosted_selection: ResumeSelfHostedSelection::UseOverride,
                 provider_overridden: true
             }
         }
@@ -3362,6 +3403,7 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
+                self_hosted_server_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -3378,12 +3420,47 @@ machine! {
                     provider_override_present
                 ) == false
                 && provider_override_present
+                && self_hosted_server_override_present == false
             }
             update {}
             to Ready
             emit SessionResumeOverridesAuthorized {
                 provider_selection: ResumeProviderSelection::UseOverride,
                 self_hosted_selection: ResumeSelfHostedSelection::Clear,
+                provider_overridden: true
+            }
+        }
+
+        // Accept an explicit provider/model pair together with an exact
+        // self-hosted server route for downstream registry validation.
+        transition AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                self_hosted_server_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_overrides_admissible(
+                    provider_override_present,
+                    model_override_present,
+                    has_build_only_overrides,
+                    first_turn_phase
+                )
+                && resume_provider_recompute_from_model(
+                    model_override_present,
+                    provider_override_present
+                ) == false
+                && provider_override_present
+                && self_hosted_server_override_present
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesAuthorized {
+                provider_selection: ResumeProviderSelection::UseOverride,
+                self_hosted_selection: ResumeSelfHostedSelection::UseOverride,
                 provider_overridden: true
             }
         }
@@ -3395,6 +3472,7 @@ machine! {
             on input AuthorizeSessionResumeOverrides {
                 provider_override_present,
                 model_override_present,
+                self_hosted_server_override_present,
                 has_build_only_overrides,
                 first_turn_phase
             }
@@ -3411,12 +3489,47 @@ machine! {
                     provider_override_present
                 ) == false
                 && provider_override_present == false
+                && self_hosted_server_override_present == false
             }
             update {}
             to Ready
             emit SessionResumeOverridesAuthorized {
                 provider_selection: ResumeProviderSelection::UseStored,
                 self_hosted_selection: ResumeSelfHostedSelection::Retain,
+                provider_overridden: false
+            }
+        }
+
+        // Accept a route-only recovery override (or any retained-provider
+        // recovery carrying one) and select the exact caller route.
+        transition AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride {
+            on input AuthorizeSessionResumeOverrides {
+                provider_override_present,
+                model_override_present,
+                self_hosted_server_override_present,
+                has_build_only_overrides,
+                first_turn_phase
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && resume_overrides_admissible(
+                    provider_override_present,
+                    model_override_present,
+                    has_build_only_overrides,
+                    first_turn_phase
+                )
+                && resume_provider_recompute_from_model(
+                    model_override_present,
+                    provider_override_present
+                ) == false
+                && provider_override_present == false
+                && self_hosted_server_override_present
+            }
+            update {}
+            to Ready
+            emit SessionResumeOverridesAuthorized {
+                provider_selection: ResumeProviderSelection::UseStored,
+                self_hosted_selection: ResumeSelfHostedSelection::UseOverride,
                 provider_overridden: false
             }
         }

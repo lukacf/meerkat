@@ -59,6 +59,10 @@ pub struct SessionLlmReconfigureRequest {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Exact configured server route for a self-hosted model. Provider/model
+    /// alone cannot distinguish two local servers exposing the same model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,

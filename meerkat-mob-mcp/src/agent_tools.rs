@@ -3331,6 +3331,10 @@ mod tests {
             Ok(self.actor_registry.contains(session_id))
         }
 
+        fn supports_runtime_turn_apply(&self) -> bool {
+            true
+        }
+
         fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
             Some(self.runtime_adapter.clone())
         }

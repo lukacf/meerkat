@@ -427,6 +427,7 @@ impl SessionRuntime {
                 ),
                 model: None,
                 provider: None,
+                self_hosted_server_id: None,
                 provider_params: None,
                 render_metadata: dispatch.render_metadata.clone(),
                 execution_kind: None,

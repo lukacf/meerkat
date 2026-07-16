@@ -7827,6 +7827,19 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
     }
 
+    /// Whether this concrete adapter has a shell host capable of realizing
+    /// live session LLM reconfiguration.
+    ///
+    /// Generic runtime-turn application is a separate capability: callers
+    /// must require both before admitting a per-turn LLM identity override.
+    #[must_use]
+    pub fn has_session_llm_reconfigure_host(&self) -> bool {
+        self.llm_reconfigure_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
     // NOTE: Realtime-attachment public API was removed as part of
     // the realtime/live-topology DSL plane deletion.
     // Provider session lifecycle now lives outside MeerkatMachine (live-adapter MVP).

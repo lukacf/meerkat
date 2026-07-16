@@ -83,6 +83,28 @@ async fn route_installs_at_rest(controlling: &ControllingMob) -> bool {
     installs.complete && installs.outstanding.is_empty()
 }
 
+async fn public_remote_member_ready(
+    controlling: &ControllingMob,
+    member: &str,
+    host_id: &str,
+    session_id: &str,
+) -> bool {
+    let Ok(snapshot) = controlling.handle.member_status(&identity(member)).await else {
+        return false;
+    };
+    snapshot.placement.as_deref() == Some(host_id)
+        && snapshot
+            .current_session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref()
+            == Some(session_id)
+        && snapshot.control_reachability
+            == Some(meerkat_contracts::wire::WireReachability::Reachable)
+        && snapshot.comms_reachability == Some(meerkat_contracts::wire::WireReachability::Reachable)
+        && route_installs_at_rest(controlling).await
+}
+
 /// Assert one send attempt is NOT admitted by the receiver within the bound.
 /// Acceptable outcomes: an immediate typed sender-side refusal (no trust row
 /// for the recipient), an unacked receipt, or the attempt out-waiting the
@@ -283,6 +305,123 @@ async fn batch_wiring_with_mixed_placements_installs_both_transports() {
             meerkat_core::comms::PeerDeliveryOutcome::HandedOff
         ),
         "a1 -> a2 must be handed directly to the in-process inbox, got {receipt:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+// ==========================================================================
+// T-W1R — member-host restart restores volatile peer trust automatically
+// ==========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_restart_reinstalls_wired_peer_trust_without_manual_drive() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture =
+        spawn_host_daemon_fixture(HostFixtureOptions::named("xhw-t1r-host-b").with_member_build())
+            .await
+            .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhw-t1r").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let mob_id = controlling.mob_id.to_string();
+
+    spawn_local_worker(&controlling, "a1").await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 materializes on host B");
+    controlling
+        .handle
+        .wire(identity("a1"), identity("b2"))
+        .await
+        .expect("wire local a1 to placed b2");
+    assert!(route_installs_at_rest(&controlling).await);
+
+    let b2_before = fixture
+        .host_binding_record(&mob_id)
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row before restart");
+    // Keep the public placed-member event subscription alive across the
+    // restart. This is the real consumer that drives PollMemberEvents and
+    // therefore the fast boot-incarnation barrier under test.
+    let _b2_events = controlling
+        .handle
+        .subscribe_agent_events(&identity("b2"))
+        .await
+        .expect("subscribe to b2 events through the public API");
+    wait_until("initial public remote-member readiness", || async {
+        public_remote_member_ready(&controlling, "b2", &report.host_id, &b2_before.session_id).await
+    })
+    .await;
+    let a1_session = controlling.member_session_id(&identity("a1")).await;
+    let a1_runtime = controlling.member_comms_runtime(&a1_session).await;
+    let a1_peer = a1_runtime.peer_id().expect("a1 peer id");
+    assert!(
+        fixture
+            .member_trusts_peer(&b2_before.session_id, &a1_peer.to_string())
+            .await,
+        "precondition: b2 trusts a1 before host restart"
+    );
+
+    // Partition and restart only the member host over the same host identity,
+    // endpoint, durable binding rows, member realm, and logical member. The
+    // revived member intentionally starts with no volatile wired-peer trust
+    // rows. No operator `drive_route_installs` call and no rebind ceremony
+    // follows.
+    let partitioned = fixture.partition().await;
+    wait_until("public reachability to observe the host outage", || async {
+        let Ok(snapshot) = controlling.handle.member_status(&identity("b2")).await else {
+            return false;
+        };
+        snapshot.control_reachability != Some(meerkat_contracts::wire::WireReachability::Reachable)
+            || snapshot.comms_reachability
+                != Some(meerkat_contracts::wire::WireReachability::Reachable)
+    })
+    .await;
+    let fixture = partitioned.restore().await;
+    let b2_after = fixture
+        .host_binding_record(&mob_id)
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row survives host restart");
+    assert_eq!(
+        b2_after.session_id, b2_before.session_id,
+        "host restart revives the same logical member session"
+    );
+
+    wait_until(
+        "public remote-member readiness after host restart",
+        || async {
+            public_remote_member_ready(&controlling, "b2", &report.host_id, &b2_after.session_id)
+                .await
+        },
+    )
+    .await;
+
+    // The send is deliberately immediate after the public predicate turns
+    // green. No fixture-private trust read, target log, manual route drive,
+    // or grace period may hide a reachability/route-recovery race.
+    let receipt = controlling
+        .handle
+        .send_peer_message(
+            identity("a1"),
+            identity("b2"),
+            "t-w1r after member-host restart",
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("host incarnation recovery restores cross-host delivery");
+    assert!(
+        matches!(
+            receipt.delivery,
+            meerkat_core::comms::PeerDeliveryOutcome::Acked
+        ),
+        "post-restart delivery must be receiver-acked, got {receipt:?}"
     );
 
     fixture.shutdown().await;

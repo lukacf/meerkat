@@ -20,8 +20,9 @@
 use std::sync::Arc;
 
 use meerkat_contracts::wire::supervisor_bridge::{
-    BridgeDeliveryRejectionCause, BridgeMemberIncarnation, BridgeTrackedInputCancelOutcome,
-    BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord, WireFlowTurnOutcome,
+    BridgeDeliveryRejectionCause, BridgeHostRuntimeIncarnation, BridgeMemberIncarnation,
+    BridgeTrackedInputCancelOutcome, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
+    WireFlowTurnOutcome,
 };
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::SessionHistoryPage;
@@ -82,6 +83,10 @@ pub enum MemberObservationCursor {
 /// One served page of a member's durable event stream (DEC-P6E-4/5/18).
 #[derive(Debug)]
 pub struct MemberEventsWindow {
+    /// Exact boot incarnation of the host actor that served this page. The
+    /// controlling mob fences reachability on this token before it may fold
+    /// or advertise the page as progress.
+    pub runtime_incarnation: BridgeHostRuntimeIncarnation,
     /// Generation the page was served at — the self-describing seq-domain
     /// reset signal (§14.6).
     pub generation: u64,

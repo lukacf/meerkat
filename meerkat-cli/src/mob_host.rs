@@ -1039,6 +1039,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
     //      service's durable event log (None on Memory backends — the
     //      bounded ring substitutes) + the actor's observation projection.
     let mut observation = HostMemberObservation::new(
+        actor.runtime_incarnation(),
         Arc::clone(&service) as Arc<dyn MobSessionService>,
         durable_log,
         actor.observation_watch(),

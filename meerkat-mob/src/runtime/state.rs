@@ -487,6 +487,15 @@ pub(super) enum MobCommand {
         binding_incarnation: u64,
         result: Result<super::bridge_protocol::BridgeHostStatusResponse, crate::MobError>,
     },
+    /// A successful, authenticated member-events page carrying the exact
+    /// member-host boot token. The actor revalidates the full residency and
+    /// converges volatile route installs before acknowledging the pump, so
+    /// event-pump reachability cannot race host restart recovery.
+    HostRuntimeIncarnationObserved {
+        expected_member: super::bridge_protocol::BridgeMemberIncarnation,
+        runtime_incarnation: super::bridge_protocol::BridgeHostRuntimeIncarnation,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Typed completion of one exact detached orphan release. The actor keeps
     /// the key reserved until this command is absorbed, suppressing overlap
     /// from periodic and rebind-triggered status observations.
@@ -1062,6 +1071,7 @@ impl MobCommand {
             Self::SpawnProvisioned { .. } => "SpawnProvisioned",
             Self::RevivePlacedMember { .. } => "RevivePlacedMember",
             Self::HostStatusPollCompleted { .. } => "HostStatusPollCompleted",
+            Self::HostRuntimeIncarnationObserved { .. } => "HostRuntimeIncarnationObserved",
             Self::HostOrphanReleaseCompleted { .. } => "HostOrphanReleaseCompleted",
             Self::PlacedBehaviorCompleted { .. } => "PlacedBehaviorCompleted",
             Self::Retire { .. } => "Retire",

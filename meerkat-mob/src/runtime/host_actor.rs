@@ -64,14 +64,14 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBootstrapToken, BridgeCapabilities, BridgeCommand, BridgeCommandDecodeError,
     BridgeHostBindPayload, BridgeHostBindResponse, BridgeHostCapabilityRequirements,
     BridgeHostMemberRecord, BridgeHostRebindPayload, BridgeHostReboundResponse,
-    BridgeHostRevokePayload, BridgeHostRevokedResponse, BridgeHostStatusPayload,
-    BridgeHostStatusResponse, BridgeMaterializePayload, BridgeMaterializedResponse,
-    BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec, BridgePeerTrustPayload,
-    BridgeProtocolVersion, BridgeRejectionCause, BridgeReleasePayload, BridgeReply,
-    BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord, MaterializeLaunchMode, MaterializeLaunchOutcome,
-    MemberSessionDisposal as WireMemberSessionDisposal, RuntimeReleaseCause, WireFlowTurnOutcome,
-    WireHostBindingDescriptor, WireHostBindingDescriptorKind, canonicalize_bridge_address,
-    decode_bridge_command,
+    BridgeHostRevokePayload, BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation,
+    BridgeHostStatusPayload, BridgeHostStatusResponse, BridgeMaterializePayload,
+    BridgeMaterializedResponse, BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec,
+    BridgePeerTrustPayload, BridgeProtocolVersion, BridgeRejectionCause, BridgeReleasePayload,
+    BridgeReply, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord, MaterializeLaunchMode,
+    MaterializeLaunchOutcome, MemberSessionDisposal as WireMemberSessionDisposal,
+    RuntimeReleaseCause, WireFlowTurnOutcome, WireHostBindingDescriptor,
+    WireHostBindingDescriptorKind, canonicalize_bridge_address, decode_bridge_command,
 };
 use meerkat_contracts::wire::{
     PortableMemberSpec, WireAuthBindingRef, portable_member_spec_digest,
@@ -4928,6 +4928,7 @@ pub struct MobHostActorConfig {
 
 /// Running mob host actor (single-owner responder task).
 pub struct MobHostActorHandle {
+    runtime_incarnation: BridgeHostRuntimeIncarnation,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join: tokio::task::JoinHandle<()>,
     initial_revival_rx: watch::Receiver<bool>,
@@ -4938,6 +4939,13 @@ pub struct MobHostActorHandle {
 }
 
 impl MobHostActorHandle {
+    /// Exact once-per-actor-boot token shared by `HostStatus` and every
+    /// successful member-events page served by this host process.
+    #[must_use]
+    pub const fn runtime_incarnation(&self) -> BridgeHostRuntimeIncarnation {
+        self.runtime_incarnation
+    }
+
     /// Wait until the actor has completed its initial recovered-member revival
     /// walk and published the first observation projection.
     ///
@@ -4998,6 +5006,11 @@ impl MobHostActorHandle {
 /// The daemon's authority holder + bridge responder. All fields are owned
 /// exclusively by the responder task; there is no interior mutability.
 pub struct MobHostActor {
+    /// Fresh per actor/process boot. The controlling mob observes this through
+    /// authenticated `HostStatus` and successful member-events pages, and
+    /// uses a change to re-realize its own route intent after volatile member
+    /// trust rows were lost.
+    runtime_incarnation: BridgeHostRuntimeIncarnation,
     /// THE ownership-ledger anchor: the generated MobHostBindingAuthority is
     /// the sole owner of every host-side binding/materialize/release/turn
     /// fact; this shell only observes and realizes.
@@ -5165,7 +5178,9 @@ pub async fn spawn_mob_host_actor(
             turn_outcome_rows.insert((mob_id.clone(), identity.clone()), rows.clone());
         }
     }
+    let runtime_incarnation = BridgeHostRuntimeIncarnation::new();
     let mut actor = MobHostActor {
+        runtime_incarnation,
         binding_authority,
         persistence,
         host_runtime,
@@ -5233,6 +5248,7 @@ pub async fn spawn_mob_host_actor(
         .await;
     });
     Ok(MobHostActorHandle {
+        runtime_incarnation,
         shutdown_tx: Some(shutdown_tx),
         join,
         initial_revival_rx,
@@ -7908,6 +7924,7 @@ impl MobHostActor {
         }
 
         let reply = BridgeReply::HostStatus(BridgeHostStatusResponse {
+            runtime_incarnation: self.runtime_incarnation,
             members,
             capabilities,
         });

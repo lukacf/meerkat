@@ -35,9 +35,9 @@ use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity, Stream
 use meerkat_core::interaction::InteractionId;
 
 use super::bridge_protocol::{
-    BridgeCommand, BridgeEventCursor, BridgeMemberEventsPage, BridgeMemberIncarnation,
-    BridgePollEventsPayload, BridgeProtocolVersion, BridgeRejectionCause, BridgeTurnOutcomeAck,
-    BridgeTurnOutcomeRecord,
+    BridgeCommand, BridgeEventCursor, BridgeHostRuntimeIncarnation, BridgeMemberEventsPage,
+    BridgeMemberIncarnation, BridgePollEventsPayload, BridgeProtocolVersion, BridgeRejectionCause,
+    BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
 };
 use super::remote_flow_ticket::{OutcomeRecordDisposition, RemoteFlowTicketRegistry};
 use crate::MobError;
@@ -610,6 +610,35 @@ pub(crate) struct HandleObligationProbe {
     pub(crate) handle: super::handle::MobHandle,
 }
 
+/// Actor-serialized boot-incarnation barrier. A successful remote page is
+/// not reachability evidence until the MobMachine-owned route intent has
+/// been re-realized for the host process that served it.
+#[async_trait]
+pub(crate) trait HostRuntimeIncarnationObserver: Send + Sync {
+    async fn observe(
+        &self,
+        expected_member: &BridgeMemberIncarnation,
+        runtime_incarnation: BridgeHostRuntimeIncarnation,
+    ) -> Result<(), MobError>;
+}
+
+pub(crate) struct HandleHostRuntimeIncarnationObserver {
+    pub(crate) handle: super::handle::MobHandle,
+}
+
+#[async_trait]
+impl HostRuntimeIncarnationObserver for HandleHostRuntimeIncarnationObserver {
+    async fn observe(
+        &self,
+        expected_member: &BridgeMemberIncarnation,
+        runtime_incarnation: BridgeHostRuntimeIncarnation,
+    ) -> Result<(), MobError> {
+        self.handle
+            .observe_host_runtime_incarnation(expected_member.clone(), runtime_incarnation)
+            .await
+    }
+}
+
 impl RemoteObligationProbe for HandleObligationProbe {
     fn has_pending_obligation(&self, expected_member: &BridgeMemberIncarnation) -> bool {
         self.handle
@@ -772,6 +801,7 @@ pub(crate) struct MemberEventPumpManager {
     mob_id: crate::MobId,
     bridge: Arc<super::MobSupervisorBridge>,
     store: Arc<dyn MobRuntimeMetadataStore>,
+    host_runtime_observer: Arc<dyn HostRuntimeIncarnationObserver>,
     sink: OnceLock<Arc<dyn RemoteTurnOutcomeSink>>,
     obligation_probe: OnceLock<Arc<dyn RemoteObligationProbe>>,
     reachability_observations: OnceLock<Arc<super::handle::ReachabilityObservations>>,
@@ -809,11 +839,13 @@ impl MemberEventPumpManager {
         mob_id: crate::MobId,
         bridge: Arc<super::MobSupervisorBridge>,
         store: Arc<dyn MobRuntimeMetadataStore>,
+        host_runtime_observer: Arc<dyn HostRuntimeIncarnationObserver>,
     ) -> Self {
         Self {
             mob_id,
             bridge,
             store,
+            host_runtime_observer,
             sink: OnceLock::new(),
             obligation_probe: OnceLock::new(),
             reachability_observations: OnceLock::new(),
@@ -1952,6 +1984,38 @@ async fn run_member_pump(
                     );
                     continue;
                 }
+                if let Err(error) = manager
+                    .host_runtime_observer
+                    .observe(&material.expected_member, page.runtime_incarnation)
+                    .await
+                {
+                    if let Some(observations) = manager.reachability_observations.get() {
+                        observations.mark_member_poll_failure(&identity, false);
+                    }
+                    tracing::warn!(
+                        agent_identity = %identity,
+                        host = %material.host_id,
+                        runtime_incarnation = %page.runtime_incarnation,
+                        error = %error,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "member event page could not cross the host runtime-incarnation barrier"
+                    );
+                    tokio::select! {
+                        () = cancel.cancelled() => break,
+                        () = tokio::time::sleep(backoff) => {}
+                    }
+                    backoff = (backoff * 2).min(POLL_BACKOFF_CEIL);
+                    continue;
+                }
+                if cancel.is_cancelled()
+                    || !manager.is_current_incarnation(
+                        &identity,
+                        &material.expected_member,
+                        incarnation,
+                    )
+                {
+                    break;
+                }
                 if let Some(observations) = manager.reachability_observations.get() {
                     observations.mark_member_progress(&identity);
                 }
@@ -2230,9 +2294,6 @@ async fn run_member_pump(
                     },
                 ..
             }) => {
-                if let Some(observations) = manager.reachability_observations.get() {
-                    observations.mark_member_progress(&identity);
-                }
                 let next_seq = match remote_cursor_successor(watermark) {
                     Ok(next_seq) => next_seq,
                     Err(error) => {
@@ -2316,9 +2377,6 @@ async fn run_member_pump(
                     },
                 reason,
             }) => {
-                if let Some(observations) = manager.reachability_observations.get() {
-                    observations.mark_member_progress(&identity);
-                }
                 // Deterministic poison-row disposition: the owning host has
                 // proved this immutable envelope cannot cross the transport.
                 // Record a typed gap and advance exactly one durable row;
@@ -2504,6 +2562,23 @@ mod tests {
     use crate::ids::{AgentIdentity, AgentRuntimeId, RunId, StepId};
     use crate::runtime::remote_flow_ticket::RemoteTurnObligationResolver;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AcceptHostRuntimeIncarnation;
+
+    #[async_trait]
+    impl HostRuntimeIncarnationObserver for AcceptHostRuntimeIncarnation {
+        async fn observe(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _runtime_incarnation: BridgeHostRuntimeIncarnation,
+        ) -> Result<(), MobError> {
+            Ok(())
+        }
+    }
+
+    fn accepting_host_runtime_observer() -> Arc<dyn HostRuntimeIncarnationObserver> {
+        Arc::new(AcceptHostRuntimeIncarnation)
+    }
 
     const TEST_HOST_ID: &str = "host-a";
 
@@ -2719,6 +2794,7 @@ mod tests {
     ) -> BridgeMemberEventsPage {
         let from_seq = rows.first().map_or(next_seq, |row| row.durable_seq);
         BridgeMemberEventsPage {
+            runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
             generation: member.generation,
             fence_token: member.fence_token,
             events: rows,
@@ -3103,7 +3179,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        Arc::new(MemberEventPumpManager::new(mob_id, bridge, store))
+        Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ))
     }
 
     #[tokio::test]
@@ -3458,7 +3539,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = Arc::new(MemberEventPumpManager::new(mob_id, bridge, store));
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ));
 
         let identity = AgentIdentity::from("w-stop");
         let runtime_id = AgentRuntimeId::initial(identity.clone());
@@ -3566,7 +3652,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = Arc::new(MemberEventPumpManager::new(mob_id, bridge, store));
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ));
         let stale_incarnation = manager
             .next_incarnation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3659,7 +3750,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = Arc::new(MemberEventPumpManager::new(mob_id, bridge, store));
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ));
         let stale_incarnation = manager
             .next_incarnation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4498,7 +4594,8 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = MemberEventPumpManager::new(mob_id, bridge, store);
+        let manager =
+            MemberEventPumpManager::new(mob_id, bridge, store, accepting_host_runtime_observer());
         let identity = AgentIdentity::from("w-gap");
         let runtime_id = AgentRuntimeId::initial(identity.clone());
         let expected_member = test_member(&identity, &runtime_id, FenceToken::new(7));

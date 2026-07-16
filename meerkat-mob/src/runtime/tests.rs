@@ -57158,6 +57158,7 @@ async fn spawn_host_daemon_stub(label: &str, live_endpoint: Option<String>) -> H
     let responder_runtime = runtime.clone();
     let responder_address = address.clone();
     let responder_peer_id = peer_id.to_string();
+    let responder_runtime_incarnation = super::bridge_protocol::BridgeHostRuntimeIncarnation::new();
     let responder_live_endpoint = live_endpoint;
     let responder_bind_requests = bind_requests.clone();
     let responder_rebind_requests = rebind_requests.clone();
@@ -57394,6 +57395,7 @@ async fn spawn_host_daemon_stub(label: &str, live_endpoint: Option<String>) -> H
                     Ok(super::bridge_protocol::BridgeCommand::HostStatus(_)) => {
                         serde_json::to_value(super::bridge_protocol::BridgeReply::HostStatus(
                             super::bridge_protocol::BridgeHostStatusResponse {
+                                runtime_incarnation: responder_runtime_incarnation,
                                 members: Vec::new(),
                                 capabilities: host_stub_capabilities(),
                             },

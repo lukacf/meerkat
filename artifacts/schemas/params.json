@@ -3718,6 +3718,10 @@
         ],
         "type": "object"
       },
+      "BridgeHostRuntimeIncarnation": {
+        "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
+        "type": "string"
+      },
       "BridgeLiveControlOutcome": {
         "description": "Per-verb result of `ControlMemberLiveChannel` — mirrors the typed\nstatuses the local live command results carry.",
         "oneOf": [
@@ -5004,6 +5008,10 @@
                 "const": "member_events_page",
                 "type": "string"
               },
+              "runtime_incarnation": {
+                "$ref": "#/$defs/BridgeHostRuntimeIncarnation",
+                "description": "Exact boot incarnation of the member-host actor that served this\npage. Required in the first published V4 contract so a successful\nevent poll can fence volatile route recovery before reachability."
+              },
               "turn_outcomes": {
                 "description": "Bounded page of unacknowledged flow-turn terminal rows (§18.10). The\nconsumer acknowledges these exact `(generation, input_id)` keys on\nits next poll; until then the same rows remain replayable.",
                 "items": {
@@ -5020,6 +5028,7 @@
             },
             "required": [
               "result",
+              "runtime_incarnation",
               "generation",
               "fence_token",
               "events",
@@ -5118,10 +5127,14 @@
               "result": {
                 "const": "host_status",
                 "type": "string"
+              },
+              "runtime_incarnation": {
+                "$ref": "#/$defs/BridgeHostRuntimeIncarnation"
               }
             },
             "required": [
               "result",
+              "runtime_incarnation",
               "members",
               "capabilities"
             ],

@@ -13792,6 +13792,12 @@
     "title": "BridgeHostReboundResponse",
     "type": "object"
   },
+  "BridgeHostRuntimeIncarnation": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
+    "title": "BridgeHostRuntimeIncarnation",
+    "type": "string"
+  },
   "BridgeHostStatusPayload": {
     "$defs": {
       "BridgePeerSpec": {
@@ -14038,6 +14044,10 @@
         ],
         "type": "object"
       },
+      "BridgeHostRuntimeIncarnation": {
+        "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
+        "type": "string"
+      },
       "BridgeProtocolVersion": {
         "description": "A supported supervisor bridge wire protocol version.\n\nThe JSON representation remains the historic integer so persisted records\nand wire payloads do not change shape. Construction is intentionally routed\nthrough this type so unsupported values fail at serde/TryFrom boundaries\ninstead of being carried deeper as raw integers.",
         "format": "uint32",
@@ -14068,9 +14078,13 @@
           "$ref": "#/$defs/BridgeHostMemberRecord"
         },
         "type": "array"
+      },
+      "runtime_incarnation": {
+        "$ref": "#/$defs/BridgeHostRuntimeIncarnation"
       }
     },
     "required": [
+      "runtime_incarnation",
       "members",
       "capabilities"
     ],
@@ -18595,6 +18609,10 @@
         ],
         "type": "object"
       },
+      "BridgeHostRuntimeIncarnation": {
+        "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
+        "type": "string"
+      },
       "BridgeTurnOutcomeRecord": {
         "additionalProperties": false,
         "description": "Terminal outcome record for a directed turn, delivered as a sidecar on\n`MemberEventsPage` (the event envelope rows themselves stay unchanged —\n§7 envelope freeze).",
@@ -20827,6 +20845,10 @@
         "description": "`true` when this page contains every currently retained,\nunacknowledged outcome for the member generation. A delayed commit may\nstill appear on a later poll; this flag is page completeness, not a\nterminal watermark.",
         "type": "boolean"
       },
+      "runtime_incarnation": {
+        "$ref": "#/$defs/BridgeHostRuntimeIncarnation",
+        "description": "Exact boot incarnation of the member-host actor that served this\npage. Required in the first published V4 contract so a successful\nevent poll can fence volatile route recovery before reachability."
+      },
       "turn_outcomes": {
         "description": "Bounded page of unacknowledged flow-turn terminal rows (§18.10). The\nconsumer acknowledges these exact `(generation, input_id)` keys on\nits next poll; until then the same rows remain replayable.",
         "items": {
@@ -20842,6 +20864,7 @@
       }
     },
     "required": [
+      "runtime_incarnation",
       "generation",
       "fence_token",
       "events",
@@ -27158,6 +27181,10 @@
         ],
         "type": "object"
       },
+      "BridgeHostRuntimeIncarnation": {
+        "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
+        "type": "string"
+      },
       "BridgeLiveControlOutcome": {
         "description": "Per-verb result of `ControlMemberLiveChannel` — mirrors the typed\nstatuses the local live command results carry.",
         "oneOf": [
@@ -32686,6 +32713,10 @@
             "const": "member_events_page",
             "type": "string"
           },
+          "runtime_incarnation": {
+            "$ref": "#/$defs/BridgeHostRuntimeIncarnation",
+            "description": "Exact boot incarnation of the member-host actor that served this\npage. Required in the first published V4 contract so a successful\nevent poll can fence volatile route recovery before reachability."
+          },
           "turn_outcomes": {
             "description": "Bounded page of unacknowledged flow-turn terminal rows (§18.10). The\nconsumer acknowledges these exact `(generation, input_id)` keys on\nits next poll; until then the same rows remain replayable.",
             "items": {
@@ -32702,6 +32733,7 @@
         },
         "required": [
           "result",
+          "runtime_incarnation",
           "generation",
           "fence_token",
           "events",
@@ -32800,10 +32832,14 @@
           "result": {
             "const": "host_status",
             "type": "string"
+          },
+          "runtime_incarnation": {
+            "$ref": "#/$defs/BridgeHostRuntimeIncarnation"
           }
         },
         "required": [
           "result",
+          "runtime_incarnation",
           "members",
           "capabilities"
         ],
@@ -37675,6 +37711,10 @@
         ],
         "type": "object"
       },
+      "BridgeHostRuntimeIncarnation": {
+        "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
+        "type": "string"
+      },
       "BridgeLiveControlOutcome": {
         "description": "Per-verb result of `ControlMemberLiveChannel` — mirrors the typed\nstatuses the local live command results carry.",
         "oneOf": [
@@ -38961,6 +39001,10 @@
                 "const": "member_events_page",
                 "type": "string"
               },
+              "runtime_incarnation": {
+                "$ref": "#/$defs/BridgeHostRuntimeIncarnation",
+                "description": "Exact boot incarnation of the member-host actor that served this\npage. Required in the first published V4 contract so a successful\nevent poll can fence volatile route recovery before reachability."
+              },
               "turn_outcomes": {
                 "description": "Bounded page of unacknowledged flow-turn terminal rows (§18.10). The\nconsumer acknowledges these exact `(generation, input_id)` keys on\nits next poll; until then the same rows remain replayable.",
                 "items": {
@@ -38977,6 +39021,7 @@
             },
             "required": [
               "result",
+              "runtime_incarnation",
               "generation",
               "fence_token",
               "events",
@@ -39075,10 +39120,14 @@
               "result": {
                 "const": "host_status",
                 "type": "string"
+              },
+              "runtime_incarnation": {
+                "$ref": "#/$defs/BridgeHostRuntimeIncarnation"
               }
             },
             "required": [
               "result",
+              "runtime_incarnation",
               "members",
               "capabilities"
             ],
@@ -52111,6 +52160,10 @@
         ],
         "type": "object"
       },
+      "BridgeHostRuntimeIncarnation": {
+        "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
+        "type": "string"
+      },
       "BridgeLiveControlOutcome": {
         "description": "Per-verb result of `ControlMemberLiveChannel` — mirrors the typed\nstatuses the local live command results carry.",
         "oneOf": [
@@ -53269,6 +53322,10 @@
                 "const": "member_events_page",
                 "type": "string"
               },
+              "runtime_incarnation": {
+                "$ref": "#/$defs/BridgeHostRuntimeIncarnation",
+                "description": "Exact boot incarnation of the member-host actor that served this\npage. Required in the first published V4 contract so a successful\nevent poll can fence volatile route recovery before reachability."
+              },
               "turn_outcomes": {
                 "description": "Bounded page of unacknowledged flow-turn terminal rows (§18.10). The\nconsumer acknowledges these exact `(generation, input_id)` keys on\nits next poll; until then the same rows remain replayable.",
                 "items": {
@@ -53285,6 +53342,7 @@
             },
             "required": [
               "result",
+              "runtime_incarnation",
               "generation",
               "fence_token",
               "events",
@@ -53383,10 +53441,14 @@
               "result": {
                 "const": "host_status",
                 "type": "string"
+              },
+              "runtime_incarnation": {
+                "$ref": "#/$defs/BridgeHostRuntimeIncarnation"
               }
             },
             "required": [
               "result",
+              "runtime_incarnation",
               "members",
               "capabilities"
             ],

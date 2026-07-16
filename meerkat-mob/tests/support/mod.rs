@@ -59,10 +59,10 @@ use meerkat_mob::runtime::HostBindRequest;
 // dependency (A1 lane owns the re-export block additions).
 use meerkat_mob::runtime::bridge_protocol::{
     BridgeAck, BridgeCapabilities, BridgeCommand, BridgeHostBindResponse, BridgeHostMemberRecord,
-    BridgeHostRevokedResponse, BridgeHostStatusResponse, BridgeMaterializePayload,
-    BridgeMaterializedResponse, BridgeMemberIncarnation, BridgeMemberReleasedResponse,
-    BridgePeerTrustPayload, BridgeRejectionCause, BridgeReleasePayload, BridgeReply,
-    MaterializeLaunchMode, MaterializeLaunchOutcome,
+    BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation, BridgeHostStatusResponse,
+    BridgeMaterializePayload, BridgeMaterializedResponse, BridgeMemberIncarnation,
+    BridgeMemberReleasedResponse, BridgePeerTrustPayload, BridgeRejectionCause,
+    BridgeReleasePayload, BridgeReply, MaterializeLaunchMode, MaterializeLaunchOutcome,
     MemberSessionDisposal as WireMemberSessionDisposal, PortableDefinitionExtract,
     PortableMemberSpec, PortableProfile, PortableSpawnOverlay, PortableSystemPrompt,
     PortableToolConfig, WireHostBindingDescriptor, WireMobRuntimeMode, WireSpawnContinuityIntent,
@@ -1845,6 +1845,7 @@ pub async fn spawn_host_daemon_fixture(
         (&member_service, &member_runtime_adapter)
     {
         let mut observation = meerkat_mob::runtime::host_observation::HostMemberObservation::new(
+            actor.runtime_incarnation(),
             Arc::clone(service),
             member_durable_log.clone(),
             actor.observation_watch(),
@@ -2362,6 +2363,7 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
     let responder_member_endpoints = Arc::clone(&member_endpoints);
     let responder_address = endpoint.runtime.advertised_address();
     let responder_token = token;
+    let responder_runtime_incarnation = BridgeHostRuntimeIncarnation::new();
 
     let task = tokio::spawn(async move {
         let runtime = Arc::clone(&responder_endpoint.runtime);
@@ -2592,6 +2594,7 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                         Some(
                             serde_json::to_value(BridgeReply::HostStatus(
                                 BridgeHostStatusResponse {
+                                    runtime_incarnation: responder_runtime_incarnation,
                                     members,
                                     capabilities: BridgeCapabilities {
                                         durable_sessions: true,
@@ -4569,6 +4572,8 @@ pub fn spawn_scripted_member_turn_responder(
 
     let state = Arc::new(std::sync::Mutex::new(ScriptedMemberTurnState::default()));
     let responder_state = Arc::clone(&state);
+    let runtime_incarnation =
+        meerkat_mob::runtime::bridge_protocol::BridgeHostRuntimeIncarnation::new();
     let task = tokio::spawn(async move {
         let runtime = Arc::clone(&endpoint.runtime);
         let notify = runtime.inbox_notify();
@@ -4767,6 +4772,7 @@ pub fn spawn_scripted_member_turn_responder(
                         Some(
                             serde_json::to_value(BridgeReply::MemberEventsPage(
                                 meerkat_mob::runtime::bridge_protocol::BridgeMemberEventsPage {
+                                    runtime_incarnation,
                                     generation,
                                     fence_token,
                                     events,

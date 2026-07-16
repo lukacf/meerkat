@@ -32,8 +32,9 @@ use futures::StreamExt as _;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use meerkat_contracts::wire::supervisor_bridge::{
-    BRIDGE_TURN_OUTCOME_ACK_MAX, BridgeDeliveryRejectionCause, BridgeTrackedInputCancelOutcome,
-    BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord, WireFlowFailureDetail, WireFlowTurnOutcome,
+    BRIDGE_TURN_OUTCOME_ACK_MAX, BridgeDeliveryRejectionCause, BridgeHostRuntimeIncarnation,
+    BridgeTrackedInputCancelOutcome, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
+    WireFlowFailureDetail, WireFlowTurnOutcome,
 };
 use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::interaction::InteractionId;
@@ -704,6 +705,9 @@ impl SessionEventRing {
 
 /// The daemon-composed observation substrate (DEC-P6E-2).
 pub struct HostMemberObservation {
+    /// Same once-per-actor-boot token returned by host-addressed
+    /// `HostStatus`; injected by `MobHostActorHandle`, never minted here.
+    runtime_incarnation: BridgeHostRuntimeIncarnation,
     session_service: Arc<dyn MobSessionService>,
     durable_log: Option<Arc<dyn DurableEventLogRead>>,
     projection: watch::Receiver<HostObservationProjection>,
@@ -876,6 +880,7 @@ fn validate_outcome_ack_batch(
 
 impl HostMemberObservation {
     pub fn new(
+        runtime_incarnation: BridgeHostRuntimeIncarnation,
         session_service: Arc<dyn MobSessionService>,
         durable_log: Option<Arc<dyn DurableEventLogRead>>,
         projection: watch::Receiver<HostObservationProjection>,
@@ -883,6 +888,7 @@ impl HostMemberObservation {
         outcome_ack_tx: mpsc::Sender<HostTurnOutcomeAckRequest>,
     ) -> Self {
         Self {
+            runtime_incarnation,
             session_service,
             durable_log,
             projection,
@@ -1673,6 +1679,7 @@ impl HostMemberObservation {
                 || tokio::time::Instant::now() >= deadline
             {
                 return Ok(MemberEventsWindow {
+                    runtime_incarnation: self.runtime_incarnation,
                     generation: current_facts.generation,
                     fence_token: current_facts.fence_token,
                     rows,
@@ -1741,6 +1748,7 @@ impl HostMemberObservation {
                     },
                 };
                 return Ok(MemberEventsWindow {
+                    runtime_incarnation: self.runtime_incarnation,
                     generation,
                     fence_token: facts.fence_token,
                     rows,
@@ -3344,6 +3352,7 @@ mod tests {
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
         let observation = Arc::new(HostMemberObservation::new(
+            BridgeHostRuntimeIncarnation::new(),
             Arc::new(BoundarySessionService::default()),
             None,
             projection_rx,
@@ -3709,6 +3718,7 @@ mod tests {
         let (pending_tx, _pending_rx) = mpsc::channel(1);
         let (outcome_ack_tx, mut outcome_ack_rx) = mpsc::channel(1);
         let observation = Arc::new(HostMemberObservation::new(
+            BridgeHostRuntimeIncarnation::new(),
             Arc::new(BoundarySessionService::default()),
             None,
             projection_rx,
@@ -3795,6 +3805,7 @@ mod tests {
             let (pending_tx, _pending_rx) = mpsc::channel(1);
             let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
             let observation = Arc::new(HostMemberObservation::new(
+                BridgeHostRuntimeIncarnation::new(),
                 Arc::new(BoundarySessionService::default()),
                 Some(log),
                 projection_rx,
@@ -3876,6 +3887,7 @@ mod tests {
             let (pending_tx, _pending_rx) = mpsc::channel(1);
             let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
             let observation = Arc::new(HostMemberObservation::new(
+                BridgeHostRuntimeIncarnation::new(),
                 service,
                 None,
                 projection_rx,
@@ -3961,6 +3973,7 @@ mod tests {
             let (pending_tx, mut pending_rx) = mpsc::channel(1);
             let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
             let observation = HostMemberObservation::new(
+                BridgeHostRuntimeIncarnation::new(),
                 Arc::clone(&service) as Arc<dyn MobSessionService>,
                 Some(Arc::new(FixedWatermarkLog(watermark))),
                 projection_rx,
@@ -4040,6 +4053,7 @@ mod tests {
         let (pending_tx, mut pending_rx) = mpsc::channel(2);
         let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
         let observation = HostMemberObservation::new(
+            BridgeHostRuntimeIncarnation::new(),
             Arc::clone(&service) as Arc<dyn MobSessionService>,
             // A replay must not depend on fresh durable-log preflight.
             None,
@@ -4116,8 +4130,14 @@ mod tests {
         });
         let (pending_tx, mut pending_rx) = mpsc::channel(2);
         let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
-        let observation =
-            HostMemberObservation::new(service, None, projection_rx, pending_tx, outcome_ack_tx);
+        let observation = HostMemberObservation::new(
+            BridgeHostRuntimeIncarnation::new(),
+            service,
+            None,
+            projection_rx,
+            pending_tx,
+            outcome_ack_tx,
+        );
         let window = DirectedTurnWindow {
             expected_member: expected_member.clone(),
             subscription: Box::pin(futures::stream::empty()),
@@ -4209,6 +4229,7 @@ mod tests {
         let (pending_tx, mut pending_rx) = mpsc::channel(2);
         let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
         let observation = HostMemberObservation::new(
+            BridgeHostRuntimeIncarnation::new(),
             Arc::clone(&service) as Arc<dyn MobSessionService>,
             Some(Arc::new(FixedWatermarkLog(0))),
             projection_rx,

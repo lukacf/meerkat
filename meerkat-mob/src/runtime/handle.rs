@@ -87,10 +87,18 @@ impl ReachabilityObservations {
     }
 
     pub(super) fn mark_host_success(&self, host_id: &str) {
+        self.mark_host_success_with_reason(host_id, "host_status_ack");
+    }
+
+    pub(super) fn mark_host_member_events_success(&self, host_id: &str) {
+        self.mark_host_success_with_reason(host_id, "member_event_page_ack");
+    }
+
+    fn mark_host_success_with_reason(&self, host_id: &str, reason: &str) {
         self.hosts
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(host_id.to_string(), Self::success_record("host_status_ack"));
+            .insert(host_id.to_string(), Self::success_record(reason));
     }
 
     pub(super) fn mark_host_failure(&self, host_id: &str, error: &MobError) {
@@ -3109,6 +3117,19 @@ async fn catch_up_structural_events(
 }
 
 impl MobHandle {
+    pub(crate) async fn observe_host_runtime_incarnation(
+        &self,
+        expected_member: super::bridge_protocol::BridgeMemberIncarnation,
+        runtime_incarnation: super::bridge_protocol::BridgeHostRuntimeIncarnation,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::HostRuntimeIncarnationObserved {
+            expected_member,
+            runtime_incarnation,
+            reply_tx,
+        })
+        .await?
+    }
+
     async fn restore_failure_for(
         &self,
         agent_identity: &AgentIdentity,
@@ -6155,9 +6176,10 @@ impl MobHandle {
     /// `materialized_member_count` counts `member_placement` entries
     /// targeting the host.
     ///
-    /// Reachability is the observer-local projection fed by the same periodic
-    /// `HostStatus` loop that performs orphan reconciliation. It never mutates
-    /// membership and uses only local monotonic elapsed time.
+    /// Reachability is the observer-local projection fed by periodic
+    /// `HostStatus` and by member-events pages only after their actor-side
+    /// runtime-incarnation/route barrier. It never mutates membership and
+    /// uses only local monotonic elapsed time.
     pub fn hosts(&self) -> Result<meerkat_contracts::wire::MobHostsResult, MobError> {
         let state = self.machine_state_watch_rx.borrow().clone();
         let mut hosts = Vec::with_capacity(state.host_bind_phase.len());

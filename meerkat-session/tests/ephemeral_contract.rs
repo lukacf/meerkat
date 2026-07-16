@@ -1295,11 +1295,28 @@ async fn test_concurrent_turns_return_busy() {
     // Start a slow turn in the background
     let service_clone = service.clone();
     let sid_clone = session_id.clone();
-    let _handle =
+    let handle =
         tokio::spawn(async move { service_clone.start_turn(&sid_clone, turn_req("Slow")).await });
 
-    // Give the turn time to start running
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // Wait for generated turn-admission authority to publish the claim. This
+    // is the exact Busy decision boundary; wall-clock sleeps are not evidence
+    // that the spawned task was scheduled under a loaded nextest runner.
+    tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+        loop {
+            if service
+                .read(&session_id)
+                .await
+                .expect("read session admission projection")
+                .state
+                .is_active
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("slow turn should claim admission");
 
     // Try to start another turn
     let result = service.start_turn(&session_id, turn_req("Fast")).await;
@@ -1307,6 +1324,10 @@ async fn test_concurrent_turns_return_busy() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), "SESSION_BUSY");
+    handle
+        .await
+        .expect("slow turn task should not panic")
+        .expect("slow turn should complete");
 }
 
 #[tokio::test]

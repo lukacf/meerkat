@@ -3768,6 +3768,10 @@ impl MobSessionService for LocalSessionService {
         Ok(self.actor_registry.contains(session_id))
     }
 
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
+    }
+
     fn runtime_adapter(&self) -> Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>> {
         Some(Arc::clone(&self.runtime_adapter))
     }
@@ -6596,6 +6600,10 @@ mod tests {
             session_id: &SessionId,
         ) -> Result<bool, SessionError> {
             Ok(self.actor_registry.contains(session_id))
+        }
+
+        fn supports_runtime_turn_apply(&self) -> bool {
+            true
         }
 
         fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {

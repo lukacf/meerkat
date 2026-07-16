@@ -481,6 +481,8 @@ enum SubmitWorkDispatchCompletion {
         operation_id: Option<meerkat_core::ops::OperationId>,
         member_ref: MemberRef,
         req: Box<meerkat_core::service::StartTurnRequest>,
+        completion_tx: Option<oneshot::Sender<Result<(), MobError>>>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
         /// `Some(identity)` iff the target is machine-placed on a member
         /// host: a typed delivery failure then fires the W-D.2 revival
         /// trigger back onto the actor.
@@ -538,7 +540,11 @@ struct SubmitWorkDispatchRequest {
     interaction_id: Option<meerkat_core::interaction::InteractionId>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     handling_mode: meerkat_core::types::HandlingMode,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    event_tx:
+        Option<tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>>,
+    completion_tx: Option<oneshot::Sender<Result<(), MobError>>>,
+    llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     operation_id: Option<meerkat_core::ops::OperationId>,
     /// Present only for a placed TurnCompleted dispatch. Its durable Record
@@ -561,24 +567,151 @@ struct PreparedPlacedCompletionWait {
 /// and the host-supplied transcript interaction identity travel together;
 /// an empty pair stays `None` so metadata-less requests keep their shape.
 fn submit_work_turn_metadata(
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     interaction_id: Option<meerkat_core::interaction::InteractionId>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
-) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
-    if render_metadata.is_none() && interaction_id.is_none() && objective_id.is_none() {
-        return None;
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>, MobError> {
+    let mut merged = turn_metadata.unwrap_or_default();
+    if interaction_id.is_some() || objective_id.is_some() {
+        merged
+            .merge(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                        interaction_id,
+                        run_id: None,
+                        objective_id,
+                    },
+                    ..Default::default()
+                },
+            )
+            .map_err(|conflict| {
+                MobError::Internal(format!(
+                    "submit-work turn metadata conflict on `{}`: {}",
+                    conflict.field, conflict.reason
+                ))
+            })?;
     }
-    Some(
-        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-            render_metadata,
-            transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
-                interaction_id,
-                run_id: None,
-                objective_id,
-            },
-            ..Default::default()
-        },
-    )
+    Ok((!merged.is_empty()).then_some(merged))
+}
+
+fn unsupported_turn_metadata_fields(
+    metadata: &meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata,
+    handling_mode: meerkat_core::types::HandlingMode,
+    allow_render_metadata: bool,
+    allow_interaction_id: bool,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if metadata
+        .handling_mode
+        .is_some_and(|metadata_mode| metadata_mode != handling_mode)
+    {
+        fields.push("handling_mode");
+    }
+    if metadata.skill_references.is_some() {
+        fields.push("skill_references");
+    }
+    if metadata.turn_tool_overlay.is_some() {
+        fields.push("turn_tool_overlay");
+    }
+    if metadata.additional_instructions.is_some() {
+        fields.push("additional_instructions");
+    }
+    if metadata.model.is_some() {
+        fields.push("model");
+    }
+    if metadata.provider.is_some() {
+        fields.push("provider");
+    }
+    if metadata.self_hosted_server_id.is_some() {
+        fields.push("self_hosted_server_id");
+    }
+    if metadata.provider_params.is_some() {
+        fields.push("provider_params");
+    }
+    if metadata.auth_binding.is_some() {
+        fields.push("auth_binding");
+    }
+    if metadata.keep_alive.is_some() {
+        fields.push("keep_alive");
+    }
+    if !allow_render_metadata && metadata.render_metadata.is_some() {
+        fields.push("render_metadata");
+    }
+    if metadata.execution_kind.is_some() {
+        fields.push("execution_kind");
+    }
+    if metadata.peer_response_terminal_apply_intent.is_some() {
+        fields.push("peer_response_terminal_apply_intent");
+    }
+    if !allow_interaction_id && metadata.transcript_identity.interaction_id.is_some() {
+        fields.push("transcript_identity.interaction_id");
+    }
+    if metadata.transcript_identity.run_id.is_some() {
+        fields.push("transcript_identity.run_id");
+    }
+    fields
+}
+
+fn validate_member_turn_carriers(
+    entry: &RosterEntry,
+    remotely_hosted: bool,
+    handling_mode: meerkat_core::types::HandlingMode,
+    turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    has_event_sender: bool,
+    has_completion_sender: bool,
+) -> Result<(), MobError> {
+    let peer_only = remotely_hosted
+        || matches!(
+            &entry.member_ref,
+            crate::event::MemberRef::BackendPeer {
+                session_id: None,
+                ..
+            }
+        );
+    let autonomous = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+
+    if (has_event_sender || has_completion_sender) && (peer_only || autonomous) {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: if peer_only {
+                "tracked turn event streams are not supported for remotely hosted or peer-only members"
+            } else {
+                "tracked turn event streams are not supported by autonomous inbox delivery"
+            }
+            .to_string(),
+        });
+    }
+
+    let Some(metadata) = turn_metadata else {
+        return Ok(());
+    };
+    if metadata
+        .handling_mode
+        .is_some_and(|metadata_mode| metadata_mode != handling_mode)
+    {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: "turn metadata handling_mode must match the explicit member turn handling mode"
+                .to_string(),
+        });
+    }
+    let unsupported = if peer_only {
+        unsupported_turn_metadata_fields(metadata, handling_mode, false, false)
+    } else if autonomous {
+        unsupported_turn_metadata_fields(metadata, handling_mode, true, true)
+    } else {
+        Vec::new()
+    };
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(MobError::UnsupportedForMode {
+        mode: entry.runtime_mode,
+        reason: format!(
+            "turn metadata fields are not representable on this member delivery path: {}",
+            unsupported.join(", ")
+        ),
+    })
 }
 
 fn placed_submit_interaction_id(
@@ -621,7 +754,9 @@ fn placed_turn_test_request(
         system_prompt: None,
         event_tx: None,
         runtime: meerkat_core::service::StartTurnRuntimeSemantics::runtime_metadata(
-            submit_work_turn_metadata(None, interaction_id, None).unwrap_or_default(),
+            submit_work_turn_metadata(None, interaction_id, None)
+                .expect("test turn metadata should merge")
+                .unwrap_or_default(),
         ),
     }
 }
@@ -691,14 +826,14 @@ fn machine_kickoff_turn_metadata(
     state: &mob_dsl::MobMachineState,
     agent_identity: &AgentIdentity,
 ) -> Result<Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>, MobError> {
-    Ok(submit_work_turn_metadata(
+    submit_work_turn_metadata(
         None,
         None,
         Some(required_machine_kickoff_objective_id(
             state,
             agent_identity,
         )?),
-    ))
+    )
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -15835,6 +15970,8 @@ impl MobActor {
                             operation_id: _,
                             member_ref,
                             req,
+                            completion_tx,
+                            llm_identity_applied_tx,
                             placed_identity,
                             placed_incarnation,
                             placed_input_id,
@@ -15844,6 +15981,8 @@ impl MobActor {
                                     self.provisioner.clone(),
                                     member_ref,
                                     req,
+                                    completion_tx,
+                                    llm_identity_applied_tx,
                                     reply_tx,
                                     placed_identity
                                         .map(|identity| (self.command_tx.clone(), identity)),
@@ -39705,7 +39844,10 @@ impl MobActor {
             interaction_id,
             objective_id,
             handling_mode,
-            render_metadata,
+            turn_metadata,
+            event_tx,
+            completion_tx,
+            llm_identity_applied_tx,
             ack_mode,
         } = *payload;
         tracing::debug!(
@@ -39833,6 +39975,58 @@ impl MobActor {
         } else {
             entry.fence_token
         };
+
+        // Per-turn LLM identity fields require a runtime-owned executor
+        // boundary. Capability is checked against the exact resolved member;
+        // actor-global adapter presence is not evidence that a direct,
+        // peer-only, or remotely hosted backend can realize the override.
+        let requests_llm_reconfigure = turn_metadata.as_ref().is_some_and(|metadata| {
+            metadata.model.is_some()
+                || metadata.provider.is_some()
+                || metadata.self_hosted_server_id.is_some()
+                || metadata.provider_params.is_some()
+                || metadata.auth_binding.is_some()
+        });
+        if requests_llm_reconfigure && handling_mode == meerkat_core::types::HandlingMode::Steer {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "per-turn LLM identity overrides require a queued executor turn; running Steer has no executor application boundary"
+                    .to_string(),
+            });
+        }
+        if requests_llm_reconfigure
+            && !self
+                .provisioner
+                .supports_member_turn_llm_reconfigure(&entry.member_ref)
+        {
+            return Err(MobError::MissingMemberCapability {
+                member_id: AgentIdentity::from(runtime_id.identity.as_str()),
+                capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
+                context: "member turn LLM identity override",
+            });
+        }
+
+        // Merge actor-owned WorkSpec causality into the caller's typed carrier
+        // before admission. Any conflict or carrier that cannot be realized
+        // on this exact placement/backend is rejected before MobMachine emits
+        // an ingress effect.
+        let turn_metadata = submit_work_turn_metadata(turn_metadata, interaction_id, objective_id)?;
+        let remotely_hosted =
+            super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity);
+        validate_member_turn_carriers(
+            &entry,
+            remotely_hosted,
+            handling_mode,
+            turn_metadata.as_ref(),
+            event_tx.is_some(),
+            completion_tx.is_some(),
+        )?;
+        let interaction_id = turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.transcript_identity.interaction_id);
+        let objective_id = turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.transcript_identity.objective_id);
 
         // Injected-context deliverability is validated BEFORE the MobMachine
         // SubmitWork input is applied: refusing realization after admission
@@ -40024,7 +40218,10 @@ impl MobActor {
                     interaction_id: effective_interaction_id,
                     objective_id,
                     handling_mode,
-                    render_metadata,
+                    turn_metadata,
+                    event_tx,
+                    completion_tx,
+                    llm_identity_applied_tx,
                     ack_mode,
                     operation_id: None,
                     placed_completion_obligation: placed_completion_obligation.clone(),
@@ -40442,6 +40639,8 @@ impl MobActor {
         provisioner: Arc<dyn MobProvisioner>,
         member_ref: MemberRef,
         req: Box<meerkat_core::service::StartTurnRequest>,
+        completion_tx: Option<oneshot::Sender<Result<(), MobError>>>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
         revival: Option<(mpsc::Sender<RoutedMobCommand>, AgentIdentity)>,
         placed_incarnation: Option<super::bridge_protocol::BridgeMemberIncarnation>,
@@ -40451,7 +40650,14 @@ impl MobActor {
         self.actor_io_tasks.spawn(async move {
             let result = match (placed_incarnation, placed_input_id) {
                 (Some(expected_member), Some(input_id)) => {
-                    match placed_turn_supplied_interaction_id(&req) {
+                    if completion_tx.is_some() || llm_identity_applied_tx.is_some() {
+                        Err(MobError::UnsupportedForMode {
+                            mode: crate::MobRuntimeMode::TurnDriven,
+                            reason: "tracked completion is not supported for remotely hosted members"
+                                .to_string(),
+                        })
+                    } else {
+                        match placed_turn_supplied_interaction_id(&req) {
                         Ok(transcript_interaction_id) => {
                             let expected_receipt = input_id.clone();
                             match provisioner
@@ -40482,9 +40688,23 @@ impl MobActor {
                             }
                         }
                         Err(error) => Err(error),
+                        }
                     }
                 }
-                (None, None) => provisioner.admit_turn(&member_ref, *req).await,
+                (None, None) => {
+                    if let Some(completion_tx) = completion_tx {
+                        provisioner
+                            .admit_tracked_turn(
+                                &member_ref,
+                                *req,
+                                completion_tx,
+                                llm_identity_applied_tx,
+                            )
+                            .await
+                    } else {
+                        provisioner.admit_turn(&member_ref, *req).await
+                    }
+                }
                 _ => Err(MobError::Internal(
                     "turn admission placement/transport fields drifted".to_string(),
                 )),
@@ -40578,7 +40798,10 @@ impl MobActor {
                         agent_identity,
                     )?),
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
-                    render_metadata: None,
+                    turn_metadata: None,
+                    event_tx: None,
+                    completion_tx: None,
+                    llm_identity_applied_tx: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                     operation_id: Some(operation_id.clone()),
                     placed_completion_obligation: None,
@@ -40680,6 +40903,8 @@ impl MobActor {
                 operation_id,
                 member_ref,
                 req,
+                completion_tx,
+                llm_identity_applied_tx,
                 placed_identity,
                 placed_incarnation,
                 placed_input_id,
@@ -40691,6 +40916,14 @@ impl MobActor {
                 );
                 debug_assert_eq!(placed_identity.is_some(), placed_incarnation.is_some());
                 let result = if let Some(expected_member) = placed_incarnation {
+                    if completion_tx.is_some() || llm_identity_applied_tx.is_some() {
+                        return Err(MobError::UnsupportedForMode {
+                            mode: crate::MobRuntimeMode::TurnDriven,
+                            reason:
+                                "tracked completion is not supported for remotely hosted members"
+                                    .to_string(),
+                        });
+                    }
                     let transcript_interaction_id = placed_turn_supplied_interaction_id(&req)?
                         .map(|interaction_id| interaction_id.0.to_string());
                     let input_id = placed_input_id.ok_or_else(|| {
@@ -40714,6 +40947,15 @@ impl MobActor {
                         )
                         .await
                         .map(|_| ())
+                } else if let Some(completion_tx) = completion_tx {
+                    self.provisioner
+                        .admit_tracked_turn(
+                            &member_ref,
+                            *req,
+                            completion_tx,
+                            llm_identity_applied_tx,
+                        )
+                        .await
                 } else if let Some(operation_id) = operation_id.as_ref() {
                     self.provisioner
                         .admit_turn_for_operation(&member_ref, operation_id, *req)
@@ -40808,7 +41050,10 @@ impl MobActor {
             interaction_id,
             objective_id,
             handling_mode,
-            render_metadata,
+            turn_metadata,
+            event_tx,
+            completion_tx,
+            llm_identity_applied_tx,
             ack_mode,
             operation_id,
             placed_completion_obligation,
@@ -40945,6 +41190,8 @@ impl MobActor {
         // the remote session id to a local injector/runtime adapter would
         // target the wrong owner.
         if placed_identity.is_some() {
+            let turn_metadata =
+                submit_work_turn_metadata(turn_metadata, effective_interaction_id, objective_id)?;
             let req = meerkat_core::service::StartTurnRequest {
                 injected_context,
                 prompt: content,
@@ -40954,11 +41201,7 @@ impl MobActor {
                     handling_mode,
                     None,
                     Vec::new(),
-                    submit_work_turn_metadata(
-                        render_metadata,
-                        effective_interaction_id,
-                        objective_id,
-                    ),
+                    turn_metadata,
                 ),
             };
             return match ack_mode {
@@ -40967,6 +41210,8 @@ impl MobActor {
                         operation_id,
                         member_ref: machine_member_ref,
                         req: Box::new(req),
+                        completion_tx,
+                        llm_identity_applied_tx,
                         placed_identity,
                         placed_incarnation,
                         placed_input_id,
@@ -41007,6 +41252,10 @@ impl MobActor {
                 self.ensure_autonomous_runtime_ready(&entry.agent_identity, &machine_member_ref)
                     .await?;
 
+                let render_metadata = turn_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.render_metadata.clone());
+
                 if self
                     .autonomous_steer_requires_admission_barrier(
                         entry,
@@ -41023,22 +41272,20 @@ impl MobActor {
                         injected_context: Vec::new(),
                         prompt: content,
                         system_prompt: None,
-                        event_tx: None,
+                        event_tx,
                         runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                             handling_mode,
                             None,
                             Vec::new(),
-                            submit_work_turn_metadata(
-                                render_metadata,
-                                interaction_id,
-                                objective_id,
-                            ),
+                            turn_metadata,
                         ),
                     };
                     return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                         operation_id,
                         member_ref: machine_member_ref,
                         req: Box::new(req),
+                        completion_tx,
+                        llm_identity_applied_tx,
                         placed_identity,
                         placed_incarnation,
                         placed_input_id,
@@ -41124,12 +41371,12 @@ impl MobActor {
                     injected_context,
                     prompt: content,
                     system_prompt: None,
-                    event_tx: None,
+                    event_tx,
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         handling_mode,
                         None,
                         Vec::new(),
-                        submit_work_turn_metadata(render_metadata, interaction_id, objective_id),
+                        turn_metadata,
                     ),
                 };
                 tracing::debug!(
@@ -41152,6 +41399,8 @@ impl MobActor {
                             operation_id,
                             member_ref: machine_member_ref,
                             req,
+                            completion_tx,
+                            llm_identity_applied_tx,
                             placed_identity,
                             placed_incarnation,
                             placed_input_id,

@@ -1104,6 +1104,7 @@ impl MeerkatMachine {
                                     crate::meerkat_machine_types::SessionLlmReconfigureRequest {
                                         model: Some(request.intent.target_model.to_string()),
                                         provider: None,
+                                        self_hosted_server_id: None,
                                         provider_params: None,
                                         auth_binding: None,
                                     },

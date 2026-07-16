@@ -8,6 +8,30 @@ use meerkat_core::lifecycle::run_primitive::{
     ProviderParamsOverride, RuntimeTurnMetadata, TurnMetadataOverride,
 };
 
+#[test]
+fn exact_self_hosted_server_route_survives_wire_round_trip() {
+    let wire: WireRuntimeTurnMetadata = RuntimeTurnMetadata {
+        model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+            "shared-local-model",
+        )),
+        provider: Some(meerkat_core::Provider::SelfHosted),
+        self_hosted_server_id: Some("local-b".to_string()),
+        ..Default::default()
+    }
+    .into();
+
+    let json = serde_json::to_value(&wire).expect("serialize exact local route");
+    assert_eq!(json["self_hosted_server_id"], "local-b");
+    let round_tripped: RuntimeTurnMetadata =
+        serde_json::from_value::<WireRuntimeTurnMetadata>(json)
+            .expect("deserialize exact local route")
+            .into();
+    assert_eq!(
+        round_tripped.self_hosted_server_id.as_deref(),
+        Some("local-b")
+    );
+}
+
 fn wire_auth_binding() -> WireAuthBindingRef {
     WireAuthBindingRef {
         realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),

@@ -179,56 +179,113 @@ struct PeerOnlySupervisorAuthorization {
 
 #[cfg(feature = "runtime-adapter")]
 struct DeferredTurnEventDelivery {
-    release_tx: oneshot::Sender<()>,
+    release_tx: oneshot::Sender<DeferredTurnEventOutcome>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredTurnEventOutcome {
+    Succeeded,
+    CallbackPending,
+    ExtractionFailed,
+    Failed,
 }
 
 #[cfg(feature = "runtime-adapter")]
 impl DeferredTurnEventDelivery {
-    fn release(self) {
-        let _ = self.release_tx.send(());
+    fn release(self, outcome: DeferredTurnEventOutcome) {
+        let _ = self.release_tx.send(outcome);
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn deferred_terminal_matches_outcome(
+    event: &meerkat_core::AgentEvent,
+    outcome: DeferredTurnEventOutcome,
+) -> bool {
+    match event {
+        meerkat_core::AgentEvent::RunCompleted { .. }
+        | meerkat_core::AgentEvent::ExtractionSucceeded { .. }
+        | meerkat_core::AgentEvent::InteractionComplete { .. } => {
+            outcome == DeferredTurnEventOutcome::Succeeded
+        }
+        meerkat_core::AgentEvent::InteractionCallbackPending { .. } => {
+            outcome == DeferredTurnEventOutcome::CallbackPending
+        }
+        meerkat_core::AgentEvent::ExtractionFailed { .. } => {
+            outcome == DeferredTurnEventOutcome::ExtractionFailed
+        }
+        meerkat_core::AgentEvent::RunFailed { .. }
+        | meerkat_core::AgentEvent::InteractionFailed { .. } => {
+            outcome == DeferredTurnEventOutcome::Failed
+        }
+        _ => true,
     }
 }
 
 #[cfg(feature = "runtime-adapter")]
 fn defer_turn_events_until_machine_completion(
-    session_id: &SessionId,
+    _session_id: &SessionId,
     event_tx: Option<TurnEventTx>,
 ) -> (Option<TurnEventTx>, Option<DeferredTurnEventDelivery>) {
     let Some(event_tx) = event_tx else {
         return (None, None);
     };
 
-    let (deferred_tx, mut deferred_rx) = mpsc::channel(DEFERRED_TURN_EVENT_CHANNEL_CAPACITY);
+    let (deferred_tx, mut deferred_rx) = mpsc::channel::<
+        meerkat_core::EventEnvelope<meerkat_core::AgentEvent>,
+    >(DEFERRED_TURN_EVENT_CHANNEL_CAPACITY);
     let (release_tx, release_rx) = oneshot::channel();
-    let session_id = session_id.clone();
     tokio::spawn(async move {
         let mut release_rx = Box::pin(release_rx);
-        let mut buffered = Vec::new();
+        let mut buffered_terminal = Vec::new();
         let mut stream_closed = false;
-        let mut released = false;
+        let mut released = None;
 
         loop {
             tokio::select! {
                 event = deferred_rx.recv(), if !stream_closed => {
                     match event {
-                        Some(event) => buffered.push(event),
+                        Some(event) => {
+                            let terminal = matches!(
+                                &event.payload,
+                                meerkat_core::AgentEvent::RunCompleted { .. }
+                                    | meerkat_core::AgentEvent::RunFailed { .. }
+                                    | meerkat_core::AgentEvent::ExtractionSucceeded { .. }
+                                    | meerkat_core::AgentEvent::ExtractionFailed { .. }
+                                    | meerkat_core::AgentEvent::InteractionComplete { .. }
+                                    | meerkat_core::AgentEvent::InteractionCallbackPending { .. }
+                                    | meerkat_core::AgentEvent::InteractionFailed { .. }
+                            );
+                            if terminal && released.is_none() {
+                                buffered_terminal.push(event);
+                            } else if released.is_none_or(|outcome| {
+                                deferred_terminal_matches_outcome(&event.payload, outcome)
+                            }) && event_tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
                         None => stream_closed = true,
                     }
                 }
-                result = &mut release_rx, if !released => {
-                    released = true;
-                    drop(result);
+                result = &mut release_rx, if released.is_none() => {
+                    // A dropped release authority is failure-closed: never let a
+                    // buffered success terminal escape without a matching
+                    // machine completion result.
+                    let outcome = result.unwrap_or(DeferredTurnEventOutcome::Failed);
+                    released = Some(outcome);
+                    for event in buffered_terminal.drain(..) {
+                        if deferred_terminal_matches_outcome(&event.payload, outcome)
+                            && event_tx.send(event).await.is_err()
+                        {
+                            return;
+                        }
+                    }
                 }
             }
 
-            if stream_closed && released {
+            if stream_closed && released.is_some() {
                 break;
-            }
-        }
-
-        for event in buffered {
-            if event_tx.send(event).await.is_err() {
-                return;
             }
         }
         // No synthetic terminal event. The mob actor receives the
@@ -461,6 +518,14 @@ impl ResumedMemberRollbackAuthority {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobProvisioner: Send + Sync {
+    /// Whether this exact member delivery path can apply a per-turn LLM
+    /// identity at the runtime executor boundary. This is intentionally
+    /// member-specific: an actor may host lifecycle adapters alongside direct,
+    /// peer-only, or remotely hosted backends that cannot realize an override.
+    fn supports_member_turn_llm_reconfigure(&self, _member_ref: &MemberRef) -> bool {
+        false
+    }
+
     async fn provision_member(
         &self,
         req: ProvisionMemberRequest,
@@ -599,6 +664,21 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError>;
+    /// Admit a turn and resolve `completion_tx` from the authoritative runtime
+    /// completion boundary without holding the mob actor until completion.
+    async fn admit_tracked_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+        completion_tx: tokio::sync::oneshot::Sender<Result<(), MobError>>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    ) -> Result<(), MobError> {
+        let _ = (member_ref, req, completion_tx, llm_identity_applied_tx);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "tracked completion is not supported by this provisioner".to_string(),
+        })
+    }
     async fn admit_turn_for_operation(
         &self,
         member_ref: &MemberRef,
@@ -2129,7 +2209,7 @@ impl SessionBackend {
         // The registration is request-scoped: cancellation at any later await
         // synchronously removes the exact attachment-local context.
         let mut queued_context =
-            state.register_turn_context(requested_input_id.clone(), queued_event_tx)?;
+            state.register_turn_context(requested_input_id.clone(), queued_event_tx, None)?;
 
         let (outcome, handle) = match adapter
             .accept_input_with_completion_for_attachment(state.witness(), input)
@@ -2141,7 +2221,7 @@ impl SessionBackend {
                 drop(operation_guard);
                 let error = err.to_string();
                 if let Some(delivery) = deferred_delivery {
-                    delivery.release();
+                    delivery.release(DeferredTurnEventOutcome::Failed);
                 }
                 return Err(MobError::Internal(error));
             }
@@ -2173,20 +2253,24 @@ impl SessionBackend {
 
         // Terminal dedup: input already processed — idempotent success
         let Some(handle) = handle else {
+            if let Some(queued_context) = queued_context.as_mut() {
+                queued_context.resolve_without_execution(Ok(None));
+            }
             drop(queued_context);
             if let Some(delivery) = deferred_delivery {
-                delivery.release();
+                delivery.release(DeferredTurnEventOutcome::Succeeded);
             }
             return Ok(());
         };
 
         let completion = handle.wait().await;
         drop(queued_context);
+        let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
+        let result = runtime_completion_to_mob_result(session_id, completion);
         if let Some(delivery) = deferred_delivery {
-            delivery.release();
+            delivery.release(delivery_outcome);
         }
-
-        runtime_completion_to_mob_result(session_id, completion)
+        result
     }
 
     fn runtime_input_from_turn_request(req: &StartTurnRequest) -> Input {
@@ -2231,6 +2315,8 @@ impl SessionBackend {
         session_id: &SessionId,
         input: Input,
         event_tx: Option<TurnEventTx>,
+        completion_tx: Option<oneshot::Sender<Result<(), MobError>>>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ) -> Result<(), MobError> {
         let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
             MobError::Internal(format!(
@@ -2246,6 +2332,12 @@ impl SessionBackend {
                 ))
             })?;
         let requested_input_id = input.id().clone();
+        // A live Steer is admitted into the active run rather than lowered to
+        // a serialized executor primitive. The actor rejects Steer requests
+        // carrying an LLM identity override before admission, so the tracked
+        // identity acknowledgement for this lane is authoritatively
+        // `Ok(None)` as soon as runtime admission succeeds. Keep the rest of
+        // the queued context alive for event/completion delivery.
         let (queued_event_tx, deferred_delivery) =
             defer_turn_events_until_machine_completion(session_id, event_tx);
 
@@ -2261,13 +2353,18 @@ impl SessionBackend {
             let state = Arc::clone(&state);
             let task_session_id = session_id.clone();
             let task_input_id = requested_input_id;
+            let resolves_llm_identity_at_admission =
+                input.handling_mode() == Some(meerkat_core::types::HandlingMode::Steer);
             tokio::spawn(async move {
-                let result = async {
+                let admission = async {
                     let operation_guard = state
                         .exact_operation_guard(&adapter, &task_session_id)
                         .await?;
-                    let mut queued_context =
-                        state.register_turn_context(task_input_id.clone(), queued_event_tx)?;
+                    let mut queued_context = state.register_turn_context(
+                        task_input_id.clone(),
+                        queued_event_tx,
+                        llm_identity_applied_tx,
+                    )?;
                     let (outcome, handle) = adapter
                         .accept_input_with_completion_for_attachment(state.witness(), input)
                         .await
@@ -2287,25 +2384,46 @@ impl SessionBackend {
                         {
                             let _ = queued_context.rekey(input_id.clone());
                         }
+                        if resolves_llm_identity_at_admission {
+                            queued_context.resolve_llm_identity_at_admission(Ok(None));
+                        }
                     }
                     drop(operation_guard);
-                    if let Some(handle) = handle {
-                        let _ = handle.wait().await;
-                    }
-                    drop(queued_context);
-                    Ok::<(), MobError>(())
+                    Ok::<_, MobError>((handle, queued_context))
                 }
                 .await;
-                if let Err(error) = result {
+
+                let (result, delivery_outcome) = match admission {
+                    Ok((Some(handle), queued_context)) => {
+                        let completion = handle.wait().await;
+                        drop(queued_context);
+                        let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
+                        (
+                            runtime_completion_to_mob_result(&task_session_id, completion),
+                            delivery_outcome,
+                        )
+                    }
+                    Ok((None, mut queued_context)) => {
+                        if let Some(queued_context) = queued_context.as_mut() {
+                            queued_context.resolve_without_execution(Ok(None));
+                        }
+                        drop(queued_context);
+                        (Ok(()), DeferredTurnEventOutcome::Succeeded)
+                    }
+                    Err(error) => (Err(error), DeferredTurnEventOutcome::Failed),
+                };
+                if let Some(delivery) = deferred_delivery {
+                    delivery.release(delivery_outcome);
+                }
+                if let Some(completion_tx) = completion_tx {
+                    let _ = completion_tx.send(result);
+                } else if let Err(error) = result {
                     tracing::warn!(
                         session_id = %task_session_id,
                         input_id = %task_input_id,
                         %error,
-                        "background WASM runtime input admission failed"
+                        "background WASM runtime turn failed"
                     );
-                }
-                if let Some(delivery) = deferred_delivery {
-                    delivery.release();
                 }
             });
             Ok(())
@@ -2313,9 +2431,14 @@ impl SessionBackend {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let resolves_llm_identity_at_admission =
+                input.handling_mode() == Some(meerkat_core::types::HandlingMode::Steer);
             let operation_guard = state.exact_operation_guard(adapter, session_id).await?;
-            let mut queued_context =
-                state.register_turn_context(requested_input_id.clone(), queued_event_tx)?;
+            let mut queued_context = state.register_turn_context(
+                requested_input_id.clone(),
+                queued_event_tx,
+                llm_identity_applied_tx,
+            )?;
             let accept_result = adapter
                 .accept_input_with_completion_for_attachment(state.witness(), input)
                 .await;
@@ -2327,7 +2450,7 @@ impl SessionBackend {
                     drop(operation_guard);
                     let error = err.to_string();
                     if let Some(delivery) = deferred_delivery {
-                        delivery.release();
+                        delivery.release(DeferredTurnEventOutcome::Failed);
                     }
                     return Err(MobError::Internal(error));
                 }
@@ -2346,22 +2469,37 @@ impl SessionBackend {
                 {
                     let _ = queued_context.rekey(input_id.clone());
                 }
+                if resolves_llm_identity_at_admission {
+                    queued_context.resolve_llm_identity_at_admission(Ok(None));
+                }
             }
             drop(operation_guard);
 
             let Some(handle) = handle else {
+                if let Some(queued_context) = queued_context.as_mut() {
+                    queued_context.resolve_without_execution(Ok(None));
+                }
                 drop(queued_context);
                 if let Some(delivery) = deferred_delivery {
-                    delivery.release();
+                    delivery.release(DeferredTurnEventOutcome::Succeeded);
+                }
+                if let Some(completion_tx) = completion_tx {
+                    let _ = completion_tx.send(Ok(()));
                 }
                 return Ok(());
             };
 
+            let completion_session_id = session_id.clone();
             tokio::spawn(async move {
-                let _completion = handle.wait().await;
+                let completion = handle.wait().await;
                 drop(queued_context);
+                let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
+                let result = runtime_completion_to_mob_result(&completion_session_id, completion);
                 if let Some(delivery) = deferred_delivery {
-                    delivery.release();
+                    delivery.release(delivery_outcome);
+                }
+                if let Some(completion_tx) = completion_tx {
+                    let _ = completion_tx.send(result);
                 }
             });
 
@@ -2415,6 +2553,39 @@ fn runtime_completion_to_mob_result(
         meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(MobError::Internal(format!("runtime terminated: {reason}")))
         }
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn deferred_turn_outcome_from_completion(
+    completion: &Result<
+        meerkat_runtime::completion::CompletionOutcome,
+        meerkat_runtime::completion::CompletionWaitError,
+    >,
+) -> DeferredTurnEventOutcome {
+    match completion {
+        Ok(meerkat_runtime::completion::CompletionOutcome::Completed(result))
+            if result.extraction_error.is_some() =>
+        {
+            DeferredTurnEventOutcome::ExtractionFailed
+        }
+        Ok(
+            meerkat_runtime::completion::CompletionOutcome::Completed(_)
+            | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult,
+        ) => DeferredTurnEventOutcome::Succeeded,
+        Ok(meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. }) => {
+            DeferredTurnEventOutcome::CallbackPending
+        }
+        Ok(
+            meerkat_runtime::completion::CompletionOutcome::Cancelled
+            | meerkat_runtime::completion::CompletionOutcome::Abandoned { .. }
+            | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { .. }
+            | meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                ..
+            }
+            | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. },
+        )
+        | Err(_) => DeferredTurnEventOutcome::Failed,
     }
 }
 
@@ -2492,7 +2663,39 @@ struct RuntimeQueuedTurnOwnerState {
 
 #[cfg(feature = "runtime-adapter")]
 struct QueuedTurnContext {
-    event_tx: TurnEventTx,
+    event_tx: Option<TurnEventTx>,
+    llm_identity_application: PendingMemberTurnLlmIdentityApplication,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[derive(Default)]
+struct PendingMemberTurnLlmIdentityApplication {
+    sender: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl PendingMemberTurnLlmIdentityApplication {
+    fn new(sender: Option<super::handle::MemberTurnLlmIdentityAppliedSender>) -> Self {
+        Self { sender }
+    }
+
+    fn resolve(&mut self, result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(result);
+        }
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl Drop for PendingMemberTurnLlmIdentityApplication {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(Err(MobError::Internal(
+                "member turn ended before reaching the LLM identity application boundary"
+                    .to_string(),
+            )));
+        }
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -2522,13 +2725,35 @@ impl RuntimeQueuedTurnRegistration {
             }
         }
     }
+
+    fn resolve_without_execution(
+        &mut self,
+        result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>,
+    ) {
+        if !self.owns_context {
+            return;
+        }
+        if let Some(mut context) = self.owner.discard_turn_context(&self.input_id) {
+            context.llm_identity_application.resolve(result);
+        }
+        self.owns_context = false;
+    }
+
+    fn resolve_llm_identity_at_admission(
+        &self,
+        result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>,
+    ) {
+        if self.owns_context {
+            self.owner.resolve_turn_llm_identity(&self.input_id, result);
+        }
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
 impl Drop for RuntimeQueuedTurnRegistration {
     fn drop(&mut self) {
         if self.owns_context {
-            self.owner.discard_turn_context(&self.input_id);
+            let _ = self.owner.discard_turn_context(&self.input_id);
         }
     }
 }
@@ -2563,7 +2788,8 @@ impl RuntimeQueuedTurnOwner {
         self: &Arc<Self>,
         attachment: &RuntimeExecutorAttachmentWitness,
         input_id: InputId,
-        event_tx: TurnEventTx,
+        event_tx: Option<TurnEventTx>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ) -> Result<RuntimeQueuedTurnRegistration, MobError> {
         let mut state = self
             .state
@@ -2579,10 +2805,15 @@ impl RuntimeQueuedTurnOwner {
                 "runtime turn context for input '{input_id}' is already registered"
             )));
         }
-        state
-            .queue
-            .entries
-            .insert(input_id.clone(), QueuedTurnContext { event_tx });
+        state.queue.entries.insert(
+            input_id.clone(),
+            QueuedTurnContext {
+                event_tx,
+                llm_identity_application: PendingMemberTurnLlmIdentityApplication::new(
+                    llm_identity_applied_tx,
+                ),
+            },
+        );
         Ok(RuntimeQueuedTurnRegistration {
             owner: Arc::clone(self),
             input_id,
@@ -2636,14 +2867,30 @@ impl RuntimeQueuedTurnOwner {
         RuntimeTurnContextRekey::Moved
     }
 
-    fn discard_turn_context(&self, input_id: &InputId) -> bool {
+    fn discard_turn_context(&self, input_id: &InputId) -> Option<QueuedTurnContext> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .queue
             .entries
             .remove(input_id)
-            .is_some()
+    }
+
+    fn resolve_turn_llm_identity(
+        &self,
+        input_id: &InputId,
+        result: Result<Option<meerkat_core::SessionLlmIdentity>, MobError>,
+    ) {
+        if let Some(context) = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .queue
+            .entries
+            .get_mut(input_id)
+        {
+            context.llm_identity_application.resolve(result);
+        }
     }
 
     fn clear_if_owned_by(&self, attachment: &RuntimeExecutorAttachmentWitness) -> bool {
@@ -2879,12 +3126,13 @@ impl RuntimeSessionState {
         self: &Arc<Self>,
         input_id: InputId,
         event_tx: Option<TurnEventTx>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ) -> Result<Option<RuntimeQueuedTurnRegistration>, MobError> {
-        let Some(event_tx) = event_tx else {
+        if event_tx.is_none() && llm_identity_applied_tx.is_none() {
             return Ok(None);
-        };
+        }
         self.queued_turn_owner
-            .register_turn_context(self.witness(), input_id, event_tx)
+            .register_turn_context(self.witness(), input_id, event_tx, llm_identity_applied_tx)
             .map(Some)
     }
 
@@ -4410,8 +4658,9 @@ pub(super) async fn prepare_prepared_runtime_session_state(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        MultiBackendProvisioner, defer_turn_events_until_machine_completion,
-        runtime_completion_to_mob_result, session_turn_error_to_mob_error,
+        DeferredTurnEventOutcome, MultiBackendProvisioner,
+        defer_turn_events_until_machine_completion, runtime_completion_to_mob_result,
+        session_turn_error_to_mob_error,
     };
     use crate::error::MobError;
     use meerkat_core::service::SessionError;
@@ -4501,7 +4750,7 @@ mod tests {
             defer_turn_events_until_machine_completion(&session_id, Some(event_tx));
 
         let deferred_delivery = deferred_delivery.expect("deferred delivery handle");
-        deferred_delivery.release();
+        deferred_delivery.release(DeferredTurnEventOutcome::Succeeded);
         drop(queued_event_tx);
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
@@ -4511,6 +4760,141 @@ mod tests {
             result.is_none(),
             "deferred buffer must not fabricate events; channel should close empty"
         );
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn deferred_turn_delivery_streams_deltas_and_commit_gates_terminal_events() {
+        let session_id = SessionId::new();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let (queued_event_tx, deferred_delivery) =
+            defer_turn_events_until_machine_completion(&session_id, Some(event_tx));
+        let queued_event_tx = queued_event_tx.expect("queued event sender");
+        let deferred_delivery = deferred_delivery.expect("deferred delivery handle");
+        queued_event_tx
+            .send(meerkat_core::EventEnvelope::new_session(
+                session_id.clone(),
+                1,
+                None,
+                meerkat_core::AgentEvent::TextDelta {
+                    delta: "live".to_string(),
+                },
+            ))
+            .await
+            .expect("send live delta");
+        queued_event_tx
+            .send(meerkat_core::EventEnvelope::new_session(
+                session_id.clone(),
+                2,
+                None,
+                meerkat_core::AgentEvent::RunCompleted {
+                    session_id,
+                    result: "done".to_string(),
+                    structured_output: None,
+                    extraction_required: false,
+                    usage: Default::default(),
+                    terminal_cause_kind: None,
+                },
+            ))
+            .await
+            .expect("send terminal event");
+        let live = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("delta should stream before release")
+            .expect("live event");
+        assert!(matches!(
+            live.payload,
+            meerkat_core::AgentEvent::TextDelta { .. }
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), event_rx.recv())
+                .await
+                .is_err(),
+            "terminal event must remain buffered before commit release"
+        );
+        deferred_delivery.release(DeferredTurnEventOutcome::Succeeded);
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("terminal should flush after release")
+            .expect("terminal event");
+        assert!(matches!(
+            terminal.payload,
+            meerkat_core::AgentEvent::RunCompleted { .. }
+        ));
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn deferred_turn_delivery_commit_gates_all_interaction_terminals() {
+        async fn assert_gated(event: meerkat_core::AgentEvent, outcome: DeferredTurnEventOutcome) {
+            let session_id = SessionId::new();
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+            let (queued_event_tx, deferred_delivery) =
+                defer_turn_events_until_machine_completion(&session_id, Some(event_tx));
+            let queued_event_tx = queued_event_tx.expect("queued event sender");
+            let deferred_delivery = deferred_delivery.expect("deferred delivery handle");
+            queued_event_tx
+                .send(meerkat_core::EventEnvelope::new_session(
+                    session_id, 1, None, event,
+                ))
+                .await
+                .expect("send interaction terminal");
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(25), event_rx.recv())
+                    .await
+                    .is_err(),
+                "interaction terminal must not escape before committed completion"
+            );
+            deferred_delivery.release(outcome);
+            let released = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+                .await
+                .expect("matching interaction terminal should release")
+                .expect("released interaction terminal");
+            assert!(
+                matches!(
+                    (outcome, released.payload),
+                    (
+                        DeferredTurnEventOutcome::Succeeded,
+                        meerkat_core::AgentEvent::InteractionComplete { .. }
+                    ) | (
+                        DeferredTurnEventOutcome::CallbackPending,
+                        meerkat_core::AgentEvent::InteractionCallbackPending { .. }
+                    ) | (
+                        DeferredTurnEventOutcome::Failed,
+                        meerkat_core::AgentEvent::InteractionFailed { .. }
+                    )
+                ),
+                "released interaction terminal must match committed outcome"
+            );
+        }
+
+        let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+        assert_gated(
+            meerkat_core::AgentEvent::InteractionComplete {
+                interaction_id,
+                result: "done".to_string(),
+                structured_output: None,
+            },
+            DeferredTurnEventOutcome::Succeeded,
+        )
+        .await;
+        assert_gated(
+            meerkat_core::AgentEvent::InteractionCallbackPending {
+                interaction_id,
+                tool_name: "external".to_string(),
+                args: json!({"value": 1}),
+            },
+            DeferredTurnEventOutcome::CallbackPending,
+        )
+        .await;
+        assert_gated(
+            meerkat_core::AgentEvent::InteractionFailed {
+                interaction_id,
+                reason: meerkat_core::event::InteractionFailureReason::abandoned("runtime failed"),
+            },
+            DeferredTurnEventOutcome::Failed,
+        )
+        .await;
     }
 
     #[cfg(feature = "runtime-adapter")]
@@ -4574,7 +4958,7 @@ mod tests {
         let input_id = meerkat_core::InputId::new();
         let (a_tx, _a_rx) = tokio::sync::mpsc::channel(1);
         let _a_registration = owner_a
-            .register_turn_context(&witness_a, input_id.clone(), a_tx)
+            .register_turn_context(&witness_a, input_id.clone(), Some(a_tx), None)
             .expect("register A-local request context");
         pending_a.abort().await.expect("abort attachment A");
 
@@ -4600,7 +4984,7 @@ mod tests {
 
         let (b_tx, _b_rx) = tokio::sync::mpsc::channel(1);
         let _b_registration = owner_b
-            .register_turn_context(&witness_b, input_id.clone(), b_tx)
+            .register_turn_context(&witness_b, input_id.clone(), Some(b_tx), None)
             .expect("register B-local request context under the same logical input id");
         assert!(owner_a.clear_if_owned_by(&witness_a));
         assert!(
@@ -4680,7 +5064,7 @@ mod tests {
         let input_id = meerkat_core::InputId::new();
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
         let _registration = state
-            .register_turn_context(input_id.clone(), Some(event_tx))
+            .register_turn_context(input_id.clone(), Some(event_tx), None)
             .expect("register exact attachment-local context")
             .expect("event sender should create a registration");
 
@@ -5103,6 +5487,34 @@ fn pending_system_context_appends_for_runtime_executor(
 }
 
 #[cfg(feature = "runtime-adapter")]
+fn runtime_llm_reconfigure_request_from_primitive(
+    primitive: &RunPrimitive,
+) -> Option<meerkat_runtime::SessionLlmReconfigureRequest> {
+    let metadata = primitive.turn_metadata()?;
+    if metadata.model.is_none()
+        && metadata.provider.is_none()
+        && metadata.self_hosted_server_id.is_none()
+        && metadata.provider_params.is_none()
+        && metadata.auth_binding.is_none()
+    {
+        return None;
+    }
+    Some(meerkat_runtime::SessionLlmReconfigureRequest {
+        model: metadata
+            .model
+            .as_ref()
+            .map(|model| model.as_str().to_string()),
+        provider: metadata
+            .provider
+            .as_ref()
+            .map(|provider| provider.as_str().to_string()),
+        self_hosted_server_id: metadata.self_hosted_server_id.clone(),
+        provider_params: metadata.provider_params.clone(),
+        auth_binding: metadata.auth_binding.clone(),
+    })
+}
+
+#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
@@ -5197,6 +5609,10 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .state
             .take_turn_context_for_inputs(&contributing_input_ids)
             .await;
+        let (event_tx, mut llm_identity_application) = match queued_context {
+            Some(context) => (context.event_tx, context.llm_identity_application),
+            None => (None, PendingMemberTurnLlmIdentityApplication::default()),
+        };
         // The runtime has already resolved handling_mode routing (Queue vs
         // Steer) before the executor fires. The session-service start_turn
         // path only supports Queue — Steer semantics are realized by the
@@ -5213,7 +5629,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             injected_context: Vec::new(),
             prompt: primitive.extract_content_input(),
             system_prompt: None,
-            event_tx: queued_context.map(|context| context.event_tx),
+            event_tx,
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                 meerkat_core::types::HandlingMode::Queue,
                 primitive
@@ -5232,6 +5648,33 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         )
         .await
         .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))?;
+
+        // A per-turn LLM selection belongs to this exact serialized runtime
+        // primitive, not to admission-time mutation of shared session state.
+        // The applied signal is the canonical resolver's actual identity and
+        // remains valid even if the subsequent turn or finalization fails.
+        if let Some(request) = runtime_llm_reconfigure_request_from_primitive(&primitive) {
+            let report = self
+                .runtime_adapter
+                .reconfigure_session_llm_identity_under_turn_finalization_boundary(
+                    &self.bridge_session_id,
+                    request,
+                )
+                .await
+                .map_err(|error| {
+                    llm_identity_application.resolve(Err(MobError::Internal(format!(
+                        "failed to reconfigure member session '{}' LLM identity for run {run_id}: {error}",
+                        self.bridge_session_id
+                    ))));
+                    CoreExecutorError::apply_failed_runtime_turn(format!(
+                        "failed to reconfigure member session '{}' LLM identity for run {run_id}: {error}",
+                        self.bridge_session_id
+                    ))
+                })?;
+            llm_identity_application.resolve(Ok(Some(report.new_identity)));
+        } else {
+            llm_identity_application.resolve(Ok(None));
+        }
 
         self.session_service
             .apply_runtime_turn(
@@ -5327,6 +5770,12 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for SessionBackend {
+    fn supports_member_turn_llm_reconfigure(&self, member_ref: &MemberRef) -> bool {
+        matches!(member_ref, MemberRef::Session { .. })
+            && self.runtime_adapter.is_some()
+            && self.session_service.supports_runtime_turn_apply()
+    }
+
     async fn provision_member(
         &self,
         mut req: ProvisionMemberRequest,
@@ -6146,7 +6595,7 @@ impl MobProvisioner for SessionBackend {
                 "SessionBackend::admit_turn admitting runtime input"
             );
             return self
-                .admit_runtime_input(&session_id, input, req.event_tx)
+                .admit_runtime_input(&session_id, input, req.event_tx, None, None)
                 .await;
         }
 
@@ -6168,6 +6617,45 @@ impl MobProvisioner for SessionBackend {
             }
             () = tokio::task::yield_now() => Ok(()),
         }
+    }
+
+    async fn admit_tracked_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+        completion_tx: tokio::sync::oneshot::Sender<Result<(), MobError>>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "admit tracked turn")?;
+        if self.runtime_adapter.is_some() {
+            self.ops_adapter
+                .report_member_progress(member_ref, "turn dispatched")
+                .await?;
+            let input = Self::runtime_input_from_turn_request(&req);
+            return self
+                .admit_runtime_input(
+                    &session_id,
+                    input,
+                    req.event_tx,
+                    Some(completion_tx),
+                    llm_identity_applied_tx,
+                )
+                .await;
+        }
+
+        if let Some(llm_identity_applied_tx) = llm_identity_applied_tx {
+            let _ = llm_identity_applied_tx.send(Ok(None));
+        }
+        let session_service = self.session_service.clone();
+        tokio::spawn(async move {
+            let result = session_service
+                .start_turn(&session_id, req)
+                .await
+                .map(|_| ())
+                .map_err(|error| session_turn_error_to_mob_error(&session_id, error));
+            let _ = completion_tx.send(result);
+        });
+        Ok(())
     }
 
     async fn admit_turn_for_operation(
@@ -6213,7 +6701,7 @@ impl MobProvisioner for SessionBackend {
                 "SessionBackend::admit_turn_for_operation admitting runtime input"
             );
             return self
-                .admit_runtime_input(&session_id, input, req.event_tx)
+                .admit_runtime_input(&session_id, input, req.event_tx, None, None)
                 .await;
         }
 
@@ -6250,7 +6738,7 @@ impl MobProvisioner for SessionBackend {
                 }),
             );
             return self
-                .admit_runtime_input(&session_id, input, req.event_tx)
+                .admit_runtime_input(&session_id, input, req.event_tx, None, None)
                 .await;
         }
 
@@ -7348,6 +7836,15 @@ impl MultiBackendProvisioner {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for MultiBackendProvisioner {
+    fn supports_member_turn_llm_reconfigure(&self, member_ref: &MemberRef) -> bool {
+        match member_ref {
+            MemberRef::Session { .. } => self
+                .session
+                .supports_member_turn_llm_reconfigure(member_ref),
+            MemberRef::BackendPeer { .. } => false,
+        }
+    }
+
     async fn provision_member(
         &self,
         mut req: ProvisionMemberRequest,
@@ -8526,6 +9023,28 @@ impl MobProvisioner for MultiBackendProvisioner {
                 session_id: None, ..
             } => self.start_turn(member_ref, req).await,
             _ => self.session.admit_turn(member_ref, req).await,
+        }
+    }
+
+    async fn admit_tracked_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+        completion_tx: tokio::sync::oneshot::Sender<Result<(), MobError>>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::BackendPeer { .. } => Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason:
+                    "tracked completion is not supported for remotely hosted or peer-only members"
+                        .to_string(),
+            }),
+            MemberRef::Session { .. } => {
+                self.session
+                    .admit_tracked_turn(member_ref, req, completion_tx, llm_identity_applied_tx)
+                    .await
+            }
         }
     }
 

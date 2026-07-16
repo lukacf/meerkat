@@ -9250,6 +9250,10 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         )
     }
 
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
+    }
+
     async fn interrupt_with_machine_authority(
         &self,
         session_id: &SessionId,
@@ -11776,6 +11780,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             ),
             model: None,
             provider: None,
+            self_hosted_server_id: None,
             provider_params: None,
             render_metadata: dispatch.render_metadata.clone(),
             execution_kind: None,
@@ -12257,6 +12262,10 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
             &self.inner,
         )
+    }
+
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
     }
 
     async fn interrupt_with_machine_authority(

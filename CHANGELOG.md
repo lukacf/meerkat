@@ -128,6 +128,30 @@ via cargo-semver-checks against the published baselines).
   opaque compaction semantic. Exhaustive downstream matches must handle the
   new variants; presentation code can use `TranscriptRewriteSelection::bounds`
   to retain the existing half-open-range rendering.
+- Exact per-turn self-hosted routing added the required
+  `self_hosted_server_id` field to public `RuntimeTurnMetadata`,
+  `WireRuntimeTurnMetadata`, `SessionLlmIdentityOverride`, and
+  `SessionLlmReconfigureRequest` literals. Exhaustive matches must also handle
+  the new `MobMemberCapability::SessionLlmReconfigure` and
+  `SessionLlmIdentityOverrideError` variants. The public
+  `SessionRuntimeLlmReconfigureHost::service` field now accepts
+  `Arc<dyn SessionRuntimeLlmReconfigureService>` instead of the concrete
+  session service so embedded runtimes can install the same canonical
+  reconfiguration boundary.
+
+### Added
+
+- Mob members can now admit completion-bearing tracked turns through
+  `MemberHandle::start_turn` and `MemberTurnOptions`. The returned
+  `MemberTurnHandle` separates ingress admission, actual executor-applied LLM
+  identity, and committed terminal completion; terminal events remain gated on
+  the MobMachine outcome, including finalization and structured-extraction
+  failures.
+- Embedded runtimes can install `SessionRuntimeLlmReconfigureHostBlueprint` to
+  apply provider, model, exact self-hosted server, provider-parameter, and auth
+  overrides at the serialized executor boundary. Queued turns retain their own
+  identity route, and unsupported member backends reject overrides before mob
+  admission instead of silently using the prior model.
 
 ### Fixed
 

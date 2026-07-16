@@ -35,7 +35,7 @@ use meerkat_core::{
     TurnStateHandle,
 };
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -45,9 +45,9 @@ use std::sync::{
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 #[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
+use crate::tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::{OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, mpsc, oneshot, watch};
 
 #[cfg(test)]
 use crate::staged_registry::MaterializationStatus;
@@ -686,6 +686,81 @@ struct SessionHandle {
     cancel_after_boundary_handle: Option<CancelAfterBoundarySender>,
     /// Broadcast channel for session-wide event subscription.
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+}
+
+/// Cancellation-safe custody of one generated turn-admission claim.
+///
+/// Public turns claim the canonical slot before awaiting the outer runtime
+/// finalization boundary. That preserves the public `SESSION_BUSY` contract
+/// instead of turning concurrent turns into a serialized queue. If the caller
+/// is cancelled, loses the actor incarnation, or fails before command
+/// delivery, dropping this guard returns `Admitted -> Idle` through the same
+/// generated authority. Successful command delivery transfers finalization to
+/// the session task.
+struct StartTurnAdmissionClaim {
+    actor_witness: LiveSessionActorWitness,
+    validated_identity: Option<SessionLlmIdentity>,
+    turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
+    state_tx: watch::Sender<SessionState>,
+    transferred_to_session_task: bool,
+}
+
+impl StartTurnAdmissionClaim {
+    fn claim(
+        id: &SessionId,
+        handle: &SessionHandle,
+        validated_identity: Option<SessionLlmIdentity>,
+    ) -> Result<Self, SessionError> {
+        let projection = {
+            let mut slot = lock_turn_admission(&handle.turn_admission);
+            match slot
+                .claim()
+                .map_err(|_| SessionError::Busy { id: id.clone() })?
+            {
+                ClaimOutcome::Admitted => slot.projection(),
+                // ShuttingDown means the session was archived or discarded;
+                // the public contract for callers is NotFound (archived).
+                ClaimOutcome::ShutdownTerminal(_) => {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+            }
+        };
+        handle.state_tx.send_replace(projection);
+        Ok(Self {
+            actor_witness: handle.actor_witness.clone(),
+            validated_identity,
+            turn_admission: Arc::clone(&handle.turn_admission),
+            state_tx: handle.state_tx.clone(),
+            transferred_to_session_task: false,
+        })
+    }
+
+    fn belongs_to(&self, handle: &SessionHandle) -> bool {
+        self.actor_witness.is_handle(handle)
+    }
+
+    fn requires_prompt_validation(&self, identity: &SessionLlmIdentity) -> bool {
+        self.validated_identity.as_ref() != Some(identity)
+    }
+
+    fn transfer_to_session_task(mut self) {
+        self.transferred_to_session_task = true;
+    }
+}
+
+impl Drop for StartTurnAdmissionClaim {
+    fn drop(&mut self) {
+        if self.transferred_to_session_task {
+            return;
+        }
+        let projection = {
+            let mut slot = lock_turn_admission(&self.turn_admission);
+            slot.abort_claim().ok().map(|_| slot.projection())
+        };
+        if let Some(projection) = projection {
+            self.state_tx.send_replace(projection);
+        }
+    }
 }
 
 struct ArchiveSnapshotGate {
@@ -1391,6 +1466,11 @@ fn wake_interrupt_notify(notify: &tokio::sync::Notify) {
 pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
     archived_views: RwLock<IndexMap<SessionId, SessionView>>,
+    /// Stable outer boundary for overlapping turns and live identity/tool
+    /// mutations of one logical session. Weak entries keep the same mutex
+    /// across every current holder and waiter without retaining rejected or
+    /// retired session IDs forever.
+    turn_finalization_gates: Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>,
     builder: B,
     /// Single typed owner of session materialization status, staged-capacity
     /// custody, and the global active-capacity admission seam.
@@ -1605,10 +1685,35 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Self {
             sessions: RwLock::new(IndexMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
+            turn_finalization_gates: Mutex::new(HashMap::new()),
             builder,
             staged_registry: Arc::new(StagedSessionRegistry::bounded(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
         }
+    }
+
+    async fn turn_finalization_gate_for_session(&self, id: &SessionId) -> Arc<Mutex<()>> {
+        let mut gates = self.turn_finalization_gates.lock().await;
+        gates.retain(|_, gate| gate.strong_count() != 0);
+        if let Some(gate) = gates.get(id).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+
+        let gate = Arc::new(Mutex::new(()));
+        gates.insert(id.clone(), Arc::downgrade(&gate));
+        gate
+    }
+
+    /// Acquire the exact per-session outer boundary shared by direct turns,
+    /// runtime turns, and the multi-command LLM reconfigure transaction.
+    pub async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        id: &SessionId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.turn_finalization_gate_for_session(id)
+            .await
+            .lock_owned()
+            .await
     }
 
     /// Acquire a global active-capacity permit through the single typed
@@ -1936,6 +2041,55 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ))
             })?
             .map_err(SessionError::Agent)
+    }
+
+    /// Apply one already-authorized live identity update while the caller
+    /// holds this session's turn-finalization boundary.
+    pub async fn apply_runtime_session_llm_identity_under_runtime_turn_boundary(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::HotSwapLlmIdentity {
+                client,
+                identity: Box::new(identity),
+                request_policy: Box::new(request_policy),
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Apply already-authorized visibility state while the caller holds the
+    /// same turn-finalization boundary as the identity update.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub async fn apply_runtime_session_tool_visibility_state_under_runtime_turn_boundary(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        self.set_session_tool_visibility_state(id, state).await
     }
 
     /// Get a diagnostic snapshot of the live execution state for a session.
@@ -2912,7 +3066,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<SessionTurnExecutionOutcome, SessionError> {
-        self.start_turn_execution_with_admission_recovering_not_found(id, req, None)
+        self.start_turn_execution_with_admission_recovering_not_found(id, req, None, None)
             .await
             .map_err(|(error, _admission)| error)
     }
@@ -2925,8 +3079,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         admission: RuntimeContextAdmissionGuard,
     ) -> Result<SessionTurnExecutionOutcome, (SessionError, Option<RuntimeContextAdmissionGuard>)>
     {
-        self.start_turn_execution_with_admission_recovering_not_found(id, req, Some(admission))
-            .await
+        self.start_turn_execution_with_admission_recovering_not_found(
+            id,
+            req,
+            Some(admission),
+            None,
+        )
+        .await
     }
 
     async fn start_turn_with_admission(
@@ -2940,6 +3099,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(|(error, _admission)| error)
     }
 
+    /// Execute a turn while the caller owns this session's stable outer
+    /// turn-finalization boundary.
+    pub async fn start_turn_under_runtime_turn_finalization_boundary(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        self.start_turn_with_admission(id, req, None).await
+    }
+
     async fn start_turn_with_admission_recovering_not_found(
         &self,
         id: &SessionId,
@@ -2951,6 +3120,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 id,
                 req,
                 reserved_admission.take(),
+                None,
             )
             .await?;
         outcome
@@ -2963,6 +3133,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         req: StartTurnRequest,
         mut reserved_admission: Option<RuntimeContextAdmissionGuard>,
+        mut preclaimed_turn: Option<StartTurnAdmissionClaim>,
     ) -> Result<SessionTurnExecutionOutcome, (SessionError, Option<RuntimeContextAdmissionGuard>)>
     {
         let (result_tx, result_rx) = oneshot::channel();
@@ -2980,14 +3151,32 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     ));
                 }
             };
+            if preclaimed_turn
+                .as_ref()
+                .is_some_and(|claim| !claim.belongs_to(handle))
+            {
+                return Err((
+                    SessionError::NotFound { id: id.clone() },
+                    reserved_admission.take(),
+                ));
+            }
             let identity = handle.llm_identity_rx.borrow().clone();
-            self.validate_prompt_video_input(&prompt, &identity)
-                .await
-                .map_err(|error| (error, None))?;
+            if preclaimed_turn
+                .as_ref()
+                .is_none_or(|claim| claim.requires_prompt_validation(&identity))
+            {
+                self.validate_prompt_video_input(&prompt, &identity)
+                    .await
+                    .map_err(|error| (error, None))?;
+            }
 
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.
-            Self::request_start_turn(id, handle).map_err(|error| (error, None))?;
+            let turn_claim = match preclaimed_turn.take() {
+                Some(claim) => claim,
+                None => Self::claim_start_turn(id, handle, Some(identity))
+                    .map_err(|error| (error, None))?,
+            };
 
             if let Some(system_prompt) = req.system_prompt {
                 let allows_override = {
@@ -2995,7 +3184,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     guard.allows_initial_turn_overrides()
                 };
                 if !allows_override {
-                    Self::try_abort_admitted_turn(handle);
                     return Err((
                         SessionError::Unsupported(
                             "system_prompt override is only allowed on a deferred session's first turn"
@@ -3013,7 +3201,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     })
                     .await
                     .map_err(|_| {
-                        Self::try_abort_admitted_turn(handle);
                         (
                             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                                 "Session task has exited".to_string(),
@@ -3022,7 +3209,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                         )
                     })?;
                 let update_result = reply_rx.await.map_err(|_| {
-                    Self::try_abort_admitted_turn(handle);
                     (
                         SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                             "Session task dropped reply channel".to_string(),
@@ -3030,10 +3216,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                         None,
                     )
                 })?;
-                update_result.map_err(|error| {
-                    Self::try_abort_admitted_turn(handle);
-                    (SessionError::Agent(error), None)
-                })?;
+                update_result.map_err(|error| (SessionError::Agent(error), None))?;
             }
 
             let active_admission = if let Some(admission) = reserved_admission.take() {
@@ -3042,7 +3225,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 match self.acquire_runtime_context_admission_for_handle(id, handle) {
                     Ok(admission) => admission,
                     Err(err) => {
-                        Self::try_abort_admitted_turn(handle);
                         return Err((err, None));
                     }
                 }
@@ -3059,8 +3241,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             if handle.command_tx.send(command).await.is_err() {
                 // Dropping the rejected command drops its admission guard; the
                 // final lease release settles staged-restore vs capacity
-                // release through the registry-owned promotion status.
-                Self::try_abort_admitted_turn(handle);
+                // release through the registry-owned promotion status. The
+                // turn-claim guard separately restores Admitted -> Idle.
                 return Err((
                     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                         "Session task has exited".to_string(),
@@ -3068,6 +3250,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     None,
                 ));
             }
+            turn_claim.transfer_to_session_task();
         }
 
         let result = result_rx.await.map_err(|_| {
@@ -3243,23 +3426,17 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         state.is_active
     }
 
+    fn claim_start_turn(
+        id: &SessionId,
+        handle: &SessionHandle,
+        validated_identity: Option<SessionLlmIdentity>,
+    ) -> Result<StartTurnAdmissionClaim, SessionError> {
+        StartTurnAdmissionClaim::claim(id, handle, validated_identity)
+    }
+
     fn request_start_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
-        let projection = {
-            let mut slot = lock_turn_admission(&handle.turn_admission);
-            match slot
-                .claim()
-                .map_err(|_| SessionError::Busy { id: id.clone() })?
-            {
-                ClaimOutcome::Admitted => slot.projection(),
-                // ShuttingDown means the session was archived or discarded;
-                // the public contract for callers is NotFound (archived).
-                ClaimOutcome::ShutdownTerminal(_) => {
-                    return Err(SessionError::NotFound { id: id.clone() });
-                }
-            }
-        };
-        handle.state_tx.send_replace(projection);
-        Ok(())
+        Self::claim_start_turn(id, handle, None)
+            .map(StartTurnAdmissionClaim::transfer_to_session_task)
     }
 
     fn try_abort_admitted_turn(handle: &SessionHandle) {
@@ -3694,7 +3871,31 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
-        self.start_turn_with_admission(id, req, None).await
+        // Claim through the generated turn-admission authority before waiting
+        // on the runtime-finalization mutex. The claim is the canonical Busy
+        // decision; the outer mutex protects identity + turn finalization but
+        // must never turn overlapping public turns into a queue.
+        let preclaimed_turn = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            let identity = handle.llm_identity_rx.borrow().clone();
+            self.validate_prompt_video_input(&req.prompt, &identity)
+                .await?;
+            Self::claim_start_turn(id, handle, Some(identity))?
+        };
+        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        self.start_turn_execution_with_admission_recovering_not_found(
+            id,
+            req,
+            None,
+            Some(preclaimed_turn),
+        )
+        .await
+        .map_err(|(error, _admission)| error)?
+        .into_public_result()
+        .map_err(SessionError::Agent)
     }
 
     async fn reconcile_runtime_compaction_projections(
@@ -3717,6 +3918,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         client: Arc<dyn meerkat_core::AgentLlmClient>,
     ) -> Result<(), SessionError> {
+        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
@@ -3745,33 +3947,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         identity: SessionLlmIdentity,
         request_policy: meerkat_core::SessionLlmRequestPolicy,
     ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::HotSwapLlmIdentity {
-                client,
-                identity: Box::new(identity),
-                request_policy: Box::new(request_policy),
-                reply_tx,
-            })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-        reply_rx
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task dropped reply channel".to_string(),
-                ))
-            })?
-            .map_err(SessionError::Agent)
+        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        self.apply_runtime_session_llm_identity_under_runtime_turn_boundary(
+            id,
+            client,
+            identity,
+            request_policy,
+        )
+        .await
     }
 
     async fn set_session_tool_visibility_state(
@@ -3779,7 +3962,19 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         state: Option<meerkat_core::SessionToolVisibilityState>,
     ) -> Result<(), SessionError> {
-        Self::set_session_tool_visibility_state(self, id, state).await
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        {
+            let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+            self.apply_runtime_session_tool_visibility_state_under_runtime_turn_boundary(id, state)
+                .await
+        }
+        #[cfg(not(all(feature = "session-store", not(target_arch = "wasm32"))))]
+        {
+            let _ = (id, state);
+            Err(SessionError::Unsupported(
+                "set_session_tool_visibility_state".to_string(),
+            ))
+        }
     }
 
     async fn set_session_tool_filter(
@@ -3787,6 +3982,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         filter: meerkat_core::ToolFilter,
     ) -> Result<(), SessionError> {
+        let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
@@ -8877,5 +9073,166 @@ mod inline_video_admission_tests {
             .await
             .expect("live identity");
         assert_eq!(live_identity, target_identity);
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn public_turn_identity_and_visibility_paths_share_the_runtime_finalization_gate() {
+        let service = Arc::new(EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: Some(identity(Provider::OpenAI, "gate-probe")),
+                committed_identity_before_turn_failure: None,
+                validated_identities: Arc::new(Mutex::new(Vec::new())),
+                run_result_session_id: None,
+            },
+            1,
+        ));
+        let created = service
+            .create_session(create_request(
+                ContentInput::Text("deferred gate probe".to_string()),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create deferred gate-probe session");
+        let session_id = created.session_id;
+        let held_guard = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+
+        let mut start_turn_task = {
+            let service = Arc::clone(&service);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                SessionService::start_turn(
+                    service.as_ref(),
+                    &session_id,
+                    start_turn_request(ContentInput::Text("blocked turn".to_string())),
+                )
+                .await
+            })
+        };
+        let mut identity_task = {
+            let service = Arc::clone(&service);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                let target = identity(Provider::OpenAI, "gate-probe-target");
+                SessionService::hot_swap_session_llm_identity(
+                    service.as_ref(),
+                    &session_id,
+                    Arc::new(NoopAgentLlmClient {
+                        model: target.model.clone(),
+                    }),
+                    target.clone(),
+                    meerkat_core::SessionLlmRequestPolicy {
+                        model: target.model,
+                        provider_params: None,
+                        provider_tool_defaults: None,
+                    },
+                )
+                .await
+            })
+        };
+        let mut visibility_task = {
+            let service = Arc::clone(&service);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                SessionService::set_session_tool_visibility_state(
+                    service.as_ref(),
+                    &session_id,
+                    None,
+                )
+                .await
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if service
+                    .read(&session_id)
+                    .await
+                    .expect("read preclaimed turn projection")
+                    .state
+                    .is_active
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("blocked public turn should publish its admission claim");
+        let overlapping_turn = SessionService::start_turn(
+            service.as_ref(),
+            &session_id,
+            start_turn_request(ContentInput::Text("overlapping turn".to_string())),
+        )
+        .await
+        .expect_err("a second public turn must not queue behind the finalization gate");
+        assert!(matches!(
+            overlapping_turn,
+            SessionError::Busy { ref id } if id == &session_id
+        ));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut start_turn_task,)
+                .await
+                .is_err(),
+            "public start_turn bypassed the held runtime-finalization gate"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut identity_task,)
+                .await
+                .is_err(),
+            "public hot_swap_session_llm_identity bypassed the held runtime-finalization gate"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut visibility_task,)
+                .await
+                .is_err(),
+            "public set_session_tool_visibility_state bypassed the held runtime-finalization gate"
+        );
+        {
+            let gates = service.turn_finalization_gates.lock().await;
+            assert_eq!(gates.len(), 1, "overlapping paths must share one gate");
+            assert!(gates.contains_key(&session_id));
+        }
+
+        drop(held_guard);
+
+        let start_turn_result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), start_turn_task)
+                .await
+                .expect("start_turn should proceed after releasing the gate")
+                .expect("start_turn task should not panic");
+        let identity_result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), identity_task)
+                .await
+                .expect("identity mutation should proceed after releasing the gate")
+                .expect("identity mutation task should not panic");
+        let visibility_result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), visibility_task)
+                .await
+                .expect("visibility mutation should proceed after releasing the gate")
+                .expect("visibility mutation task should not panic");
+
+        start_turn_result.expect("turn should proceed under the released boundary");
+        identity_result.expect("identity mutation should proceed under the released boundary");
+        assert!(matches!(
+            visibility_result,
+            Err(SessionError::Agent(AgentError::ConfigError(ref message)))
+                if message == "tool visibility updates are not supported by this session agent"
+        ));
+
+        let replacement_id = SessionId::new();
+        let replacement_guard = service
+            .acquire_runtime_turn_finalization_guard(&replacement_id)
+            .await;
+        {
+            let gates = service.turn_finalization_gates.lock().await;
+            assert_eq!(gates.len(), 1, "dead weak gate entries must be reaped");
+            assert!(!gates.contains_key(&session_id));
+            assert!(gates.contains_key(&replacement_id));
+        }
+        drop(replacement_guard);
     }
 }

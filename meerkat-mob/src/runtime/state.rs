@@ -378,14 +378,23 @@ pub(super) struct SubmitWorkPayload {
     /// (runtime id, fence, work id, origin), never content payloads.
     pub injected_context: Vec<ContentInput>,
     /// Host-supplied interaction identity riding with the work content.
-    /// Shell dispatch carrier only (content-adjacent metadata, like
-    /// `render_metadata`); stamped into the turn's transcript identity at
-    /// delivery so the committed transcript joins the host's live frames.
+    /// Shell dispatch carrier only (content-adjacent metadata); stamped into
+    /// the turn's transcript identity at delivery so the committed transcript
+    /// joins the host's live frames.
     pub interaction_id: Option<meerkat_core::interaction::InteractionId>,
     /// Durable objective causality riding with this work item.
     pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     pub handling_mode: meerkat_core::types::HandlingMode,
-    pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    /// Typed runtime/session semantics for this turn. The actor merges the
+    /// WorkSpec-owned transcript identity into this carrier before dispatch.
+    pub turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    /// Optional live event stream for this specific member turn.
+    pub event_tx:
+        Option<tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>>,
+    /// Optional committed-completion result channel for a tracked turn.
+    pub completion_tx: Option<oneshot::Sender<Result<(), MobError>>>,
+    /// Executor-bound acknowledgement for a host-requested LLM identity.
+    pub llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     pub ack_mode: crate::mob_machine::SubmitWorkAckMode,
 }
 

@@ -6448,6 +6448,10 @@ pub struct SessionLlmIdentity {
 pub struct SessionLlmIdentityOverride<'a> {
     pub model: Option<&'a str>,
     pub provider: Option<Provider>,
+    /// Exact configured route for a self-hosted model. This cannot be inferred
+    /// from provider/model when multiple local servers expose the same model
+    /// identifier.
+    pub self_hosted_server_id: Option<&'a str>,
     pub provider_params:
         Option<TurnMetadataOverride<&'a crate::lifecycle::run_primitive::ProviderParamsOverride>>,
     pub auth_binding: Option<TurnMetadataOverride<&'a crate::AuthBindingRef>>,
@@ -6461,6 +6465,18 @@ pub enum SessionLlmIdentityOverrideError {
     ProviderModelMismatch(String),
     #[error("self-hosted provider requires a registered model alias; '{model}' is not configured")]
     MissingSelfHostedAlias { model: String },
+    #[error("self_hosted_server_id requires provider 'self_hosted'")]
+    SelfHostedServerRequiresSelfHostedProvider,
+    #[error("self_hosted_server_id must not be empty")]
+    EmptySelfHostedServerId,
+    #[error(
+        "self-hosted model '{model}' is configured on server '{configured}', not requested server '{requested}'"
+    )]
+    SelfHostedServerMismatch {
+        model: String,
+        requested: String,
+        configured: String,
+    },
 }
 
 /// Resolve a turn-time model/provider/auth override against the current
@@ -6506,8 +6522,35 @@ pub fn resolve_session_llm_identity_override(
         Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
         None => current.provider_params.clone(),
     };
+    if overrides.self_hosted_server_id.is_some() && provider != Provider::SelfHosted {
+        return Err(SessionLlmIdentityOverrideError::SelfHostedServerRequiresSelfHostedProvider);
+    }
     let self_hosted_server_id = if provider == Provider::SelfHosted {
-        if overrides.model.is_none() {
+        if let Some(requested_server_id) = overrides.self_hosted_server_id {
+            if requested_server_id.trim().is_empty() {
+                return Err(SessionLlmIdentityOverrideError::EmptySelfHostedServerId);
+            }
+            let entry = registry
+                .entry_for_provider(Provider::SelfHosted, &model)
+                .ok_or_else(|| SessionLlmIdentityOverrideError::MissingSelfHostedAlias {
+                    model: model.clone(),
+                })?;
+            let configured_server_id = entry
+                .self_hosted
+                .as_ref()
+                .map(|server| server.server_id.as_str())
+                .ok_or_else(|| SessionLlmIdentityOverrideError::MissingSelfHostedAlias {
+                    model: model.clone(),
+                })?;
+            if configured_server_id != requested_server_id {
+                return Err(SessionLlmIdentityOverrideError::SelfHostedServerMismatch {
+                    model,
+                    requested: requested_server_id.to_string(),
+                    configured: configured_server_id.to_string(),
+                });
+            }
+            Some(requested_server_id.to_string())
+        } else if overrides.model.is_none() {
             current.self_hosted_server_id.clone().or_else(|| {
                 registry
                     .entry_for_provider(Provider::SelfHosted, &model)
@@ -9274,6 +9317,7 @@ mod tests {
             SessionLlmIdentityOverride {
                 model: Some("test-openai-default"),
                 provider: None,
+                self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },
@@ -9309,6 +9353,7 @@ mod tests {
             SessionLlmIdentityOverride {
                 model: Some("uncatalogued-custom-model"),
                 provider: None,
+                self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
             },
@@ -9317,6 +9362,105 @@ mod tests {
 
         assert_eq!(resolved.model, "uncatalogued-custom-model");
         assert_eq!(resolved.provider, Provider::Anthropic);
+    }
+
+    fn self_hosted_registry_with_shared_remote_model() -> crate::ModelRegistry {
+        use crate::config::{
+            SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
+        };
+        use crate::model_profile::catalog::ModelTier;
+
+        let mut config = crate::Config::default();
+        for server_id in ["local-a", "local-b"] {
+            config.self_hosted.servers.insert(
+                server_id.to_string(),
+                SelfHostedServerConfig {
+                    transport: SelfHostedTransport::OpenAiCompatible,
+                    base_url: format!("http://{server_id}.test"),
+                    api_style: SelfHostedApiStyle::Responses,
+                },
+            );
+            config.self_hosted.models.insert(
+                format!("shared-local-{server_id}"),
+                SelfHostedModelConfig {
+                    server: server_id.to_string(),
+                    remote_model: "shared-local-model".to_string(),
+                    display_name: "Shared local model".to_string(),
+                    family: "shared-local".to_string(),
+                    tier: ModelTier::Supported,
+                    ..Default::default()
+                },
+            );
+        }
+        config.self_hosted.default_model = Some("shared-local-local-a".to_string());
+        crate::ModelRegistry::from_config(
+            &config,
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        )
+        .expect("shared local registry")
+    }
+
+    #[test]
+    fn llm_identity_override_preserves_exact_self_hosted_server_route() {
+        let registry = self_hosted_registry_with_shared_remote_model();
+        let current = SessionLlmIdentity {
+            model: "shared-local-local-a".to_string(),
+            provider: Provider::SelfHosted,
+            self_hosted_server_id: Some("local-a".to_string()),
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let resolved = resolve_session_llm_identity_override(
+            &current,
+            &registry,
+            SessionLlmIdentityOverride {
+                model: Some("shared-local-local-b"),
+                provider: Some(Provider::SelfHosted),
+                self_hosted_server_id: Some("local-b"),
+                provider_params: None,
+                auth_binding: None,
+            },
+        )
+        .expect("exact configured local route should resolve");
+
+        assert_eq!(resolved.model, "shared-local-local-b");
+        assert_eq!(resolved.provider, Provider::SelfHosted);
+        assert_eq!(resolved.self_hosted_server_id.as_deref(), Some("local-b"));
+    }
+
+    #[test]
+    fn llm_identity_override_rejects_self_hosted_server_model_mismatch() {
+        let registry = self_hosted_registry_with_shared_remote_model();
+        let current = SessionLlmIdentity {
+            model: "shared-local-local-a".to_string(),
+            provider: Provider::SelfHosted,
+            self_hosted_server_id: Some("local-a".to_string()),
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let error = resolve_session_llm_identity_override(
+            &current,
+            &registry,
+            SessionLlmIdentityOverride {
+                model: Some("shared-local-local-b"),
+                provider: Some(Provider::SelfHosted),
+                self_hosted_server_id: Some("local-a"),
+                provider_params: None,
+                auth_binding: None,
+            },
+        )
+        .expect_err("server id must match the requested model alias route");
+
+        assert!(matches!(
+            error,
+            SessionLlmIdentityOverrideError::SelfHostedServerMismatch {
+                requested,
+                configured,
+                ..
+            } if requested == "local-a" && configured == "local-b"
+        ));
     }
 
     #[test]

@@ -1110,6 +1110,14 @@ pub struct RuntimeTurnMetadata {
     /// Override provider for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// Exact self-hosted server route for this turn.
+    ///
+    /// Model identifiers are not sufficient route identity for local models:
+    /// distinct configured servers may expose the same model identifier. This
+    /// field therefore travels beside `provider` and `model` all the way to
+    /// the executor-owned LLM reconfigure boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
     /// Override, clear, or preserve provider-specific parameters for this turn
     /// (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1162,6 +1170,7 @@ impl RuntimeTurnMetadata {
             && self.additional_instructions.is_none()
             && self.model.is_none()
             && self.provider.is_none()
+            && self.self_hosted_server_id.is_none()
             && self.provider_params.is_none()
             && self.auth_binding.is_none()
             && self.keep_alive.is_none()
@@ -1194,6 +1203,11 @@ impl RuntimeTurnMetadata {
         )?;
         merge_scalar(&mut self.model, other.model, "model")?;
         merge_scalar(&mut self.provider, other.provider, "provider")?;
+        merge_scalar(
+            &mut self.self_hosted_server_id,
+            other.self_hosted_server_id,
+            "self_hosted_server_id",
+        )?;
         merge_override(
             &mut self.provider_params,
             other.provider_params,

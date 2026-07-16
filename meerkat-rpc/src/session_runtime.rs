@@ -1195,6 +1195,10 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         Some(Arc::clone(&self.runtime_adapter))
     }
 
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
+    }
+
     async fn interrupt_with_machine_authority(
         &self,
         session_id: &SessionId,
@@ -1953,6 +1957,7 @@ impl SessionRuntime {
                 .and_then(|ov| ov.model.clone())
                 .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
             provider,
+            self_hosted_server_id: None,
             provider_params,
             render_metadata: None,
             auth_binding,
@@ -2178,7 +2183,7 @@ impl SessionRuntime {
         let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
-                service: Arc::clone(&service),
+                service: service.clone(),
                 staged_sessions: Arc::clone(&staged_sessions),
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
@@ -2319,7 +2324,7 @@ impl SessionRuntime {
         let reconfigure_auth_lease = runtime_adapter.generated_auth_lease_handle();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
-                service: Arc::clone(&service),
+                service: service.clone(),
                 staged_sessions: Arc::clone(&staged_sessions),
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
@@ -4438,6 +4443,7 @@ impl SessionRuntime {
             SessionLlmIdentityOverride {
                 model: ov.model.as_deref(),
                 provider,
+                self_hosted_server_id: None,
                 provider_params: ov
                     .provider_params
                     .as_ref()
@@ -4527,7 +4533,7 @@ impl SessionRuntime {
 
     fn llm_reconfigure_host(&self) -> SessionRuntimeLlmReconfigureHost {
         SessionRuntimeLlmReconfigureHost {
-            service: Arc::clone(&self.service),
+            service: self.service.clone(),
             staged_sessions: Arc::clone(&self.staged_sessions),
             factory: self.factory.clone(),
             auth_lease: self.runtime_adapter.generated_auth_lease_handle(),
@@ -4576,6 +4582,7 @@ impl SessionRuntime {
         let request = SessionLlmReconfigureRequest {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
+            self_hosted_server_id: None,
             provider_params: ov.provider_params.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
@@ -14771,6 +14778,7 @@ mod tests {
         let request = SessionLlmReconfigureRequest {
             model: Some("gpt-5.4".to_string()),
             provider: Some("anthropic".to_string()),
+            self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
         };
@@ -14800,6 +14808,7 @@ mod tests {
         let request = SessionLlmReconfigureRequest {
             model: Some("unknown-model-xyz".to_string()),
             provider: Some("provider-shaped-cache-key".to_string()),
+            self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
         };

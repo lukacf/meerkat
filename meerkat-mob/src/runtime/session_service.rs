@@ -238,6 +238,20 @@ pub trait MobSessionService:
         None
     }
 
+    /// Whether this service implements the runtime-owned turn application
+    /// boundary used by [`MeerkatMachine`]. Merely exposing a runtime adapter
+    /// is not sufficient: some hosts use that adapter only for lifecycle or
+    /// comms authority and still execute turns through the direct
+    /// [`SessionService::start_turn`] path.
+    ///
+    /// Per-turn LLM identity overrides are legal only when this capability is
+    /// true, because the executor must apply the identity immediately before
+    /// the exact admitted turn runs.
+    #[cfg(feature = "runtime-adapter")]
+    fn supports_runtime_turn_apply(&self) -> bool {
+        false
+    }
+
     /// Apply a live hard cancel after `MeerkatMachine` accepts the cancel command.
     ///
     /// The machine has ALREADY admitted the interrupt when this runs — the
@@ -747,6 +761,24 @@ where
     }
 
     #[cfg(feature = "runtime-adapter")]
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
+    }
+
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>, SessionError>
+    {
+        Ok(Box::new(
+            meerkat_session::EphemeralSessionService::<B>::acquire_runtime_turn_finalization_guard(
+                self, session_id,
+            )
+            .await,
+        ))
+    }
+
+    #[cfg(feature = "runtime-adapter")]
     async fn interrupt_with_machine_authority(
         &self,
         session_id: &SessionId,
@@ -894,9 +926,12 @@ where
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        let run_result =
-            meerkat_session::EphemeralSessionService::<B>::start_turn(self, session_id, req)
-                .await?;
+        let run_result = meerkat_session::EphemeralSessionService::<B>::start_turn_under_runtime_turn_finalization_boundary(
+            self,
+            session_id,
+            req,
+        )
+        .await?;
         let session =
             meerkat_session::EphemeralSessionService::<B>::export_session(self, session_id).await?;
         let receipt = build_runtime_receipt(run_id, boundary, contributing_input_ids, &session)?;
@@ -1095,6 +1130,11 @@ where
                 },
             ))
         }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    fn supports_runtime_turn_apply(&self) -> bool {
+        true
     }
 
     async fn load_persisted_session(

@@ -24,11 +24,17 @@ use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTar
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::comms::{CommsCommand, PeerId, SendReceipt, TrustedPeerDescriptor};
+use meerkat_core::lifecycle::run_primitive::{
+    KeepAliveDirective, ModelId, ProviderParamsOverride, RuntimeTurnMetadata, TurnInstruction,
+    TurnMetadataOverride,
+};
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
+use meerkat_core::skills::SkillKey;
 use meerkat_core::time_compat::Instant;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
+use meerkat_core::{AuthBindingRef, Provider, TurnToolOverlay};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -1949,6 +1955,221 @@ pub struct MemberDeliveryReceipt {
     pub(crate) fence_token: FenceToken,
 }
 
+/// Sender for the live event stream of a single member turn.
+///
+/// Runtime-backed members forward nonterminal events live. Terminal events
+/// are withheld until the MeerkatMachine commits the corresponding boundary.
+pub type MemberTurnEventSender =
+    tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>;
+
+pub(crate) type MemberTurnLlmIdentityAppliedSender =
+    tokio::sync::oneshot::Sender<Result<Option<meerkat_core::SessionLlmIdentity>, MobError>>;
+
+/// Host-owned observation channels attached to one external member turn.
+///
+/// Keeping these channels together makes the admission carrier explicit and
+/// prevents the canonical external-turn seam from growing one positional
+/// argument for every independently observed lifecycle fact.
+#[derive(Default)]
+pub(super) struct MemberTurnObservers {
+    pub(super) event_tx: Option<MemberTurnEventSender>,
+    pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), MobError>>>,
+    pub(super) llm_identity_applied_tx: Option<MemberTurnLlmIdentityAppliedSender>,
+}
+
+/// Host-owned options for one member turn.
+///
+/// Runtime-authored metadata (execution classification, terminal peer intent,
+/// run identity, and dispatch context) is deliberately absent. The mob runtime
+/// stamps those facts at admission instead of accepting them from callers.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct MemberTurnOptions {
+    pub model: Option<ModelId>,
+    pub provider: Option<Provider>,
+    /// Exact local-server route for self-hosted models. This is deliberately
+    /// part of the typed turn identity instead of being inferred from a model
+    /// id that may be shared by multiple local servers.
+    pub self_hosted_server_id: Option<String>,
+    pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
+    pub skill_references: Option<Vec<SkillKey>>,
+    pub turn_tool_overlay: Option<TurnToolOverlay>,
+    pub additional_instructions: Option<Vec<TurnInstruction>>,
+    pub keep_alive: Option<KeepAliveDirective>,
+    pub render_metadata: Option<RenderMetadata>,
+    pub interaction_id: Option<meerkat_core::interaction::InteractionId>,
+    pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+}
+
+impl MemberTurnOptions {
+    /// Construct empty host-owned options for one member turn.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_model(mut self, model: ModelId) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    pub fn with_provider(mut self, provider: Provider) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
+    pub fn with_self_hosted_server_id(mut self, server_id: impl Into<String>) -> Self {
+        self.self_hosted_server_id = Some(server_id.into());
+        self
+    }
+
+    /// Set or explicitly clear provider parameters for this turn.
+    pub fn with_provider_params(
+        mut self,
+        provider_params: TurnMetadataOverride<ProviderParamsOverride>,
+    ) -> Self {
+        self.provider_params = Some(provider_params);
+        self
+    }
+
+    /// Set or explicitly clear the auth binding for this turn.
+    pub fn with_auth_binding(mut self, auth_binding: TurnMetadataOverride<AuthBindingRef>) -> Self {
+        self.auth_binding = Some(auth_binding);
+        self
+    }
+
+    pub fn with_skill_references(mut self, skill_references: Vec<SkillKey>) -> Self {
+        self.skill_references = Some(skill_references);
+        self
+    }
+
+    pub fn with_turn_tool_overlay(mut self, turn_tool_overlay: TurnToolOverlay) -> Self {
+        self.turn_tool_overlay = Some(turn_tool_overlay);
+        self
+    }
+
+    pub fn with_additional_instructions(
+        mut self,
+        additional_instructions: Vec<TurnInstruction>,
+    ) -> Self {
+        self.additional_instructions = Some(additional_instructions);
+        self
+    }
+
+    pub fn with_keep_alive(mut self, keep_alive: KeepAliveDirective) -> Self {
+        self.keep_alive = Some(keep_alive);
+        self
+    }
+
+    pub fn with_render_metadata(mut self, render_metadata: RenderMetadata) -> Self {
+        self.render_metadata = Some(render_metadata);
+        self
+    }
+
+    pub fn with_interaction_id(
+        mut self,
+        interaction_id: meerkat_core::interaction::InteractionId,
+    ) -> Self {
+        self.interaction_id = Some(interaction_id);
+        self
+    }
+
+    pub fn with_objective_id(
+        mut self,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+    ) -> Self {
+        self.objective_id = Some(objective_id);
+        self
+    }
+
+    fn into_runtime_metadata(self, handling_mode: HandlingMode) -> RuntimeTurnMetadata {
+        RuntimeTurnMetadata {
+            handling_mode: Some(handling_mode),
+            skill_references: self.skill_references,
+            turn_tool_overlay: self
+                .turn_tool_overlay
+                .map(TurnToolOverlay::without_dispatch_context),
+            additional_instructions: self.additional_instructions,
+            model: self.model,
+            provider: self.provider,
+            self_hosted_server_id: self.self_hosted_server_id,
+            provider_params: self.provider_params,
+            auth_binding: self.auth_binding,
+            keep_alive: self.keep_alive,
+            render_metadata: self.render_metadata,
+            transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                interaction_id: self.interaction_id,
+                objective_id: self.objective_id,
+                run_id: None,
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Completion-bearing handle for an admitted member turn.
+///
+/// The receipt proves canonical mob admission. [`Self::wait`] resolves only
+/// after the runtime's completion boundary commits, and returns an error when
+/// execution fails after admission.
+#[must_use = "member turns must be awaited or deliberately detached"]
+#[derive(Debug)]
+pub struct MemberTurnHandle {
+    receipt: MemberDeliveryReceipt,
+    session_id: Option<SessionId>,
+    completion_rx: tokio::sync::oneshot::Receiver<Result<(), MobError>>,
+    llm_identity_applied_rx: Option<
+        tokio::sync::oneshot::Receiver<Result<Option<meerkat_core::SessionLlmIdentity>, MobError>>,
+    >,
+}
+
+impl MemberTurnHandle {
+    pub fn receipt(&self) -> &MemberDeliveryReceipt {
+        &self.receipt
+    }
+
+    /// Bridge session admitted for this exact member runtime binding.
+    pub fn session_id(&self) -> Option<&SessionId> {
+        self.session_id.as_ref()
+    }
+
+    /// Wait until the exact serialized executor boundary has either applied
+    /// this turn's requested LLM identity or determined that the turn carries
+    /// no identity override.
+    ///
+    /// `Ok(Some(identity))` is authoritative applied live identity and remains
+    /// valid even if the later agent turn or its finalization fails. Backing
+    /// services that persist reconfiguration also make it durable; ephemeral
+    /// or custom hosts need not. `Ok(None)` means this turn did not request an
+    /// identity change. This is deliberately distinct from both ingress
+    /// admission and [`Self::wait`] terminal completion.
+    pub async fn wait_for_applied_llm_identity(
+        &mut self,
+    ) -> Result<Option<meerkat_core::SessionLlmIdentity>, MobError> {
+        let receiver = self.llm_identity_applied_rx.take().ok_or_else(|| {
+            MobError::Internal(
+                "member turn LLM identity application was already awaited".to_string(),
+            )
+        })?;
+        receiver.await.map_err(|_| {
+            MobError::Internal(
+                "member turn LLM identity application channel closed before executor boundary"
+                    .to_string(),
+            )
+        })?
+    }
+
+    pub async fn wait(self) -> Result<MemberDeliveryReceipt, MobError> {
+        match self.completion_rx.await {
+            Ok(Ok(())) => Ok(self.receipt),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(MobError::Internal(
+                "member turn completion channel closed before terminal outcome".to_string(),
+            )),
+        }
+    }
+}
+
 /// Receipt returned by sender-aware mob peer-message delivery.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -3051,7 +3272,10 @@ impl MobHandle {
                     work_ref,
                     spec,
                     handling_mode,
-                    render_metadata,
+                    turn_metadata,
+                    event_tx,
+                    completion_tx,
+                    llm_identity_applied_tx,
                     ack_mode,
                 } = *cmd;
                 let receipt_work_ref = work_ref.clone();
@@ -3065,7 +3289,10 @@ impl MobHandle {
                     interaction_id: spec.interaction_id,
                     objective_id: spec.objective_id,
                     handling_mode,
-                    render_metadata,
+                    turn_metadata,
+                    event_tx,
+                    completion_tx,
+                    llm_identity_applied_tx,
                     ack_mode,
                 });
                 self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
@@ -6309,27 +6536,41 @@ impl MobHandle {
         agent_identity: AgentIdentity,
         message: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
-        render_metadata: Option<RenderMetadata>,
-    ) -> Result<(AgentRuntimeId, FenceToken), MobError> {
-        let (runtime_id, fence_token) = self
-            .resolve_submit_work_runtime_binding(
-                &agent_identity,
-                WorkOrigin::External,
-                "external_turn_for_member",
-            )
-            .await?;
+        turn_metadata: Option<RuntimeTurnMetadata>,
+        observers: MemberTurnObservers,
+    ) -> Result<(AgentRuntimeId, FenceToken, Option<SessionId>), MobError> {
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let Some((runtime_id, fence_token)) = machine_state
+            .member_runtime_material_for_identity(&dsl_identity)
+            .map(|material| material.to_domain_for_identity(&domain_identity))
+        else {
+            return Err(self
+                .resolve_submit_work_missing_runtime_rejection(
+                    &agent_identity,
+                    WorkOrigin::External,
+                    "external_turn_for_member",
+                )
+                .await);
+        };
+        let session_id =
+            Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state);
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id: runtime_id.clone(),
             fence_token,
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
-            render_metadata,
+            turn_metadata,
+            event_tx: observers.event_tx,
+            completion_tx: observers.completion_tx,
+            llm_identity_applied_tx: observers.llm_identity_applied_tx,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
-        Ok((runtime_id, fence_token))
+        Ok((runtime_id, fence_token, session_id))
     }
 
     pub(super) async fn internal_turn_for_member(
@@ -6350,7 +6591,10 @@ impl MobHandle {
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::Internal),
             handling_mode: HandlingMode::Queue,
-            render_metadata: None,
+            turn_metadata: None,
+            event_tx: None,
+            completion_tx: None,
+            llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::TurnCompleted,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
@@ -6475,7 +6719,10 @@ impl MobHandle {
             work_ref: work_ref.clone(),
             spec,
             handling_mode,
-            render_metadata: None,
+            turn_metadata: None,
+            event_tx: None,
+            completion_tx: None,
+            llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
         });
         match self
@@ -8851,7 +9098,7 @@ impl MemberHandle {
         content: impl Into<meerkat_core::types::ContentInput>,
         handling_mode: HandlingMode,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        self.send_with_render_metadata(content, handling_mode, None)
+        self.send_with_internal_turn_metadata(content, handling_mode, None, None, None)
             .await
     }
 
@@ -8862,13 +9109,79 @@ impl MemberHandle {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        let (agent_runtime_id, fence_token) = self
+        let turn_metadata = render_metadata.map(|render_metadata| RuntimeTurnMetadata {
+            render_metadata: Some(render_metadata),
+            ..Default::default()
+        });
+        self.send_with_internal_turn_metadata(content, handling_mode, turn_metadata, None, None)
+            .await
+    }
+
+    /// Start an external member turn with host-owned runtime options and an
+    /// optional live event stream.
+    ///
+    /// The mob actor remains the admission authority: member generation,
+    /// fence, session binding, transcript identity, and runtime dispatch are
+    /// resolved through the same canonical SubmitWork path as [`Self::send`].
+    /// Nonterminal events stream as they happen; terminal events and
+    /// [`MemberTurnHandle::wait`] remain gated on committed runtime completion.
+    pub async fn start_turn(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+        options: MemberTurnOptions,
+        event_tx: Option<MemberTurnEventSender>,
+    ) -> Result<MemberTurnHandle, MobError> {
+        let turn_metadata = options.into_runtime_metadata(handling_mode);
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        let (llm_identity_applied_tx, llm_identity_applied_rx) = tokio::sync::oneshot::channel();
+        let (agent_runtime_id, fence_token, session_id) = self
             .mob
             .external_turn_for_member(
                 self.agent_identity.clone(),
                 content.into(),
                 handling_mode,
-                render_metadata,
+                Some(turn_metadata),
+                MemberTurnObservers {
+                    event_tx,
+                    completion_tx: Some(completion_tx),
+                    llm_identity_applied_tx: Some(llm_identity_applied_tx),
+                },
+            )
+            .await?;
+        Ok(MemberTurnHandle {
+            receipt: MemberDeliveryReceipt {
+                identity: self.identity(),
+                agent_runtime_id,
+                fence_token,
+                handling_mode,
+            },
+            session_id,
+            completion_rx,
+            llm_identity_applied_rx: Some(llm_identity_applied_rx),
+        })
+    }
+
+    async fn send_with_internal_turn_metadata(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+        turn_metadata: Option<RuntimeTurnMetadata>,
+        event_tx: Option<MemberTurnEventSender>,
+        completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), MobError>>>,
+    ) -> Result<MemberDeliveryReceipt, MobError> {
+        let (agent_runtime_id, fence_token, _session_id) = self
+            .mob
+            .external_turn_for_member(
+                self.agent_identity.clone(),
+                content.into(),
+                handling_mode,
+                turn_metadata,
+                MemberTurnObservers {
+                    event_tx,
+                    completion_tx,
+                    llm_identity_applied_tx: None,
+                },
             )
             .await?;
         Ok(MemberDeliveryReceipt {

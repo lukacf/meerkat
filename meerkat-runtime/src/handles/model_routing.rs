@@ -938,6 +938,7 @@ mod tests {
                 crate::SessionLlmReconfigureRequest {
                     model: Some(next_identity.model.clone()),
                     provider: Some("gemini".to_string()),
+                    self_hosted_server_id: None,
                     provider_params: None,
                     auth_binding: None,
                 },

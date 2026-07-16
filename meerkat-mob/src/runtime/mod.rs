@@ -72,6 +72,7 @@ mod events;
 mod flow;
 pub mod flow_frame_engine;
 mod handle;
+pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub mod host_actor;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -164,14 +165,15 @@ pub use handle::{
     ExternalMemberRebindStatus, ExternalPeerBindingSpec, HelperOptions, HelperResult,
     HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
     InitializeAdaptiveRunRequest, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MobDestroyError, MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig,
-    MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
-    MobPeerConnectivitySnapshot, MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer,
-    MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
-    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult,
-    SpawnSource, SpawnSystemPromptOverride, SpawnToolAdmission, SupervisorRotationReport,
-    WorkDeliveryReceipt, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
+    MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions, MobDestroyError, MobDestroyReport,
+    MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
+    MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
+    MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
+    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
+    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
+    SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
+    SpawnToolAdmission, SupervisorRotationReport, WorkDeliveryReceipt, mob_error_wire_code,
+    profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

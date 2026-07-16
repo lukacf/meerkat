@@ -39037,6 +39037,12 @@ impl meerkat_runtime::SessionLlmReconfigureHost for RecordingSessionLlmReconfigu
     }
 }
 
+#[derive(Clone)]
+struct RuntimeTurnPromptBarrier {
+    prompt_substring: String,
+    entered: Arc<tokio::sync::Notify>,
+}
+
 struct RuntimeBackedRealCommsSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<meerkat_comms::CommsRuntime>>>,
     actor_registry: meerkat_session::LiveSessionActorRegistry,
@@ -39051,6 +39057,7 @@ struct RuntimeBackedRealCommsSessionService {
     fail_runtime_checkpoint: AtomicBool,
     return_extraction_failure: AtomicBool,
     runtime_turn_started: tokio::sync::Notify,
+    runtime_turn_prompt_barriers: RwLock<HashMap<SessionId, RuntimeTurnPromptBarrier>>,
     release_runtime_turns: tokio::sync::Notify,
     block_session_reads: AtomicBool,
     session_read_entered: tokio::sync::Notify,
@@ -39093,6 +39100,7 @@ impl RuntimeBackedRealCommsSessionService {
             fail_runtime_checkpoint: AtomicBool::new(false),
             return_extraction_failure: AtomicBool::new(false),
             runtime_turn_started: tokio::sync::Notify::new(),
+            runtime_turn_prompt_barriers: RwLock::new(HashMap::new()),
             release_runtime_turns: tokio::sync::Notify::new(),
             block_session_reads: AtomicBool::new(false),
             session_read_entered: tokio::sync::Notify::new(),
@@ -39235,6 +39243,10 @@ impl RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.runtime_turn_prompt_barriers
+            .write()
+            .await
+            .remove(session_id);
         drop(sessions);
         Ok(true)
     }
@@ -39281,6 +39293,29 @@ impl RuntimeBackedRealCommsSessionService {
 
     fn release_one_runtime_turn(&self) {
         self.release_runtime_turns.notify_one();
+    }
+
+    async fn arm_runtime_turn_prompt_barrier(
+        &self,
+        session_id: &SessionId,
+        prompt_substring: impl Into<String>,
+    ) -> Arc<tokio::sync::Notify> {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        self.runtime_turn_prompt_barriers.write().await.insert(
+            session_id.clone(),
+            RuntimeTurnPromptBarrier {
+                prompt_substring: prompt_substring.into(),
+                entered: Arc::clone(&entered),
+            },
+        );
+        entered
+    }
+
+    async fn clear_runtime_turn_prompt_barrier(&self, session_id: &SessionId) {
+        self.runtime_turn_prompt_barriers
+            .write()
+            .await
+            .remove(session_id);
     }
 
     fn set_emit_runtime_event_before_completion(&self, enabled: bool) {
@@ -39739,6 +39774,17 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         let event_tx = req.event_tx.clone();
         let applied_turn_metadata = req.runtime.turn_metadata.clone();
         let provider_visible_prompt = provider_visible_prompt_from_start_turn_request(&req);
+        let prompt_barrier = self
+            .runtime_turn_prompt_barriers
+            .read()
+            .await
+            .get(session_id)
+            .filter(|barrier| {
+                provider_visible_prompt
+                    .text_content()
+                    .contains(&barrier.prompt_substring)
+            })
+            .cloned();
         let pre_turn_context_appends = req.runtime.pre_turn_context_appends;
         if !pre_turn_context_appends.is_empty() {
             for append in pre_turn_context_appends {
@@ -39874,8 +39920,14 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 .await;
         }
 
-        if self.block_runtime_turns.load(Ordering::Relaxed) {
+        let block_all_runtime_turns = self.block_runtime_turns.load(Ordering::Relaxed);
+        if block_all_runtime_turns {
             self.runtime_turn_started.notify_waiters();
+        }
+        if let Some(barrier) = &prompt_barrier {
+            barrier.entered.notify_waiters();
+        }
+        if block_all_runtime_turns || prompt_barrier.is_some() {
             self.release_runtime_turns.notified().await;
         }
 
@@ -40070,6 +40122,10 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
+        self.runtime_turn_prompt_barriers
+            .write()
+            .await
+            .remove(session_id);
         drop(sessions);
         Ok(())
     }
@@ -42022,8 +42078,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
         .await
         .len();
     let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
-    let delivery_observation_timeout = Duration::from_secs(5);
-    service.set_keep_alive_turns_complete_immediately(false);
+    let delivery_observation_timeout = Duration::from_secs(15);
 
     let requester_comms = service
         .real_comms(&sid_requester)
@@ -42033,6 +42088,13 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
         .real_comms(&sid_responder)
         .await
         .expect("responder comms");
+
+    let requester_runtime_started_notify = service
+        .arm_runtime_turn_prompt_barrier(&sid_requester, "body: keep requester busy")
+        .await;
+    let requester_runtime_started = requester_runtime_started_notify.notified();
+    tokio::pin!(requester_runtime_started);
+    requester_runtime_started.as_mut().enable();
 
     CoreCommsRuntime::send(
         &*responder_comms,
@@ -42052,21 +42114,32 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     .await
     .expect("busy message should send");
 
-    tokio::time::timeout(delivery_observation_timeout, async {
-        loop {
-            let prompts = service.applied_runtime_prompts(&sid_requester).await;
-            if prompts
-                .iter()
-                .skip(requester_prompt_baseline)
-                .any(|prompt| prompt.text_content().contains("body: keep requester busy"))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("requester should be in a running turn before the pong lands");
+    if tokio::time::timeout(delivery_observation_timeout, &mut requester_runtime_started)
+        .await
+        .is_err()
+    {
+        let prompts = service.applied_runtime_prompts(&sid_requester).await;
+        let snapshot = service
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&sid_requester)
+            .await;
+        panic!(
+            "requester runtime apply should start and block before the pong lands; prompts={prompts:?} snapshot={snapshot:?}"
+        );
+    }
+    let requester_prompts = service.applied_runtime_prompts(&sid_requester).await;
+    assert!(
+        requester_prompts
+            .iter()
+            .skip(requester_prompt_baseline)
+            .any(|prompt| prompt.text_content().contains("body: keep requester busy")),
+        "runtime-start barrier fired without recording the busy requester prompt; prompts={requester_prompts:?}"
+    );
+    service.set_keep_alive_turns_complete_immediately(false);
+    service
+        .clear_runtime_turn_prompt_barrier(&sid_requester)
+        .await;
+    service.release_one_runtime_turn();
 
     let request_receipt = CoreCommsRuntime::send(
         &*requester_comms,

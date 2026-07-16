@@ -15172,6 +15172,13 @@ impl MobActor {
             .collect())
     }
 
+    /// Cancel and join derived lifecycle-notification delivery.
+    /// Safe to call repeatedly; completed and cancelled tasks are drained.
+    async fn abort_and_join_lifecycle_tasks(&mut self) {
+        self.lifecycle_tasks.abort_all();
+        while self.lifecycle_tasks.join_next().await.is_some() {}
+    }
+
     /// Join barrier for every background task/listener owned directly by the
     /// actor (as opposed to keyed pending-spawn/flow/autonomous tables).
     /// Safe to call repeatedly; all task sets and optional handles are drained.
@@ -15193,8 +15200,7 @@ impl MobActor {
         while self.peer_delivery_tasks.join_next().await.is_some() {}
         self.peer_delivery_inflight.clear();
 
-        self.lifecycle_tasks.abort_all();
-        while self.lifecycle_tasks.join_next().await.is_some() {}
+        self.abort_and_join_lifecycle_tasks().await;
 
         self.member_event_pumps.stop_all_and_join().await;
 
@@ -17619,6 +17625,16 @@ impl MobActor {
                             if result.is_ok() {
                                 result = Err(error);
                             }
+                        }
+                        // Lifecycle notifications are actor-owned mechanical
+                        // delivery, not teardown retry anchors. A notification
+                        // can be blocked in the session service while machine
+                        // unregister waits for the same session to quiesce, so
+                        // cancel and join notifications before opening runtime
+                        // teardown. The full background-work barrier below is
+                        // idempotent and still owns every other task/listener.
+                        if result.is_ok() {
+                            self.abort_and_join_lifecycle_tasks().await;
                         }
                         // The member-stop phase owns the exact executor
                         // attachments. Preserve them as retry anchors when an

@@ -330,6 +330,7 @@ rust_test(
     srcs = [
         "tests/cross_host_events.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -404,6 +405,7 @@ rust_test(
     srcs = [
         "tests/cross_host_flows.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -479,6 +481,7 @@ rust_test(
         "tests/cross_host_live.rs",
         "tests/support/live_plane.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -552,6 +555,7 @@ rust_test(
     srcs = [
         "tests/cross_host_wiring.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -847,6 +851,7 @@ rust_test(
     srcs = [
         "tests/host_actor_persistence.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -921,6 +926,7 @@ rust_test(
     srcs = [
         "tests/host_bind_ceremony.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -997,6 +1003,7 @@ rust_test(
     srcs = [
         "tests/host_materialize_serving.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -1073,6 +1080,7 @@ rust_test(
     srcs = [
         "tests/host_member_release.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -1147,6 +1155,7 @@ rust_test(
     srcs = [
         "tests/host_member_revival.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -1223,6 +1232,7 @@ rust_test(
     srcs = [
         "tests/host_orphan_reconciliation.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -1372,6 +1382,7 @@ rust_test(
     srcs = [
         "tests/host_resume_recovery.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -1592,6 +1603,7 @@ rust_test(
     srcs = [
         "tests/member_upcall_lane.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -1887,6 +1899,7 @@ rust_test(
     srcs = [
         "tests/placed_member_respawn.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -2034,6 +2047,7 @@ rust_test(
     srcs = [
         "tests/remote_spawn_ladder.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -2108,6 +2122,7 @@ rust_test(
     srcs = [
         "tests/remote_spawn_materialization.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -2183,6 +2198,7 @@ rust_test(
         "tests/scope_matrix.rs",
         "tests/support/live_plane.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -2330,6 +2346,7 @@ rust_test(
     srcs = [
         "tests/smoke_mob_flow_runtime.rs",
         "tests/support/mod.rs",
+        "tests/support/probe.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {

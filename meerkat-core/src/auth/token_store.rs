@@ -267,6 +267,14 @@ pub enum RefreshError {
         message: String,
         observation: RefreshFailureObservation,
     },
+    #[error("refresh function failed: {message}")]
+    Classified {
+        message: String,
+        observation: RefreshFailureObservation,
+        disposition: RefreshFailureDisposition,
+    },
+    #[error("refresh requires interactive reauthorization: {0}")]
+    ReauthRequired(String),
     #[error("refresh in progress was cancelled")]
     Cancelled,
     #[error("cross-process lock acquisition failed: {0}")]
@@ -275,7 +283,22 @@ pub enum RefreshError {
     DurableTerminalCommit {
         message: String,
         observation: RefreshFailureObservation,
+        disposition: RefreshFailureDisposition,
     },
+}
+
+/// Machine-issued classification of a typed refresh-failure observation.
+///
+/// AuthMachine is the semantic owner of this verdict. Provider and persistence
+/// shells may mirror it for durable ordering and public error projection, but
+/// must never construct it by re-evaluating raw HTTP or OAuth fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefreshFailureDisposition {
+    /// The refresh may be retried after returning the lease to Expiring.
+    Transient,
+    /// The credential is terminally unusable and interactive authorization is
+    /// required.
+    ReauthRequired,
 }
 
 /// Typed boundary evidence reported to AuthMachine after a refresh failure.
@@ -323,46 +346,33 @@ impl RefreshFailureObservation {
             ..Self::default()
         }
     }
-
-    /// Whether this boundary observation classifies the refresh failure as
-    /// permanent — i.e. interactive user reauthorization is required rather
-    /// than a transient retry.
-    ///
-    /// This is the single owner of the reauth-vs-retry classification. It
-    /// mirrors the AuthMachine `refresh_failure_observation_permanent` guard
-    /// (`auth_machine.rs` `RefreshFailedPermanent`) so every boundary that
-    /// inspects a `RefreshFailureObservation` (lease lifecycle, MCP OAuth)
-    /// reaches the same verdict without re-deriving it from raw HTTP bodies.
-    pub fn requires_reauth(&self) -> bool {
-        if self.local_credential_unusable {
-            return true;
-        }
-        if matches!(self.http_status, Some(401 | 403)) {
-            return true;
-        }
-        matches!(
-            self.oauth_error_code.as_deref(),
-            Some(
-                "invalid_grant"
-                    | "invalid_client"
-                    | "unauthorized_client"
-                    | "invalid_scope"
-                    | "access_denied"
-                    | "permission_denied"
-                    | "expired_token"
-            )
-        )
-    }
 }
 
 impl RefreshError {
     pub fn observation(&self) -> RefreshFailureObservation {
         match self {
             Self::Observed { observation, .. }
+            | Self::Classified { observation, .. }
             | Self::DurableTerminalCommit { observation, .. } => observation.clone(),
+            Self::ReauthRequired(_) => RefreshFailureObservation::local_credential_unusable(),
             Self::Refresh(_) | Self::Cancelled | Self::LockFailed(_) => {
                 RefreshFailureObservation::transient()
             }
+        }
+    }
+
+    /// Return only a disposition issued by AuthMachine's generated classifier.
+    /// Unclassified provider errors deliberately return `None` rather than
+    /// re-deriving policy from their observation fields.
+    pub fn refresh_failure_disposition(&self) -> Option<RefreshFailureDisposition> {
+        match self {
+            Self::Classified { disposition, .. }
+            | Self::DurableTerminalCommit { disposition, .. } => Some(*disposition),
+            Self::Refresh(_)
+            | Self::Observed { .. }
+            | Self::ReauthRequired(_)
+            | Self::Cancelled
+            | Self::LockFailed(_) => None,
         }
     }
 }
@@ -373,9 +383,9 @@ pub type RefreshFn =
 
 /// Errors raised while serializing one durable credential mutation.
 ///
-/// Refresh classification remains [`RefreshError`]-owned. This error only
-/// describes the mechanics of entering and completing the shared mutation
-/// transaction used by refresh and interactive credential replacement.
+/// Refresh classification remains AuthMachine-owned. This error only describes
+/// the mechanics of entering and completing the shared mutation transaction
+/// used by refresh and interactive credential replacement.
 #[derive(Clone, Debug, Error)]
 pub enum CredentialMutationError {
     #[error("credential mutation failed: {0}")]

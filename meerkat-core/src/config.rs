@@ -268,6 +268,7 @@ impl Config {
         let retry_layer = file_config.retry.clone();
         let self_hosted_layer = file_config.self_hosted.clone();
         let provider_tools_layer = file_config.provider_tools.clone();
+        let skills_layer = file_config.skills.clone();
         // Merge (file values override defaults)
         self.merge(file_config);
         let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::Parse)?;
@@ -275,6 +276,7 @@ impl Config {
         self.merge_retry_from_toml_presence(&parsed, &retry_layer);
         self.merge_self_hosted_from_toml_presence(&parsed, &self_hosted_layer);
         self.merge_provider_tools_from_toml_presence(&parsed, &provider_tools_layer);
+        self.merge_skills_from_toml_presence(&parsed, &skills_layer);
         Ok(())
     }
 
@@ -429,11 +431,14 @@ impl Config {
             self.model_fallback = other.model_fallback;
         }
 
-        // Skills: scalar toggles child-wins when non-default; repositories
-        // append parent-first, with a child shadowing the same canonical
-        // source UUID rather than a merely same-named source. Display names
-        // are presentation and may legitimately collide. No removal of
-        // inherited sources.
+        // Skills: scalar toggles and health policy are child-wins when
+        // non-default. Identity-governance records are an append-only overlay:
+        // preserve root-first composition so a child cannot replace inherited
+        // lineage, remaps, or aliases with a second authority. Repositories
+        // append parent-first, with a child shadowing the same canonical source
+        // UUID rather than a merely same-named source. Display names are
+        // presentation and may legitimately collide. No removal of inherited
+        // sources.
         let default_skills = crate::skills_config::SkillsConfig::default();
         if other.skills.enabled != default_skills.enabled {
             self.skills.enabled = other.skills.enabled;
@@ -444,6 +449,21 @@ impl Config {
         if other.skills.inventory_threshold != default_skills.inventory_threshold {
             self.skills.inventory_threshold = other.skills.inventory_threshold;
         }
+        if other.skills.health_thresholds != default_skills.health_thresholds {
+            self.skills.health_thresholds = other.skills.health_thresholds;
+        }
+        self.skills
+            .identity
+            .lineage
+            .extend(other.skills.identity.lineage);
+        self.skills
+            .identity
+            .remaps
+            .extend(other.skills.identity.remaps);
+        self.skills
+            .identity
+            .aliases
+            .extend(other.skills.identity.aliases);
         for repo in other.skills.repositories {
             if let Some(existing) = self
                 .skills
@@ -745,10 +765,11 @@ impl Config {
         let Some(skills) = parsed.get("skills").and_then(toml::Value::as_table) else {
             return;
         };
-        // Presence-based scalar toggles: a child realm wins even when it sets a
-        // scalar back to its struct default (e.g. re-enabling `skills.enabled`
-        // that a parent disabled). The `!= default` value-merge in `Config::merge`
-        // cannot see a value-equals-default override; the explicit raw key can.
+        // Presence-based policy: a child realm wins even when it sets a scalar
+        // or the health-threshold bundle back to its struct default (e.g.
+        // re-enabling `skills.enabled` that a parent disabled). The `!= default`
+        // value-merge in `Config::merge` cannot see a value-equals-default
+        // override; the explicit raw key can.
         if skills.contains_key("enabled") {
             self.skills.enabled = layer.enabled;
         }
@@ -757,6 +778,9 @@ impl Config {
         }
         if skills.contains_key("inventory_threshold") {
             self.skills.inventory_threshold = layer.inventory_threshold;
+        }
+        if skills.contains_key("health_thresholds") {
+            self.skills.health_thresholds = layer.health_thresholds;
         }
     }
 
@@ -2979,6 +3003,160 @@ model = "custom-model"
                 path: path.to_string(),
             },
         }
+    }
+
+    fn skills_identity_overlay(
+        label: &str,
+        from_uuid: &str,
+        to_uuid: &str,
+    ) -> crate::skills_config::SkillsIdentityConfig {
+        let from = crate::skills::SourceUuid::parse(from_uuid).expect("valid source uuid");
+        let to = crate::skills::SourceUuid::parse(to_uuid).expect("valid source uuid");
+        let from_skill = crate::skills::SkillName::parse(&format!("{label}-old"))
+            .expect("valid source skill name");
+        let to_skill = crate::skills::SkillName::parse(&format!("{label}-new"))
+            .expect("valid target skill name");
+        crate::skills_config::SkillsIdentityConfig {
+            lineage: vec![crate::skills::SourceIdentityLineage {
+                event_id: format!("{label}-lineage"),
+                recorded_at_unix_secs: 1,
+                required_from_skills: vec![from_skill.clone()],
+                event: crate::skills::SourceIdentityLineageEvent::Rotate {
+                    from: from.clone(),
+                    to: to.clone(),
+                },
+            }],
+            remaps: vec![crate::skills::SkillKeyRemap {
+                from: crate::skills::SkillKey::new(from, from_skill),
+                to: crate::skills::SkillKey::new(to.clone(), to_skill.clone()),
+                reason: Some(format!("{label}-remap")),
+            }],
+            aliases: vec![crate::skills::SkillAlias {
+                alias: format!("{label}-alias"),
+                to: crate::skills::SkillKey::new(to, to_skill),
+            }],
+        }
+    }
+
+    #[test]
+    fn ordinary_toml_merge_honors_explicit_default_skills_health_thresholds() {
+        let mut config = Config::default();
+        config.skills.health_thresholds = crate::skills::SourceHealthThresholds {
+            degraded_invalid_ratio: 0.25,
+            unhealthy_invalid_ratio: 0.75,
+            degraded_failure_streak: 8,
+            unhealthy_failure_streak: 20,
+        };
+
+        config
+            .merge_toml_str(
+                r"
+[skills.health_thresholds]
+degraded_invalid_ratio = 0.05
+unhealthy_invalid_ratio = 0.40
+degraded_failure_streak = 3
+unhealthy_failure_streak = 10
+",
+            )
+            .expect("explicit default health thresholds should parse");
+
+        assert_eq!(
+            config.skills.health_thresholds,
+            crate::skills::SourceHealthThresholds::default(),
+            "an explicitly present default-valued health section must reset an inherited value"
+        );
+    }
+
+    #[test]
+    fn realm_skills_compose_identity_parent_first_and_reset_health_by_presence() {
+        let parent_id = crate::connection::RealmId::parse("parent").expect("valid parent realm");
+        let child_id = crate::connection::RealmId::parse("child").expect("valid child realm");
+
+        let mut parent = Config::default();
+        parent.realm.insert(
+            parent_id.to_string(),
+            crate::connection::RealmConfigSection::default(),
+        );
+        parent.skills.health_thresholds = crate::skills::SourceHealthThresholds {
+            degraded_invalid_ratio: 0.25,
+            unhealthy_invalid_ratio: 0.75,
+            degraded_failure_streak: 8,
+            unhealthy_failure_streak: 20,
+        };
+        parent.skills.identity = skills_identity_overlay(
+            "parent",
+            "00000000-0000-4000-8000-000000000021",
+            "00000000-0000-4000-8000-000000000022",
+        );
+
+        let mut child = Config::default();
+        child.realm.insert(
+            child_id.to_string(),
+            crate::connection::RealmConfigSection {
+                parent: Some(parent_id.clone()),
+                ..Default::default()
+            },
+        );
+        child.skills.identity = skills_identity_overlay(
+            "child",
+            "00000000-0000-4000-8000-000000000023",
+            "00000000-0000-4000-8000-000000000024",
+        );
+
+        let docs =
+            std::collections::BTreeMap::from([(parent_id, parent), (child_id.clone(), child)]);
+        let raw_docs = std::collections::BTreeMap::from([(
+            child_id.clone(),
+            toml::from_str(
+                r"
+[skills.health_thresholds]
+degraded_invalid_ratio = 0.05
+unhealthy_invalid_ratio = 0.40
+degraded_failure_streak = 3
+unhealthy_failure_streak = 10
+",
+            )
+            .expect("raw child skills config should parse"),
+        )]);
+
+        let effective = compose_effective_config(&docs, &raw_docs, &child_id)
+            .expect("realm composition should succeed");
+
+        assert_eq!(
+            effective.skills.health_thresholds,
+            crate::skills::SourceHealthThresholds::default(),
+            "an explicit child default must reset the parent's health thresholds"
+        );
+        assert_eq!(
+            effective
+                .skills
+                .identity
+                .lineage
+                .iter()
+                .map(|entry| entry.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent-lineage", "child-lineage"]
+        );
+        assert_eq!(
+            effective
+                .skills
+                .identity
+                .remaps
+                .iter()
+                .map(|entry| entry.reason.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("parent-remap"), Some("child-remap")]
+        );
+        assert_eq!(
+            effective
+                .skills
+                .identity
+                .aliases
+                .iter()
+                .map(|entry| entry.alias.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent-alias", "child-alias"]
+        );
     }
 
     // RCT-12

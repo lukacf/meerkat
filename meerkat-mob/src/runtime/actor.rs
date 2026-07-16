@@ -10793,14 +10793,15 @@ impl MobActor {
         }
     }
 
-    /// Deliver a lifecycle notification to the orchestrator member.
+    /// Deliver a lifecycle notification to every active member of the
+    /// definition-owned orchestrator profile.
     ///
     /// This is *not* best-effort projection work: a genuine delivery fault
     /// surfaces to the caller as a typed [`MobError`] instead of being
     /// swallowed by a `tracing::warn`. Cases that legitimately have nothing to
-    /// deliver (no orchestrator declared, orchestrator not yet seated in the
-    /// roster) return `Ok(())`. Faults — an addressable orchestrator that
-    /// cannot be projected, an autonomous host with no reachable injector, or
+    /// deliver (no orchestrator declared or no active MobMachine member for its
+    /// profile) return `Ok(())`. Faults — an active machine member missing from
+    /// the mechanical roster, an autonomous host with no reachable injector, or
     /// an injection/turn that fails — return `Err`.
     ///
     /// The injector for an [`AutonomousHost`](crate::MobRuntimeMode::AutonomousHost)
@@ -10818,114 +10819,64 @@ impl MobActor {
         let Some(orchestrator) = &self.definition.orchestrator else {
             return Ok(());
         };
-        let Some(orchestrator_entry) = self
-            .roster
-            .read()
-            .await
-            .by_profile(&orchestrator.profile)
-            .next()
-            .cloned()
-        else {
-            // The orchestrator is declared but not yet seated; there is nothing
-            // to deliver to yet.
-            return Ok(());
-        };
-
-        while self.lifecycle_tasks.len() >= MAX_LIFECYCLE_NOTIFICATION_TASKS {
-            match self.lifecycle_tasks.join_next().await {
-                Some(join_result) => Self::surface_lifecycle_task_outcome(join_result)?,
-                None => break,
-            }
-        }
-
-        let placed_incarnation = if super::member_runtime_is_host_owned(
-            self.dsl_authority.state(),
-            &orchestrator_entry.agent_identity,
-        ) {
-            Some(self.placed_member_incarnation(&orchestrator_entry)?)
-        } else {
-            None
-        };
-        let provisioner = self.provisioner.clone();
-        let runtime_mode = orchestrator_entry.runtime_mode;
-        let agent_identity = orchestrator_entry.agent_identity;
-        let bridge_session_id = self.machine_bridge_session_id_for_identity(&agent_identity)?;
-        let Some(member_ref) = Self::project_member_ref_session_binding(
-            &orchestrator_entry.member_ref,
-            bridge_session_id,
-        ) else {
-            return Err(MobError::WiringError(format!(
-                "orchestrator lifecycle notification for '{agent_identity}' could not project an addressable member binding"
-            )));
-        };
-
-        if let Some(expected_member) = placed_incarnation {
-            // Placement owns the delivery lane before runtime mode. An
-            // AutonomousHost session placed on a member host is just as remote
-            // as a TurnDriven one; its machine session binding must never be
-            // submitted to this controller's injector registry.
-            let task_member_ref = member_ref.clone();
-            self.lifecycle_tasks.spawn(async move {
-                provisioner
-                    .start_turn_with_correlation(
-                        &task_member_ref,
-                        meerkat_core::service::StartTurnRequest {
-                            injected_context: Vec::new(),
-                            prompt: message.into(),
-                            system_prompt: None,
-                            event_tx: None,
-                            runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
-                        },
-                        Some(super::provisioner::PlacedTurnDeliveryContext {
-                            input_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
-                            transcript_interaction_id: None,
-                            expected_member,
-                            outcome_tracking: None,
-                        }),
-                    )
-                    .await
-                    .map(|_| ())
-            });
+        let orchestrator_identities = self
+            .dsl_authority
+            .state()
+            .active_member_identities_for_profile(&orchestrator.profile);
+        if orchestrator_identities.is_empty() {
             return Ok(());
         }
-
-        match runtime_mode {
-            crate::MobRuntimeMode::AutonomousHost => {
-                // Resolve the injector synchronously so an unreachable autonomous
-                // host fails the caller now instead of vanishing inside a
-                // detached task.
-                let Some(bridge_session_id) = member_ref.bridge_session_id() else {
-                    return Err(MobError::WiringError(format!(
-                        "orchestrator lifecycle notification for '{agent_identity}' has no bridge session for autonomous-host injection"
-                    )));
-                };
-                let Some(injector) = provisioner
-                    .interaction_event_injector(bridge_session_id)
-                    .await
-                else {
-                    return Err(MobError::MissingMemberCapability {
-                        member_id: agent_identity.clone(),
-                        capability: crate::error::MobMemberCapability::InteractionEventInjector,
-                        context: "orchestrator lifecycle notification",
-                    });
-                };
-                let task_identity = agent_identity.clone();
-                self.lifecycle_tasks.spawn(async move {
-                    injector
-                        .inject(
-                            message.into(),
-                            meerkat_core::PlainEventSource::Rpc,
-                            meerkat_core::types::HandlingMode::Queue,
-                            None,
-                        )
-                        .map_err(|error| {
+        let orchestrator_entries = {
+            let roster = self.roster.read().await;
+            orchestrator_identities
+                .into_iter()
+                .map(|orchestrator_identity| {
+                    roster
+                        .get(&orchestrator_identity)
+                        .cloned()
+                        .ok_or_else(|| {
                             MobError::Internal(format!(
-                                "orchestrator lifecycle inject failed for '{task_identity}': {error}"
+                                "active MobMachine orchestrator '{orchestrator_identity}' has no mechanical roster entry"
                             ))
                         })
-                });
+                })
+                .collect::<Result<Vec<_>, MobError>>()?
+        };
+
+        for orchestrator_entry in orchestrator_entries {
+            while self.lifecycle_tasks.len() >= MAX_LIFECYCLE_NOTIFICATION_TASKS {
+                match self.lifecycle_tasks.join_next().await {
+                    Some(join_result) => Self::surface_lifecycle_task_outcome(join_result)?,
+                    None => break,
+                }
             }
-            crate::MobRuntimeMode::TurnDriven => {
+            let placed_incarnation = if super::member_runtime_is_host_owned(
+                self.dsl_authority.state(),
+                &orchestrator_entry.agent_identity,
+            ) {
+                Some(self.placed_member_incarnation(&orchestrator_entry)?)
+            } else {
+                None
+            };
+            let provisioner = self.provisioner.clone();
+            let runtime_mode = orchestrator_entry.runtime_mode;
+            let agent_identity = orchestrator_entry.agent_identity;
+            let bridge_session_id = self.machine_bridge_session_id_for_identity(&agent_identity)?;
+            let Some(member_ref) = Self::project_member_ref_session_binding(
+                &orchestrator_entry.member_ref,
+                bridge_session_id,
+            ) else {
+                return Err(MobError::WiringError(format!(
+                    "orchestrator lifecycle notification for '{agent_identity}' could not project an addressable member binding"
+                )));
+            };
+            let task_message = message.clone();
+
+            if let Some(expected_member) = placed_incarnation {
+                // Placement owns the delivery lane before runtime mode. An
+                // AutonomousHost session placed on a member host is just as remote
+                // as a TurnDriven one; its machine session binding must never be
+                // submitted to this controller's injector registry.
                 let task_member_ref = member_ref.clone();
                 self.lifecycle_tasks.spawn(async move {
                     provisioner
@@ -10933,17 +10884,81 @@ impl MobActor {
                             &task_member_ref,
                             meerkat_core::service::StartTurnRequest {
                                 injected_context: Vec::new(),
-                                prompt: message.into(),
+                                prompt: task_message.into(),
                                 system_prompt: None,
                                 event_tx: None,
                                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(
                                 ),
                             },
-                            None,
+                            Some(super::provisioner::PlacedTurnDeliveryContext {
+                                input_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
+                                transcript_interaction_id: None,
+                                expected_member,
+                                outcome_tracking: None,
+                            }),
                         )
                         .await
                         .map(|_| ())
                 });
+                continue;
+            }
+
+            match runtime_mode {
+                crate::MobRuntimeMode::AutonomousHost => {
+                    // Resolve the injector synchronously so an unreachable autonomous
+                    // host fails the caller now instead of vanishing inside a
+                    // detached task.
+                    let Some(bridge_session_id) = member_ref.bridge_session_id() else {
+                        return Err(MobError::WiringError(format!(
+                            "orchestrator lifecycle notification for '{agent_identity}' has no bridge session for autonomous-host injection"
+                        )));
+                    };
+                    let Some(injector) = provisioner
+                        .interaction_event_injector(bridge_session_id)
+                        .await
+                    else {
+                        return Err(MobError::MissingMemberCapability {
+                            member_id: agent_identity.clone(),
+                            capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                            context: "orchestrator lifecycle notification",
+                        });
+                    };
+                    let task_identity = agent_identity.clone();
+                    self.lifecycle_tasks.spawn(async move {
+                        injector
+                            .inject(
+                                task_message.into(),
+                                meerkat_core::PlainEventSource::Rpc,
+                                meerkat_core::types::HandlingMode::Queue,
+                                None,
+                            )
+                            .map_err(|error| {
+                                MobError::Internal(format!(
+                                    "orchestrator lifecycle inject failed for '{task_identity}': {error}"
+                                ))
+                            })
+                    });
+                }
+                crate::MobRuntimeMode::TurnDriven => {
+                    let task_member_ref = member_ref.clone();
+                    self.lifecycle_tasks.spawn(async move {
+                        provisioner
+                            .start_turn_with_correlation(
+                                &task_member_ref,
+                                meerkat_core::service::StartTurnRequest {
+                                    injected_context: Vec::new(),
+                                    prompt: task_message.into(),
+                                    system_prompt: None,
+                                    event_tx: None,
+                                    runtime:
+                                        meerkat_core::service::StartTurnRuntimeSemantics::default(),
+                                },
+                                None,
+                            )
+                            .await
+                            .map(|_| ())
+                    });
+                }
             }
         }
         Ok(())
@@ -13090,29 +13105,6 @@ impl MobActor {
             return Err(error);
         }
         Ok(())
-    }
-
-    async fn orchestrator_is_broken(&self) -> bool {
-        let Some(orchestrator) = self.definition.orchestrator.as_ref() else {
-            return false;
-        };
-        let identity = {
-            let roster = self.roster.read().await;
-            roster
-                .by_profile(&orchestrator.profile)
-                .next()
-                .map(|entry| entry.agent_identity.clone())
-        };
-        let Some(identity) = identity else {
-            return false;
-        };
-        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(
-            identity.as_str(),
-        ));
-        self.dsl_authority
-            .state()
-            .member_restore_failures
-            .contains_key(&dsl_identity)
     }
 
     /// Ensure all autonomous roster members have their runtime ready.
@@ -17230,60 +17222,75 @@ impl MobActor {
                             }
 
                             if self.has_orchestrator {
-                                if self.orchestrator_is_broken().await {
-                                    tracing::warn!(
-                                        mob_id = %self.definition.id,
-                                        "skipping orchestrator resume notification because the orchestrator is Broken"
-                                    );
-                                } else {
-                                    let orchestrator_transition_succeeded = match self
-                                        .apply_dsl_signal(
-                                            mob_dsl::MobMachineSignal::ResumeOrchestrator,
-                                            "resume_orchestrator_after_durable_resume",
-                                        ) {
-                                        Ok(()) => true,
-                                        Err(error) => {
-                                            if post_commit_error.is_none() {
-                                                // The mob is durably Running;
-                                                // surface the local transition
-                                                // failure without pretending
-                                                // Resume rolled back.
-                                                post_commit_error = Some(MobError::Internal(
-                                                    format!(
-                                                        "mob resumed durably but orchestrator ResumeOrchestrator transition failed: {error}"
-                                                    ),
-                                                ));
-                                            }
-                                            false
+                                let orchestrator_transition_succeeded = match self
+                                    .apply_dsl_signal(
+                                        mob_dsl::MobMachineSignal::ResumeOrchestrator,
+                                        "resume_orchestrator_after_durable_resume",
+                                    ) {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        if post_commit_error.is_none() {
+                                            // The mob is durably Running;
+                                            // surface the local transition
+                                            // failure without pretending
+                                            // Resume rolled back.
+                                            post_commit_error = Some(MobError::Internal(format!(
+                                                "mob resumed durably but orchestrator ResumeOrchestrator transition failed: {error}"
+                                            )));
                                         }
-                                    };
-                                    if orchestrator_transition_succeeded
-                                        && self.notify_orchestrator_on_resume
+                                        false
+                                    }
+                                };
+                                if orchestrator_transition_succeeded
+                                    && self.notify_orchestrator_on_resume
+                                {
+                                    let orchestrator_entries = if let Some(orchestrator) =
+                                        self.definition.orchestrator.as_ref()
                                     {
-                                        let orchestrator_entry = if let Some(orchestrator) =
-                                            self.definition.orchestrator.as_ref()
-                                        {
-                                            let roster = self.roster.read().await;
-                                            roster
-                                                .by_profile(&orchestrator.profile)
-                                                .next()
-                                                .cloned()
-                                        } else {
-                                            None
-                                        };
-                                        if let Some(orchestrator_entry) = orchestrator_entry
-                                            && let Err(error) = super::builder::realize_orchestrator_resume_notification(
-                                                self.definition.as_ref(),
-                                                &orchestrator_entry,
-                                                self.session_service.as_ref(),
-                                                self.provisioner.as_ref(),
-                                                &self.dsl_authority,
-                                            )
-                                            .await
-                                            && post_commit_error.is_none()
-                                        {
+                                        let orchestrator_identities = self
+                                            .dsl_authority
+                                            .state()
+                                            .active_member_identities_for_profile(
+                                                &orchestrator.profile,
+                                            );
+                                        let roster = self.roster.read().await;
+                                        orchestrator_identities
+                                            .into_iter()
+                                            .map(|orchestrator_identity| {
+                                                roster
+                                                    .get(&orchestrator_identity)
+                                                    .cloned()
+                                                    .ok_or_else(|| {
+                                                        MobError::Internal(format!(
+                                                            "active MobMachine orchestrator '{orchestrator_identity}' has no mechanical roster entry during explicit resume"
+                                                        ))
+                                                    })
+                                            })
+                                            .collect::<Result<Vec<_>, MobError>>()
+                                    } else {
+                                        Ok(Vec::new())
+                                    };
+                                    match orchestrator_entries {
+                                        Ok(orchestrator_entries) => {
+                                            for orchestrator_entry in orchestrator_entries {
+                                                if let Err(error) = super::builder::realize_orchestrator_resume_notification(
+                                                    self.definition.as_ref(),
+                                                    &orchestrator_entry,
+                                                    self.session_service.as_ref(),
+                                                    self.provisioner.as_ref(),
+                                                    &self.dsl_authority,
+                                                )
+                                                .await
+                                                && post_commit_error.is_none()
+                                                {
+                                                    post_commit_error = Some(error);
+                                                }
+                                            }
+                                        }
+                                        Err(error) if post_commit_error.is_none() => {
                                             post_commit_error = Some(error);
                                         }
+                                        Err(_) => {}
                                     }
                                 }
                             }
@@ -35107,6 +35114,27 @@ impl MobActor {
                     error,
                 )
             })?;
+
+            // Capture and schedule the destroy notification while the
+            // machine still classifies the orchestrator-profile members as
+            // Active. The generated retire transitions below move every
+            // member to Retiring; querying the active-profile projection
+            // afterward would deterministically erase the recipients.
+            // Destroy remains dominant, so an unreachable recipient is logged
+            // rather than allowed to block teardown.
+            if let Err(error) = self
+                .notify_orchestrator_lifecycle(format!(
+                    "Mob '{}' is destroying.",
+                    self.definition.id
+                ))
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "destroy proceeding despite orchestrator lifecycle delivery failure"
+                );
+            }
         }
         if destroy_input_needed {
             for entry in &entries {
@@ -35134,27 +35162,6 @@ impl MobActor {
                     error,
                 )
             })?;
-        }
-        if destroy_input_needed {
-            // Destroy is terminal and must proceed. The orchestrator is itself
-            // being torn down here, so an unreachable injector is expected
-            // rather than a destroy-blocking fault. This seam owns that policy:
-            // it decides to continue and surfaces the delivery outcome via the
-            // log instead of swallowing it inside the delivery routine or
-            // marking the destroy incomplete.
-            if let Err(error) = self
-                .notify_orchestrator_lifecycle(format!(
-                    "Mob '{}' is destroying.",
-                    self.definition.id
-                ))
-                .await
-            {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    error = %error,
-                    "destroy proceeding despite orchestrator lifecycle delivery failure"
-                );
-            }
         }
         let released_remote_authorities = entries
             .iter()

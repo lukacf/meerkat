@@ -476,6 +476,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordLayerRunStarted`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, child_run_id: RunId)
 - `IngestLayerTerminal`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, result_class: FlowRunPublicResultClassKind, actual_tokens: u64, actual_tool_calls: u64)
 - `RecordLayerSetupFault`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, fault: AdaptiveLayerSetupFaultKind, spawned_members: u64, requested_members: u64)
+- `RecordLayerInterrupted`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64)
 - `RecordLayerResultValidated`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, result_digest: String)
 - `RecordLayerResultInvalid`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64)
 - `RecordLayerMobDestroyed`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64)
@@ -674,6 +675,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdaptiveLayerRunStarted`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, child_run_id: RunId)
 - `AdaptiveLayerTerminalIngested`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_class: FlowRunPublicResultClassKind)
 - `AdaptiveLayerSetupFaultRecorded`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, fault: AdaptiveLayerSetupFaultKind)
+- `AdaptiveLayerInterrupted`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId)
 - `AdaptiveLayerResultValidated`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_digest: String)
 - `AdaptiveLayerResultInvalid`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId)
 - `AdaptiveLayerCleanupObserved`(adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, disposition: AdaptiveLayerDispositionKind)
@@ -1807,6 +1809,27 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `attempt_matches`
   - `setup_counts_valid`
 - Emits: `AdaptiveLayerSetupFaultRecorded`
+- To: `Running`
+
+### `RecordAdaptiveLayerInterruptedNonterminalRunning`
+- From: `Running`
+- On: `RecordLayerInterrupted`(adaptive_run_id, layer_id, attempt)
+- Guards:
+  - `layer_owner_matches`
+  - `layer_nonterminal_after_acquisition`
+  - `active_layer_matches`
+  - `attempt_matches`
+- Emits: `AdaptiveLayerInterrupted`
+- To: `Running`
+
+### `RecordAdaptiveLayerInterruptedAlreadyTerminalRunning`
+- From: `Running`
+- On: `RecordLayerInterrupted`(adaptive_run_id, layer_id, attempt)
+- Guards:
+  - `layer_owner_matches`
+  - `layer_already_terminal`
+  - `attempt_matches`
+- Emits: `AdaptiveLayerInterrupted`
 - To: `Running`
 
 ### `RecordAdaptiveLayerResultValidatedRunning`

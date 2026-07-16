@@ -5545,24 +5545,71 @@ impl MobHandle {
                 // `Box::pin` breaks the compiler-visible recursion:
                 // handle_ensure_member -> spawn_spec -> execute_machine_command
                 // -> (MobMachineCommand::Spawn arm, which never re-enters here).
-                let spawn_result = Box::pin(self.spawn_spec(spec)).await?;
-                Ok(EnsureMemberOutcome::Spawned(spawn_result))
+                match Box::pin(self.spawn_spec(spec)).await {
+                    Ok(spawn_result) => Ok(EnsureMemberOutcome::Spawned(spawn_result)),
+                    Err(MobError::MemberAlreadyExists(existing_identity))
+                        if existing_identity == identity =>
+                    {
+                        // A concurrent ensure may have advanced the exact
+                        // identity from machine-owned pending admission to a
+                        // committed member after this EnsureMember decision.
+                        // Converge on that winner instead of surfacing a
+                        // duplicate-call failure.
+                        let existing = self.await_machine_member_projection(&identity).await?;
+                        Ok(EnsureMemberOutcome::Existed(Box::new(existing)))
+                    }
+                    Err(error) => Err(error),
+                }
             }
             (false, true) => {
-                let existing = Box::pin(self.list_members())
-                    .await
-                    .into_iter()
-                    .find(|entry| entry.agent_identity == identity)
-                    .ok_or_else(|| {
-                        MobError::Internal(format!(
-                            "ensure_member: member '{identity}' reported existing but not found in roster"
-                        ))
-                    })?;
+                // Membership commits before the mechanical roster projection.
+                // The machine's retain verdict is authoritative even when a
+                // concurrent ensure lands in that short projection interval.
+                let existing = self.await_machine_member_projection(&identity).await?;
                 Ok(EnsureMemberOutcome::Existed(Box::new(existing)))
             }
             _ => Err(MobError::Internal(format!(
                 "ensure_member: MobMachine emitted no decisive spawn/retain verdict for '{identity}' (spawn_required={spawn_required}, retain_required={retain_required})"
             ))),
+        }
+    }
+
+    async fn await_machine_member_projection(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MobMemberListEntry, MobError> {
+        let started = Instant::now();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        loop {
+            let machine_state = self.machine_state_watch_rx.borrow().clone();
+            let lifecycle = machine_state.member_lifecycle_for_identity(&dsl_identity);
+            let pending = machine_state
+                .pending_spawn_sessions
+                .contains_key(&dsl_identity);
+
+            if lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Active
+                && let Some(entry) = self
+                    .list_members()
+                    .await
+                    .into_iter()
+                    .find(|entry| entry.agent_identity == *identity)
+            {
+                return Ok(entry);
+            }
+
+            if !pending && lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
+                return Err(MobError::MemberNotFound(identity.clone()));
+            }
+            if started.elapsed() >= DEFAULT_READY_WAIT_TIMEOUT {
+                return Err(MobError::ReadyWaitTimedOut {
+                    pending_member_ids: vec![identity.clone()],
+                });
+            }
+
+            // Machine membership commits just before the mechanical roster
+            // insert. A short yield covers that projection window without
+            // letting roster presence decide admission.
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -8192,6 +8239,20 @@ impl MobHandle {
             fault: observation.fault.into(),
             spawned_members: observation.spawned_members,
             requested_members: observation.requested_members,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn record_adaptive_layer_interrupted(
+        &self,
+        capability: &AdaptiveDriverCapability,
+        attempt: AdaptiveLayerAttempt,
+    ) -> Result<(), MobError> {
+        self.apply_machine_input_effects(mob_dsl::MobMachineInput::RecordLayerInterrupted {
+            adaptive_run_id: mob_dsl::AdaptiveRunId(capability.adaptive_run_id.clone()),
+            layer_id: mob_dsl::AdaptiveLayerId(attempt.layer_id),
+            attempt: attempt.attempt,
         })
         .await
         .map(|_| ())

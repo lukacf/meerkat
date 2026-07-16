@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for AuthMachine.
 
-CONSTANTS AuthLifecyclePhaseValues, BooleanValues, CredentialUseDispositionValues, CredentialUseIntentValues, NatValues, SetOfStringValues, StringValues
+CONSTANTS AuthLifecyclePhaseValues, BooleanValues, CredentialUseDispositionValues, CredentialUseIntentValues, NatValues, RefreshFailureDispositionValues, SetOfStringValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -177,18 +177,34 @@ CompleteRefresh(new_expires_at, now_ts, arg_credential_published_at_millis) ==
     /\ UNCHANGED << oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count, release_draining >>
 
 
-RefreshFailedTransient(http_status, oauth_error_code, local_credential_unusable) ==
+ResolveRefreshFailureDispositionTransientRefreshing(http_status, oauth_error_code, local_credential_unusable) ==
     /\ phase = "Refreshing"
     /\ ((local_credential_unusable = FALSE) /\ (http_status # Some(401)) /\ (http_status # Some(403)) /\ (oauth_error_code # Some("invalid_grant")) /\ (oauth_error_code # Some("invalid_client")) /\ (oauth_error_code # Some("unauthorized_client")) /\ (oauth_error_code # Some("invalid_scope")) /\ (oauth_error_code # Some("access_denied")) /\ (oauth_error_code # Some("permission_denied")) /\ (oauth_error_code # Some("expired_token")))
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count, release_draining >>
+
+
+ResolveRefreshFailureDispositionPermanentRefreshing(http_status, oauth_error_code, local_credential_unusable) ==
+    /\ phase = "Refreshing"
+    /\ (IF (local_credential_unusable = TRUE) THEN TRUE ELSE (IF (http_status = Some(401)) THEN TRUE ELSE (IF (http_status = Some(403)) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_grant")) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_client")) THEN TRUE ELSE (IF (oauth_error_code = Some("unauthorized_client")) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_scope")) THEN TRUE ELSE (IF (oauth_error_code = Some("access_denied")) THEN TRUE ELSE (IF (oauth_error_code = Some("permission_denied")) THEN TRUE ELSE (oauth_error_code = Some("expired_token")))))))))))
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count, release_draining >>
+
+
+RefreshFailedTransient(disposition) ==
+    /\ phase = "Refreshing"
+    /\ (disposition = "Transient")
     /\ phase' = "Expiring"
     /\ model_step_count' = model_step_count + 1
     /\ refresh_attempt' = (refresh_attempt + 1)
     /\ UNCHANGED << expires_at, last_refresh, credential_present, credential_generation, credential_published_at_millis, oauth_browser_flow_ids, oauth_browser_flow_providers, oauth_browser_flow_redirect_uris, oauth_browser_flow_expires_at_millis, oauth_device_flow_ids, oauth_device_flow_providers, oauth_device_flow_expires_at_millis, oauth_device_poll_ids, oauth_outstanding_flow_count, release_draining >>
 
 
-RefreshFailedPermanent(http_status, oauth_error_code, local_credential_unusable) ==
+RefreshFailedPermanent(disposition) ==
     /\ phase = "Refreshing"
-    /\ (IF (local_credential_unusable = TRUE) THEN TRUE ELSE (IF (http_status = Some(401)) THEN TRUE ELSE (IF (http_status = Some(403)) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_grant")) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_client")) THEN TRUE ELSE (IF (oauth_error_code = Some("unauthorized_client")) THEN TRUE ELSE (IF (oauth_error_code = Some("invalid_scope")) THEN TRUE ELSE (IF (oauth_error_code = Some("access_denied")) THEN TRUE ELSE (IF (oauth_error_code = Some("permission_denied")) THEN TRUE ELSE (oauth_error_code = Some("expired_token")))))))))))
+    /\ (disposition = "ReauthRequired")
     /\ phase' = "ReauthRequired"
     /\ model_step_count' = model_step_count + 1
     /\ refresh_attempt' = (refresh_attempt + 1)
@@ -1927,8 +1943,10 @@ Next ==
     \/ BeginRefreshFromExpiring
     \/ BeginRefreshFromExpired
     \/ \E new_expires_at \in OptionU64Values : \E now_ts \in 0..2 : \E arg_credential_published_at_millis \in 0..2 : CompleteRefresh(new_expires_at, now_ts, arg_credential_published_at_millis)
-    \/ \E http_status \in OptionU64Values : \E oauth_error_code \in OptionStringValues : RefreshFailedTransient(http_status, oauth_error_code, FALSE)
-    \/ \E http_status \in OptionU64Values : \E oauth_error_code \in OptionStringValues : \E local_credential_unusable \in BOOLEAN : RefreshFailedPermanent(http_status, oauth_error_code, local_credential_unusable)
+    \/ \E http_status \in OptionU64Values : \E oauth_error_code \in OptionStringValues : ResolveRefreshFailureDispositionTransientRefreshing(http_status, oauth_error_code, FALSE)
+    \/ \E http_status \in OptionU64Values : \E oauth_error_code \in OptionStringValues : \E local_credential_unusable \in BOOLEAN : ResolveRefreshFailureDispositionPermanentRefreshing(http_status, oauth_error_code, local_credential_unusable)
+    \/ \E disposition \in RefreshFailureDispositionValues : RefreshFailedTransient(disposition)
+    \/ \E disposition \in RefreshFailureDispositionValues : RefreshFailedPermanent(disposition)
     \/ MarkReauthRequiredFromValid
     \/ MarkReauthRequiredFromExpiring
     \/ MarkReauthRequiredFromExpired

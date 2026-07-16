@@ -1515,6 +1515,11 @@ macro_rules! mob_catalog_machine_dsl {
                 spawned_members: u64,
                 requested_members: u64,
             },
+            RecordLayerInterrupted {
+                adaptive_run_id: AdaptiveRunId,
+                layer_id: AdaptiveLayerId,
+                attempt: u64,
+            },
             RecordLayerResultValidated {
                 adaptive_run_id: AdaptiveRunId,
                 layer_id: AdaptiveLayerId,
@@ -1918,6 +1923,7 @@ macro_rules! mob_catalog_machine_dsl {
             AdaptiveLayerRunStarted { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, attempt: u64, child_run_id: RunId },
             AdaptiveLayerTerminalIngested { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_class: Enum<FlowRunPublicResultClassKind> },
             AdaptiveLayerSetupFaultRecorded { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, fault: Enum<AdaptiveLayerSetupFaultKind> },
+            AdaptiveLayerInterrupted { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId },
             AdaptiveLayerResultValidated { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, result_digest: String },
             AdaptiveLayerResultInvalid { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId },
             AdaptiveLayerCleanupObserved { adaptive_run_id: AdaptiveRunId, layer_id: AdaptiveLayerId, disposition: Enum<AdaptiveLayerDispositionKind> },
@@ -2083,6 +2089,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition AdaptiveLayerRunStarted => local seam NoOwnerRealization,
         disposition AdaptiveLayerTerminalIngested => local seam NoOwnerRealization,
         disposition AdaptiveLayerSetupFaultRecorded => local seam NoOwnerRealization,
+        disposition AdaptiveLayerInterrupted => local seam NoOwnerRealization,
         disposition AdaptiveLayerResultValidated => local seam NoOwnerRealization,
         disposition AdaptiveLayerResultInvalid => local seam NoOwnerRealization,
         disposition AdaptiveLayerCleanupObserved => local seam NoOwnerRealization,
@@ -4053,6 +4060,64 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit AdaptiveLayerSetupFaultRecorded { adaptive_run_id: adaptive_run_id, layer_id: layer_id, fault: fault }
+        }
+
+        // Driver or kernel failure after a layer mob has been acquired must
+        // terminalize the layer before physical cleanup can be recorded. This
+        // typed transition owns that interruption fact for every nonterminal
+        // post-acquisition phase.
+        transition RecordAdaptiveLayerInterruptedNonterminal {
+            per_phase [Running]
+            on input RecordLayerInterrupted { adaptive_run_id, layer_id, attempt }
+            guard "layer_owner_matches" {
+                self.adaptive_layer_adaptive_run.get_cloned(layer_id) == Some(adaptive_run_id)
+            }
+            guard "layer_nonterminal_after_acquisition" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Admitted)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Provisioning)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Running)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Collecting)
+            }
+            guard "active_layer_matches" {
+                self.adaptive_active_layer.get_cloned(adaptive_run_id) == Some(layer_id)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            update {
+                self.adaptive_layer_failures.insert(
+                    adaptive_run_id,
+                    self.adaptive_layer_failures.get_cloned(adaptive_run_id).get("value") + 1
+                );
+                self.adaptive_layer_phase.insert(layer_id, AdaptiveLayerPhase::RunFailed);
+                self.adaptive_active_layer.remove(adaptive_run_id);
+            }
+            to Running
+            emit AdaptiveLayerInterrupted { adaptive_run_id: adaptive_run_id, layer_id: layer_id }
+        }
+
+        // Idempotent acknowledgement covers the case where the owning kernel
+        // committed a terminal transition but its response path failed. It
+        // never rewrites the more precise terminal fact.
+        transition RecordAdaptiveLayerInterruptedAlreadyTerminal {
+            per_phase [Running]
+            on input RecordLayerInterrupted { adaptive_run_id, layer_id, attempt }
+            guard "layer_owner_matches" {
+                self.adaptive_layer_adaptive_run.get_cloned(layer_id) == Some(adaptive_run_id)
+            }
+            guard "layer_already_terminal" {
+                self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Completed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::SetupFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::RunFailed)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::ResultInvalid)
+                || self.adaptive_layer_phase.get_cloned(layer_id) == Some(AdaptiveLayerPhase::Canceled)
+            }
+            guard "attempt_matches" {
+                self.adaptive_layer_attempt.get_cloned(layer_id).get("value") == attempt
+            }
+            update {}
+            to Running
+            emit AdaptiveLayerInterrupted { adaptive_run_id: adaptive_run_id, layer_id: layer_id }
         }
 
         transition RecordAdaptiveLayerResultValidated {

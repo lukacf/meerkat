@@ -7047,6 +7047,12 @@ pub mod inputs {
         pub requested_members: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLayerInterrupted {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+        pub attempt: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLayerResultValidated {
         pub adaptive_run_id: AdaptiveRunId,
         pub layer_id: AdaptiveLayerId,
@@ -7292,6 +7298,7 @@ pub enum Input {
     RecordLayerRunStarted(inputs::RecordLayerRunStarted),
     IngestLayerTerminal(inputs::IngestLayerTerminal),
     RecordLayerSetupFault(inputs::RecordLayerSetupFault),
+    RecordLayerInterrupted(inputs::RecordLayerInterrupted),
     RecordLayerResultValidated(inputs::RecordLayerResultValidated),
     RecordLayerResultInvalid(inputs::RecordLayerResultInvalid),
     RecordLayerMobDestroyed(inputs::RecordLayerMobDestroyed),
@@ -7566,6 +7573,7 @@ impl Input {
             Self::RecordLayerRunStarted(_) => InputKind::RecordLayerRunStarted,
             Self::IngestLayerTerminal(_) => InputKind::IngestLayerTerminal,
             Self::RecordLayerSetupFault(_) => InputKind::RecordLayerSetupFault,
+            Self::RecordLayerInterrupted(_) => InputKind::RecordLayerInterrupted,
             Self::RecordLayerResultValidated(_) => InputKind::RecordLayerResultValidated,
             Self::RecordLayerResultInvalid(_) => InputKind::RecordLayerResultInvalid,
             Self::RecordLayerMobDestroyed(_) => InputKind::RecordLayerMobDestroyed,
@@ -7765,6 +7773,7 @@ pub enum InputKind {
     RecordLayerRunStarted,
     IngestLayerTerminal,
     RecordLayerSetupFault,
+    RecordLayerInterrupted,
     RecordLayerResultValidated,
     RecordLayerResultInvalid,
     RecordLayerMobDestroyed,
@@ -9071,6 +9080,11 @@ pub mod effects {
         pub fault: AdaptiveLayerSetupFaultKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdaptiveLayerInterrupted {
+        pub adaptive_run_id: AdaptiveRunId,
+        pub layer_id: AdaptiveLayerId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdaptiveLayerResultValidated {
         pub adaptive_run_id: AdaptiveRunId,
         pub layer_id: AdaptiveLayerId,
@@ -9359,6 +9373,7 @@ pub enum Effect {
     AdaptiveLayerRunStarted(effects::AdaptiveLayerRunStarted),
     AdaptiveLayerTerminalIngested(effects::AdaptiveLayerTerminalIngested),
     AdaptiveLayerSetupFaultRecorded(effects::AdaptiveLayerSetupFaultRecorded),
+    AdaptiveLayerInterrupted(effects::AdaptiveLayerInterrupted),
     AdaptiveLayerResultValidated(effects::AdaptiveLayerResultValidated),
     AdaptiveLayerResultInvalid(effects::AdaptiveLayerResultInvalid),
     AdaptiveLayerCleanupObserved(effects::AdaptiveLayerCleanupObserved),
@@ -9500,6 +9515,7 @@ pub enum EffectKind {
     AdaptiveLayerRunStarted,
     AdaptiveLayerTerminalIngested,
     AdaptiveLayerSetupFaultRecorded,
+    AdaptiveLayerInterrupted,
     AdaptiveLayerResultValidated,
     AdaptiveLayerResultInvalid,
     AdaptiveLayerCleanupObserved,
@@ -9771,6 +9787,8 @@ pub enum TransitionId {
     IngestAdaptiveLayerTerminalSuccessRunning,
     IngestAdaptiveLayerTerminalFailureRunning,
     RecordAdaptiveLayerSetupFaultRunning,
+    RecordAdaptiveLayerInterruptedNonterminalRunning,
+    RecordAdaptiveLayerInterruptedAlreadyTerminalRunning,
     RecordAdaptiveLayerResultValidatedRunning,
     RecordAdaptiveLayerResultInvalidRunning,
     RecordAdaptiveLayerMobDestroyedRunning,

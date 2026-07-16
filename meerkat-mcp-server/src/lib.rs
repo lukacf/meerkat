@@ -1298,9 +1298,7 @@ impl MeerkatMcpState {
             .store_path()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| realm_store_path(&realms_root, &realm_id, manifest.backend));
-        let runtime_store = persistence.runtime_store();
         let session_store = persistence.session_store();
-        let blob_store = persistence.blob_store();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let workgraph_service = meerkat::WorkGraphService::with_scope(
             persistence.workgraph_store(),
@@ -1369,11 +1367,8 @@ impl MeerkatMcpState {
                 workgraph_service.clone(),
             ))),
         );
-        let (service, runtime_adapter) = meerkat::surface::build_runtime_backed_service(
-            builder,
-            max_sessions,
-            PersistenceBundle::new(session_store, runtime_store, blob_store),
-        );
+        let (service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
         let service = Arc::new(service);
         #[cfg(feature = "mob")]
         let mob_state = {
@@ -4951,6 +4946,32 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn mcp_realm_bootstrap_preserves_durable_event_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = MeerkatMcpState::new_with_bootstrap_and_test_client(
+            RuntimeBootstrap {
+                realm: meerkat_core::RealmConfig {
+                    selection: RealmSelection::Explicit {
+                        realm_id: "mcp-projection".to_string(),
+                    },
+                    instance_id: None,
+                    backend_hint: Some("sqlite".to_string()),
+                    state_root: Some(temp.path().to_path_buf()),
+                },
+                context: meerkat_core::ContextConfig::default(),
+            },
+            false,
+        )
+        .await
+        .expect("MCP realm bootstrap");
+
+        assert!(
+            state.service.has_event_projection(),
+            "MCP must pass the complete realm persistence bundle to the shared runtime-backed service"
+        );
+    }
 
     fn mcp_inherited_gemini_binding() -> (Config, meerkat_core::AuthBindingRef) {
         let mut config = Config::default();

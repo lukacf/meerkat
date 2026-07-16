@@ -199,6 +199,56 @@ impl std::fmt::Display for CredentialUseIntent {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RefreshFailureDisposition {
+    #[default]
+    #[serde(rename = "Transient")]
+    Transient,
+    #[serde(rename = "ReauthRequired")]
+    ReauthRequired,
+}
+impl RefreshFailureDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Transient => "Transient",
+            Self::ReauthRequired => "ReauthRequired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RefreshFailureDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Transient" => Ok(Self::Transient),
+            "ReauthRequired" => Ok(Self::ReauthRequired),
+            other => Err(format!("invalid RefreshFailureDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RefreshFailureDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RefreshFailureDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -266,9 +316,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RefreshFailed {
-        pub http_status: Option<u64>,
-        pub oauth_error_code: Option<String>,
-        pub local_credential_unusable: bool,
+        pub disposition: RefreshFailureDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkReauthRequired {}
@@ -385,6 +433,12 @@ pub mod inputs {
         pub flow_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRefreshFailureDisposition {
+        pub http_status: Option<u64>,
+        pub oauth_error_code: Option<String>,
+        pub local_credential_unusable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveCredentialUseAdmission {
         pub intent: CredentialUseIntent,
     }
@@ -425,6 +479,7 @@ pub enum Input {
     FinishOAuthDevicePoll(inputs::FinishOAuthDevicePoll),
     ConsumeOAuthDeviceFlow(inputs::ConsumeOAuthDeviceFlow),
     ExpireOAuthDeviceFlow(inputs::ExpireOAuthDeviceFlow),
+    ResolveRefreshFailureDisposition(inputs::ResolveRefreshFailureDisposition),
     ResolveCredentialUseAdmission(inputs::ResolveCredentialUseAdmission),
     ResolveOAuthLoginCredentialDisposition(inputs::ResolveOAuthLoginCredentialDisposition),
 }
@@ -460,6 +515,9 @@ impl Input {
             Self::FinishOAuthDevicePoll(_) => InputKind::FinishOAuthDevicePoll,
             Self::ConsumeOAuthDeviceFlow(_) => InputKind::ConsumeOAuthDeviceFlow,
             Self::ExpireOAuthDeviceFlow(_) => InputKind::ExpireOAuthDeviceFlow,
+            Self::ResolveRefreshFailureDisposition(_) => {
+                InputKind::ResolveRefreshFailureDisposition
+            }
             Self::ResolveCredentialUseAdmission(_) => InputKind::ResolveCredentialUseAdmission,
             Self::ResolveOAuthLoginCredentialDisposition(_) => {
                 InputKind::ResolveOAuthLoginCredentialDisposition
@@ -496,6 +554,7 @@ pub enum InputKind {
     FinishOAuthDevicePoll,
     ConsumeOAuthDeviceFlow,
     ExpireOAuthDeviceFlow,
+    ResolveRefreshFailureDisposition,
     ResolveCredentialUseAdmission,
     ResolveOAuthLoginCredentialDisposition,
 }
@@ -513,6 +572,10 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct WakeRefreshLoop {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RefreshFailureDispositionResolved {
+        pub disposition: RefreshFailureDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CredentialUseAdmissionResolved {
         pub disposition: CredentialUseDisposition,
     }
@@ -527,6 +590,7 @@ pub mod effects {
 pub enum Effect {
     EmitLifecycleEvent(effects::EmitLifecycleEvent),
     WakeRefreshLoop(effects::WakeRefreshLoop),
+    RefreshFailureDispositionResolved(effects::RefreshFailureDispositionResolved),
     CredentialUseAdmissionResolved(effects::CredentialUseAdmissionResolved),
     CancelOAuthFlowsForRelease(effects::CancelOAuthFlowsForRelease),
 }
@@ -534,6 +598,7 @@ pub enum Effect {
 pub enum EffectKind {
     EmitLifecycleEvent,
     WakeRefreshLoop,
+    RefreshFailureDispositionResolved,
     CredentialUseAdmissionResolved,
     CancelOAuthFlowsForRelease,
 }
@@ -556,6 +621,8 @@ pub enum TransitionId {
     BeginRefreshFromExpiring,
     BeginRefreshFromExpired,
     CompleteRefresh,
+    ResolveRefreshFailureDispositionTransientRefreshing,
+    ResolveRefreshFailureDispositionPermanentRefreshing,
     RefreshFailedTransient,
     RefreshFailedPermanent,
     MarkReauthRequiredFromValid,

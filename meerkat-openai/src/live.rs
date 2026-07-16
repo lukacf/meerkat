@@ -979,6 +979,7 @@ fn openai_session_update(
         // `AssistantTranscriptDelta` (`transcript_supported=true`).
         config: session_update_with_audio_text_modality(
             openai_realtime_instructions(
+                open_config.system_prompt.as_deref(),
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
                 policy.output_language_instruction.clone(),
@@ -1019,6 +1020,7 @@ fn openai_projection_session_update(
         // inherit it. Pin it via the typed constructor.
         config: session_update_with_audio_text_modality(
             openai_realtime_instructions(
+                open_config.system_prompt.as_deref(),
                 &open_config.seed_messages,
                 &open_config.runtime_system_context,
                 policy.output_language_instruction.clone(),
@@ -1374,15 +1376,24 @@ pub(crate) fn parse_tool_call_args(
 }
 
 fn openai_realtime_instructions(
+    system_prompt: Option<&str>,
     seed_messages: &[Message],
     runtime_system_context: &[PendingSystemContextAppend],
     language_pin: Option<String>,
 ) -> Option<String> {
+    // `system_prompt` is the provider-neutral typed authority. Seed System and
+    // SystemNotice messages remain canonical transcript projection and are
+    // deliberately ignored by the instruction channel.
     // Language pin goes first so output_text and output_audio_transcript
     // stay coherent with the caller's expected language even when
     // transcription confidence on input dips. The pin is the typed
     // `OpenAiRealtimePolicy.output_language_instruction` resolved at
     // session-open (no per-build env read).
+
+    let typed_system_prompt = system_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .map(ToOwned::to_owned);
 
     if let Some(authoritative_context) =
         openai_realtime_authoritative_system_context(runtime_system_context)
@@ -1397,17 +1408,9 @@ fn openai_realtime_instructions(
             instructions.push(pin);
         }
         instructions.push(authoritative_context);
-        instructions.extend(
-            seed_messages
-                .iter()
-                .take(1)
-                .filter_map(|message| match message {
-                    Message::System(system) => Some(system.content.trim().to_string()),
-                    Message::SystemNotice(notice) => Some(notice.model_projection_text()),
-                    _ => None,
-                })
-                .filter(|text| !text.is_empty()),
-        );
+        if let Some(prompt) = typed_system_prompt {
+            instructions.push(prompt);
+        }
         return Some(instructions.join("\n\n"));
     }
 
@@ -1415,17 +1418,9 @@ fn openai_realtime_instructions(
     if let Some(pin) = language_pin {
         instructions.push(pin);
     }
-    instructions.extend(
-        seed_messages
-            .iter()
-            .take(1)
-            .filter_map(|message| match message {
-                Message::System(system) => Some(system.content.trim().to_string()),
-                Message::SystemNotice(notice) => Some(notice.model_projection_text()),
-                _ => None,
-            })
-            .filter(|text| !text.is_empty()),
-    );
+    if let Some(prompt) = typed_system_prompt {
+        instructions.push(prompt);
+    }
     if let Some(history) = openai_realtime_history_context(seed_messages) {
         instructions.push(history);
     }
@@ -7271,6 +7266,7 @@ mod tests {
                 }),
             ],
         )
+        .with_system_prompt(Some("You are the realtime operator.".to_string()))
         .with_runtime_system_context(vec![PendingSystemContextAppend {
             content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
                 "Authoritative peer token is birch seventeen.".to_string()
@@ -7481,12 +7477,13 @@ mod tests {
     }
 
     #[test]
-    fn openai_realtime_instructions_prepend_language_pin_when_seed_has_system_only() {
+    fn openai_realtime_instructions_prepend_language_pin_to_typed_system_prompt() {
         let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(
             "You are a helpful realtime operator.".to_string(),
         ))];
 
         let instructions = openai_realtime_instructions(
+            Some("You are a helpful realtime operator."),
             &seed_messages,
             &[],
             Some(openai_realtime_output_language_instruction()),
@@ -7511,13 +7508,92 @@ mod tests {
     }
 
     #[test]
+    fn session_updates_use_typed_system_prompt_and_ignore_stray_seed_authority() {
+        let mut open_config = sample_open_config(RealtimeTurningMode::ProviderManaged);
+        open_config.system_prompt = Some("Typed realtime authority.".to_string());
+        open_config.runtime_system_context.clear();
+        open_config.seed_messages = vec![
+            Message::System(meerkat_core::SystemMessage::new(
+                "STRAY SEED SYSTEM AUTHORITY".to_string(),
+            )),
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
+                meerkat_core::SystemNoticeKind::Generic,
+                "STRAY SEED NOTICE AUTHORITY",
+            )),
+            Message::User(meerkat_core::UserMessage::text("ordinary dialogue")),
+        ];
+        let policy = OpenAiRealtimePolicy::resolve(&open_config.llm_identity);
+
+        for update in [
+            openai_session_update(&open_config, &policy),
+            openai_projection_session_update(&open_config, &policy),
+        ] {
+            let instructions = update
+                .config
+                .instructions
+                .expect("the typed system prompt should produce instructions");
+            assert!(
+                instructions.contains("Typed realtime authority."),
+                "typed system prompt must drive OpenAI instructions: {instructions}"
+            );
+            assert!(
+                !instructions.contains("STRAY SEED SYSTEM AUTHORITY"),
+                "seed System messages are dialogue projection, not instruction authority: {instructions}"
+            );
+            assert!(
+                !instructions.contains("STRAY SEED NOTICE AUTHORITY"),
+                "seed SystemNotice messages are transcript projection, not instruction authority: {instructions}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_updates_never_promote_stray_seed_system_without_typed_prompt() {
+        let mut open_config = sample_open_config(RealtimeTurningMode::ProviderManaged);
+        open_config.system_prompt = None;
+        open_config.runtime_system_context.clear();
+        open_config.seed_messages = vec![
+            Message::System(meerkat_core::SystemMessage::new(
+                "STRAY SEED SYSTEM AUTHORITY".to_string(),
+            )),
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
+                meerkat_core::SystemNoticeKind::Generic,
+                "STRAY SEED NOTICE AUTHORITY",
+            )),
+        ];
+        let policy = OpenAiRealtimePolicy::resolve(&open_config.llm_identity);
+
+        for update in [
+            openai_session_update(&open_config, &policy),
+            openai_projection_session_update(&open_config, &policy),
+        ] {
+            let instructions = update
+                .config
+                .instructions
+                .expect("the typed output-language policy should produce instructions");
+            assert!(
+                !instructions.contains("STRAY SEED SYSTEM AUTHORITY"),
+                "seed System messages must never seed the instruction channel: {instructions}"
+            );
+            assert!(
+                !instructions.contains("STRAY SEED NOTICE AUTHORITY"),
+                "seed SystemNotice messages must never seed the instruction channel: {instructions}"
+            );
+        }
+    }
+
+    #[test]
     fn instructions_do_not_promote_rendered_runtime_marker_without_typed_context() {
-        let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(format!(
+        let system_prompt = format!(
             "You are the realtime operator.{}\n[Runtime System Context]\nsource: peer_response_terminal:analyst:req-123\n\nPeer terminal response from analyst\nRequest ID: req-123\nStatus: completed\nPayload: {{\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}}",
             meerkat_core::SYSTEM_CONTEXT_SEPARATOR
-        )))];
+        );
+        let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(
+            system_prompt.clone(),
+        ))];
 
         let instructions = openai_realtime_instructions(
+            Some(&system_prompt),
             &seed_messages,
             &[],
             Some(openai_realtime_output_language_instruction()),
@@ -7555,6 +7631,7 @@ mod tests {
         }];
 
         let instructions = openai_realtime_instructions(
+            Some("You are the realtime operator."),
             &seed_messages,
             &runtime_system_context,
             Some(openai_realtime_output_language_instruction()),
@@ -7607,6 +7684,7 @@ mod tests {
         }];
 
         let instructions = openai_realtime_instructions(
+            Some("You are the realtime operator."),
             &seed_messages,
             &runtime_system_context,
             Some(openai_realtime_output_language_instruction()),
@@ -7679,6 +7757,7 @@ mod tests {
         }];
 
         let instructions = openai_realtime_instructions(
+            Some("You are the realtime operator."),
             &seed_messages,
             &runtime_system_context,
             Some(openai_realtime_output_language_instruction()),
@@ -7722,6 +7801,7 @@ mod tests {
         ];
 
         let instructions = openai_realtime_instructions(
+            Some("You are the realtime operator."),
             &seed_messages,
             &[],
             Some(openai_realtime_output_language_instruction()),
@@ -10933,6 +11013,7 @@ mod tests {
                 assert_eq!(
                     session.config.instructions.as_deref(),
                     openai_realtime_instructions(
+                        open_config.system_prompt.as_deref(),
                         &open_config.seed_messages,
                         &open_config.runtime_system_context,
                         OpenAiRealtimePolicy::resolve(&open_config.llm_identity)

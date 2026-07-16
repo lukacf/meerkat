@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::LoopState;
-use crate::auth::RefreshFailureObservation;
+use crate::auth::{RefreshFailureDisposition, RefreshFailureObservation};
 use crate::comms::InputSource;
 use crate::interaction::{
     PeerIngressAdmission, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
@@ -2054,9 +2054,26 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
-    /// Fire the typed refresh-failure observation input — only legal from
-    /// `refreshing`. AuthMachine decides the permanent/transient lifecycle
-    /// result from the observation.
+    /// Classify a typed refresh-failure observation through AuthMachine's
+    /// read-only generated resolver — only legal from `refreshing`.
+    ///
+    /// The machine owns permanent-vs-transient policy. Callers may mirror the
+    /// returned verdict to order durable cleanup, but must not infer it from
+    /// [`RefreshFailureObservation`] fields.
+    fn resolve_refresh_failure_disposition(
+        &self,
+        lease_key: &LeaseKey,
+        observation: RefreshFailureObservation,
+    ) -> Result<RefreshFailureDisposition, DslTransitionError> {
+        let _ = (lease_key, observation);
+        Err(DslTransitionError::no_matching(
+            "AuthLeaseHandle::resolve_refresh_failure_disposition",
+            "classifying refresh failure requires generated AuthMachine authority",
+        ))
+    }
+
+    /// Resolve a typed refresh-failure observation through AuthMachine, then
+    /// commit the machine-issued disposition — only legal from `refreshing`.
     fn refresh_failed(
         &self,
         lease_key: &LeaseKey,

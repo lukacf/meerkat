@@ -7554,6 +7554,24 @@ async fn adaptive_public_seam_drives_layer_to_collecting_then_completed() {
         .await
         .expect("record layer mob destroyed");
     handle
+        .record_adaptive_layer_mob_destroyed(
+            &capability,
+            AdaptiveLayerAttempt {
+                layer_id: layer_id.to_string(),
+                attempt: 1,
+            },
+        )
+        .await
+        .expect("duplicate destroyed feedback must be idempotent");
+    let cleanup_replayed = handle
+        .adaptive_run_snapshot(&capability)
+        .await
+        .expect("snapshot after duplicate cleanup feedback");
+    assert_eq!(
+        cleanup_replayed.active_members, 0,
+        "duplicate destroyed feedback must not debit active members twice"
+    );
+    handle
         .resolve_adaptive_finish(&capability, "sha256:final-result")
         .await
         .expect("finish run");
@@ -7644,6 +7662,241 @@ async fn adaptive_public_seam_requests_host_cancel_through_mob_machine() {
     assert_eq!(
         snapshot.stop_reason,
         Some(AdaptiveStopReasonView::HostCancel)
+    );
+}
+
+#[tokio::test]
+async fn adaptive_driver_run_lease_cancels_before_layer_and_releases_run_slot() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let driver = crate::adaptive::AdaptiveDriver::new(handle.clone());
+    let adaptive_run_id = crate::adaptive::AdaptiveRunId::new("adaptive-run-lease-cancel")
+        .expect("valid leased adaptive run id");
+    let initialization = crate::adaptive::AdaptiveKernel::initialize_run(
+        &driver,
+        &adaptive_run_id,
+        &crate::adaptive::AdaptivePolicy {
+            limits: crate::adaptive::AdaptiveLimitRecord {
+                max_depth: 3,
+                max_total_decisions: 5,
+                max_repair_attempts: 2,
+                max_layer_failures: 2,
+                max_attempts_per_layer: 2,
+                max_members_per_layer: 4,
+                max_total_spawned_members: 8,
+                max_active_members: 4,
+                max_retained_layer_mobs: 1,
+                max_wall_clock_ms: 10_000,
+                max_aggregate_tokens: 10_000,
+                max_aggregate_tool_calls: 100,
+            },
+            allowed_model_classes: BTreeSet::from(["standard".to_string()]),
+            allowed_tool_classes: BTreeSet::from(["readonly".to_string()]),
+            allowed_skill_classes: BTreeSet::from(["audit".to_string()]),
+            allowed_auth_bindings: BTreeSet::from(["default".to_string()]),
+            ..crate::adaptive::AdaptivePolicy::default()
+        },
+        0,
+    );
+    let (capability, run_lease) = initialization
+        .resolve()
+        .await
+        .expect("initialize leased adaptive run");
+
+    drop(run_lease);
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let snapshot = handle
+                .adaptive_run_snapshot(&capability)
+                .await
+                .expect("read leased-run cancellation snapshot");
+            if snapshot.phase == Some(AdaptiveRunPhaseView::Canceled) {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("prestarted run guardian must close the canceled run");
+    assert_eq!(
+        snapshot.stop_reason,
+        Some(AdaptiveStopReasonView::HostCancel)
+    );
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("read machine after leased-run cancellation");
+    assert_eq!(
+        state.adaptive_active_run, None,
+        "typed host cancellation must release the canonical adaptive-run slot"
+    );
+
+    let next = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "adaptive-run-after-lease-cancel".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("a second adaptive run must initialize after cancellation");
+    handle
+        .request_adaptive_cancel(&next)
+        .await
+        .expect("close second adaptive test run");
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn adaptive_loop_real_planning_error_cancels_run_and_allows_next_initialization() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adaptive_run_id = crate::adaptive::AdaptiveRunId::new("adaptive-real-plan-error")
+        .expect("valid adaptive run id");
+    let driver = crate::adaptive::AdaptiveDriver::new(handle.clone());
+    let mut runtime = crate::runtime::mobpack_execution::PackAdaptiveRuntime {
+        control_mob: handle.clone(),
+        session_service: service,
+        layer_created_probe: None,
+    };
+    let limits = crate::adaptive::AdaptiveLimitRecord {
+        max_depth: 3,
+        max_total_decisions: 5,
+        max_repair_attempts: 2,
+        max_layer_failures: 2,
+        max_attempts_per_layer: 2,
+        max_members_per_layer: 4,
+        max_total_spawned_members: 8,
+        max_active_members: 4,
+        max_retained_layer_mobs: 1,
+        max_wall_clock_ms: 10_000,
+        max_aggregate_tokens: 10_000,
+        max_aggregate_tool_calls: 100,
+    };
+
+    let error = crate::adaptive::run_adaptive_loop(
+        &driver,
+        &mut runtime,
+        crate::adaptive::AdaptiveRunRequest {
+            adaptive_run_id: adaptive_run_id.clone(),
+            policy: crate::adaptive::AdaptivePolicy {
+                limits,
+                ..crate::adaptive::AdaptivePolicy::default()
+            },
+            compile_context: crate::adaptive::CompileContext {
+                adaptive_run_id: adaptive_run_id.clone(),
+                attempt: 1,
+                schema_registry: crate::adaptive::SchemaRegistry::default(),
+                profile_templates: BTreeMap::new(),
+                previous_layer_result: None,
+            },
+            objective: "Exercise a real planning failure.".to_string(),
+            started_at_ms: 1_000,
+        },
+    )
+    .await
+    .expect_err("missing plan flow must fail through the real runtime");
+    assert!(error.to_string().contains("flow not found"));
+
+    let snapshot = handle
+        .adaptive_run_snapshot_by_id(adaptive_run_id.as_str())
+        .await
+        .expect("read real planning-error snapshot");
+    assert_eq!(snapshot.phase, Some(AdaptiveRunPhaseView::Canceled));
+    assert_eq!(
+        snapshot.stop_reason,
+        Some(AdaptiveStopReasonView::HostCancel)
+    );
+    assert_eq!(
+        handle
+            .query_machine_state()
+            .await
+            .expect("read real planning-error machine state")
+            .adaptive_active_run,
+        None
+    );
+
+    let next = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "adaptive-after-real-plan-error".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("planning-error cancellation must release the next run slot");
+    handle
+        .request_adaptive_cancel(&next)
+        .await
+        .expect("close next adaptive run");
+}
+
+#[tokio::test]
+async fn adaptive_proven_absent_layer_cleanup_releases_admission_reservation() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let capability = handle
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "adaptive-absent-layer".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("initialize absent-layer adaptive run");
+    let layer_id = "adaptive-absent-layer-create-failed";
+    handle
+        .record_adaptive_planning_decision(&capability, AdaptivePlanningDecisionKind::RunLayer)
+        .await
+        .expect("record absent-layer planning decision");
+    assert_eq!(
+        handle
+            .resolve_adaptive_layer_admission(&capability, adaptive_admission_request(layer_id, 2),)
+            .await
+            .expect("admit layer before create failure"),
+        AdaptiveLayerAdmission::Allowed
+    );
+    handle
+        .record_adaptive_layer_setup_fault(
+            &capability,
+            AdaptiveLayerSetupFaultObservation {
+                layer_id: layer_id.to_string(),
+                attempt: 1,
+                fault: AdaptiveLayerSetupFault::MobCreateFailed,
+                spawned_members: 0,
+                requested_members: 2,
+            },
+        )
+        .await
+        .expect("record handle-less mob create failure");
+    handle
+        .record_adaptive_layer_mob_destroyed(
+            &capability,
+            AdaptiveLayerAttempt {
+                layer_id: layer_id.to_string(),
+                attempt: 1,
+            },
+        )
+        .await
+        .expect("record proven physical absence through cleanup authority");
+    handle
+        .request_adaptive_cancel(&capability)
+        .await
+        .expect("cancel failed adaptive run");
+
+    let snapshot = handle
+        .adaptive_run_snapshot(&capability)
+        .await
+        .expect("read absent-layer cleanup snapshot");
+    assert_eq!(snapshot.phase, Some(AdaptiveRunPhaseView::Canceled));
+    assert_eq!(
+        snapshot.active_members, 0,
+        "proven physical absence must release admitted active-member accounting"
+    );
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("read absent-layer machine state");
+    assert_eq!(state.adaptive_active_run, None);
+    assert_eq!(
+        state
+            .adaptive_layer_disposition
+            .get(&crate::machines::mob_machine::AdaptiveLayerId::from(
+                layer_id
+            )),
+        Some(&crate::machines::mob_machine::AdaptiveLayerDispositionKind::Destroyed)
     );
 }
 
@@ -37464,6 +37717,43 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
 }
 
 #[tokio::test]
+async fn test_stop_notifies_every_active_orchestrator_profile_member() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    for identity in ["lead-one", "lead-two"] {
+        handle
+            .spawn(
+                ProfileName::from("lead"),
+                AgentIdentity::from(identity),
+                None,
+            )
+            .await
+            .expect("spawn orchestrator-profile member");
+    }
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("orchestrator-profile members ready");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let baseline = service.inject_call_count();
+
+    handle.stop().await.expect("stop");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.inject_call_count() < baseline + 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stop notification should reach every active orchestrator-profile member");
+
+    assert_eq!(
+        service.inject_call_count(),
+        baseline + 2,
+        "machine-owned profile membership must fan lifecycle delivery out to every active member"
+    );
+}
+
+#[tokio::test]
 async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
     let (handle, service) = create_test_mob(sample_definition()).await;
 
@@ -37494,6 +37784,11 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
     );
 
     handle.destroy().await.expect("destroy");
+    assert_eq!(
+        service.inject_call_count(),
+        1,
+        "destroy must schedule its lifecycle notification while the machine still classifies the orchestrator as Active"
+    );
     // With the runtime adapter path, interrupt goes through the runtime-owned
     // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that destroy succeeds (above) and
@@ -55184,6 +55479,343 @@ async fn test_ensure_member_respawns_history_only_identity_at_next_generation() 
         first_generation
             .next()
             .expect("test generation has a successor")
+    );
+}
+
+#[tokio::test]
+async fn test_concurrent_ensure_member_converges_on_exact_machine_identity() {
+    use crate::runtime::reconcile::EnsureMemberOutcome;
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_create_session_delay_ms(180);
+
+    let first_handle = handle.clone();
+    let second_handle = handle.clone();
+    let first = tokio::spawn(async move {
+        first_handle
+            .ensure_member(SpawnMemberSpec::new("worker", "adaptive-flowmaster"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let second = tokio::spawn(async move {
+        second_handle
+            .ensure_member(SpawnMemberSpec::new("worker", "adaptive-flowmaster"))
+            .await
+    });
+
+    let first = first
+        .await
+        .expect("first ensure join")
+        .expect("first ensure");
+    let second = second
+        .await
+        .expect("second ensure join")
+        .expect("second ensure converges");
+    assert!(matches!(first, EnsureMemberOutcome::Spawned(_)));
+    assert!(matches!(second, EnsureMemberOutcome::Existed(_)));
+
+    let state = handle.query_machine_state().await.expect("machine state");
+    let identity = crate::machines::mob_machine::AgentIdentity::from("adaptive-flowmaster");
+    assert_eq!(
+        state.member_profile_name_for_identity(&identity),
+        Some("worker")
+    );
+    assert_eq!(
+        handle
+            .list_members()
+            .await
+            .into_iter()
+            .filter(|entry| entry.agent_identity.as_str() == "adaptive-flowmaster")
+            .count(),
+        1
+    );
+    assert_eq!(service.active_session_count().await, 1);
+}
+
+#[tokio::test]
+async fn test_ensure_member_retain_converges_before_roster_projection() {
+    use crate::runtime::reconcile::EnsureMemberOutcome;
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("adaptive-flowmaster");
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&identity);
+    let runtime_id = AgentRuntimeId::initial(identity.clone());
+    let dsl_runtime_id = crate::machines::mob_machine::AgentRuntimeId::from_domain(&runtime_id);
+    let generation = crate::ids::Generation::INITIAL;
+    let fence_token = FenceToken::new(1);
+    let profile_digest = "ensure-retain-profile-digest".to_string();
+
+    handle
+        .apply_machine_input_effects(
+            crate::machines::mob_machine::MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: dsl_identity.clone(),
+                profile_name: "worker".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: profile_digest.clone(),
+                tool_config_digest: "ensure-retain-tool-digest".to_string(),
+                skills_digest: "ensure-retain-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+                resolved_spec_digest: None,
+            },
+        )
+        .await
+        .expect("authorize committed-before-roster member profile");
+    handle
+        .apply_machine_input_effects(
+            crate::machines::mob_machine::MobMachineInput::BeginSpawnExec {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: dsl_runtime_id.clone(),
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(fence_token),
+                generation: crate::machines::mob_machine::Generation::from_domain(generation),
+                profile_material_digest: profile_digest.clone(),
+                external_addressable: false,
+                runtime_mode: crate::machines::mob_machine::SpawnPolicyRuntimeMode::TurnDriven,
+                bridge_session_id: None,
+                replacing: None,
+                placement: None,
+                workgraph_required: false,
+                rust_bundles_present: false,
+                per_spawn_external_tools_present: false,
+                mob_default_external_tools_present: false,
+                default_llm_client_override_present: false,
+                host_surface_mcp_allowlist_present: false,
+                inherited_tool_filter_present: false,
+                shell_env_present: false,
+                mcp_stdio_env_present: false,
+                mcp_http_headers_present: false,
+                memory_required: false,
+                mcp_required: false,
+                resume_session_id: None,
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
+            },
+        )
+        .await
+        .expect("open committed-before-roster spawn");
+    handle
+        .apply_machine_input_effects(
+            crate::machines::mob_machine::MobMachineInput::CommitSpawnMembership {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: dsl_runtime_id,
+                fence_token: crate::machines::mob_machine::FenceToken::from_domain(fence_token),
+                generation: crate::machines::mob_machine::Generation::from_domain(generation),
+                profile_material_digest: profile_digest,
+                external_addressable: false,
+                runtime_mode: crate::machines::mob_machine::SpawnPolicyRuntimeMode::TurnDriven,
+                bridge_session_id: None,
+                replacing: None,
+                member_peer_endpoint: None,
+                spec_digest_echo: None,
+                ack_engine_version: None,
+                placed_spawn_id: None,
+                provision_operation_id: None,
+            },
+        )
+        .await
+        .expect("commit membership before mechanical roster projection");
+
+    let committed = handle.machine_state_watch_rx.borrow().clone();
+    assert!(
+        committed.identity_to_runtime.contains_key(&dsl_identity),
+        "machine membership must be committed while the roster row is absent"
+    );
+    assert_eq!(
+        committed
+            .member_lifecycle_for_identity(&dsl_identity)
+            .status,
+        crate::machines::mob_machine::MobMemberLifecycleStatus::Active,
+        "the machine-owned current incarnation must already be active"
+    );
+    assert!(
+        handle.roster.read().await.get(&identity).is_none(),
+        "mechanical roster row must still be absent"
+    );
+
+    let outcome = handle
+        .ensure_member(SpawnMemberSpec::new("worker", "adaptive-flowmaster"))
+        .await
+        .expect("machine retain verdict must converge before roster publication");
+    match outcome {
+        EnsureMemberOutcome::Existed(entry) => assert_eq!(entry.agent_identity, identity),
+        other => panic!("committed member must be retained, got {other:?}"),
+    }
+    assert!(
+        handle.roster.read().await.get(&identity).is_none(),
+        "retain convergence must not manufacture a mechanical roster row"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn pack_cleanup_physically_destroys_real_mob_handle() {
+    struct TestCancellationOwner;
+
+    impl crate::adaptive::AdaptiveLayerCancellationOwner<MobHandle> for TestCancellationOwner {
+        fn take_layer_for_cancellation(&self, _layer: MobHandle) {}
+
+        fn disarm_after_cleanup(&self) {}
+    }
+
+    let (layer, service) = create_test_mob(sample_definition()).await;
+    let mut runtime = crate::runtime::mobpack_execution::PackAdaptiveRuntime {
+        control_mob: layer.clone(),
+        session_service: service,
+        layer_created_probe: None,
+    };
+
+    let layer_lease =
+        crate::adaptive::AdaptiveLayerLease::new(layer.clone(), Arc::new(TestCancellationOwner));
+    let cleanup = <crate::runtime::mobpack_execution::PackAdaptiveRuntime as crate::adaptive::AdaptiveDriverRuntime>::cleanup_layer(
+        &mut runtime,
+        &layer_lease,
+        &crate::adaptive::LayerId::new("real-layer").expect("layer id"),
+        1,
+    )
+    .await
+    .expect("physical cleanup");
+    let _destroyed_layer = layer_lease.disarm();
+
+    assert_eq!(cleanup, crate::adaptive::AdaptiveLayerCleanup::Destroyed);
+    assert_eq!(
+        layer.status().await.expect("terminal status projection"),
+        crate::runtime::MobState::Destroyed
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn aborting_pack_provision_destroys_child_and_cancels_machine_run() {
+    let (control_mob, service) = create_test_mob(sample_definition()).await;
+    let capability = control_mob
+        .initialize_adaptive_run(InitializeAdaptiveRunRequest {
+            adaptive_run_id: "adaptive-cancel-run".to_string(),
+            limits: adaptive_test_limits(),
+        })
+        .await
+        .expect("initialize adaptive cancellation run");
+    control_mob
+        .record_adaptive_planning_decision(&capability, AdaptivePlanningDecisionKind::RunLayer)
+        .await
+        .expect("record adaptive layer decision");
+
+    let layer_id =
+        crate::adaptive::LayerId::new("adaptive-cancel-run-layer").expect("valid layer id");
+    let mut admission = adaptive_admission_request(layer_id.as_str(), 1);
+    admission.child_mob_id = "adaptive-cancel-child".to_string();
+    control_mob
+        .resolve_adaptive_layer_admission(&capability, admission)
+        .await
+        .expect("admit adaptive cancellation layer");
+
+    let mut child_definition = sample_definition();
+    child_definition.id = MobId::from("adaptive-cancel-child");
+    let mut body_store = crate::adaptive::InMemoryBodyStore::default();
+    let plan_digest = body_store
+        .put_json(&serde_json::json!({"layer": "adaptive-cancel-run-layer"}))
+        .expect("digest cancellation test layer");
+    let compiled = crate::adaptive::CompiledLayer {
+        child_mob_id: child_definition.id.clone(),
+        definition: child_definition,
+        spawn_specs: vec![SpawnMemberSpec::new("worker", "cancel-worker")],
+        activation_params: BTreeMap::new(),
+        plan_digest,
+        policy_evidence: crate::adaptive::LayerPolicyEvidence::default(),
+    };
+
+    // Hold provisioning inside spawn_many after the child actor and its
+    // cancellation guardian have both been created.
+    service.set_create_session_delay_ms(5_000);
+    let (layer_created_tx, mut layer_created_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut runtime = crate::runtime::mobpack_execution::PackAdaptiveRuntime {
+        control_mob: control_mob.clone(),
+        session_service: service.clone(),
+        layer_created_probe: Some(layer_created_tx),
+    };
+    let task_capability = capability.clone();
+    let task_layer_id = layer_id.clone();
+    let provision = tokio::spawn(async move {
+        <crate::runtime::mobpack_execution::PackAdaptiveRuntime as crate::adaptive::AdaptiveDriverRuntime>::provision_layer(
+            &mut runtime,
+            &task_capability,
+            &task_layer_id,
+            1,
+            &compiled,
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.max_concurrent_create_session_calls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("spawn_many must enter session creation before abort");
+    let child_mob = layer_created_rx
+        .recv()
+        .await
+        .expect("provision must expose its created child to the test probe");
+    provision.abort();
+    let join_error = match provision.await {
+        Err(error) => error,
+        Ok(_) => panic!("provision task must abort"),
+    };
+    assert!(
+        join_error.is_cancelled(),
+        "join error must report cancellation"
+    );
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let snapshot = control_mob
+                .adaptive_run_snapshot(&capability)
+                .await
+                .expect("read adaptive cancellation snapshot");
+            if snapshot.phase == Some(AdaptiveRunPhaseView::Canceled)
+                && snapshot.active_members == 0
+            {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("guardian must finish machine cancellation and physical teardown");
+
+    assert_eq!(
+        snapshot.stop_reason,
+        Some(AdaptiveStopReasonView::HostCancel)
+    );
+    assert_eq!(
+        snapshot.layers[layer_id.as_str()].phase,
+        AdaptiveLayerPhaseView::Canceled
+    );
+    let machine_state = control_mob
+        .query_machine_state()
+        .await
+        .expect("read cancellation machine state");
+    assert!(
+        !machine_state.adaptive_active_layer.contains_key(
+            &crate::machines::mob_machine::AdaptiveRunId::from("adaptive-cancel-run")
+        ),
+        "host cancellation must clear the machine-owned active-layer pointer"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "aborted spawn_many must not leave a child session alive"
+    );
+    assert_eq!(
+        child_mob
+            .status()
+            .await
+            .expect("read canceled child terminal status"),
+        MobState::Destroyed,
+        "the cancellation guardian must physically destroy the child mob"
     );
 }
 

@@ -348,6 +348,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordAdaptiveLayerSetupFaultRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordAdaptiveLayerInterruptedNonterminalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordAdaptiveLayerInterruptedAlreadyTerminalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordAdaptiveLayerResultValidatedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4128,6 +4134,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AdaptiveLayerSetupFaultRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdaptiveLayerInterrupted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AdaptiveLayerResultValidated`

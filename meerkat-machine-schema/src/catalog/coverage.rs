@@ -529,27 +529,28 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_actor_authority",
                     "MobMachine",
                     "meerkat-mob/src/runtime/actor.rs",
-                    "MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding",
+                    "MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, recover durable incarnations, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff pending/replay and resolve started/callback pending/failed/clear, wiring graph, and session binding",
                     CoverageClaims::none()
                         .transitions(&[
                             "ReconcileStopped",
                             "ReconcileCompleted",
-                            "KickoffMarkPendingStopped",
-                            "KickoffMarkPendingCompleted",
+                            "KickoffMarkPending",
+                            "KickoffMarkPendingReplayRunning",
+                            "KickoffMarkPendingReplayStopped",
+                            "KickoffMarkPendingReplayCompleted",
                             "KickoffResolveStartedStopped",
                             "KickoffResolveStartedCompleted",
                             "KickoffResolveCallbackPendingStopped",
                             "KickoffResolveCallbackPendingCompleted",
                             "KickoffClearStopped",
                             "KickoffClearCompleted",
+                            "RetireMember",
                             "RetireRunningReleasing",
                             "RetireRunningPreservingBinding",
                             "RetireRunningNoBinding",
                             "RetireStoppedReleasing",
                             "RetireStoppedPreservingBinding",
                             "RetireStoppedNoBinding",
-                            "ResetMember",
-                            "RespawnMember",
                             "MarkCompleted",
                             "DestroyMob",
                             "RecordOperatorActionProvenanceStopped",
@@ -633,13 +634,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects",
                     CoverageClaims::none()
                         .transitions(&[
+                            "RetireMember",
                             "RetireRunningReleasing",
                             "RetireRunningPreservingBinding",
                             "RetireRunningNoBinding",
                             "RetireStoppedReleasing",
                             "RetireStoppedPreservingBinding",
                             "RetireStoppedNoBinding",
-                            "RespawnMember",
                         ])
                         .effects(&[
                             "MemberAdmissionProbed",
@@ -690,17 +691,16 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     CoverageClaims::none(),
                 ),
                 scenario(
-                    "retire-respawn-destroy",
-                    "member retires, resets, respawns with a new runtime incarnation, stops/stopped, resumes, shuts down, destroys cleanly, and resets to running when reusable",
+                    "retire-recover-destroy",
+                    "member retires, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly",
                     CoverageClaims::none().transitions(&[
+                        "RetireMember",
                         "RetireRunningReleasing",
                         "RetireRunningPreservingBinding",
                         "RetireRunningNoBinding",
                         "RetireStoppedReleasing",
                         "RetireStoppedPreservingBinding",
                         "RetireStoppedNoBinding",
-                        "ResetMember",
-                        "RespawnMember",
                         "StopRunning",
                         "ResumeStopped",
                         "RespawnRunning",
@@ -774,13 +774,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "probe member admission duplicate or admitted, compute respawn generation, reconcile desired members to spawn retain or retire emitting member spawn required member retain required and member retire required, set and observe external member rebind capability available or unavailable, classify turn timeout disposition detached canceled or retryable, and seed orphan budget",
                     CoverageClaims::none()
                         .transitions(&[
+                            "RetireMember",
                             "RetireRunningReleasing",
                             "RetireRunningPreservingBinding",
                             "RetireRunningNoBinding",
                             "RetireStoppedReleasing",
                             "RetireStoppedPreservingBinding",
                             "RetireStoppedNoBinding",
-                            "RespawnMember",
                         ])
                         .effects(&[
                             "MemberSpawnRequired",
@@ -1349,7 +1349,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "session_system_context_snapshot_restore",
-                    "RestoreSystemContextSnapshot authorizes a durable system-context snapshot only when active keys have known pending-or-seen entries and seen keys match known appends under SystemContextSnapshotRestoreAuthorized",
+                    "RestoreSystemContextSnapshot authorizes a durable system-context snapshot only when key-independent active-turn pending membership and its keyed rollback projection are consistent and seen keys match known appends under SystemContextSnapshotRestoreAuthorized",
                     CoverageClaims::none()
                         .transitions(&["RestoreSystemContextSnapshot"])
                         .effects(&["SystemContextSnapshotRestoreAuthorized"]),

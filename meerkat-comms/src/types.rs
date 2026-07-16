@@ -64,12 +64,35 @@ pub enum MessageKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     },
+    /// A peer message with a mandatory exact recipient residency. The
+    /// authenticated member sender is unchanged; the fence is inside the
+    /// signed envelope and is checked before receiver work admission.
+    #[serde(rename = "incarnation_fenced_message")]
+    IncarnationFencedMessage {
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_taint: Option<SenderContentTaint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+        expected_recipient: meerkat_core::comms::PeerRecipientIncarnation,
+    },
     /// A request for the peer to perform an action.
     Request {
         intent: String,
         params: JsonValue,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        /// Sender-declared socket endpoint for the response to this exact
+        /// request. The field lives inside the signed `kind` region, so an
+        /// ingress classifier may treat it as authenticated sender metadata
+        /// after verifying the envelope. Omission preserves the canonical
+        /// bytes of requests produced before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_endpoint: Option<meerkat_core::comms::PeerAddress>,
         /// Sender-declared content taint (signed-when-present; see
         /// [`MessageKind::Message::content_taint`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +132,7 @@ impl MessageKind {
     pub fn objective_id(&self) -> Option<meerkat_core::interaction::ObjectiveId> {
         match self {
             Self::Message { objective_id, .. }
+            | Self::IncarnationFencedMessage { objective_id, .. }
             | Self::Request { objective_id, .. }
             | Self::Response { objective_id, .. } => *objective_id,
             Self::Lifecycle { .. } | Self::Ack { .. } => None,
@@ -121,6 +145,7 @@ impl MessageKind {
     pub fn content_taint(&self) -> Option<SenderContentTaint> {
         match self {
             Self::Message { content_taint, .. }
+            | Self::IncarnationFencedMessage { content_taint, .. }
             | Self::Request { content_taint, .. }
             | Self::Response { content_taint, .. } => *content_taint,
             Self::Lifecycle { .. } | Self::Ack { .. } => None,
@@ -136,6 +161,7 @@ impl MessageKind {
     pub(crate) fn with_content_taint(mut self, taint: Option<SenderContentTaint>) -> Self {
         match &mut self {
             Self::Message { content_taint, .. }
+            | Self::IncarnationFencedMessage { content_taint, .. }
             | Self::Request { content_taint, .. }
             | Self::Response { content_taint, .. } => *content_taint = taint,
             Self::Lifecycle { .. } | Self::Ack { .. } => {}
@@ -169,6 +195,12 @@ impl Envelope {
     /// then recursively sort all maps by canonical key order before encoding.
     ///
     /// `PubKey` is encoded as a CBOR byte string (major type 2), not an array.
+    ///
+    /// TWIN ALGORITHM: `meerkat-contracts/src/wire/spec_digest.rs` carries a
+    /// byte-identical copy of this canonicalizer for the portable-member-spec
+    /// digest (the crates cannot share code without a dependency cycle). Any
+    /// RFC 8949 edge-case fix must land in BOTH; the contracts side pins the
+    /// semantics with a known-answer vector test.
     pub fn signable_bytes(&self) -> Vec<u8> {
         fn canonicalize(value: &mut Value) {
             match value {
@@ -301,12 +333,89 @@ mod tests {
     }
 
     #[test]
+    fn incarnation_fenced_message_objective_is_optional_and_signed() {
+        use crate::identity::Keypair;
+
+        let expected_recipient = meerkat_core::comms::PeerRecipientIncarnation {
+            mob_id: "mob".to_string(),
+            agent_identity: "worker".to_string(),
+            host_id: "host".to_string(),
+            binding_generation: 1,
+            member_session_id: "session".to_string(),
+            generation: 1,
+            fence_token: 7,
+        };
+        let without_objective = MessageKind::IncarnationFencedMessage {
+            body: "fenced work".to_string(),
+            blocks: None,
+            content_taint: None,
+            handling_mode: Some(HandlingMode::Queue),
+            objective_id: None,
+            expected_recipient: expected_recipient.clone(),
+        };
+        let legacy_json = serde_json::to_value(&without_objective).unwrap();
+        assert!(legacy_json.get("objective_id").is_none());
+        let decoded: MessageKind = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(decoded, without_objective);
+        assert_eq!(decoded.objective_id(), None);
+
+        let keypair = Keypair::generate();
+        let mut legacy_envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: keypair.public_key(),
+            to: PubKey::new([2u8; 32]),
+            kind: without_objective,
+            sig: Signature::new([0u8; 64]),
+        };
+        legacy_envelope.sign(&keypair);
+        let legacy_envelope_json = serde_json::to_value(&legacy_envelope).unwrap();
+        assert!(legacy_envelope_json["kind"].get("objective_id").is_none());
+        let legacy_envelope_roundtrip: Envelope =
+            serde_json::from_value(legacy_envelope_json).unwrap();
+        assert!(legacy_envelope_roundtrip.verify());
+        assert_eq!(legacy_envelope_roundtrip.kind.objective_id(), None);
+
+        let objective_id = meerkat_core::interaction::ObjectiveId::new();
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: keypair.public_key(),
+            to: PubKey::new([2u8; 32]),
+            kind: MessageKind::IncarnationFencedMessage {
+                body: "fenced work".to_string(),
+                blocks: None,
+                content_taint: None,
+                handling_mode: Some(HandlingMode::Queue),
+                objective_id: Some(objective_id),
+                expected_recipient,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        assert_eq!(envelope.kind.objective_id(), Some(objective_id));
+        envelope.sign(&keypair);
+        assert!(envelope.verify());
+        let envelope_json = serde_json::to_value(&envelope).unwrap();
+        let mut envelope: Envelope = serde_json::from_value(envelope_json).unwrap();
+        assert!(envelope.verify());
+        assert_eq!(envelope.kind.objective_id(), Some(objective_id));
+
+        let MessageKind::IncarnationFencedMessage { objective_id, .. } = &mut envelope.kind else {
+            panic!("expected incarnation-fenced message");
+        };
+        *objective_id = None;
+        assert!(
+            !envelope.verify(),
+            "objective_id must remain signature-bound"
+        );
+    }
+
+    #[test]
     fn test_message_kind_request_fields() {
         let req = MessageKind::Request {
             objective_id: None,
             intent: "review-pr".to_string(),
             params: serde_json::json!({"pr": 42}),
             blocks: None,
+            reply_endpoint: None,
             content_taint: None,
             handling_mode: None,
         };
@@ -314,6 +423,7 @@ mod tests {
             intent,
             params,
             blocks,
+            reply_endpoint,
             content_taint,
             handling_mode,
             ..
@@ -322,11 +432,85 @@ mod tests {
             assert_eq!(intent, "review-pr");
             assert_eq!(params["pr"], 42);
             assert_eq!(blocks, None);
+            assert_eq!(reply_endpoint, None);
             assert_eq!(content_taint, None);
             assert_eq!(handling_mode, None);
         } else {
             panic!("Expected Request variant");
         }
+    }
+
+    #[test]
+    fn request_reply_endpoint_is_signed_and_absent_is_byte_identical() {
+        #[derive(Serialize)]
+        #[serde(tag = "type", rename_all = "lowercase")]
+        enum LegacyMessageKind {
+            Request {
+                intent: String,
+                params: serde_json::Value,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                blocks: Option<Vec<ContentBlock>>,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                content_taint: Option<SenderContentTaint>,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                handling_mode: Option<HandlingMode>,
+            },
+        }
+
+        let request = MessageKind::Request {
+            intent: "probe".to_string(),
+            params: serde_json::json!({"seq": 1}),
+            blocks: None,
+            reply_endpoint: None,
+            content_taint: None,
+            handling_mode: Some(HandlingMode::Queue),
+            objective_id: None,
+        };
+        let legacy = LegacyMessageKind::Request {
+            intent: "probe".to_string(),
+            params: serde_json::json!({"seq": 1}),
+            blocks: None,
+            content_taint: None,
+            handling_mode: Some(HandlingMode::Queue),
+        };
+        let mut request_bytes = Vec::new();
+        ciborium::into_writer(&request, &mut request_bytes).unwrap();
+        let mut legacy_bytes = Vec::new();
+        ciborium::into_writer(&legacy, &mut legacy_bytes).unwrap();
+        assert_eq!(
+            request_bytes, legacy_bytes,
+            "omitting reply_endpoint must preserve the legacy Request bytes"
+        );
+
+        let keypair = Keypair::generate();
+        let mut envelope = Envelope {
+            id: Uuid::new_v4(),
+            from: keypair.public_key(),
+            to: PubKey::new([2u8; 32]),
+            kind: MessageKind::Request {
+                intent: "probe".to_string(),
+                params: serde_json::json!({}),
+                blocks: None,
+                reply_endpoint: Some(
+                    meerkat_core::comms::PeerAddress::parse("tcp://127.0.0.1:4311").unwrap(),
+                ),
+                content_taint: None,
+                handling_mode: Some(HandlingMode::Queue),
+                objective_id: None,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        envelope.sign(&keypair);
+        assert!(envelope.verify(), "signed reply endpoint must verify");
+        let MessageKind::Request { reply_endpoint, .. } = &mut envelope.kind else {
+            panic!("expected Request");
+        };
+        *reply_endpoint =
+            Some(meerkat_core::comms::PeerAddress::parse("tcp://127.0.0.1:4312").unwrap());
+        assert!(
+            !envelope.verify(),
+            "tampering with the reply endpoint must break the envelope signature"
+        );
     }
 
     #[test]
@@ -412,6 +596,7 @@ mod tests {
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -1116,6 +1301,7 @@ mod tests {
                     intent: "review".to_string(),
                     params: serde_json::json!({"pr": 7}),
                     blocks: None,
+                    reply_endpoint: None,
                     content_taint: Some(taint),
                     handling_mode: None,
                 },

@@ -12,7 +12,9 @@ use crate::service::SessionError;
 use crate::session::PendingSystemContextAppend;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 use crate::types::RunResult;
+use crate::{TurnErrorMetadata, event::AgentEvent, interaction::InteractionId};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// Closed classifier for failures observed while applying a run primitive.
@@ -309,6 +311,9 @@ impl CoreExecutorError {
     }
 
     pub fn apply_failed_from_session_error(error: SessionError) -> Self {
+        if error.requests_runtime_executor_stop() {
+            return Self::Stopped;
+        }
         match error {
             SessionError::Agent(AgentError::Cancelled) => Self::Cancelled,
             SessionError::Agent(AgentError::StickyModelFallbackAuthorityUnknown { message }) => {
@@ -381,6 +386,11 @@ pub enum CoreApplyTerminal {
     RunResult(Box<RunResult>),
     /// A resume-pending request reached the session with no pending boundary.
     NoPendingBoundary,
+    /// The exact admitted runtime turn reached a generated hard-failure
+    /// terminal after mutating the session. The runtime must atomically commit
+    /// the accompanying receipt/session snapshot with failed-run lifecycle;
+    /// this is a completed application, not an executor-mechanism error.
+    MachineTerminalFailure { error: TurnErrorMetadata },
     /// The run committed a continuation boundary and is waiting for external
     /// tool results before it can continue.
     CallbackPending { tool_name: String, args: Value },
@@ -405,17 +415,172 @@ pub struct CoreApplyOutput {
     pub terminal: Option<CoreApplyTerminal>,
 }
 
-/// Successful result of staging runtime-owned context at an active turn boundary.
-#[derive(Debug, Clone)]
+/// Durable receipt for one exact interaction-terminal publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreInteractionTerminalPublicationReceipt {
+    interaction_id: InteractionId,
+    terminal_seq: u64,
+    payload_digest: String,
+}
+
+impl CoreInteractionTerminalPublicationReceipt {
+    pub fn try_new(event: &AgentEvent, terminal_seq: u64) -> Result<Self, CoreExecutorError> {
+        if terminal_seq == 0 {
+            return Err(CoreExecutorError::Internal(
+                "interaction terminal durable sequence must be non-zero".to_string(),
+            ));
+        }
+        let interaction_id = match event {
+            AgentEvent::InteractionComplete { interaction_id, .. }
+            | AgentEvent::InteractionCallbackPending { interaction_id, .. }
+            | AgentEvent::InteractionFailed { interaction_id, .. } => *interaction_id,
+            _ => {
+                return Err(CoreExecutorError::Internal(
+                    "interaction terminal publication receipt requires an Interaction terminal event"
+                        .to_string(),
+                ));
+            }
+        };
+        let encoded = serde_json::to_vec(event).map_err(|error| {
+            CoreExecutorError::Internal(format!(
+                "failed to encode interaction terminal publication receipt: {error}"
+            ))
+        })?;
+        Ok(Self {
+            interaction_id,
+            terminal_seq,
+            payload_digest: format!("{:x}", Sha256::digest(encoded)),
+        })
+    }
+
+    pub fn interaction_id(&self) -> InteractionId {
+        self.interaction_id
+    }
+
+    pub fn terminal_seq(&self) -> u64 {
+        self.terminal_seq
+    }
+
+    pub fn payload_digest(&self) -> &str {
+        &self.payload_digest
+    }
+}
+
+/// Typed failure while preparing or resolving an exact live turn boundary.
+///
+/// Only [`CoreBoundaryStageError::Unavailable`] permits a caller to fall back
+/// to queued delivery. `Stale` means an exact actor/run/generation witness was
+/// invalidated, while `Fault` means the preparation mechanism itself failed;
+/// neither may be laundered into ordinary unavailability.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CoreBoundaryStageError {
+    #[error("active turn boundary is unavailable: {reason}")]
+    Unavailable { reason: String },
+    #[error("active turn boundary authority is stale: {reason}")]
+    Stale { reason: String },
+    #[error("active turn boundary preparation failed: {reason}")]
+    Fault { reason: String },
+}
+
+impl CoreBoundaryStageError {
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self::Unavailable {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn stale(reason: impl Into<String>) -> Self {
+        Self::Stale {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn fault(reason: impl Into<String>) -> Self {
+        Self::Fault {
+            reason: reason.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable { .. })
+    }
+}
+
+pub(crate) trait CoreBoundaryStageCommitAuthority: Send {
+    fn commit(&mut self) -> Result<(), CoreBoundaryStageError>;
+    fn abort(&mut self) -> Result<(), CoreBoundaryStageError>;
+}
+
+/// Successful prepare result for one exact parked model boundary.
+///
+/// The value is deliberately non-`Clone` and `#[must_use]`: it owns the only
+/// commit/abort authority for the parked `{actor, run, generation}`. Dropping
+/// it synchronously aborts the preparation and wakes the runner.
+///
+/// `commit` is the publication linearization point, not a claim that the LLM
+/// consumed the context. A hard cancel that linearizes after publication but
+/// before the runner's final synchronous consume still cancels that
+/// active-turn-only context; the runner-owned consumption witness distinguishes
+/// those outcomes.
+#[must_use = "a prepared boundary must be committed or aborted; dropping it aborts"]
 pub struct CoreBoundaryStageOutput {
     /// Optional serialized session snapshot to commit atomically with the
     /// generated receipt and input-state updates.
-    pub session_snapshot: Option<Vec<u8>>,
+    session_snapshot: Option<Vec<u8>>,
+    authority: Option<Box<dyn CoreBoundaryStageCommitAuthority>>,
 }
 
 impl CoreBoundaryStageOutput {
-    pub fn new(session_snapshot: Option<Vec<u8>>) -> Self {
-        Self { session_snapshot }
+    pub(crate) fn prepared(
+        session_snapshot: Option<Vec<u8>>,
+        authority: Box<dyn CoreBoundaryStageCommitAuthority>,
+    ) -> Self {
+        Self {
+            session_snapshot,
+            authority: Some(authority),
+        }
+    }
+
+    #[must_use]
+    pub fn session_snapshot(&self) -> Option<&[u8]> {
+        self.session_snapshot.as_deref()
+    }
+
+    /// Publish the prepared candidate exactly once and unblock its runner.
+    ///
+    /// Success means the exact parked actor accepted publication. Delivery to
+    /// the model remains cancellable until the runner consumes its separate
+    /// model-boundary witness at the final call seam.
+    pub fn commit(mut self) -> Result<(), CoreBoundaryStageError> {
+        let Some(mut authority) = self.authority.take() else {
+            return Err(CoreBoundaryStageError::stale(
+                "prepared boundary authority was already resolved",
+            ));
+        };
+        authority.commit()
+    }
+
+    pub fn abort(mut self) -> Result<(), CoreBoundaryStageError> {
+        let Some(mut authority) = self.authority.take() else {
+            return Err(CoreBoundaryStageError::stale(
+                "prepared boundary authority was already resolved",
+            ));
+        };
+        authority.abort()
+    }
+}
+
+impl std::fmt::Debug for CoreBoundaryStageOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CoreBoundaryStageOutput")
+            .field(
+                "session_snapshot_len",
+                &self.session_snapshot.as_ref().map(Vec::len),
+            )
+            .field("authority", &self.authority.as_ref().map(|_| "prepared"))
+            .finish()
     }
 }
 
@@ -475,40 +640,28 @@ impl CoreApplyOutput {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutorBoundaryHandle: Send + Sync {
-    async fn cancel_after_boundary(&self, reason: String) -> Result<(), CoreExecutorError>;
+    /// Request cooperative cancellation for one exact active run.
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &RunId,
+        reason: String,
+    ) -> Result<(), CoreExecutorError>;
 
-    /// Return true when the executor still has an active turn whose next
-    /// cooperative model boundary can receive staged system context.
-    async fn active_turn_boundary_available(&self) -> Result<bool, CoreExecutorError> {
-        Ok(false)
-    }
-
-    /// Stage runtime-owned system context for the next cooperative LLM
-    /// boundary of the active turn.
+    /// Prepare runtime-owned system context for one exact cooperative LLM
+    /// boundary and return only after the actor is parked immediately before
+    /// consumption. The non-clone result owns explicit commit/abort authority.
     ///
     /// Implementations that can serialize the staged session snapshot return
     /// it so the runtime control plane can commit the snapshot atomically with
     /// the consumed input state. Implementations without durable session
     /// authority may return `None`.
-    async fn stage_system_context_at_boundary(
+    async fn prepare_system_context_at_boundary(
         &self,
         _expected_run_id: &RunId,
         _appends: Vec<PendingSystemContextAppend>,
-    ) -> Result<CoreBoundaryStageOutput, CoreExecutorError> {
-        Err(CoreExecutorError::Internal(
-            "live boundary system-context staging is unsupported by this executor".to_string(),
-        ))
-    }
-
-    /// Roll back live-boundary system context that was staged for an accepted
-    /// input whose runtime/machine commit did not succeed.
-    async fn discard_staged_system_context_at_boundary(
-        &self,
-        _expected_run_id: &RunId,
-        _idempotency_keys: Vec<String>,
-    ) -> Result<(), CoreExecutorError> {
-        Err(CoreExecutorError::Internal(
-            "live boundary system-context rollback is unsupported by this executor".to_string(),
+    ) -> Result<CoreBoundaryStageOutput, CoreBoundaryStageError> {
+        Err(CoreBoundaryStageError::unavailable(
+            "live boundary system-context preparation is unsupported by this executor",
         ))
     }
 }
@@ -518,6 +671,64 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutorInterruptHandle: Send + Sync {
     async fn hard_cancel_current_run(&self, reason: String) -> Result<(), CoreExecutorError>;
+}
+
+/// Cloneable capability for exact durable interaction-terminal publication.
+///
+/// Runtime control paths may need to terminalize queued or staged directed
+/// inputs while the owning executor is in flight (destroy/unregister) or after
+/// its loop channels have been detached. Keeping this authority on a separate
+/// handle prevents those paths from borrowing or duplicating the executor
+/// while still routing publication through the executor's owning session
+/// surface.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait CoreExecutorPublicationHandle: Send + Sync {
+    async fn publish_interaction_terminals(
+        &self,
+        events: &[AgentEvent],
+    ) -> Result<Vec<CoreInteractionTerminalPublicationReceipt>, CoreExecutorError>;
+}
+
+/// Cloneable service/surface cleanup authority retained by the runtime entry.
+///
+/// Unlike adapter unregister, this handle owns only the executor's live actor
+/// and surface-local state. `MeerkatMachine` invokes it inside the exact
+/// attachment's generated unregister window, and can retry it after a failed
+/// or externally initiated drain without resurrecting the executor object.
+/// Implementations must therefore be idempotent, including when a prior
+/// attempt completed only part of its sidecar cleanup before returning an
+/// error.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait CoreExecutorPostStopCleanupHandle: Send + Sync {
+    async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError>;
+
+    /// Cleanup when the runtime loop already owns this session's stable outer
+    /// turn-finalization boundary. Implementations backed by that boundary must
+    /// not reacquire it.
+    async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+    ) -> Result<(), CoreExecutorError> {
+        self.cleanup_after_runtime_stop_terminalized().await
+    }
+}
+
+/// Opaque RAII witness that one session actor's turn-finalization interval is
+/// exclusively owned. The runtime holds this from before queue/effect staging
+/// through machine commit, compatibility checkpoint, exact terminal receipt
+/// persistence, and waiter resolution.
+pub trait CoreExecutorTurnFinalizationGuard: Send {}
+
+impl<T: Send> CoreExecutorTurnFinalizationGuard for T {}
+
+/// Cloneable endpoint for the stable per-session turn-finalization boundary.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait CoreExecutorTurnFinalizationBoundaryHandle: Send + Sync {
+    async fn acquire(
+        &self,
+    ) -> Result<Box<dyn CoreExecutorTurnFinalizationGuard>, CoreExecutorError>;
 }
 
 /// The interface core exposes for the runtime layer to apply run primitives.
@@ -546,6 +757,37 @@ pub trait CoreExecutor: Send + Sync {
     /// the queued in-loop executor channel because user/session interrupt
     /// semantics require prompt delivery during a long in-flight turn.
     fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        None
+    }
+
+    /// Optional cloneable authority for exact durable terminal publication.
+    fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+        None
+    }
+
+    /// Whether `MeerkatMachine` should retain and fence this attachment's exact
+    /// post-stop service cleanup authority.
+    ///
+    /// Opted-in executors expose a cloneable attachment-local cleanup handle.
+    /// The machine fences it by the attachment incarnation it created, so a
+    /// stale cleanup cannot remove replacement state. Ordinary runtime stop
+    /// cleans the service incarnation while preserving the registered
+    /// `Stopped` machine state; explicit unregister owns the later `Draining`
+    /// transition and registration removal.
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        false
+    }
+
+    /// Cloneable service/surface cleanup authority for machine-managed
+    /// post-stop unregister.
+    fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+        None
+    }
+
+    /// Stable boundary shared with direct and non-turn session mutations.
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn CoreExecutorTurnFinalizationBoundaryHandle>> {
         None
     }
 
@@ -599,6 +841,22 @@ pub trait CoreExecutor: Send + Sync {
     /// authority.
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         Ok(())
+    }
+
+    /// Durably publish exact per-input Interaction terminal events after
+    /// generated runtime completion authority has observed finalization.
+    /// Implementations must make replay idempotent by interaction ID and
+    /// reject a mismatching existing payload.
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[AgentEvent],
+    ) -> Result<Vec<CoreInteractionTerminalPublicationReceipt>, CoreExecutorError> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(CoreExecutorError::Internal(
+            "exact interaction terminal publication is unsupported by this executor".to_string(),
+        ))
     }
 
     /// Request cancellation at the next cooperative boundary.
@@ -676,6 +934,15 @@ mod tests {
             err.apply_failure_cause().kind,
             CoreApplyFailureCauseKind::RuntimeTurn
         );
+    }
+
+    #[test]
+    fn corrupted_live_session_signal_stops_instead_of_retrying_apply() {
+        let err = CoreExecutorError::apply_failed_from_session_error(
+            SessionError::runtime_executor_stopped("terminal witness mismatch"),
+        );
+
+        assert!(matches!(err, CoreExecutorError::Stopped));
     }
 
     #[test]

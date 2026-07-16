@@ -19,7 +19,7 @@ use crate::input_state::{
 };
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
-use crate::store::{MachineLifecycleCommit, RuntimeStore};
+use crate::store::{InputStateBatchCasOutcome, MachineLifecycleCommit, RuntimeStore};
 use crate::traits::{DestroyReport, RecoveryReport, RuntimeDriver, RuntimeDriverError};
 
 use super::ephemeral::{
@@ -85,6 +85,79 @@ impl PersistentRuntimeDriver {
     /// Get immutable reference to the inner ephemeral driver.
     pub fn inner_ref(&self) -> &EphemeralRuntimeDriver {
         &self.inner
+    }
+
+    pub(crate) fn inner_mut(&mut self) -> &mut EphemeralRuntimeDriver {
+        &mut self.inner
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn compare_and_swap_interaction_terminal_outbox_inputs(
+        &self,
+        expected: &[StoredInputState],
+        input_ids: &[InputId],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
+        let mut replacements = Vec::with_capacity(input_ids.len());
+        for input_id in input_ids {
+            let replacement = self
+                .inner
+                .authorized_stored_input_state(input_id)?
+                .ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "interaction terminal outbox input {input_id} disappeared before compare-and-swap"
+                    ))
+                })?;
+            replacements.push(replacement);
+        }
+        self.store
+            .compare_and_swap_input_states_atomically(&self.runtime_id, expected, &replacements)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "interaction terminal outbox batch compare-and-swap failed: {error}"
+                ))
+            })
+    }
+
+    pub(crate) async fn compare_and_swap_interaction_terminal_outbox_replacements(
+        &self,
+        expected: &[StoredInputState],
+        replacements: &[crate::input_state::InputStatePersistenceRecord],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
+        self.store
+            .compare_and_swap_input_states_atomically(&self.runtime_id, expected, replacements)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "interaction terminal outbox batch compare-and-swap failed: {error}"
+                ))
+            })
+    }
+
+    pub(crate) async fn committed_session_snapshot_for_terminal_recovery(
+        &self,
+    ) -> Result<Option<Vec<u8>>, RuntimeDriverError> {
+        self.store
+            .load_session_snapshot(&self.runtime_id)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "interaction terminal recovery failed to load committed session snapshot: {error}"
+                ))
+            })
+    }
+
+    pub(crate) async fn durable_input_states_for_terminal_recovery(
+        &self,
+    ) -> Result<Vec<StoredInputState>, RuntimeDriverError> {
+        self.store
+            .load_input_states(&self.runtime_id)
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "interaction terminal recovery failed to load durable input states: {error}"
+                ))
+            })
     }
 
     pub(crate) fn rollback_snapshot(&self) -> EphemeralDriverRollbackSnapshot {
@@ -197,6 +270,49 @@ impl PersistentRuntimeDriver {
                 inner.machine_lifecycle_binding_facts(),
                 inner.supervisor_authority_snapshot(),
                 Self::unregister_progress_for_persistence_from_inner(inner),
+            ),
+        )
+    }
+
+    /// Project a committed final `UnregisterSession` for durable storage.
+    ///
+    /// The live entry deliberately keeps `registration_phase = Draining` as a
+    /// same-process rematerialization tombstone until exact entry removal. That
+    /// mechanical fence is not durable unregister progress: final generated
+    /// authority has cleared the session binding and all drain obligations, so
+    /// persisting a progress row would make a later process replay a completed
+    /// teardown and reject fresh registration.
+    fn lifecycle_commit_for_completed_unregister(
+        &self,
+    ) -> Result<MachineLifecycleCommit, RuntimeDriverError> {
+        let completed = {
+            let authority = self.inner.shared_dsl_authority();
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            state.registration_phase == crate::meerkat_machine::dsl::RegistrationPhase::Draining
+                && state.session_id.is_none()
+                && state.active_runtime_id.is_none()
+                && state.active_fence_token.is_none()
+                && state.active_runtime_generation.is_none()
+                && state.active_runtime_epoch_id.is_none()
+                && !state.unregister_runtime_loop_drain_pending
+                && !state.unregister_comms_drain_exit_pending
+                && !state.unregister_completion_waiter_drain_pending
+        };
+        if !completed {
+            return Err(RuntimeDriverError::Internal(
+                "completed unregister persistence requires the generated final lifecycle image"
+                    .to_string(),
+            ));
+        }
+        Ok(
+            MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                Self::runtime_state_for_persistence_from_inner(&self.inner)?,
+                self.inner.machine_lifecycle_binding_facts(),
+                self.inner.supervisor_authority_snapshot(),
+                None,
             ),
         )
     }
@@ -319,17 +435,57 @@ impl PersistentRuntimeDriver {
         Ok(())
     }
 
-    pub(crate) async fn publish_service_turn_terminal_lifecycle(
+    pub(crate) async fn publish_service_turn_terminal(
         &mut self,
         checkpoint: super::ephemeral::EphemeralDriverRollbackSnapshot,
         target_state: RuntimeState,
+        session_snapshot: Vec<u8>,
+        receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+        owner_session_id: meerkat_core::types::SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        self.commit_lifecycle_with_rollback(
-            checkpoint,
-            target_state,
-            "service turn terminal receipt",
-        )
-        .await?;
+        let commit = match self.lifecycle_commit_for_persistence() {
+            Ok(commit) => commit,
+            Err(error) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "service turn terminal receipt lifecycle classification failed: {error}"
+                )));
+            }
+        };
+        let target_durable_state =
+            match crate::meerkat_machine::classify_runtime_lifecycle_durable_state(target_state) {
+                Ok(target_durable_state) => target_durable_state,
+                Err(error) => {
+                    self.inner.restore_rollback_snapshot(checkpoint);
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "service turn terminal receipt target classification failed: {error}"
+                    )));
+                }
+            };
+        if commit.runtime_state() != target_durable_state {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(RuntimeDriverError::Internal(format!(
+                "service turn terminal receipt durable target {target_durable_state:?} disagreed with generated lifecycle {:?}",
+                commit.runtime_state()
+            )));
+        }
+        if let Err(error) = self
+            .store
+            .atomic_apply_with_machine_lifecycle(
+                &self.runtime_id,
+                crate::store::SessionDelta { session_snapshot },
+                receipt,
+                commit,
+                Vec::new(),
+                owner_session_id,
+            )
+            .await
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(RuntimeDriverError::Internal(format!(
+                "service turn terminal receipt persist failed: {error}"
+            )));
+        }
         self.inner.sync_control_projection_from_dsl_authority();
         Ok(())
     }
@@ -370,13 +526,18 @@ impl PersistentRuntimeDriver {
         &mut self,
         context: &str,
         retired_ops_epoch: &meerkat_core::RuntimeEpochId,
+        authority: crate::meerkat_machine::DeleteOpsFinalizationAuthority,
     ) -> Result<(), RuntimeDriverError> {
         let input_states = self.inner.authorized_stored_input_states_snapshot()?;
-        let commit = self
-            .lifecycle_commit_for_persistence()?
-            .for_unregister_finalization(retired_ops_epoch.clone());
+        let commit = self.lifecycle_commit_for_completed_unregister()?;
+        let finalization = crate::store::UnregisterFinalizationCommit::new(
+            commit,
+            input_states,
+            retired_ops_epoch.clone(),
+            authority,
+        );
         self.store
-            .commit_unregister_finalization(&self.runtime_id, commit, &input_states)
+            .commit_unregister_finalization(&self.runtime_id, finalization)
             .await
             .map_err(|err| match err {
                 crate::store::RuntimeStoreError::UnregisterFinalizationOutcomeUnknown(reason) => {
@@ -387,6 +548,32 @@ impl PersistentRuntimeDriver {
                 err => RuntimeDriverError::Internal(format!(
                     "{context} lifecycle+ops finalization failed: {err}"
                 )),
+            })
+    }
+
+    pub(crate) async fn persist_completed_unregister_machine_lifecycle(
+        &mut self,
+        context: &str,
+        _authority: crate::meerkat_machine::RetainOpsFinalizationAuthority,
+    ) -> Result<(), RuntimeDriverError> {
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
+        let commit = self.lifecycle_commit_for_completed_unregister()?;
+        self.store
+            .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
+            .await
+            .map_err(|error| {
+                // The generic lifecycle commit contract is atomic, but unlike
+                // commit_unregister_finalization it does not distinguish a
+                // definitely-uncommitted error from a lost acknowledgement.
+                // RetainSnapshot finalization must therefore treat every
+                // error as ambiguous: rolling local authority back to
+                // Draining could overwrite a terminal image that already
+                // committed durably.
+                RuntimeDriverError::UnregisterFinalizationOutcomeUnknown {
+                    reason: format!(
+                        "{context} retained lifecycle finalization acknowledgement unavailable: {error}"
+                    ),
+                }
             })
     }
 
@@ -646,6 +833,15 @@ impl PersistentRuntimeDriver {
         self.inner.apply_input(input_id, run_id)
     }
 
+    pub(crate) fn machine_realize_terminal_failure_applied(
+        &mut self,
+        run_id: &meerkat_core::lifecycle::RunId,
+        input_ids: &[InputId],
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
+        self.inner
+            .machine_realize_terminal_failure_applied(run_id, input_ids)
+    }
+
     /// Roll back staged inputs (delegates to inner).
     pub fn rollback_staged(
         &mut self,
@@ -688,6 +884,37 @@ impl PersistentRuntimeDriver {
             )));
         }
         Ok(abandoned)
+    }
+
+    pub(crate) async fn abandon_queued_input(
+        &mut self,
+        input_id: &meerkat_core::lifecycle::InputId,
+        reason: InputAbandonReason,
+    ) -> Result<bool, RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        let abandoned = match self.inner.abandon_queued_input(input_id, reason) {
+            Ok(abandoned) => abandoned,
+            Err(error) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(error);
+            }
+        };
+        if !abandoned {
+            return Ok(false);
+        }
+        let (checkpoint, input_states, commit) =
+            self.lifecycle_persistence_payload_with_rollback(checkpoint, "tracked input cancel")?;
+        if let Err(error) = self
+            .store
+            .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
+            .await
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(RuntimeDriverError::Internal(format!(
+                "tracked input cancel persist failed: {error}"
+            )));
+        }
+        Ok(true)
     }
 
     /// Recycle the in-memory driver shell while preserving canonical pending
@@ -914,6 +1141,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         receipt: &RunBoundaryReceipt,
         session_snapshot: Option<&Vec<u8>>,
+        owner_session_id: &meerkat_core::types::SessionId,
     ) -> Result<(), RuntimeDriverError> {
         let input_updates = self.inner.authorized_stored_input_states_snapshot()?;
         self.store
@@ -924,11 +1152,7 @@ impl PersistentRuntimeDriver {
                 }),
                 receipt.clone(),
                 input_updates,
-                session_snapshot
-                    .and_then(|snapshot| {
-                        serde_json::from_slice::<meerkat_core::Session>(snapshot).ok()
-                    })
-                    .map(|session| session.id().clone()),
+                Some(owner_session_id.clone()),
             )
             .await
             .map_err(|e| {
@@ -938,26 +1162,30 @@ impl PersistentRuntimeDriver {
             })
     }
 
-    pub(crate) async fn machine_realize_run_failed(
+    /// Persist a failed-run realization whose generated input transitions and
+    /// directed terminal outboxes have already been staged in `inner` by the
+    /// shared `DriverEntry` owner. Keeping this persistence step after the
+    /// shared realization makes the queued/abandoned split and its exact
+    /// terminal recipient batch one atomic store commit.
+    pub(crate) async fn persist_machine_realized_run_failed(
         &mut self,
-        run_id: &RunId,
-        contributing_input_ids: &[InputId],
-        replay_plan: &super::ephemeral::ReplayQueuedContributorsPlan,
-        terminal_error: &str,
-        runtime_apply_failure: Option<&meerkat_core::lifecycle::CoreApplyFailureCause>,
-        recoverable: bool,
+        realization: crate::meerkat_machine::driver::MachineRunFailureRealization,
     ) -> Result<(), RuntimeDriverError> {
+        let crate::meerkat_machine::driver::MachineRunFailureRealization {
+            run_id,
+            contributing_input_ids,
+            replay_plan,
+            terminal_error,
+            runtime_apply_failure,
+            recoverable,
+            applied_commit,
+        } = realization;
         let checkpoint = self.inner.rollback_snapshot();
-        if let Err(err) =
-            self.inner
-                .machine_realize_run_failed(run_id, contributing_input_ids, replay_plan)
-        {
-            self.inner.restore_rollback_snapshot(checkpoint);
-            return Err(err);
-        }
-        let failure_cause = runtime_apply_failure.map(|failure| failure.kind);
+        let failure_cause = runtime_apply_failure.as_ref().map(|failure| failure.kind);
         tracing::debug!(
             run_id = ?run_id,
+            contributors = contributing_input_ids.len(),
+            replay_kind = replay_plan.notice_kind,
             recoverable,
             error = terminal_error,
             failure_cause = ?failure_cause,
@@ -965,11 +1193,44 @@ impl PersistentRuntimeDriver {
         );
         let (checkpoint, input_states, commit) = self
             .lifecycle_persistence_payload_with_rollback(checkpoint, "failed-run terminal event")?;
-        if let Err(err) = self
-            .store
-            .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
-            .await
-        {
+        let persist_result = if let Some(applied_commit) = applied_commit {
+            let session = match serde_json::from_slice::<meerkat_core::Session>(
+                &applied_commit.session_snapshot,
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    self.inner.restore_rollback_snapshot(checkpoint);
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "machine-terminal session snapshot was not a Session: {error}"
+                    )));
+                }
+            };
+            if session.id() != &applied_commit.owner_session_id {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "machine-terminal session owner changed after validation: generated {}, snapshot {}",
+                    applied_commit.owner_session_id,
+                    session.id()
+                )));
+            }
+            self.store
+                .atomic_apply_with_machine_lifecycle(
+                    &self.runtime_id,
+                    crate::store::SessionDelta {
+                        session_snapshot: applied_commit.session_snapshot,
+                    },
+                    applied_commit.receipt,
+                    commit,
+                    input_states,
+                    applied_commit.owner_session_id,
+                )
+                .await
+        } else {
+            self.store
+                .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
+                .await
+        };
+        if let Err(err) = persist_result {
             self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "terminal event persist failed: {err}"
@@ -1242,6 +1503,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interaction_terminal_outbox_delegator_swaps_exact_rows_and_reports_stale() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store_trait: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let rid = LogicalRuntimeId::new("interaction-outbox-cas-delegator");
+        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store_trait, blob_store);
+
+        let mut input_ids = Vec::new();
+        for text in ["first", "second"] {
+            let input = make_prompt(text);
+            input_ids.push(input.id().clone());
+            assert!(driver.accept_input(input).await.unwrap().is_accepted());
+        }
+        // The persistent accept path intentionally previews and durably
+        // commits an isolated staged driver before realizing the same
+        // admission in the live driver.  Capture the CAS witness from the
+        // durable store, as recovery adoption does, instead of assuming the
+        // two independently timestamped admission shells are byte-identical.
+        let expected = store.load_input_states(&rid).await.unwrap();
+        for input_id in &input_ids {
+            driver
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 1;
+        }
+
+        assert_eq!(
+            driver
+                .compare_and_swap_interaction_terminal_outbox_inputs(&expected, &input_ids)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Swapped
+        );
+        assert!(
+            store
+                .load_input_states(&rid)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.state.recovery_count == 1)
+        );
+
+        for input_id in &input_ids {
+            driver
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 2;
+        }
+        assert_eq!(
+            driver
+                .compare_and_swap_interaction_terminal_outbox_inputs(&expected, &input_ids)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Stale
+        );
+        assert!(
+            store
+                .load_input_states(&rid)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.state.recovery_count == 1),
+            "a stale delegator CAS must not mutate any durable row"
+        );
+    }
+
+    #[tokio::test]
     async fn recover_atomically_rewrites_cold_running_lifecycle_to_idle() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let runtime_id = LogicalRuntimeId::new("rewrite-cold-running-lifecycle");
@@ -1280,6 +1612,158 @@ mod tests {
                 .expect("reload durable lifecycle"),
             Some(RuntimeState::Idle),
             "recovery acknowledgement must mean the torn lifecycle row is repaired"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_batch_cas_fences_stale_two_handle_finalization_and_publication_writes() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let store_trait: Arc<dyn RuntimeStore> = store.clone();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let rid = LogicalRuntimeId::new("interaction-outbox-two-handle-phase-fence");
+        let mut owner =
+            PersistentRuntimeDriver::new(rid.clone(), store_trait.clone(), blob_store.clone());
+        let mut input_ids = Vec::new();
+        for text in ["first", "second"] {
+            let input = make_prompt(text);
+            input_ids.push(input.id().clone());
+            assert!(owner.accept_input(input).await.unwrap().is_accepted());
+        }
+
+        // First owner acquires the durable batch witness.
+        let initial = store.load_input_states(&rid).await.unwrap();
+        for input_id in &input_ids {
+            owner
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 10;
+        }
+        assert_eq!(
+            owner
+                .compare_and_swap_interaction_terminal_outbox_inputs(&initial, &input_ids)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Swapped
+        );
+        let owner_witness = store.load_input_states(&rid).await.unwrap();
+
+        // A second store handle takes over before Candidate -> Finalized.
+        let mut takeover =
+            PersistentRuntimeDriver::new(rid.clone(), store_trait.clone(), blob_store.clone());
+        RuntimeDriver::recover(&mut takeover).await.unwrap();
+        let takeover_expected = store.load_input_states(&rid).await.unwrap();
+        for input_id in &input_ids {
+            takeover
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 20;
+        }
+        assert_eq!(
+            takeover
+                .compare_and_swap_interaction_terminal_outbox_inputs(
+                    &takeover_expected,
+                    &input_ids,
+                )
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Swapped
+        );
+        for input_id in &input_ids {
+            owner
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 30;
+        }
+        assert_eq!(
+            owner
+                .compare_and_swap_interaction_terminal_outbox_inputs(&owner_witness, &input_ids)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Stale,
+            "the superseded owner must not overwrite takeover at finalization"
+        );
+        assert!(
+            store
+                .load_input_states(&rid)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.state.recovery_count == 20)
+        );
+
+        // The takeover owner finalizes, then a third handle takes ownership
+        // before Finalized -> Published. The old finalizer's receipt write is
+        // fenced by its exact pre-publication witness.
+        let takeover_witness = store.load_input_states(&rid).await.unwrap();
+        for input_id in &input_ids {
+            takeover
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 40;
+        }
+        assert_eq!(
+            takeover
+                .compare_and_swap_interaction_terminal_outbox_inputs(&takeover_witness, &input_ids,)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Swapped
+        );
+        let finalized_witness = store.load_input_states(&rid).await.unwrap();
+        let mut publisher = PersistentRuntimeDriver::new(rid.clone(), store_trait, blob_store);
+        RuntimeDriver::recover(&mut publisher).await.unwrap();
+        let publisher_expected = store.load_input_states(&rid).await.unwrap();
+        for input_id in &input_ids {
+            publisher
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 50;
+        }
+        assert_eq!(
+            publisher
+                .compare_and_swap_interaction_terminal_outbox_inputs(
+                    &publisher_expected,
+                    &input_ids,
+                )
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Swapped
+        );
+        for input_id in &input_ids {
+            takeover
+                .inner_mut()
+                .ledger_mut()
+                .get_mut(input_id)
+                .unwrap()
+                .recovery_count = 60;
+        }
+        assert_eq!(
+            takeover
+                .compare_and_swap_interaction_terminal_outbox_inputs(
+                    &finalized_witness,
+                    &input_ids,
+                )
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Stale,
+            "the superseded finalizer must not overwrite takeover at publication"
+        );
+        assert!(
+            store
+                .load_input_states(&rid)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.state.recovery_count == 50)
         );
     }
 }

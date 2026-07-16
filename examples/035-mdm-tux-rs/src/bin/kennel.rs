@@ -204,6 +204,7 @@ async fn main() -> anyhow::Result<()> {
     let hive_mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
         hive_runtime.session_service(),
         Some(hive_runtime.runtime_adapter()),
+        meerkat_mob::MobControlPrincipal::Owner,
     ));
     let hive_mob_state_for_kennel = Arc::clone(&hive_mob_state);
     hive_runtime.set_mob_tools(Arc::new(AgentMobToolSurfaceFactory::new(Arc::clone(

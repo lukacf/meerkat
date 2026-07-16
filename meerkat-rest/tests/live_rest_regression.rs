@@ -80,6 +80,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
         session_service.clone(),
         Some(runtime_adapter.clone()),
         None,
+        meerkat_mob::MobControlPrincipal::Owner,
     );
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(

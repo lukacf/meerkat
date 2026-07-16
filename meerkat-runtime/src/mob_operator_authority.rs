@@ -118,6 +118,53 @@ fn resolve_requested_mob_operator_authority(
     }
 }
 
+/// Atomic capability FACTS for a mob member's operator authority (ADJ-15).
+///
+/// This is the read-side twin of the durable
+/// `MobMemberOperatorAuthorityRecord`: the record stores facts, never a
+/// context — a persisted `MobToolAuthorityContext` can NEVER be rehydrated
+/// into dispatch authority (serde drops the seal and
+/// [`restore_mob_operator_authority`] rejects unsealed contexts). Every read
+/// re-mints a sealed context from these facts through the generated ladder
+/// via [`mint_mob_operator_authority_from_facts`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MobOperatorAuthorityFacts {
+    pub can_create_mobs: bool,
+    pub can_mutate_profiles: bool,
+    pub managed_mob_scope: BTreeSet<String>,
+    pub spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Re-mint a sealed `MobToolAuthorityContext` from capability facts through
+/// the generated ladder (ADJ-15): `create_only_mob_operator_authority` →
+/// `set_create_authority` → `set_profile_mutation` → `grant_manage_mob` per
+/// managed scope → `grant_spawn_profiles_in_mob` per entry →
+/// `with_caller_provenance` → `with_audit_invocation_id`. Every step is a
+/// generated MeerkatMachine input, so the output satisfies
+/// `is_generated_authority_context()` — no stored-context rehydration exists
+/// on this path.
+///
+/// `caller_provenance` carries the member identity; `audit_invocation_id`
+/// carries the upcall `request_id` so operator-action provenance names the
+/// member caller and request.
+pub fn mint_mob_operator_authority_from_facts(
+    facts: &MobOperatorAuthorityFacts,
+    caller_provenance: MobToolCallerProvenance,
+    audit_invocation_id: impl Into<String>,
+) -> Result<MobToolAuthorityContext, String> {
+    let mut context = create_only_mob_operator_authority()?;
+    context = set_create_authority(&context, facts.can_create_mobs)?;
+    context = set_profile_mutation(&context, facts.can_mutate_profiles)?;
+    for mob_id in &facts.managed_mob_scope {
+        context = grant_manage_mob(&context, mob_id.clone())?;
+    }
+    for (mob_id, profiles) in &facts.spawn_profile_scope {
+        context = grant_spawn_profiles_in_mob(&context, mob_id.clone(), profiles.iter().cloned())?;
+    }
+    context = with_caller_provenance(&context, caller_provenance)?;
+    with_audit_invocation_id(&context, audit_invocation_id)
+}
+
 pub fn restore_mob_operator_authority(
     authority_context: &MobToolAuthorityContext,
 ) -> Result<MobToolAuthorityContext, String> {
@@ -331,6 +378,60 @@ mod tests {
 
         assert_eq!(override_mob, ToolCategoryOverride::Disable);
         assert!(restored.is_none());
+    }
+
+    /// T-10 (upcall lane): facts → sealed context through the generated
+    /// ladder. The minted context is generated-sealed, carries exactly the
+    /// facts, and stamps the member caller provenance + upcall request id.
+    #[test]
+    fn mint_from_facts_produces_sealed_context_with_exact_capabilities() {
+        let facts = MobOperatorAuthorityFacts {
+            can_create_mobs: false,
+            can_mutate_profiles: true,
+            managed_mob_scope: BTreeSet::from(["mob-1".to_string()]),
+            spawn_profile_scope: BTreeMap::from([(
+                "mob-1".to_string(),
+                BTreeSet::from(["investigator".to_string(), "writer".to_string()]),
+            )]),
+        };
+        let minted = mint_mob_operator_authority_from_facts(
+            &facts,
+            MobToolCallerProvenance::default().with_mob_id("mob-1"),
+            "req-42",
+        )
+        .expect("facts must re-mint through the generated ladder");
+
+        assert!(minted.is_generated_authority_context());
+        assert!(!minted.can_create_mobs());
+        assert!(minted.can_mutate_profiles());
+        assert!(minted.can_manage_mob("mob-1"));
+        assert!(!minted.can_manage_mob("mob-2"));
+        assert_eq!(minted.managed_mob_scope(), &facts.managed_mob_scope);
+        assert_eq!(minted.spawn_profile_scope(), &facts.spawn_profile_scope);
+        assert_eq!(minted.audit_invocation_id(), Some("req-42"));
+        assert!(minted.caller_provenance().is_some());
+    }
+
+    /// The one-fact-one-owner pin behind ADJ-15: the persisted PROJECTION of
+    /// a facts-minted context still cannot restore behavior authority — only
+    /// the facts-path re-mint can.
+    #[test]
+    fn minted_facts_context_projection_still_does_not_restore_authority() {
+        let facts = MobOperatorAuthorityFacts {
+            can_create_mobs: true,
+            ..MobOperatorAuthorityFacts::default()
+        };
+        let minted = mint_mob_operator_authority_from_facts(
+            &facts,
+            MobToolCallerProvenance::default(),
+            "req-1",
+        )
+        .expect("facts must re-mint through the generated ladder");
+        let projected = persisted_projection(minted);
+        assert!(!projected.is_generated_authority_context());
+        let error = restore_mob_operator_authority(&projected)
+            .expect_err("an unsealed projection must never restore authority");
+        assert!(error.contains("was not minted by generated authority"));
     }
 
     #[test]

@@ -1317,7 +1317,12 @@ async fn in_session_model_switch_via_turn_start() {
         }
     });
     send_request(&mut writer, &turn_req).await;
-    let turn_resp = read_response(&mut reader).await;
+    let turn_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        read_response(&mut reader),
+    )
+    .await
+    .expect("runtime-backed model override must not deadlock on the turn-finalization boundary");
     assert!(
         turn_resp["error"].is_null(),
         "turn/start with model override failed: {turn_resp}"

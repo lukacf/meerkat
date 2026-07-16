@@ -12,6 +12,7 @@ use meerkat_core::{
     PeerIngressKind, PeerIngressPlainEventFacts, PeerInputClass, TerminalityClass,
     handles::PeerCommsHandle,
 };
+use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -73,6 +74,78 @@ fn content_shape_for_text_and_blocks(
 fn parse_admission_interaction_id(raw: Option<&str>) -> Option<InteractionId> {
     raw.and_then(|id| Uuid::parse_str(id).ok())
         .map(InteractionId)
+}
+
+/// Extract only the callback port from a declared TCP address.
+///
+/// The declared host is deliberately parsed only far enough to reject a
+/// malformed authority; it is never used for routing. The callback host is
+/// derived from the kernel-observed TCP source below.
+pub(crate) fn declared_tcp_port(endpoint: &meerkat_core::comms::PeerAddress) -> Option<u16> {
+    if endpoint.transport() != meerkat_core::comms::PeerTransport::Tcp {
+        return None;
+    }
+
+    let authority = endpoint.endpoint();
+    let port = if let Some(bracketed) = authority.strip_prefix('[') {
+        let closing_bracket = bracketed.find(']')?;
+        let declared_host = &bracketed[..closing_bracket];
+        if declared_host.is_empty() {
+            return None;
+        }
+        bracketed[closing_bracket + 1..].strip_prefix(':')?
+    } else {
+        let (declared_host, port) = authority.rsplit_once(':')?;
+        // Unbracketed IPv6 authorities are ambiguous and therefore invalid.
+        if declared_host.is_empty() || declared_host.contains(':') {
+            return None;
+        }
+        port
+    };
+
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let port = port.parse::<u16>().ok()?;
+    (port != 0).then_some(port)
+}
+
+fn source_confined_tcp_reply_endpoint(
+    require_peer_auth: bool,
+    envelope: &crate::types::Envelope,
+    observed_tcp_source: Option<SocketAddr>,
+) -> Option<meerkat_core::comms::PeerAddress> {
+    // A callback route is usable only on an authenticated TCP ingress. Open
+    // auth must not acquire a callback capability merely because an envelope
+    // happens to contain endpoint-shaped data.
+    if !require_peer_auth {
+        return None;
+    }
+    let observed_tcp_source = observed_tcp_source?;
+    if !envelope.verify() {
+        return None;
+    }
+    let MessageKind::Request {
+        reply_endpoint: Some(declared_endpoint),
+        ..
+    } = &envelope.kind
+    else {
+        return None;
+    };
+    let declared_port = declared_tcp_port(declared_endpoint)?;
+    let source_confined = match observed_tcp_source {
+        SocketAddr::V4(source) => SocketAddr::V4(SocketAddrV4::new(*source.ip(), declared_port)),
+        SocketAddr::V6(source) => SocketAddr::V6(SocketAddrV6::new(
+            *source.ip(),
+            declared_port,
+            source.flowinfo(),
+            source.scope_id(),
+        )),
+    };
+    Some(meerkat_core::comms::PeerAddress::new(
+        meerkat_core::comms::PeerTransport::Tcp,
+        source_confined.to_string(),
+    ))
 }
 
 impl IngressClassificationContext {
@@ -139,6 +212,18 @@ impl IngressClassificationContext {
     /// facts. Without an installed machine handle, classified ingress fails
     /// closed instead of deriving machine facts locally.
     pub(crate) fn prepare(&self, item: InboxItem) -> Option<PreparedIngressItem> {
+        self.prepare_with_observed_tcp_source(item, None)
+    }
+
+    /// Prepare ingress with connection-local transport evidence.
+    ///
+    /// `observed_tcp_source` is out-of-band metadata from `TcpListener::accept`;
+    /// it is intentionally not added to serialized [`InboxItem`].
+    pub(crate) fn prepare_with_observed_tcp_source(
+        &self,
+        item: InboxItem,
+        observed_tcp_source: Option<SocketAddr>,
+    ) -> Option<PreparedIngressItem> {
         match item {
             InboxItem::External { envelope } => {
                 let from_peer_id = envelope.from.to_peer_id();
@@ -160,7 +245,8 @@ impl IngressClassificationContext {
                     from_peer: from_name.clone(),
                     from_peer_id,
                     kind: match &envelope.kind {
-                        MessageKind::Message { body, .. } => {
+                        MessageKind::Message { body, .. }
+                        | MessageKind::IncarnationFencedMessage { body, .. } => {
                             PeerIngressEnvelopeKind::Message { body: body.clone() }
                         }
                         MessageKind::Request { intent, params, .. } => {
@@ -204,7 +290,9 @@ impl IngressClassificationContext {
                 let classification = admission.classification;
                 let lifecycle_peer = admission.lifecycle_peer.clone();
                 let convention = match &envelope.kind {
-                    MessageKind::Message { .. } => PeerIngressConvention::Message,
+                    MessageKind::Message { .. } | MessageKind::IncarnationFencedMessage { .. } => {
+                        PeerIngressConvention::Message
+                    }
                     MessageKind::Request {
                         intent, params: _, ..
                     } => {
@@ -249,6 +337,11 @@ impl IngressClassificationContext {
                         in_reply_to: request_id?,
                     },
                 };
+                let declared_reply_endpoint = source_confined_tcp_reply_endpoint(
+                    self.require_peer_auth,
+                    &envelope,
+                    observed_tcp_source,
+                );
                 let ingress_fact = PeerIngressFact::peer(
                     InteractionId(envelope.id),
                     classification.class,
@@ -256,10 +349,12 @@ impl IngressClassificationContext {
                     Some(classification.auth),
                     PeerIngressIdentity::new(canonical_from_peer_id, from_name.clone(), convention)
                         .with_signing_pubkey(envelope.from.0),
-                );
+                )
+                .with_declared_reply_endpoint(declared_reply_endpoint);
 
                 let content_shape = match &envelope.kind {
-                    MessageKind::Message { body, blocks, .. } => {
+                    MessageKind::Message { body, blocks, .. }
+                    | MessageKind::IncarnationFencedMessage { body, blocks, .. } => {
                         content_shape_for_text_and_blocks(body, blocks.as_deref())
                     }
                     MessageKind::Request { blocks, .. } => {
@@ -695,6 +790,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -801,6 +897,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -814,6 +911,143 @@ mod tests {
             result.ingress_fact.canonical_peer_id_string().as_deref(),
             Some(expected_peer_id.as_str())
         );
+    }
+
+    #[test]
+    fn signed_tcp_request_reply_endpoint_is_confined_to_observed_source_ip() {
+        let sender = make_keypair();
+        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
+        let ctx = make_context(true, trusted, vec![]);
+        let endpoint = meerkat_core::comms::PeerAddress::parse("tcp://203.0.113.99:4311")
+            .expect("valid socket endpoint");
+        let mut envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "probe".to_string(),
+                params: serde_json::json!({"seq": 1}),
+                blocks: None,
+                reply_endpoint: Some(endpoint.clone()),
+                content_taint: None,
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+                objective_id: None,
+            },
+        );
+        envelope.sign(&sender);
+        assert!(envelope.verify(), "endpoint-bearing Request must verify");
+
+        let mut tampered = envelope.clone();
+        let MessageKind::Request { reply_endpoint, .. } = &mut tampered.kind else {
+            panic!("expected Request");
+        };
+        *reply_endpoint = Some(
+            meerkat_core::comms::PeerAddress::parse("tcp://127.0.0.1:4312")
+                .expect("valid alternate endpoint"),
+        );
+        assert!(
+            !tampered.verify(),
+            "classifier metadata is authenticated by the envelope signature"
+        );
+
+        let prepared = ctx
+            .prepare_with_observed_tcp_source(
+                InboxItem::External { envelope },
+                Some("192.0.2.44:51820".parse().expect("valid observed source")),
+            )
+            .expect("signed Request should classify");
+        assert_eq!(
+            prepared.ingress_fact.declared_reply_endpoint,
+            Some(
+                meerkat_core::comms::PeerAddress::parse("tcp://192.0.2.44:4311")
+                    .expect("valid source-confined endpoint")
+            ),
+            "the sender-selected host is ignored while the declared port is preserved"
+        );
+    }
+
+    #[test]
+    fn reply_endpoint_is_not_propagated_without_authenticated_tcp_ingress() {
+        let sender = make_keypair();
+        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
+        let request = MessageKind::Request {
+            intent: "probe".to_string(),
+            params: serde_json::json!({}),
+            blocks: None,
+            reply_endpoint: Some(
+                meerkat_core::comms::PeerAddress::parse("tcp://203.0.113.99:4311")
+                    .expect("valid socket endpoint"),
+            ),
+            content_taint: None,
+            handling_mode: None,
+            objective_id: None,
+        };
+
+        let unsigned = make_envelope(&sender, request.clone());
+        let strict = make_context(true, trusted.clone(), vec![]);
+        let prepared = strict
+            .prepare_with_observed_tcp_source(
+                InboxItem::External { envelope: unsigned },
+                Some("192.0.2.44:51820".parse().expect("valid observed source")),
+            )
+            .expect("classification itself remains independent of transport auth rejection");
+        assert_eq!(prepared.ingress_fact.declared_reply_endpoint, None);
+
+        let mut signed = make_envelope(&sender, request);
+        signed.sign(&sender);
+        let open_auth = make_context(false, trusted, vec![]);
+        let prepared = open_auth
+            .prepare_with_observed_tcp_source(
+                InboxItem::External { envelope: signed },
+                Some("192.0.2.44:51820".parse().expect("valid observed source")),
+            )
+            .expect("open-auth request should still classify");
+        assert_eq!(
+            prepared.ingress_fact.declared_reply_endpoint, None,
+            "open-auth ingress never grants a callback route, even for a signed envelope"
+        );
+    }
+
+    #[test]
+    fn reply_endpoint_rejects_non_tcp_and_invalid_declared_ports() {
+        let sender = make_keypair();
+        let trusted = make_trusted_peers("sender-agent", &sender.public_key());
+        let ctx = make_context(true, trusted, vec![]);
+        let observed_source = Some(
+            "192.0.2.44:51820"
+                .parse::<SocketAddr>()
+                .expect("valid observed source"),
+        );
+
+        for endpoint in [
+            "uds:///tmp/reply.sock",
+            "inproc://sender-agent",
+            "tcp://203.0.113.99:0",
+            "tcp://203.0.113.99:not-a-port",
+            "tcp://2001:db8::1:4311",
+        ] {
+            let mut envelope = make_envelope(
+                &sender,
+                MessageKind::Request {
+                    intent: "probe".to_string(),
+                    params: serde_json::json!({}),
+                    blocks: None,
+                    reply_endpoint: Some(
+                        meerkat_core::comms::PeerAddress::parse(endpoint)
+                            .expect("scheme-level peer address parses"),
+                    ),
+                    content_taint: None,
+                    handling_mode: None,
+                    objective_id: None,
+                },
+            );
+            envelope.sign(&sender);
+            let prepared = ctx
+                .prepare_with_observed_tcp_source(InboxItem::External { envelope }, observed_source)
+                .expect("request should otherwise classify");
+            assert_eq!(
+                prepared.ingress_fact.declared_reply_endpoint, None,
+                "invalid reply endpoint {endpoint} must be discarded"
+            );
+        }
     }
 
     #[test]
@@ -877,6 +1111,7 @@ mod tests {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -899,6 +1134,7 @@ mod tests {
                 intent: "mob.peer_retired".to_string(),
                 params: serde_json::json!({"peer": "old-agent"}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -921,6 +1157,7 @@ mod tests {
                 intent: "my-silent-intent".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -944,6 +1181,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -976,6 +1214,7 @@ mod tests {
                     "expected_address": "inproc://peer"
                 }),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -1019,6 +1258,7 @@ mod tests {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -1045,6 +1285,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -1071,6 +1312,7 @@ mod tests {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -1079,6 +1321,7 @@ mod tests {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -1137,6 +1380,7 @@ mod tests {
                     intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params: serde_json::json!({}),
                     blocks: None,
+                    reply_endpoint: None,
                     content_taint: None,
                     handling_mode: None,
                 },
@@ -1168,6 +1412,7 @@ mod tests {
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
                         blocks: None,
+                        reply_endpoint: None,
                         content_taint: None,
                         handling_mode: None,
                     },
@@ -1233,6 +1478,7 @@ mod tests {
                         intent: "review".to_string(),
                         params: serde_json::json!({}),
                         blocks: None,
+                        reply_endpoint: None,
                         content_taint: None,
                         handling_mode: None,
                     },
@@ -1250,6 +1496,7 @@ mod tests {
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
                         blocks: None,
+                        reply_endpoint: None,
                         content_taint: None,
                         handling_mode: None,
                     },
@@ -1279,6 +1526,7 @@ mod tests {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },
@@ -1412,6 +1660,7 @@ mod tests {
                     intent: "mob.peer_added".to_string(),
                     params,
                     blocks: None,
+                    reply_endpoint: None,
                     content_taint: None,
                     handling_mode: None,
                 },
@@ -1445,6 +1694,7 @@ mod tests {
                     }
                 }),
                 blocks: None,
+                reply_endpoint: None,
                 content_taint: None,
                 handling_mode: None,
             },

@@ -526,10 +526,14 @@ pub fn resolve_effective_turn_config(
         self_hosted_server_id: llm_binding.self_hosted_server_id,
         // Caller-scoped build inputs, not durable session facts: the owning
         // surface (e.g. the mob runtime, which rebuilds from its definition)
-        // re-supplies these on resume.
+        // re-supplies these on resume. The member host re-derives
+        // host_prompt_sections from the stored spec on revival (the persisted
+        // prompt tri-state keeps resumed prompts stable regardless).
         custom_models: std::collections::BTreeMap::new(),
         image_generation_provider: None,
         auto_compact_threshold_override: None,
+        session_comms_runtime_override: None,
+        host_prompt_sections: Default::default(),
         output_schema: overrides
             .output_schema
             .clone()

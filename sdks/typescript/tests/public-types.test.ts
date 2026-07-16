@@ -1,43 +1,135 @@
-import { MeerkatClient } from "../src/index.js";
+import { MeerkatClient, Mob } from "../src/index.js";
 import type {
   AgentErrorReport,
+  BridgeCommandDeclareMemberOutboundTaint,
+  BridgeCommandDeliverMemberInput,
+  BridgeCommandHardCancelMember,
+  BridgeCommandCancelTrackedMemberInput,
+  BridgeCommandObserveSupervisorRotation,
+  BridgeHostCapabilityRequirements,
+  BridgeCommandOpenMemberLiveChannel,
+  BridgeCommandPollMemberEvents,
+  BridgeCommandUnwireMember,
+  BridgeCommandWireMember,
+  BridgeDeliveryPayload,
+  BridgeDeliveryRejectionCauseStaleMemberIncarnation,
+  BridgeDeliveryRejectionCauseStaleMemberResidency,
+  BridgeEventCursor,
+  BridgeMemberIncarnation,
+  BridgeMobPeerOverlayHandoff,
+  BridgeOutboundTaintTarget,
+  BridgePeerWiringPayload,
+  BridgeTurnDirective,
+  BridgeTurnOutcomeAck,
+  BridgeTurnOutcomeRecord,
+  BridgeTrackedInputCancelOutcome,
   CommsCommand,
   ContentBlock,
+  ContentInput,
+  MobControlScope,
   MobCreateOptions,
   MobDefinition,
+  MobGrantRecord,
+  MobGrantScopesParams,
+  MobGrantScopesResult,
+  MobGrantsResult,
+  MobHardCancelParams,
+  MobHardCancelResult,
+  MobRevokeScopesParams,
+  MobRevokeScopesResult,
   MobRotateSupervisorResult,
   MobTurnStartOptions,
   MobWireMembersBatchEdgeInput,
   MobWireMembersBatchResult,
+  LiveOpenTransport,
+  OperationId,
   PeerCorrelationId,
   PeerId,
+  RunId,
   RunFailedEvent,
+  SessionContentBlock,
+  SessionContentInput,
   SessionOptions,
   SpawnManySpec,
   SpawnSpec,
   SupervisorRotationReportWire,
   ToolCallRequestedEvent,
+  TranscriptForkOptions,
+  TranscriptRewriteOptions,
+  WireControlScope,
+  WireFlowFailureDetail,
+  WireFlowTurnOutcome,
+  WireGrantRecord,
 } from "../src/index.js";
 import type {
   MobSpawnParams as PublicMobSpawnParams,
   MobSpawnSpecParams as PublicMobSpawnSpecParams,
 } from "../src/index.js";
 import type {
+  BridgeLiveControlOutcome,
+  BridgeLiveControlOutcomeCommitInput,
+  BridgeLiveControlOutcomeInterrupt,
+  BridgeLiveControlOutcomeRefresh,
+  BridgeLiveControlOutcomeTruncate,
+  BridgeLiveControlVerb,
+  BridgeLiveControlVerbCommitInput,
+  BridgeLiveControlVerbInterrupt,
+  BridgeLiveControlVerbRefresh,
+  BridgeLiveControlVerbTruncate,
+  LiveCloseResult,
   LiveInputChunkWire,
-  LiveSendInputErrorData,
+  LiveOpenResult,
   LiveSendInputParams,
+  LiveStatusResult,
+  MultiHostErrorCode,
+  MobBindHostParams,
+  MobBindHostResult,
+  MobHostStatus,
+  MobHostsResult,
+  MobMemberHistoryParams,
+  MobMemberHistoryResult,
+  MobMemberLiveChannelParams,
+  MobMemberLiveControlParams,
+  MobMemberLiveOpenOptions,
+  MobMemberLiveOpenParams,
+  MobMemberLiveStatusParams,
+  MobRevokeHostParams,
+  MobRevokeHostResult,
+  MobRouteInstallsResult,
+  LiveSendInputErrorData,
   RealtimeImageChunk,
   RealtimeInputChunk,
   RealtimeInputKind,
   RealtimeTranscriptEvent,
   RealtimeTranscriptEventItemObserved,
+  RealtimeTurningMode,
   WireAssistantBlock,
+  WireHistoryRow,
+  WireHostUnavailableDetail,
+  WireHostBindPhase,
+  WireHostBindingDescriptor,
+  WireHostBindingDescriptorKind,
+  WireHostCapabilityFlags,
+  WireHostRef,
   WireLiveAdapterErrorCode,
   WireLiveAdapterObservation,
   WireLiveAdapterObservationAssistantAudioChunk,
   WireLiveAdapterObservationCommandRejected,
   WireLiveAdapterObservationUserContentCommitted,
   WireLiveConfigRejectionReason,
+  WireMemberHistoryPageBody,
+  WireMemberLifecycleCapabilities,
+  WireMemberProgressSnapshot,
+  WireNonPortableResourceKind,
+  WireProjectionProvenance,
+  WireReachability,
+  WireRouteInstallObligation,
+  WireScopeDeniedDetail,
+  WireSessionMessage,
+  WireStaleCursorDetail,
+  WireStaleFenceDetail,
+  WireTrustedPeerIdentity,
+  WireTrustedPeerIdentityEd25519PublicKey,
   WireLiveConfigRejectionReasonImageInputInvalidBase64,
   WireLiveConfigRejectionReasonImageInputIdempotencyConflict,
   WireLiveConfigRejectionReasonImageInputIdempotencyKeyInvalid,
@@ -46,7 +138,20 @@ import type {
   WireLiveConfigRejectionReasonInputTooLarge,
   WireLiveConfigRejectionReasonRefreshTranscriptRewriteRequiresReopen,
 } from "../src/index.js";
+
+const publicMemberProgress: WireMemberProgressSnapshot = {
+  run_state: "run_open",
+  in_flight_work: 1,
+  last_progress_at_ms: 1,
+  last_progress_event: "execution_advanced",
+  health: "healthy",
+};
+void publicMemberProgress;
 import type {
+  BridgeRejectionCauseMaterializeBuildRejectedPayload,
+  BridgeRejectionCauseScopeDeniedPayload,
+  DeferredCatalogDelta,
+  MemberBuildRejection,
   MobCreateParams,
   MobDefinitionInput,
   MobEnsureMemberParams,
@@ -72,8 +177,18 @@ import type {
   MobTurnStartParams,
   MobWireMembersBatchParams,
   MobWireMembersBatchResult as WireMobWireMembersBatchResult,
-  WireBudgetSplitPolicy,
+  RuntimeHostCapabilities,
+  RuntimeHostFeatureFlags,
+  ContractVersion as GeneratedContractVersion,
+  SystemNoticeBlockComms,
+  SystemNoticeBlockToolConfig,
+  SystemNoticePeer,
+  ToolConfigChangedPayload,
+  ToolConfigChangeStatus,
   WireAuthBindingRef,
+  WirePeerConnectivityKnown,
+  WirePeerConnectivitySnapshot,
+  WireUnreachablePeer,
   WireMemberLaunchMode,
   WireMemberRef,
   WireMobBackendKind,
@@ -85,12 +200,447 @@ import type {
   WireToolFilter,
 } from "../src/generated/types.js";
 
+const runtimeHostFeatureFlags: RuntimeHostFeatureFlags = {
+  runtime_backed_sessions: true,
+  mobs: true,
+  mcp_live: true,
+  comms: true,
+  blobs: true,
+  session_events: true,
+  session_streams: true,
+  schedules: true,
+  skills: true,
+  event_replay: true,
+  artifacts: true,
+  approvals: true,
+  external_members: true,
+  secure_remote_rpc: true,
+  multi_host_mobs: true,
+};
+const generatedContractVersion: GeneratedContractVersion = {
+  major: 0,
+  minor: 7,
+  patch: 29,
+};
+const runtimeHostCapabilities: RuntimeHostCapabilities = {
+  contract_version: generatedContractVersion,
+  features: runtimeHostFeatureFlags,
+};
+void runtimeHostCapabilities;
+
+// These multi-host and bridge contracts are part of the package-root type
+// surface. Consumers must not import implementation details from
+// `src/generated/types` to construct grant/cancel commands or inspect typed
+// terminal outcomes.
+const publicGrantScopes: MobGrantScopesParams = {
+  mob_id: "mob-1",
+  principal: "operator",
+  scopes: ["cancel"],
+};
+const publicWireGrant: WireGrantRecord = {
+  principal: "operator",
+  scopes: ["cancel"],
+};
+const publicGrantResult: MobGrantScopesResult = { record: publicWireGrant };
+const publicGrantsResult: MobGrantsResult = { grants: [publicWireGrant] };
+const publicRevokeScopes: MobRevokeScopesParams = {
+  mob_id: "mob-1",
+  principal: "operator",
+  scopes: ["cancel"],
+};
+const publicRevokeResult: MobRevokeScopesResult = { removed: true };
+const publicHardCancel: MobHardCancelParams = {
+  mob_id: "mob-1",
+  agent_identity: "worker-1",
+  reason: "operator request",
+};
+const publicHardCancelResult: MobHardCancelResult = { cancelled: true };
+const publicScope: WireControlScope = "cancel";
+const publicHostRequirements: BridgeHostCapabilityRequirements = {
+  autonomous_members: true,
+  durable_sessions: true,
+  protocol_v4: true,
+  tracked_input_cancel: true,
+};
+const publicFailureDetail: WireFlowFailureDetail = {
+  original_utf8_bytes: 7,
+  text: "failure",
+  truncated: false,
+};
+const publicFlowOutcome: WireFlowTurnOutcome = {
+  run_failed: { detail: publicFailureDetail },
+};
+const publicTurnOutcome: BridgeTurnOutcomeRecord = {
+  fence_token: 3,
+  generation: 2,
+  input_id: "input-1",
+  outcome: publicFlowOutcome,
+  terminal_seq: 9,
+};
+const publicCancelOutcome: BridgeTrackedInputCancelOutcome = {
+  outcome: "terminal",
+  record: publicTurnOutcome,
+};
+declare const publicCancelTrackedCommand: BridgeCommandCancelTrackedMemberInput;
+declare const publicObserveRotationCommand: BridgeCommandObserveSupervisorRotation;
+const publicCancelTrackedTag: "cancel_tracked_member_input" =
+  publicCancelTrackedCommand.command;
+const publicObserveRotationTag: "observe_supervisor_rotation" =
+  publicObserveRotationCommand.command;
+void [
+  publicGrantScopes,
+  publicGrantResult,
+  publicGrantsResult,
+  publicRevokeScopes,
+  publicRevokeResult,
+  publicHardCancel,
+  publicHardCancelResult,
+  publicScope,
+  publicHostRequirements,
+  publicCancelOutcome,
+  publicCancelTrackedTag,
+  publicObserveRotationTag,
+];
+
+// Nested public mob contracts must retain their named generated types. A
+// schema-local `$defs` regression previously widened these fields to opaque
+// Record<string, unknown> values while still letting codegen freshness pass.
+declare const generatedMobHistory: MobMemberHistoryResult;
+declare const generatedMobHosts: MobHostsResult;
+declare const generatedMobBind: MobBindHostResult;
+declare const generatedRouteInstalls: MobRouteInstallsResult;
+declare const generatedGrant: MobGrantScopesResult;
+declare const generatedGrants: MobGrantsResult;
+
+const generatedHistoryPage: WireMemberHistoryPageBody = generatedMobHistory.page;
+const generatedHistoryRows: WireHistoryRow[] = generatedHistoryPage.messages;
+declare const generatedConnectivity: WirePeerConnectivityKnown;
+const generatedConnectivitySnapshot: WirePeerConnectivitySnapshot =
+  generatedConnectivity.snapshot;
+const generatedUnreachablePeers: WireUnreachablePeer[] =
+  generatedConnectivitySnapshot.unreachable_peers ?? [];
+const generatedHosts: MobHostStatus[] = generatedMobHosts.hosts;
+const generatedHostCapabilities: WireHostCapabilityFlags = generatedMobBind.capabilities;
+const generatedRouteObligations: WireRouteInstallObligation[] =
+  generatedRouteInstalls.outstanding;
+const generatedGrantRecord: WireGrantRecord = generatedGrant.record;
+const generatedGrantRecords: readonly WireGrantRecord[] = generatedGrants.grants;
+
+void generatedHistoryPage;
+void generatedHistoryRows;
+void generatedConnectivitySnapshot;
+void generatedUnreachablePeers;
+void generatedHosts;
+void generatedHostCapabilities;
+void generatedRouteObligations;
+void generatedGrantRecord;
+void generatedGrantRecords;
+
+// The public supervisor-bridge contracts are emitted from schema-local refs.
+// Keep every newly exposed nested field named and typed instead of allowing
+// codegen to widen it to unknown/Record<string, unknown>.
+declare const generatedBridgeDelivery: BridgeDeliveryPayload;
+declare const generatedBridgeOutboundTaint: BridgeCommandDeclareMemberOutboundTaint;
+declare const generatedBridgeDeliverCommand: BridgeCommandDeliverMemberInput;
+declare const generatedBridgeHardCancel: BridgeCommandHardCancelMember;
+declare const generatedBridgePoll: BridgeCommandPollMemberEvents;
+declare const generatedBridgeLiveOpen: BridgeCommandOpenMemberLiveChannel;
+declare const generatedBridgeWire: BridgeCommandWireMember;
+declare const generatedBridgeUnwire: BridgeCommandUnwireMember;
+declare const generatedBridgePeerWiring: BridgePeerWiringPayload;
+declare const generatedStaleMemberRejection: BridgeDeliveryRejectionCauseStaleMemberIncarnation;
+declare const generatedMaterializeRejection: BridgeRejectionCauseMaterializeBuildRejectedPayload;
+declare const generatedScopeRejection: BridgeRejectionCauseScopeDeniedPayload;
+
+const generatedDeliveryExpectedMember: BridgeMemberIncarnation | null | undefined =
+  generatedBridgeDelivery.expected_member;
+const generatedOutboundTaintTarget: BridgeOutboundTaintTarget | null | undefined =
+  generatedBridgeOutboundTaint.target;
+const generatedDeliveryTurn: BridgeTurnDirective | null | undefined =
+  generatedBridgeDelivery.turn;
+const generatedCommandExpectedMember: BridgeMemberIncarnation | null | undefined =
+  generatedBridgeDeliverCommand.expected_member;
+const generatedCommandObjective: string | null | undefined =
+  generatedBridgeDeliverCommand.objective_id;
+const generatedCommandTurn: BridgeTurnDirective | null | undefined =
+  generatedBridgeDeliverCommand.turn;
+const generatedInjectedContext: readonly ContentInput[] | undefined =
+  generatedBridgeDeliverCommand.injected_context;
+const generatedExpectedRunId: RunId = generatedBridgeHardCancel.expected_run_id;
+const generatedOperationId: OperationId = generatedBridgeHardCancel.operation_id;
+const generatedCursor: BridgeEventCursor = generatedBridgePoll.cursor;
+const generatedOutcomeAcks: readonly BridgeTurnOutcomeAck[] | undefined =
+  generatedBridgePoll.outcome_acks;
+const generatedLiveTransport: LiveOpenTransport | null | undefined =
+  generatedBridgeLiveOpen.transport;
+const generatedCommandOverlay: BridgeMobPeerOverlayHandoff | null | undefined =
+  generatedBridgeWire.mob_peer_overlay;
+const generatedUnwireOverlay: BridgeMobPeerOverlayHandoff | null | undefined =
+  generatedBridgeUnwire.mob_peer_overlay;
+const generatedPayloadOverlay: BridgeMobPeerOverlayHandoff | null | undefined =
+  generatedBridgePeerWiring.mob_peer_overlay;
+const generatedCurrentMember: BridgeMemberIncarnation =
+  generatedStaleMemberRejection.current;
+declare const generatedResidencyMember: BridgeMemberIncarnation;
+const generatedAbsentResidency: BridgeDeliveryRejectionCauseStaleMemberResidency = {
+  kind: "stale_member_residency",
+  expected: generatedResidencyMember,
+};
+const generatedAbsentResidencyCurrent: BridgeMemberIncarnation | null | undefined =
+  generatedAbsentResidency.current;
+const generatedBuildRejection: MemberBuildRejection =
+  generatedMaterializeRejection.cause;
+const generatedPresentedScopes: WireControlScope[] =
+  generatedScopeRejection.presented;
+const generatedRequiredScope: WireControlScope = generatedScopeRejection.required;
+
+void generatedDeliveryExpectedMember;
+void generatedOutboundTaintTarget;
+void generatedDeliveryTurn;
+void generatedCommandExpectedMember;
+void generatedCommandTurn;
+void generatedInjectedContext;
+void generatedExpectedRunId;
+void generatedOperationId;
+void generatedCursor;
+void generatedOutcomeAcks;
+void generatedLiveTransport;
+void generatedCommandOverlay;
+void generatedUnwireOverlay;
+void generatedPayloadOverlay;
+void generatedCurrentMember;
+void generatedAbsentResidency;
+void generatedAbsentResidencyCurrent;
+void generatedBuildRejection;
+void generatedPresentedScopes;
+void generatedRequiredScope;
+
+declare const generatedCommsNotice: SystemNoticeBlockComms;
+declare const generatedToolConfigNotice: SystemNoticeBlockToolConfig;
+const generatedNoticePeer: SystemNoticePeer | null | undefined =
+  generatedCommsNotice.peer;
+const generatedToolConfigPayload: ToolConfigChangedPayload =
+  generatedToolConfigNotice.payload;
+const generatedToolConfigStatus: ToolConfigChangeStatus =
+  generatedToolConfigPayload.status_info;
+const generatedDeferredCatalogDelta: DeferredCatalogDelta | null | undefined =
+  generatedToolConfigPayload.deferred_catalog_delta;
+void generatedNoticePeer;
+void generatedToolConfigPayload;
+void generatedToolConfigStatus;
+void generatedDeferredCatalogDelta;
+
+// The package root is the supported SDK surface. Every new public
+// host/history/route/member-live contract (including discriminated control
+// variants and nested wire vocabulary) must remain importable from there.
+type PublicMultiHostContractSurface = [
+  BridgeLiveControlOutcome,
+  BridgeLiveControlOutcomeCommitInput,
+  BridgeLiveControlOutcomeInterrupt,
+  BridgeLiveControlOutcomeRefresh,
+  BridgeLiveControlOutcomeTruncate,
+  BridgeLiveControlVerb,
+  BridgeLiveControlVerbCommitInput,
+  BridgeLiveControlVerbInterrupt,
+  BridgeLiveControlVerbRefresh,
+  BridgeLiveControlVerbTruncate,
+  MobBindHostParams,
+  MobBindHostResult,
+  MobHostStatus,
+  MobHostsResult,
+  MobMemberHistoryParams,
+  MobMemberHistoryResult,
+  MobMemberLiveChannelParams,
+  MobMemberLiveControlParams,
+  MobMemberLiveOpenParams,
+  MobMemberLiveStatusParams,
+  MobRevokeHostParams,
+  MobRevokeHostResult,
+  MobRouteInstallsResult,
+  WireHistoryRow,
+  WireHostBindPhase,
+  WireHostBindingDescriptor,
+  WireHostBindingDescriptorKind,
+  WireHostCapabilityFlags,
+  WireHostRef,
+  WireMemberHistoryPageBody,
+  WireMemberLifecycleCapabilities,
+  WireNonPortableResourceKind,
+  WireProjectionProvenance,
+  WireReachability,
+  WireRouteInstallObligation,
+  WireTrustedPeerIdentity,
+  WireTrustedPeerIdentityEd25519PublicKey,
+];
+declare const publicMultiHostContractSurface: PublicMultiHostContractSurface;
+void publicMultiHostContractSurface;
+
+const publicHistoryRow: WireHistoryRow = {
+  role: "user",
+  created_at: "2026-07-10T00:00:00Z",
+  content: "hello",
+};
+const publicHistoryMessage: WireSessionMessage = publicHistoryRow;
+void publicHistoryMessage;
+const publicAssistantHistory: WireHistoryRow = {
+  role: "block_assistant",
+  created_at: "2026-07-10T00:00:01Z",
+  blocks: [{ block_type: "text", data: { text: "answer" } }],
+  stop_reason: "end_turn",
+};
+const publicToolResultsHistory: WireHistoryRow = {
+  role: "tool_results",
+  created_at: "2026-07-10T00:00:02Z",
+  results: [{ tool_use_id: "tool-1", content: "done" }],
+};
+const publicSystemNoticeHistory: WireHistoryRow = {
+  role: "system_notice",
+  created_at: "2026-07-10T00:00:03Z",
+  kind: "generic",
+  blocks: [{ type: "auth", state: "refresh_required" }],
+};
+void publicAssistantHistory;
+void publicToolResultsHistory;
+void publicSystemNoticeHistory;
+
+const publicSessionContentBlock: SessionContentBlock = {
+  type: "structured",
+  data: { answer: 42 },
+};
+const publicSessionContent: SessionContentInput = [
+  publicSessionContentBlock,
+  { type: "unknown" },
+  {
+    type: "image",
+    media_type: "image/png",
+    source: "inline",
+    data: "aW1hZ2U=",
+  },
+];
+void publicSessionContent;
+
+const scopeDeniedDetail: WireScopeDeniedDetail = {
+  required: "live",
+  presented: ["list"],
+};
+const hostUnavailableDetail: WireHostUnavailableDetail = {
+  host: "host:remote-1",
+  timeout_ms: 5000,
+};
+const staleCursorDetail: WireStaleCursorDetail = {
+  watermark: 42,
+  requested: 7,
+};
+const staleFenceDetail: WireStaleFenceDetail = {
+  runtime_id: "runtime-1",
+  expected: 9,
+  actual: 8,
+};
+const multiHostErrorCode: MultiHostErrorCode = "SCOPE_DENIED";
+// @ts-expect-error multi-host error codes are a generated closed vocabulary.
+const invalidMultiHostErrorCode: MultiHostErrorCode = "REMOTE_FAILURE";
+void scopeDeniedDetail;
+void hostUnavailableDetail;
+void staleCursorDetail;
+void staleFenceDetail;
+void multiHostErrorCode;
+void invalidMultiHostErrorCode;
+
+declare const publicMob: Mob;
+declare const publicClient: MeerkatClient;
+
+const clientGrantResult: Promise<WireGrantRecord> = publicClient.grantMobScopes(
+  "mob-1",
+  "operator-1",
+  ["read_history"],
+);
+const clientGrantList: Promise<WireGrantRecord[]> =
+  publicClient.listMobGrants("mob-1");
+const mobGrantResult: Promise<WireGrantRecord> = publicMob.grantScopes(
+  "operator-1",
+  ["read_history"],
+);
+const mobGrantList: Promise<WireGrantRecord[]> = publicMob.grants();
+void clientGrantResult;
+void clientGrantList;
+void mobGrantResult;
+void mobGrantList;
+
+const memberLiveOpenOptions: MobMemberLiveOpenOptions = {
+  turningMode: "explicit_commit",
+  transport: "websocket",
+};
+const memberLiveTurningMode: RealtimeTurningMode = "provider_managed";
+const memberLiveOpenParams: MobMemberLiveOpenParams = {
+  mob_id: "mob-1",
+  agent_identity: "worker-1",
+  turning_mode: memberLiveTurningMode,
+  transport: "webrtc",
+};
+
+type ClientMemberLiveOpenOptions = NonNullable<
+  Parameters<MeerkatClient["openMobMemberLive"]>[2]
+>;
+const clientMemberLiveOpenOptions: ClientMemberLiveOpenOptions = memberLiveOpenOptions;
+
+const invalidMemberLiveTurningMode: MobMemberLiveOpenOptions = {
+  // @ts-expect-error turning mode is the generated closed vocabulary.
+  turningMode: "automatic",
+};
+// @ts-expect-error transport is the generated websocket/webrtc literal.
+const invalidMemberLiveTransport: MobMemberLiveOpenOptions = { transport: "sse" };
+
+const clientMemberLiveOpenResult: Promise<LiveOpenResult> =
+  publicClient.openMobMemberLive("mob-1", "worker-1", memberLiveOpenOptions);
+const mobMemberLiveOpenResult: Promise<LiveOpenResult> =
+  publicMob.memberLiveOpen("worker-1", memberLiveOpenOptions);
+const mobMemberLiveCloseResult: Promise<LiveCloseResult> =
+  publicMob.memberLiveClose("worker-1", "channel-1");
+const mobMemberLiveStatusResult: Promise<LiveStatusResult> =
+  publicMob.memberLiveStatus("worker-1", "channel-1");
+const memberLiveControlVerb: BridgeLiveControlVerb = {
+  verb: "truncate",
+  item_id: "item-1",
+  content_index: 0,
+  audio_played_ms: 50,
+};
+const mobMemberLiveControlResult: Promise<BridgeLiveControlOutcome> =
+  publicMob.memberLiveControl("worker-1", "channel-1", memberLiveControlVerb);
+
+// @ts-expect-error control verbs are a generated discriminated union.
+publicMob.memberLiveControl("worker-1", "channel-1", { verb: "pause" });
+
+void memberLiveOpenParams;
+void clientMemberLiveOpenOptions;
+void invalidMemberLiveTurningMode;
+void invalidMemberLiveTransport;
+void clientMemberLiveOpenResult;
+void mobMemberLiveOpenResult;
+void mobMemberLiveCloseResult;
+void mobMemberLiveStatusResult;
+void mobMemberLiveControlResult;
+
 const spawnSpec: SpawnSpec = {
   profile: "worker",
   agentIdentity: "worker-1",
+  placement: "host-b",
 };
 
 void spawnSpec;
+
+const mobControlScope: MobControlScope = "admin_grants";
+const mobGrantRecord: MobGrantRecord = {
+  principal: "operator-1",
+  scopes: ["read_history", mobControlScope],
+  expires_at_ms: 1_750_000_000_000,
+};
+// @ts-expect-error grant records preserve the generated snake_case boundary.
+mobGrantRecord.expiresAtMs;
+// @ts-expect-error grant scopes are a closed wire vocabulary.
+const invalidMobControlScope: MobControlScope = "manage";
+
+void mobGrantRecord;
+void invalidMobControlScope;
 
 const sessionOptionsWithAuthBinding: SessionOptions = {
   authBinding: { realm: "dev", binding: "default_openai" },
@@ -222,7 +772,6 @@ const publicSpawnSpecWithAdvancedFields: SpawnSpec = {
   autoWireParent: true,
   launchMode: { mode: "fresh" },
   toolAccessPolicy: { type: "allow_list", value: ["grep"] },
-  budgetSplitPolicy: { type: "remaining" },
   inheritedToolFilter: { Allow: ["grep"] },
   overrideProfile: {
     model: "claude-sonnet-4-6",
@@ -233,9 +782,24 @@ const publicSpawnSpecWithAdvancedFields: SpawnSpec = {
 
 void publicSpawnSpecWithAdvancedFields;
 
+const publicTranscriptForkOptions: TranscriptForkOptions = {
+  runningBehavior: "reject",
+  toolAccessPolicy: { type: "allow_list", value: ["grep"] },
+};
+void publicTranscriptForkOptions;
+
+const publicTranscriptRewriteOptions: TranscriptRewriteOptions = {
+  runningBehavior: "reject",
+  actor: "operator",
+  // @ts-expect-error Tool policy belongs to fork creation, not in-place rewrite.
+  toolAccessPolicy: { type: "allow_list", value: ["grep"] },
+};
+void publicTranscriptRewriteOptions;
+
 const publicSpawnManySpec: SpawnManySpec = {
   profile: "worker",
   agentIdentity: "worker-many",
+  placement: "host-b-peer",
   authBinding: { realm: "dev", binding: "default_anthropic" },
 };
 
@@ -391,7 +955,6 @@ const generatedMobSpawnWithAdvancedJsonSlot: MobSpawnParams = {
   agent_identity: "worker-2",
   launch_mode: { mode: "fresh" },
   tool_access_policy: { type: "allow_list", value: ["grep"] },
-  budget_split_policy: { type: "remaining" },
   inherited_tool_filter: { Allow: ["grep"] },
   override_profile: {
     model: "claude-sonnet-4-6",
@@ -406,7 +969,6 @@ const generatedMobToolAccess: WireToolAccessPolicy = {
   type: "allow_list",
   value: ["grep"],
 };
-const generatedMobBudgetSplit: WireBudgetSplitPolicy = { type: "remaining" };
 const generatedMobToolFilter: WireToolFilter = { Allow: ["grep"] };
 const generatedMobProfile: WireMobProfile = { model: "claude-sonnet-4-6" };
 const generatedMobOverrideTools: WireMobToolConfig = { shell: true };
@@ -417,7 +979,6 @@ const generatedMobOverrideToolsWithRustBundles: WireMobToolConfig = {
 
 void generatedMobLaunchMode;
 void generatedMobToolAccess;
-void generatedMobBudgetSplit;
 void generatedMobToolFilter;
 void generatedMobProfile;
 void generatedMobOverrideTools;
@@ -483,6 +1044,7 @@ const generatedMobSpawnManySpec: MobSpawnSpecParams = {
   agent_identity: "worker-3",
   initial_message: "hello",
   backend: "session",
+  placement: "host-b-peer",
   auth_binding: { realm: "dev", binding: "default_anthropic" },
 };
 
@@ -531,7 +1093,7 @@ const generatedMobSpawnManyResult: MobSpawnManyResult = {
 };
 
 const generatedMobSpawnManyStatus: MobSpawnManyResultStatus = "failed";
-const generatedMobSpawnManyFailureCause: MobSpawnManyFailureCause = "profile_not_found";
+const generatedMobSpawnManyFailureCause: MobSpawnManyFailureCause = "missing_member_capability";
 const generatedMobSpawnManyFailure: MobSpawnManyFailedResult = {
   cause: generatedMobSpawnManyFailureCause,
   message: "profile missing",
@@ -699,7 +1261,17 @@ const sdkCommsSupervisorBridgeWithPublicBlocks: CommsCommand = {
     command: "deliver_member_input",
     content: [{ type: "text", text: "describe" }, sdkCommsImageBlock],
     epoch: 1,
+    expected_member: {
+      mob_id: "mob-1",
+      agent_identity: "worker-1",
+      host_id: "host-1",
+      binding_generation: 2,
+      member_session_id: "session-1",
+      generation: 3,
+      fence_token: 4,
+    },
     handling_mode: "steer",
+    injected_context: ["host context"],
     input_id: "input-1",
     protocol_version: 1,
     supervisor: {
@@ -707,8 +1279,72 @@ const sdkCommsSupervisorBridgeWithPublicBlocks: CommsCommand = {
       name: "supervisor",
       peer_id: "pictionary/supervisor/supervisor",
     },
+    turn: { correlation: { run_id: "run-1", step_id: "step-1" } },
   },
   blocks: [{ type: "text", text: "describe" }, sdkCommsImageBlock],
+};
+
+const sdkBridgeSupervisor = {
+  address: "inproc://supervisor",
+  name: "supervisor",
+  peer_id: "pictionary/supervisor/supervisor",
+  pubkey: [1, 2, 3] as const,
+} as const;
+
+const sdkBridgeExpectedMember: BridgeMemberIncarnation = {
+  mob_id: "mob-1",
+  agent_identity: "worker-1",
+  host_id: "host-1",
+  binding_generation: 2,
+  member_session_id: "session-1",
+  generation: 3,
+  fence_token: 4,
+};
+
+const sdkBridgeHardCancel: BridgeCommandHardCancelMember = {
+  command: "hard_cancel_member",
+  epoch: 1,
+  expected_member: sdkBridgeExpectedMember,
+  expected_run_id: "run-1",
+  operation_id: "operation-1",
+  protocol_version: 1,
+  reason: "operator interrupt",
+  supervisor: sdkBridgeSupervisor,
+};
+
+const sdkBridgePoll: BridgeCommandPollMemberEvents = {
+  command: "poll_member_events",
+  cursor: { cursor: "at", generation: 3, seq: 9 },
+  epoch: 1,
+  expected_member: sdkBridgeExpectedMember,
+  outcome_acks: [{ generation: 3, fence_token: 4, input_id: "input-1" }],
+  protocol_version: 1,
+  supervisor: sdkBridgeSupervisor,
+};
+
+const sdkBridgeLiveOpen: BridgeCommandOpenMemberLiveChannel = {
+  command: "open_member_live_channel",
+  epoch: 1,
+  expected_member: sdkBridgeExpectedMember,
+  protocol_version: 1,
+  supervisor: sdkBridgeSupervisor,
+  transport: "websocket",
+};
+
+// Overlay handoff is optional on both wire and unwire for pre-V3 peers.
+const sdkBridgeWireWithoutOverlay: BridgeCommandWireMember = {
+  command: "wire_member",
+  epoch: 1,
+  peer_spec: sdkBridgeSupervisor,
+  protocol_version: 1,
+  supervisor: sdkBridgeSupervisor,
+};
+const sdkBridgeUnwireWithoutOverlay: BridgeCommandUnwireMember = {
+  command: "unwire_member",
+  epoch: 1,
+  peer_spec: sdkBridgeSupervisor,
+  protocol_version: 1,
+  supervisor: sdkBridgeSupervisor,
 };
 
 const sdkCommsPeerRequestIntentMismatch: CommsCommand = {
@@ -723,6 +1359,11 @@ void sdkCommsPeerMessageWithBlocks;
 void sdkCommsPeerRequestWithBlocks;
 void sdkCommsSupervisorBridgeWithPublicBlocks;
 void sdkCommsPeerRequestIntentMismatch;
+void sdkBridgeHardCancel;
+void sdkBridgePoll;
+void sdkBridgeLiveOpen;
+void sdkBridgeWireWithoutOverlay;
+void sdkBridgeUnwireWithoutOverlay;
 
 // R5-10: `LiveSendInputParams.chunk` must be the typed `LiveInputChunkWire`
 // discriminated union, not an opaque `Record<string, unknown>`. Each typed
@@ -867,7 +1508,11 @@ void liveRewriteRequiresReopenReason;
 // payload without an `as` cast.
 function readAudioIdentity(
   obs: WireLiveAdapterObservation,
-): { item_id?: string; response_id?: string; content_index?: number } | null {
+): {
+  item_id?: string | null;
+  response_id?: string | null;
+  content_index?: number | null;
+} | null {
   if (obs.observation !== "assistant_audio_chunk") return null;
   // Compile-time proof: `obs` is narrowed to the audio variant; the
   // identity fields are visible without further type assertions.

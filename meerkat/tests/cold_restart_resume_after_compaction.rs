@@ -818,11 +818,10 @@ mod tests {
         async fn commit_unregister_finalization(
             &self,
             runtime_id: &meerkat_runtime::LogicalRuntimeId,
-            commit: meerkat_runtime::store::MachineLifecycleCommit,
-            input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+            finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             self.inner
-                .commit_unregister_finalization(runtime_id, commit, input_states)
+                .commit_unregister_finalization(runtime_id, finalization)
                 .await
         }
 
@@ -832,6 +831,19 @@ mod tests {
             snapshot: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+        }
+
+        async fn initialize_ops_lifecycle_if_absent(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            candidate: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<
+            meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+                .await
         }
 
         async fn load_ops_lifecycle(
@@ -1375,6 +1387,23 @@ mod tests {
                 rewrite_audits, 0,
                 "the injected append failure must leave the audit missing until retry"
             );
+
+            // The failed compatibility projection stops this host and starts
+            // the machine-owned unregister saga asynchronously. The
+            // completion waiter above proves the run outcome, not that the
+            // old host has finished detaching. Join that exact saga before
+            // constructing host 2 so cold recovery cannot race a durable
+            // Draining prefix from host 1.
+            wait_for_canonical_unregister_completion(&adapter, &session_id).await;
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("reload outbox after host-1 unregister")
+                    .len(),
+                1,
+                "host teardown must preserve the committed compaction outbox for cold recovery"
+            );
             session_id
         };
 
@@ -1809,6 +1838,45 @@ mod tests {
         }
     }
 
+    async fn wait_for_canonical_unregister_completion(
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &meerkat::SessionId,
+    ) {
+        let expected_runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if !adapter.contains_session(session_id).await {
+                    break;
+                }
+                match adapter.unregister_session(session_id).await {
+                    Ok(()) => {}
+                    Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress {
+                        runtime_id,
+                    }) => {
+                        assert_eq!(
+                            runtime_id, expected_runtime_id,
+                            "unregister coordinator reported the wrong runtime identity"
+                        );
+                    }
+                    Err(error) => {
+                        assert!(
+                            !adapter.contains_session(session_id).await,
+                            "unregister coordinator failed for runtime {expected_runtime_id}: {error}"
+                        );
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unregister coordinator should complete before the process boundary");
+        assert!(
+            !adapter.contains_session(session_id).await,
+            "completed unregister must remove runtime {expected_runtime_id}"
+        );
+    }
+
     /// Kill between commit points: the host dies (loses durable row writes)
     /// during the compaction turn's boundary persist, AFTER the runtime-store
     /// snapshots and the event-store rewrite audit committed but BEFORE the
@@ -1858,12 +1926,42 @@ mod tests {
                 !has_compaction_summary(&row),
                 "test setup failed: durable row unexpectedly carries the compacted transcript"
             );
+
+            // The failed compatibility checkpoint stops the runtime after its
+            // committed snapshot is durable. Its completion waiter resolves
+            // before the independently owned unregister saga necessarily
+            // finishes, and the executor itself retains the service/adapter
+            // Arcs, so merely leaving this lexical scope is not a process
+            // boundary. Join the canonical saga before constructing host 2;
+            // otherwise host 2 can race a durable Draining prefix and this
+            // transcript-projection test accidentally becomes an unregister
+            // recovery test.
+            wait_for_canonical_unregister_completion(&adapter, &session_id).await;
             session_id
         };
         let runtime_store =
             meerkat_runtime::store::SqliteRuntimeStore::new(temp.path().join("sessions.sqlite3"))
                 .expect("reopen runtime store after kill window");
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        assert_eq!(
+            meerkat_runtime::store::load_runtime_state(&runtime_store, &runtime_id)
+                .await
+                .expect("load completed runtime lifecycle after process boundary"),
+            Some(meerkat_runtime::RuntimeState::Idle),
+            "host 1 must durably commit the completed unregister lifecycle before host 2 starts"
+        );
+        let lifecycle_record = runtime_store
+            .load_machine_lifecycle_record(&runtime_id)
+            .await
+            .expect("load completed machine lifecycle record")
+            .expect("completed machine lifecycle record must remain queryable");
+        let lifecycle_record: serde_json::Value = serde_json::from_slice(&lifecycle_record)
+            .expect("completed machine lifecycle record must remain valid JSON");
+        assert_eq!(
+            lifecycle_record.get("unregister_progress"),
+            Some(&serde_json::Value::Null),
+            "host 2 must not inherit an unfinished unregister prefix from host 1"
+        );
         let runtime_snapshot = runtime_store
             .load_session_snapshot(&runtime_id)
             .await

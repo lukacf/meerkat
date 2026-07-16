@@ -28,13 +28,16 @@ pub fn build_per_open_realtime_session_factory(
     realm_config_source: Arc<dyn RealmConfigSource>,
     realm: RealmId,
 ) -> Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory> {
-    let realtime_config_source = Arc::new(
-        meerkat::session_runtime::realtime_credentials::StoreBackedRealtimeConfigSource::new(
-            config_store,
-            Some(meerkat::RealmInheritance::new(realm_config_source, realm)),
-        ),
-    );
-    factory.build_openai_realtime_session_factory(realtime_config_source)
+    // Phase 6b (DEC-P6B-L9): the composition is facade-owned so the member
+    // host daemon runs the identical wiring over its own realm chain; this
+    // module keeps its name, doc, and the binary-wiring regression test —
+    // the test keeps pinning what the `rkat-rpc` binary ships.
+    meerkat::session_runtime::realtime_credentials::build_per_open_realtime_session_factory(
+        factory,
+        config_store,
+        realm_config_source,
+        realm,
+    )
 }
 
 #[cfg(test)]

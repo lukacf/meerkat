@@ -1809,7 +1809,15 @@ fn workspace_member_dirs(root: &Path) -> Result<Vec<String>> {
 /// instead of silently shrinking the resolution domain.
 fn workspace_type_index(root: &Path) -> Result<BTreeSet<String>> {
     let mut index = BTreeSet::new();
-    for schema in meerkat_machine_schema::canonical_machine_schemas() {
+    // Canonical machines PLUS the non-canonical scoped authorities that own
+    // ledgered state (plan §21.5 requires ownership entries for
+    // MobHostBindingAuthority, whose generated types are macro expansions
+    // invisible to the source walk below — the catalog schema is their
+    // typed-fact source).
+    let mut machine_schemas = meerkat_machine_schema::canonical_machine_schemas();
+    machine_schemas
+        .push(meerkat_machine_schema::catalog::dsl::dsl_mob_host_binding_authority_machine());
+    for schema in machine_schemas {
         index.insert(schema.machine.as_str().to_string());
         for variants in [
             &schema.state.phase.variants,
@@ -2715,7 +2723,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         ),
         state_entry!(
             "meerkat-mob/src/runtime/provisioner.rs",
-            "RuntimeSessionState.queued_turns",
+            "RuntimeSessionState.queued_turn_owner",
             Subsystem::Mob,
             StateClass::TransportBuffer,
             "InputLifecycle canonical input identity + runtime primitive contributing ids",
@@ -2736,6 +2744,42 @@ fn state_cells() -> Vec<StateCellEntry> {
             None,
             EntryStatus::Closed,
             "treat ops registry as opaque access to canonical operation lifecycle truth; spawn receipts carry canonical operation ids and live member-op lookups target non-terminal lifecycle state only",
+        ),
+        // Multi-host mobs: one cell, four machine regions (the
+        // `MobActor.dsl_authority` posture) — the ledger dedups by
+        // (path, symbol), so the supervisor-binding, materialized-member,
+        // release-dedup, and turn-outcome-journal regions fold into this
+        // single MachineOwned entry.
+        state_entry!(
+            "meerkat-mob/src/runtime/host_actor.rs",
+            "MobHostActor.binding_authority",
+            Subsystem::Mob,
+            StateClass::MachineOwned,
+            "MobHostBindingAuthority mob-keyed regions: supervisor-binding tuple (peer, signing key, epoch, phase); materialized-member rows per (mob, identity) (generation, fence, session, spec digest — successes only, §14 R7); release-dedup rows (released generation, fence, typed disposal); turn-outcome journal per (mob, identity, generation, input_id) (terminal_seq pinned to StoredEvent.seq, §18 O2)",
+            Some(contract(
+                "per-mob binding tuple recorded by ResolveHostBind/ResolveHostRebind and cleared by RevokeHostBinding; materialize dedup replays at the recorded tuple+digest (StaleFence below, SpecDigestMismatch on digest divergence); release replay returns the recorded MemberSessionDisposal; turn-outcome rows are idempotent, generation-scoped, pruned at member release, and mob-cleared at revoke (DEC-5)",
+                "bind accept/replay, strictly-monotonic rebind (+ idempotent rebind replay ack), revoke clear, host-command admission reads, ResolveMaterializeAdmission/Preflight arms, RecordMaterializedMember, ResolveReleaseAdmission/RecordMemberRelease, RecordTurnOutcome fresh/replay",
+                StalenessPolicy::Forbidden,
+            )),
+            EntryStatus::Closed,
+            "binding/dedup/journal truth lives only in the generated DSL authority; the host shell observes envelope facts (sender match, address match, token validity) and feeds them typed — no shell pre-check decides admission, one idempotency key never names two builds, and disposal classes are machine facts never inferred by the shell",
+        ),
+        // Multi-host mobs: controlling-host upcall serving (§3.5). Machine
+        // admission runs FIRST on every delivery; this durable protocol owns
+        // effect/reply idempotency, never authorization.
+        state_entry!(
+            "meerkat-mob/src/store/mod.rs",
+            "MobMemberOperatorRequestRecord.state",
+            Subsystem::Mob,
+            StateClass::MachineOwned,
+            "durable member-operator request/reply protocol after exact-generation/fence MobMachine admission",
+            Some(contract(
+                "Pending/Terminal rows keyed by (mob_id, agent_identity, requester_generation, requester_fence_token, request_id), carrying the typed-operation digest; Terminal is immutable and replayed verbatim, while a recovered Pending terminalizes indeterminate without re-execution",
+                "atomic begin-if-absent before effect; exact Pending-to-Terminal compare-and-put; digest conflict leaves the original untouched; no capacity eviction; mob-destroy scrub with rollback restore",
+                StalenessPolicy::Forbidden,
+            )),
+            EntryStatus::Closed,
+            "the ledger is never read before signed tuple + peer-key machine admission and carries no capability authority; completed success is emitted only after durable terminal persistence (or durable-winner reload), and post-effect persistence uncertainty can produce only a stable indeterminate/non-success outcome",
         ),
         // dogma #44 resolved: per-binding AuthMachine slot map is the only
         // shell-side container; the kernel state for each binding lives
@@ -4050,7 +4094,7 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             Subsystem::Mob,
             &[
                 "SessionBackend.runtime_sessions",
-                "RuntimeSessionState.queued_turns",
+                "RuntimeSessionState.queued_turn_owner",
                 "MobOpsAdapter.member_bindings",
             ],
             "runtime-backed bridge tables must agree on member/session/runtime association",

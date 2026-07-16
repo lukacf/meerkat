@@ -416,6 +416,10 @@ mod tests {
     use crate::composition::{
         CatalogCompositionSignalDispatcher, OwnedFieldValue, RouteTable, SignalConsumerSurface,
     };
+    use crate::meerkat_machine::{
+        EnsureRuntimeExecutorAttachment, LocalSessionMaterializationMode,
+        PreparedSessionMaterialization, RuntimeLoopAttachmentSlot,
+    };
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
@@ -528,29 +532,34 @@ mod tests {
         }
     }
 
-    async fn begin_startup_gated_attachment(
+    async fn begin_startup_gated_first_live_attachment(
         machine: &Arc<MeerkatMachine>,
         session_id: &SessionId,
+        mut prepared: PreparedSessionMaterialization,
     ) -> (tokio::task::JoinHandle<()>, Arc<tokio::sync::Notify>) {
         let reconciliation_started = Arc::new(tokio::sync::Notify::new());
         let allow_reconciliation = Arc::new(tokio::sync::Notify::new());
         let registration = tokio::spawn({
-            let machine = Arc::clone(machine);
-            let session_id = session_id.clone();
             let reconciliation_started = Arc::clone(&reconciliation_started);
             let allow_reconciliation = Arc::clone(&allow_reconciliation);
             async move {
-                machine
-                    .ensure_session_with_executor(
-                        session_id,
+                let attachment = prepared
+                    .ensure_executor_attachment(move |_| {
                         Box::new(StartupGatedNoopExecutor {
                             reconciliation_started,
                             allow_reconciliation,
                             gate_first_reconciliation: std::sync::atomic::AtomicBool::new(true),
-                        }),
-                    )
+                        })
+                    })
                     .await
-                    .expect("replacement executor must finish attaching after startup release");
+                    .expect("prepared first live attachment must reach startup reconciliation");
+                let EnsureRuntimeExecutorAttachment::Pending(attachment) = attachment else {
+                    panic!("missing-live materialization unexpectedly found a serving attachment");
+                };
+                attachment
+                    .commit()
+                    .await
+                    .expect("first live attachment must finish after startup release");
             }
         });
 
@@ -559,12 +568,12 @@ mod tests {
             reconciliation_started.notified(),
         )
         .await
-        .expect("replacement executor must reach startup reconciliation");
+        .expect("first live attachment must reach startup reconciliation");
 
         let attached = machine
             .session_dsl_state(session_id)
             .await
-            .expect("attached replacement authority exists");
+            .expect("pending first attachment authority exists");
         assert_eq!(attached.lifecycle_phase, mm_dsl::MeerkatPhase::Attached);
         assert_eq!(
             attached.registration_phase,
@@ -574,18 +583,32 @@ mod tests {
             let sessions = machine.sessions.read().await;
             let entry = sessions
                 .get(session_id)
-                .expect("replacement attachment remains registered");
+                .expect("pending first attachment remains registered");
             assert!(
-                entry.has_live_attachment(),
-                "startup reconciliation begins only after the replacement attachment is published"
+                matches!(
+                    &entry.attachment_slot,
+                    RuntimeLoopAttachmentSlot::Pending(_)
+                ),
+                "startup reconciliation must retain a pending mechanical attachment"
+            );
+            assert!(
+                !entry.has_live_attachment(),
+                "startup reconciliation must not publish a serving attachment before commit"
             );
         }
+        assert!(
+            machine
+                .current_executor_attachment_witness(session_id)
+                .await
+                .is_none(),
+            "a pending startup attachment must not expose a serving witness"
+        );
 
         (registration, allow_reconciliation)
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn route_replacement_and_finish_gated_attachment(
+    async fn route_successor_binding_and_finish_gated_attachment(
         machine: &Arc<MeerkatMachine>,
         session_id: &SessionId,
         registration: tokio::task::JoinHandle<()>,
@@ -629,12 +652,12 @@ mod tests {
                         ],
                     )
                     .await
-                    .expect("routed replacement binding is admitted at Attached");
+                    .expect("routed successor binding is admitted at Attached");
             }
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), route_started.notified())
             .await
-            .expect("replacement binding route must start");
+            .expect("successor binding route must start");
         tokio::task::yield_now().await;
         assert!(
             !routed.is_finished(),
@@ -644,12 +667,12 @@ mod tests {
         allow_reconciliation.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(2), registration)
             .await
-            .expect("replacement executor registration must finish")
-            .expect("replacement executor registration task must not panic");
+            .expect("first live attachment registration must finish")
+            .expect("first live attachment registration task must not panic");
         tokio::time::timeout(std::time::Duration::from_secs(2), routed)
             .await
-            .expect("replacement binding route must finish")
-            .expect("replacement binding route task must not panic");
+            .expect("successor binding route must finish")
+            .expect("successor binding route task must not panic");
 
         let completion_outcome = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -664,7 +687,7 @@ mod tests {
                     .await
                     .expect("runtime spine exists after completion timeout");
                 panic!(
-                    "preserved queued input must complete on the replacement executor: {error}; snapshot={snapshot:#?}"
+                    "unassigned queued input must complete on the first live attachment after ownerless recovery: {error}; snapshot={snapshot:#?}"
                 );
             }
         };
@@ -1158,6 +1181,14 @@ mod tests {
             .expect("local bindings prepare");
 
         assert_eq!(bindings.session_id(), &session_id);
+        let expected_epoch = {
+            let sessions = machine.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .expect("session registered")
+                .epoch_id
+                .to_string()
+        };
         assert!(
             signal_surface.log.lock().await.is_empty(),
             "local resource preparation must not publish cross-machine runtime readiness"
@@ -1180,18 +1211,23 @@ mod tests {
         }
 
         machine
-            .apply_routed_meerkat_input(
-                &session_id,
-                mm_dsl::MeerkatMachineInput::PrepareBindings {
-                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-authoritative".into()),
-                    fence_token: mm_dsl::FenceToken(13),
-                    generation: Some(mm_dsl::Generation(0)),
-                    runtime_epoch_id: None,
-                    session_id: mm_dsl::SessionId(session_id.to_string()),
-                },
+            .prepare_runtime_placement_binding(
+                session_id.clone(),
+                crate::identifiers::LogicalRuntimeId::new("rt-authoritative"),
+                13,
+                7,
             )
             .await
             .expect("authoritative binding still applies after local resource prep");
+        machine
+            .prepare_runtime_placement_binding(
+                session_id.clone(),
+                crate::identifiers::LogicalRuntimeId::new("rt-authoritative"),
+                13,
+                7,
+            )
+            .await
+            .expect("exact placement replay is idempotent");
 
         let log = signal_surface.log.lock().await;
         assert_eq!(log.len(), 1);
@@ -1213,11 +1249,24 @@ mod tests {
                 authority.state().active_fence_token,
                 Some(mm_dsl::FenceToken(13))
             ));
+            assert!(matches!(
+                authority.state().active_runtime_generation,
+                Some(mm_dsl::Generation(7))
+            ));
+            assert_eq!(
+                authority
+                    .state()
+                    .active_runtime_epoch_id
+                    .as_ref()
+                    .map(|id| id.0.as_str()),
+                Some(expected_epoch.as_str()),
+                "exact member placement must still bind the current registration epoch"
+            );
         }
     }
 
     #[tokio::test]
-    async fn v3_idle_stale_binding_is_redriven_before_routed_revival_rebinds() {
+    async fn v3_idle_stale_binding_is_normalized_before_routed_revival_rebinds() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let runtime_store: Arc<dyn crate::store::RuntimeStore> = store.clone();
         let session_id = sid("00000000-0000-0000-0000-000000000034");
@@ -1280,113 +1329,142 @@ mod tests {
             mm_dsl::RegistrationPhase::Queuing,
             "V3 does not persist an executor claim, so cold recovery must queue a replacement"
         );
-        assert!(
-            matches!(&recovered.active_runtime_id, Some(value) if value.0 == "stale-mob-runtime:7")
-        );
-        assert_eq!(recovered.active_fence_token, Some(mm_dsl::FenceToken(41)));
         assert_eq!(
-            recovered.active_runtime_generation,
-            Some(mm_dsl::Generation(7))
+            recovered.active_runtime_id, None,
+            "cold registration must release the stale runtime owner"
         );
-        assert!(
-            matches!(&recovered.active_runtime_epoch_id, Some(value) if value.0 == "stale-runtime-epoch")
+        assert_eq!(
+            recovered.active_fence_token, None,
+            "cold registration must release the stale fence"
+        );
+        assert_eq!(
+            recovered.active_runtime_generation, None,
+            "cold registration must release the stale generation"
+        );
+        assert_eq!(
+            recovered.active_runtime_epoch_id, None,
+            "cold registration must release the stale runtime epoch"
         );
         assert!(
             signal_surface.log.lock().await.is_empty(),
             "local resource recovery must not publish stale runtime readiness"
         );
 
+        // No physical attachment exists yet: this request belongs to the
+        // machine's durable unassigned queue, not to an attachment A that a
+        // later B could wrongly inherit.
+        assert!(
+            machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "cold Queuing recovery must not mint an attachment witness"
+        );
         let queued_input = crate::input::Input::Prompt(crate::input::PromptInput::new(
-            "durable work queued before missing-executor revival redrive",
+            "durable work queued before missing-live materialization",
             None,
         ));
         let queued_input_id = queued_input.id().clone();
         let (outcome, completion) = machine
             .accept_input_with_completion(&session_id, queued_input)
             .await
-            .expect("queue durable work before delivery-time redrive");
+            .expect("queue durable work before missing-live materialization");
         assert!(outcome.is_accepted());
         let completion = completion.expect("queued durable work installs a completion waiter");
         let durable_before =
             crate::store::RuntimeStore::load_input_states(store.as_ref(), &runtime_id)
                 .await
-                .expect("load queued durable work before redrive");
+                .expect("load queued durable work before missing-live preparation");
         assert_eq!(durable_before.len(), 1);
         assert_eq!(durable_before[0].state.input_id, queued_input_id);
         assert_eq!(
             durable_before[0].seed.phase,
             crate::input_state::InputLifecycleState::Queued
         );
-        let spine_before_redrive = machine
+        let spine_before_revival = machine
             .meerkat_machine_spine_snapshot(&session_id)
             .await
-            .expect("runtime spine exists before redrive");
+            .expect("runtime spine exists before missing-live materialization");
         assert_eq!(
-            spine_before_redrive.inputs.queue,
+            spine_before_revival.inputs.queue,
             vec![queued_input_id.clone()]
         );
 
-        machine
-            .redrive_missing_executor_for_revival(&session_id, machine.session_control_authority())
+        let prepared = machine
+            .prepare_local_session_materialization_with_mode(
+                session_id.clone(),
+                LocalSessionMaterializationMode::MissingLiveRevival,
+            )
             .await
-            .expect("capability-gated redrive repairs the missing executor epoch");
+            .expect("typed missing-live materialization claims the cold-normalized session");
 
-        let redriven = machine
+        let normalized = machine
             .session_dsl_state(&session_id)
             .await
-            .expect("redriven revival authority exists");
-        assert_eq!(redriven.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+            .expect("normalized revival authority exists");
+        assert_eq!(normalized.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
         assert_eq!(
-            redriven.registration_phase,
+            normalized.registration_phase,
             mm_dsl::RegistrationPhase::Queuing
         );
         assert_eq!(
-            redriven.active_runtime_id, None,
-            "redrive releases the stale runtime owner"
+            normalized.active_runtime_id, None,
+            "missing-live preparation releases the stale runtime owner"
         );
         assert_eq!(
-            redriven.active_fence_token, None,
-            "redrive releases the stale fence"
+            normalized.active_fence_token, None,
+            "missing-live preparation releases the stale fence"
         );
         assert_eq!(
-            redriven.active_runtime_generation, None,
-            "redrive releases the stale generation"
+            normalized.active_runtime_generation, None,
+            "missing-live preparation releases the stale generation"
         );
         assert_eq!(
-            redriven.active_runtime_epoch_id, None,
-            "redrive releases the stale runtime epoch"
+            normalized.active_runtime_epoch_id, None,
+            "missing-live preparation releases the stale runtime epoch"
         );
-        let after_redrive = machine
+        let after_revival = machine
             .meerkat_machine_spine_snapshot(&session_id)
             .await
-            .expect("runtime spine remains available after redrive");
-        assert_input_spine_preserved(&spine_before_redrive.inputs, &after_redrive.inputs);
+            .expect("runtime spine remains available after missing-live preparation");
+        assert_input_spine_preserved(&spine_before_revival.inputs, &after_revival.inputs);
         assert_eq!(
-            after_redrive.completion_waiters, spine_before_redrive.completion_waiters,
+            after_revival.completion_waiters, spine_before_revival.completion_waiters,
             "typed exit/readmit must leave completion waiters verbatim"
         );
-        let durable_after_redrive =
+        let durable_after_revival =
             crate::store::RuntimeStore::load_input_states(store.as_ref(), &runtime_id)
                 .await
-                .expect("load queued durable work after redrive");
-        assert_eq!(durable_after_redrive.len(), 1);
-        assert_eq!(durable_after_redrive[0].state.input_id, queued_input_id);
+                .expect("load queued durable work after missing-live preparation");
+        assert_eq!(durable_after_revival.len(), 1);
+        assert_eq!(durable_after_revival[0].state.input_id, queued_input_id);
         assert_eq!(
-            durable_after_redrive[0].seed.phase,
+            durable_after_revival[0].seed.phase,
             crate::input_state::InputLifecycleState::Queued,
-            "the in-memory redrive must not terminalize or consume queued durable work"
+            "missing-live preparation must not terminalize or consume unassigned durable work"
         );
         assert!(
             signal_surface.log.lock().await.is_empty(),
-            "redrive must not publish runtime readiness for the discarded stale tuple"
+            "missing-live preparation must not publish runtime readiness for the discarded stale tuple"
         );
+        assert!(
+            machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "missing-live preparation must leave the durable queue unassigned until its first live attachment"
+        );
+        crate::begin_session_runtime_actor_materialization(prepared.bindings())
+            .expect("claim the normalized materialization for actor construction")
+            .commit()
+            .expect("record the normalized actor materialization");
 
         let (registration, allow_reconciliation) =
-            begin_startup_gated_attachment(&machine, &session_id).await;
+            begin_startup_gated_first_live_attachment(&machine, &session_id, prepared).await;
         let attached = machine
             .session_dsl_state(&session_id)
             .await
-            .expect("replacement startup authority exists");
+            .expect("first live attachment startup authority exists");
         assert_eq!(attached.active_runtime_id, None, "stale owner released");
         assert_eq!(attached.active_fence_token, None, "stale fence released");
         assert_eq!(
@@ -1416,7 +1494,7 @@ mod tests {
         assert_eq!(startup_persisted.binding().runtime_generation(), None);
         assert_eq!(startup_persisted.binding().runtime_epoch_id(), None);
 
-        route_replacement_and_finish_gated_attachment(
+        route_successor_binding_and_finish_gated_attachment(
             &machine,
             &session_id,
             registration,
@@ -1432,13 +1510,21 @@ mod tests {
             .await
             .expect("load healed lifecycle after replacement completion")
             .expect("healed lifecycle exists");
-        assert_eq!(healed_durable.binding().agent_runtime_id(), None);
-        assert_eq!(healed_durable.binding().fence_token(), None);
-        assert_eq!(healed_durable.binding().runtime_generation(), None);
+        assert_eq!(
+            healed_durable.runtime_state(),
+            crate::RuntimeState::Idle,
+            "generated durability classification projects process-local Attached to recoverable Idle"
+        );
+        assert_eq!(
+            healed_durable.binding().agent_runtime_id(),
+            Some("replacement-mob-runtime:8")
+        );
+        assert_eq!(healed_durable.binding().fence_token(), Some(42));
+        assert_eq!(healed_durable.binding().runtime_generation(), Some(8));
         assert_eq!(healed_durable.binding().runtime_epoch_id(), None);
 
         let log = signal_surface.log.lock().await;
-        assert_eq!(log.len(), 1, "replacement binding publishes readiness once");
+        assert_eq!(log.len(), 1, "successor binding publishes readiness once");
         assert_eq!(log[0].0.as_str(), "ObserveRuntimeReady");
         assert_eq!(log[0].1[0].0.as_str(), "agent_runtime_id");
         assert!(
@@ -1449,7 +1535,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ownerless_attached_claim_is_redriven_in_place_after_local_preparation() {
+    async fn ownerless_attached_claim_is_normalized_by_missing_live_materialization() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = sid("00000000-0000-0000-0000-000000000035");
         let signal_surface = Arc::new(RecordingSignalSurface::default());
@@ -1464,6 +1550,16 @@ mod tests {
             .prepare_local_session_bindings(session_id.clone())
             .await
             .expect("prepare the original in-process session entry");
+        // This input is accepted before any physical executor attachment
+        // exists, so it remains machine-owned and unassigned across the
+        // ownerless-claim repair below.
+        assert!(
+            machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "local preparation must not mint an attachment witness"
+        );
         let queued_input = crate::input::Input::Prompt(crate::input::PromptInput::new(
             "queued work survives an ownerless in-process executor claim",
             None,
@@ -1548,100 +1644,79 @@ mod tests {
             let entry = sessions.get(&session_id).expect("ownerless entry exists");
             assert!(
                 !entry.has_live_attachment(),
-                "completed exact stop cleanup must leave no live executor"
+                "an ownerless generated claim must not imply a serving attachment"
             );
             assert!(entry.runtime_loop_teardown.is_none());
         }
 
-        machine
-            .prepare_local_session_bindings(session_id.clone())
-            .await
-            .expect("real delivery-time preparation revisits the same ownerless entry");
-        let prepared_ownerless = machine
-            .session_dsl_state(&session_id)
-            .await
-            .expect("locally prepared ownerless authority exists");
-        assert!(
-            matches!(
-                prepared_ownerless.lifecycle_phase,
-                mm_dsl::MeerkatPhase::Idle | mm_dsl::MeerkatPhase::Attached
-            ),
-            "same-instance local preparation may preserve Attached or normalize to Idle; redrive owns both orphaned Active shapes"
-        );
-        assert_eq!(
-            prepared_ownerless.registration_phase,
-            mm_dsl::RegistrationPhase::Active,
-            "the limbo'd executor claim remains active until the explicit redrive"
-        );
-        assert!(
-            matches!(&prepared_ownerless.active_runtime_id, Some(value) if value.0 == "ownerless-stale-mob-runtime:9")
-        );
-        assert_eq!(
-            prepared_ownerless.active_fence_token,
-            Some(mm_dsl::FenceToken(51))
-        );
-        assert_eq!(
-            prepared_ownerless.active_runtime_generation,
-            Some(mm_dsl::Generation(9))
-        );
-        assert!(
-            matches!(&prepared_ownerless.active_runtime_epoch_id, Some(value) if value.0 == "ownerless-stale-runtime-epoch")
-        );
-
-        let before_redrive = machine
+        let before_revival = machine
             .meerkat_machine_spine_snapshot(&session_id)
             .await
-            .expect("ownerless runtime spine exists before redrive");
-        assert_eq!(before_redrive.inputs.queue, vec![queued_input_id.clone()]);
-        machine
-            .redrive_missing_executor_for_revival(&session_id, machine.session_control_authority())
+            .expect("ownerless runtime spine exists before missing-live preparation");
+        assert_eq!(before_revival.inputs.queue, vec![queued_input_id.clone()]);
+        let prepared = machine
+            .prepare_local_session_materialization_with_mode(
+                session_id.clone(),
+                LocalSessionMaterializationMode::MissingLiveRevival,
+            )
             .await
-            .expect("redrive repairs the locally prepared ownerless active claim");
+            .expect("typed missing-live materialization repairs the ownerless active claim");
 
-        let redriven = machine
+        let normalized = machine
             .session_dsl_state(&session_id)
             .await
-            .expect("redriven ownerless authority exists");
-        assert_eq!(redriven.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+            .expect("normalized ownerless authority exists");
+        assert_eq!(normalized.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
         assert_eq!(
-            redriven.registration_phase,
+            normalized.registration_phase,
             mm_dsl::RegistrationPhase::Queuing
         );
-        assert_eq!(redriven.active_runtime_id, None);
-        assert_eq!(redriven.active_fence_token, None);
-        assert_eq!(redriven.active_runtime_generation, None);
-        assert_eq!(redriven.active_runtime_epoch_id, None);
-        let after_redrive = machine
+        assert_eq!(normalized.active_runtime_id, None);
+        assert_eq!(normalized.active_fence_token, None);
+        assert_eq!(normalized.active_runtime_generation, None);
+        assert_eq!(normalized.active_runtime_epoch_id, None);
+        let after_revival = machine
             .meerkat_machine_spine_snapshot(&session_id)
             .await
-            .expect("ownerless runtime spine survives redrive");
-        assert_input_spine_preserved(&before_redrive.inputs, &after_redrive.inputs);
+            .expect("ownerless runtime spine survives missing-live preparation");
+        assert_input_spine_preserved(&before_revival.inputs, &after_revival.inputs);
         assert_eq!(
-            after_redrive.completion_waiters, before_redrive.completion_waiters,
+            after_revival.completion_waiters, before_revival.completion_waiters,
             "same-instance exit/readmit must leave completion waiters verbatim"
         );
         {
             let sessions = machine.sessions.read().await;
             let entry = sessions
                 .get(&session_id)
-                .expect("same entry survives redrive");
+                .expect("same entry survives missing-live preparation");
             assert!(Arc::ptr_eq(&driver_before, &entry.driver));
             assert!(Arc::ptr_eq(&authority_before, &entry.dsl_authority));
             assert_eq!(entry.epoch_id, epoch_before);
             assert!(
                 !entry.has_live_attachment(),
-                "completed exact stop cleanup must leave no live executor"
+                "missing-live normalization must leave no serving attachment"
             );
             assert!(entry.runtime_loop_teardown.is_none());
         }
         assert!(
             signal_surface.log.lock().await.is_empty(),
-            "fixture staging and redrive must not publish stale runtime readiness"
+            "fixture staging and missing-live preparation must not publish stale runtime readiness"
         );
+        assert!(
+            machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "missing-live preparation must leave the queue unassigned until its first live attachment"
+        );
+        crate::begin_session_runtime_actor_materialization(prepared.bindings())
+            .expect("claim the normalized materialization for actor construction")
+            .commit()
+            .expect("record the normalized actor materialization");
 
         let (registration, allow_reconciliation) =
-            begin_startup_gated_attachment(&machine, &session_id).await;
-        route_replacement_and_finish_gated_attachment(
+            begin_startup_gated_first_live_attachment(&machine, &session_id, prepared).await;
+        route_successor_binding_and_finish_gated_attachment(
             &machine,
             &session_id,
             registration,
@@ -1654,7 +1729,7 @@ mod tests {
         .await;
 
         let log = signal_surface.log.lock().await;
-        assert_eq!(log.len(), 1, "replacement binding publishes readiness once");
+        assert_eq!(log.len(), 1, "successor binding publishes readiness once");
         assert_eq!(log[0].0.as_str(), "ObserveRuntimeReady");
         assert!(
             matches!(&log[0].1[0].1, OwnedFieldValue::Str(value) if value == "ownerless-replacement-mob-runtime:10")
@@ -1663,7 +1738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_stop_cleanup_after_idle_preparation_does_not_block_redrive() {
+    async fn completed_stop_cleanup_is_retired_by_idle_preparation() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = sid("00000000-0000-0000-0000-000000000036");
         machine
@@ -1698,6 +1773,10 @@ mod tests {
             assert!(
                 !entry.has_live_attachment(),
                 "completed exact stop cleanup must leave no live executor"
+            );
+            assert!(
+                matches!(entry.attachment_slot, RuntimeLoopAttachmentSlot::Empty),
+                "completed exact stop cleanup must retire its attachment slot"
             );
         }
 
@@ -1737,30 +1816,8 @@ mod tests {
                 entry.runtime_stop_cleanup_coordinator.is_none(),
                 "local preparation must retire the completed exact cleanup receipt"
             );
+            assert!(entry.runtime_loop_teardown.is_none());
         }
-
-        machine
-            .redrive_missing_executor_for_revival(&session_id, machine.session_control_authority())
-            .await
-            .expect(
-                "redrive retires completed cleanup ownership instead of reporting stop in progress",
-            );
-
-        let redriven = machine
-            .session_dsl_state(&session_id)
-            .await
-            .expect("redriven authority exists");
-        assert_eq!(redriven.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
-        assert_eq!(
-            redriven.registration_phase,
-            mm_dsl::RegistrationPhase::Queuing
-        );
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&session_id)
-            .expect("redriven session remains registered");
-        assert!(entry.runtime_stop_cleanup_coordinator.is_none());
-        assert!(entry.runtime_loop_teardown.is_none());
     }
 
     #[tokio::test]

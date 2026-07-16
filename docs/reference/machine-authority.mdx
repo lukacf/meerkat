@@ -32,6 +32,38 @@ scheduling are auxiliary authority machines that protect specific perimeter
 state. WorkGraph is an optional subsystem authority for durable agent
 commitments, dependency-aware claim state, and goal attention bindings.
 
+One scoped authority sits outside the canonical registry:
+`MobHostBindingAuthority` (catalog DSL source
+`meerkat-machine-schema/src/catalog/dsl/mob_host_binding_authority.rs`,
+production expansion `meerkat-mob/src/machines/mob_host_binding_authority.rs`).
+It is the member host's process-scoped, mob-keyed admission and dedup
+authority for host-addressed mob commands: supervisor bind/rebind/revoke,
+host-command admission, materialize admission/preflight with success-only
+dedup memory, release admission with recorded-disposal replay, and the remote
+turn-outcome journal. It follows the `session_persistence_version_authority`
+precedent — one shared DSL body expanded into both crates, pinned by a
+dedicated production-schema parity test
+(`meerkat-mob/tests/mob_host_binding_authority.rs`) and by kernel tests
+instead of TLC — so it carries seam-inventory dispositions like any machine
+but has no poster, no generated kernel, and no entry in
+`canonical_machine_schemas()`.
+
+Principal control-scope grants (multi-host mobs §8) follow the
+`ToolExecutionPolicy` split. The `MobMachine` owns the grant lifecycle — the
+`operator_grant_scopes` / `operator_grant_expiries` facts, the
+`GrantOperatorScopes` / `RevokeOperatorScopes` transitions, and the in-machine
+revalidation of caller-proposed revoke partitions — while scope *resolution*
+lives shell-side in the sealed `ResolvedControlPolicy`
+(`meerkat-mob/src/control_policy.rs`): private shape, one `resolve()` mint
+path, no serde, fail-closed to the empty scope set. Expiry is data: the
+machine never reads a clock; the enforcement chokepoint reads the wall clock
+once per decision and passes `now_ms` in as a parameter, so a restored mob's
+expired grants stay expired with zero persisted derived state. Grant
+durability is a runtime-metadata record (`MobOperatorGrantRecord`) written
+only under `GrantRecorded`/`GrantRevoked` transition witnesses and replayed
+on resume through the machine's own `GrantOperatorScopes` input — never a
+second enforcement source.
+
 ## Canonical Compositions
 
 The canonical registry is `canonical_composition_schemas()` in

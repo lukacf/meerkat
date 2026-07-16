@@ -10,10 +10,27 @@ impl MeerkatMachine {
                 session_id,
                 keep_alive,
                 comms_runtime,
+                expected_attachment,
                 mob_id,
             } => {
+                if let Some(expected) = expected_attachment.as_ref()
+                    && (!expected.belongs_to(self) || expected.session_id() != &session_id)
+                {
+                    return Err(RuntimeDriverError::StaleAuthority {
+                        reason: format!(
+                            "peer-ingress attachment witness does not belong to runtime session '{session_id}'"
+                        ),
+                    });
+                }
                 // Guard: session must exist.
                 if !self.sessions.read().await.contains_key(&session_id) {
+                    if expected_attachment.is_some() {
+                        return Err(RuntimeDriverError::StaleAuthority {
+                            reason: format!(
+                                "runtime executor attachment disappeared before peer-ingress publication for session '{session_id}'"
+                            ),
+                        });
+                    }
                     return Err(RuntimeDriverError::NotReady {
                         state: RuntimeState::Destroyed,
                     });
@@ -28,6 +45,33 @@ impl MeerkatMachine {
                     Some(ref g) => Some(g.lock().await),
                     None => None,
                 };
+
+                if let Some(expected) = expected_attachment.as_ref() {
+                    let exact_attachment = if let Some(gate) = gate.as_ref() {
+                        let sessions = self.sessions.read().await;
+                        sessions.get(&session_id).is_some_and(|entry| {
+                            Arc::ptr_eq(&entry.mutation_gate, gate)
+                                && entry.epoch_id == expected.epoch_id
+                                && entry.generated_executor_registration_active()
+                                && matches!(
+                                    &entry.attachment_slot,
+                                    RuntimeLoopAttachmentSlot::Attached(attachment)
+                                        if attachment.id == expected.attachment_id
+                                            && !attachment.wake_tx.is_closed()
+                                            && !attachment.effect_tx.is_closed()
+                                )
+                        })
+                    } else {
+                        false
+                    };
+                    if !exact_attachment {
+                        return Err(RuntimeDriverError::StaleAuthority {
+                            reason: format!(
+                                "runtime executor attachment changed before peer-ingress publication for session '{session_id}'"
+                            ),
+                        });
+                    }
+                }
 
                 if let Err(reason) = self
                     .stage_session_dsl_input(

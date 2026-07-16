@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { testSourcePaths as sharedTestSourcePaths } from "./rust-test-selector.mjs";
 
 const checkOnly = process.argv.includes("--check");
@@ -572,6 +572,18 @@ const nativeE2eSystemTests = [
   },
   {
     packageKey: "meerkat-cli",
+    cargoTestTarget: "system_mob_host_daemon",
+    name: "e2e_system_mob_host_daemon_lifecycle_bazel_test",
+    testName: "integration_real_mob_host_daemon_lifecycle",
+  },
+  {
+    packageKey: "meerkat-cli",
+    cargoTestTarget: "system_mob_cli_verbs",
+    name: "e2e_system_mob_cli_verbs_over_tcp_bazel_test",
+    testName: "integration_real_mob_cli_verbs_over_tcp",
+  },
+  {
+    packageKey: "meerkat-cli",
     cargoTestTarget: "cli_mobpack_live_smoke",
     name: "e2e_system_cli_mobpack_pack_inspect_validate_bazel_test",
     testName: "e2e_smoke_mobpack_pack_inspect_validate",
@@ -635,6 +647,37 @@ function nativeE2eSystemSpecsFor(pkg, target) {
     spec.packageKey === key && spec.cargoTestTarget === target.name
   );
 }
+
+function assertNativeE2eSystemCoverage() {
+  const ignorePattern = /#\s*\[\s*ignore\s*=\s*"lane:e2e-system"\s*\]\s*(?:#\s*\[[^\]]*\]\s*)*(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/gu;
+  for (const pkg of localPackages.values()) {
+    for (const target of pkg.targets) {
+      // `e2e_*` suites may be selected through the shared Rust lane harness;
+      // standalone `system_*` Cargo targets require an explicit native Bazel
+      // wrapper so their ignored tests actually execute.
+      if (
+        !target.kind.includes("test")
+        || packageKey(pkg) !== "meerkat-cli"
+        || !target.name.startsWith("system_")
+        || !existsSync(target.src_path)
+      ) continue;
+      const source = readFileSync(target.src_path, "utf8");
+      const ignoredTests = [...source.matchAll(ignorePattern)].map((match) => match[1]);
+      if (!ignoredTests.length) continue;
+      const specs = nativeE2eSystemSpecsFor(pkg, target);
+      const covered = new Set(specs.map((spec) => spec.testName));
+      const missing = ignoredTests.filter((testName) => !covered.has(testName));
+      if (missing.length) {
+        throw new Error(
+          `${packageKey(pkg)} test target ${target.name} has lane:e2e-system tests without `
+            + `Bazel-native coverage: ${missing.join(", ")}`,
+        );
+      }
+    }
+  }
+}
+
+assertNativeE2eSystemCoverage();
 
 let staleFileCount = 0;
 
@@ -773,10 +816,69 @@ function rustSourceFiles(packageRoot, includeTests) {
   return files.sort();
 }
 
-function testSourcePaths(target, pkg, packageRoot) {
-  return [...sharedTestSourcePaths(target, pkg)]
-    .map((path) => relative(packageRoot, resolve(root, path)).replaceAll("\\", "/"))
-    .sort();
+const localPackageRoots = [...localPackages.values()]
+  .map((pkg) => ({ pkg, root: packageDir(pkg) }))
+  .sort((a, b) => b.root.length - a.root.length);
+
+function pathIsWithin(path, directory) {
+  return path === directory || path.startsWith(`${directory}${sep}`);
+}
+
+function localPackageOwningSource(path) {
+  return localPackageRoots.find((candidate) => pathIsWithin(path, candidate.root))?.pkg ?? null;
+}
+
+function externalTestSourceLabel(path) {
+  const owner = localPackageOwningSource(path);
+  if (owner) {
+    const ownerRoot = packageDir(owner);
+    const source = relative(ownerRoot, path).replaceAll("\\", "/");
+    return `//${packageKey(owner)}:${source}`;
+  }
+
+  const workspacePath = relative(root, path).replaceAll("\\", "/");
+  if (workspacePath === "test-fixtures/live_smoke/support.rs") {
+    return "//:live_smoke_support";
+  }
+  throw new Error(`test source ${workspacePath} is outside its Cargo package without a Bazel input owner`);
+}
+
+function testSourceInputs(target, pkg, packageRoot) {
+  const paths = [];
+  const compileDataLabels = new Set();
+  for (const path of sharedTestSourcePaths(target, pkg)) {
+    const absolute = resolve(root, path);
+    if (pathIsWithin(absolute, packageRoot)) {
+      paths.push(relative(packageRoot, absolute).replaceAll("\\", "/"));
+    } else {
+      compileDataLabels.add(externalTestSourceLabel(absolute));
+    }
+  }
+  return {
+    compileDataLabels: [...compileDataLabels].sort(),
+    paths: paths.sort(),
+  };
+}
+
+const externalTestSourcesByOwner = new Map();
+for (const consumer of localPackages.values()) {
+  const consumerRoot = packageDir(consumer);
+  for (const target of consumer.targets) {
+    if (!target.kind.includes("test")) continue;
+    for (const path of sharedTestSourcePaths(target, consumer)) {
+      const absolute = resolve(root, path);
+      if (pathIsWithin(absolute, consumerRoot)) continue;
+      const owner = localPackageOwningSource(absolute);
+      if (!owner) continue;
+      let entry = externalTestSourcesByOwner.get(owner.id);
+      if (!entry) {
+        entry = { paths: new Set(), visibility: new Set() };
+        externalTestSourcesByOwner.set(owner.id, entry);
+      }
+      entry.paths.add(relative(packageDir(owner), absolute).replaceAll("\\", "/"));
+      entry.visibility.add(`//${packageKey(consumer)}:__pkg__`);
+    }
+  }
 }
 
 function compileData(target, packageRoot, includeTests) {
@@ -1082,7 +1184,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `E2E_SMOKE_TURBO_S_SCENARIOS = [`,
     `    16, 21, 22, 28, 30, 44, 47, 48, 49, 50, 51, 52,`,
     `    53, 54, 71, 72, 74, 75, 76, 77, 78, 79, 80, 81,`,
-    `    82, 83, 84, 85, 86, 87, 88, 89, 90,`,
+    `    82, 83, 84, 85, 86, 87, 88, 89, 90, 92, 93,`,
     `]`,
     ``,
     `E2E_SMOKE_TURBO_S_SUITES = [`,
@@ -1321,12 +1423,19 @@ for (const pkg of localPackages.values()) {
     const scansWorkspaceRustSources = targetSourceText.includes("walk_rust_sources(&root)");
     const needsLiveWorkspaceRunfiles = targetSourceText.includes("LIVE_WORKSPACE_RUNFILES");
     const isE2eLaneHarness = target.name.startsWith("e2e_") && target.name.endsWith("_lane");
+    const targetSourceInputs = isTest ? testSourceInputs(target, pkg, dir) : null;
     const targetCompileData = compileData(target, dir, isTest);
+    const targetCompileDataLabels = [
+      ...new Set([
+        ...targetCompileData.labels,
+        ...(targetSourceInputs?.compileDataLabels ?? []),
+      ]),
+    ].sort();
     const compileDataExpr = `${listExpr(targetCompileData.paths, 8)}${
-      targetCompileData.labels.length ? ` + ${listExpr(targetCompileData.labels, 8)}` : ""
+      targetCompileDataLabels.length ? ` + ${listExpr(targetCompileDataLabels, 8)}` : ""
     }`;
     const srcsExpr = isTest
-      ? listExpr(testSourcePaths(target, pkg, dir), 8)
+      ? listExpr(targetSourceInputs.paths, 8)
       : `glob(["src/**/*.rs"])`;
 
     const attrs = [
@@ -1933,6 +2042,7 @@ for (const pkg of localPackages.values()) {
     rules.push(`test_suite(\n    name = "fast_tests",\n    tests = ${listExpr(packageFastTests.sort())},\n)`);
   }
   if (!checkOnly) mkdirSync(dir, { recursive: true });
+  const externalTestSources = externalTestSourcesByOwner.get(pkg.id);
   writeGenerated(
     resolve(dir, "BUILD.bazel"),
     [
@@ -1952,6 +2062,15 @@ for (const pkg of localPackages.values()) {
       `    visibility = ["//visibility:public"],`,
       `)`,
       "",
+      ...(externalTestSources
+        ? [
+            `exports_files(`,
+            `    ${listExpr([...externalTestSources.paths].sort(), 8)},`,
+            `    visibility = ${listExpr([...externalTestSources.visibility].sort(), 8)},`,
+            `)`,
+            "",
+          ]
+        : []),
       ...(key === "meerkat-machine-kernels"
         ? [
             `exports_files(`,

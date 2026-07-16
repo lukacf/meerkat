@@ -184,8 +184,7 @@ impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
-        commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
     ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
         if self
             .fail_delete
@@ -196,7 +195,7 @@ impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
             ));
         }
         self.inner
-            .commit_unregister_finalization(runtime_id, commit, input_states)
+            .commit_unregister_finalization(runtime_id, finalization)
             .await
     }
 
@@ -206,6 +205,19 @@ impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
         snapshot: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
     ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
         self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+    }
+
+    async fn initialize_ops_lifecycle_if_absent(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        candidate: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+    ) -> Result<
+        meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        meerkat_runtime::store::RuntimeStoreError,
+    > {
+        self.inner
+            .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+            .await
     }
 
     async fn load_ops_lifecycle(

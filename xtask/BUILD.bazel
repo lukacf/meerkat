@@ -350,6 +350,7 @@ rust_test(
         "//:repo_governance_files",
         "//meerkat-cli:package_runfiles",
         "//meerkat-contracts:package_runfiles",
+        "//meerkat-core:package_runfiles",
         "//meerkat-mob:package_runfiles",
         "//meerkat-rest:package_runfiles",
         "//meerkat-rpc:package_runfiles",

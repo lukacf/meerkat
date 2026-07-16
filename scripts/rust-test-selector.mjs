@@ -154,10 +154,15 @@ export function moduleReferences(source) {
   const refs = [];
   let pendingPath = null;
   for (const line of source.split(/\r?\n/)) {
-    const pathMatch = line.match(/#[ \t]*\[[ \t]*path[ \t]*=[ \t]*"([^"]+)"[ \t]*\]/);
+    // Only recognize attributes and module declarations at the start of a
+    // Rust item. Documentation and comments may quote examples such as
+    // `#[path = "..."]`; treating those as live attributes can bind the
+    // quoted path to a later, real `mod` declaration.
+    const pathMatch = line.match(/^[ \t]*#[ \t]*\[[ \t]*path[ \t]*=[ \t]*"([^"]+)"[ \t]*\]/);
     if (pathMatch) pendingPath = pathMatch[1];
 
-    const modMatch = line.match(/(?:^|\s)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;/);
+    const itemText = pathMatch ? line.slice(pathMatch[0].length) : line;
+    const modMatch = itemText.match(/^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;/);
     const modName = modMatch?.[1];
     if (!modName) continue;
 
@@ -172,16 +177,14 @@ export function moduleReferences(source) {
 }
 
 export function testSourcePaths(target, pkg) {
-  const packageRoot = dirname(pkg.manifest_path);
   const seen = new Set();
   const paths = new Set();
 
   function visit(file) {
     if (seen.has(file) || !existsSync(file)) return;
     seen.add(file);
-    if (!file.startsWith(`${packageRoot}/`)) return;
     const rel = normalizePath(relative(root, file));
-    if (!rel || rel.startsWith("..")) return;
+    if (!rel || rel === ".." || rel.startsWith("../")) return;
     paths.add(rel);
 
     const source = readFileSync(file, "utf8");

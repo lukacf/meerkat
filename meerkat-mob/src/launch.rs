@@ -3,9 +3,8 @@
 //! These types define how a member is launched within a mob — fresh, resuming
 //! an existing session, or forking from another member's conversation.
 //!
-//! `ForkContext` and `BudgetSplitPolicy` are mob-native types defined here
-//! (not in `meerkat-core`) because fork and budget splitting are mob-level
-//! orchestration concepts.
+//! `ForkContext` is a mob-native type defined here (not in `meerkat-core`)
+//! because forking is a mob-level orchestration concept.
 
 use crate::ids::AgentIdentity;
 use meerkat_core::types::SessionId;
@@ -58,22 +57,6 @@ pub enum ForkContext {
     FullHistory,
     /// Last N messages from the source session.
     LastMessages { count: u32 },
-}
-
-/// How to split the orchestrator's remaining budget among spawned members.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum BudgetSplitPolicy {
-    /// Split remaining budget equally among members.
-    #[default]
-    Equal,
-    /// Proportional split (no-op unless weights are implemented).
-    Proportional,
-    /// Give all remaining budget to the new member.
-    Remaining,
-    /// Fixed token budget for the new member.
-    Fixed(u64),
 }
 
 #[cfg(test)]

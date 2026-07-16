@@ -286,7 +286,7 @@ pub enum SessionDocumentInput {
         source_kind: SystemContextSource,
     },
     RestoreSystemContextSnapshot {
-        active_keys_have_known_pending_or_seen: bool,
+        active_turn_membership_is_consistent: bool,
         seen_keys_match_known_appends: bool,
     },
     ResolveSystemContextPersistAppendAdmission {
@@ -1418,12 +1418,12 @@ impl SessionDocumentMachineAuthority {
                 }
             }
             SessionDocumentInput::RestoreSystemContextSnapshot {
-                active_keys_have_known_pending_or_seen,
+                active_turn_membership_is_consistent,
                 seen_keys_match_known_appends,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((active_keys_have_known_pending_or_seen) && (seen_keys_match_known_appends))
+                    && ((active_turn_membership_is_consistent) && (seen_keys_match_known_appends))
                 {
                     matches.push(SessionDocumentTransition::RestoreSystemContextSnapshot);
                 }
@@ -3485,11 +3485,11 @@ impl SessionDocumentMachineAuthority {
 
     pub fn restore_system_context_snapshot(
         &mut self,
-        active_keys_have_known_pending_or_seen: bool,
+        active_turn_membership_is_consistent: bool,
         seen_keys_match_known_appends: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::RestoreSystemContextSnapshot {
-            active_keys_have_known_pending_or_seen,
+            active_turn_membership_is_consistent,
             seen_keys_match_known_appends,
         })
     }

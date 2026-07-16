@@ -1,6 +1,46 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { AsyncQueue, EventStream } from "../dist/streaming.js";
+import {
+  HostUnavailableError,
+  MeerkatError,
+  ScopeDeniedError,
+  StaleCursorError,
+  StaleFenceError,
+  meerkatErrorFromJsonRpcCode,
+  meerkatErrorFromSemanticCode,
+} from "../dist/index.js";
+
+const MULTI_HOST_ERROR_CASES = [
+  {
+    rpcCode: -32025,
+    semanticCode: "SCOPE_DENIED",
+    ErrorClass: ScopeDeniedError,
+    details: { required: "live", presented: ["list", "read_history"] },
+    malformed: { required: "live" },
+  },
+  {
+    rpcCode: -32026,
+    semanticCode: "HOST_UNAVAILABLE",
+    ErrorClass: HostUnavailableError,
+    details: { host: "host:remote-1", timeout_ms: 5000 },
+    malformed: { timeout_ms: -1 },
+  },
+  {
+    rpcCode: -32027,
+    semanticCode: "STALE_CURSOR",
+    ErrorClass: StaleCursorError,
+    details: { watermark: 42, generation: 3, requested: 7 },
+    malformed: { generation: 3 },
+  },
+  {
+    rpcCode: -32028,
+    semanticCode: "STALE_FENCE",
+    ErrorClass: StaleFenceError,
+    details: { runtime_id: "runtime-1", expected: 9, actual: 8 },
+    malformed: { runtime_id: 7 },
+  },
+];
 
 describe("EventStream late drain", () => {
   it("delivers late tail events after the response resolves without leaking waiters", async () => {
@@ -80,6 +120,97 @@ describe("RPC error payload parsing", () => {
     assert.equal(folklore.code, "-32600");
     assert.equal(folklore.message, embedded);
     assert.equal(folklore.details, undefined);
+  });
+
+  it("maps all typed multi-host errors by semantic and numeric code", () => {
+    for (const testCase of MULTI_HOST_ERROR_CASES) {
+      const semantic = meerkatErrorFromSemanticCode(
+        testCase.semanticCode,
+        "typed message",
+        testCase.details,
+      );
+      assert.ok(semantic instanceof testCase.ErrorClass);
+      assert.deepEqual(semantic.details, testCase.details);
+
+      const numeric = meerkatErrorFromJsonRpcCode(
+        testCase.rpcCode,
+        undefined,
+        "numeric message",
+        testCase.details,
+      );
+      assert.ok(numeric instanceof testCase.ErrorClass);
+    }
+  });
+
+  it("dispatches all four canonical JSON-RPC errors as typed subclasses", async () => {
+    const { MeerkatClient } = await import("../dist/client.js");
+    const client = new MeerkatClient();
+    let requestId = 100;
+    for (const testCase of MULTI_HOST_ERROR_CASES) {
+      requestId += 1;
+      const response = client.registerRequest(requestId);
+      client.handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          error: {
+            code: testCase.rpcCode,
+            message: "presentation text",
+            data: {
+              code: testCase.semanticCode,
+              message: "typed message",
+              details: testCase.details,
+            },
+          },
+        }),
+      );
+      await assert.rejects(response, (error) => {
+        assert.ok(error instanceof testCase.ErrorClass);
+        assert.equal(error.code, testCase.semanticCode);
+        assert.equal(error.message, "typed message");
+        assert.deepEqual(error.details, testCase.details);
+        return true;
+      });
+    }
+  });
+
+  it("keeps malformed details generic for every typed multi-host code", async () => {
+    const { MeerkatClient } = await import("../dist/client.js");
+    const client = new MeerkatClient();
+    let requestId = 200;
+    for (const testCase of MULTI_HOST_ERROR_CASES) {
+      requestId += 1;
+      const response = client.registerRequest(requestId);
+      client.handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          error: {
+            code: testCase.rpcCode,
+            message: "presentation text",
+            data: {
+              code: testCase.semanticCode,
+              message: "typed message",
+              details: testCase.malformed,
+            },
+          },
+        }),
+      );
+      await assert.rejects(response, (error) => {
+        assert.equal(error.constructor, MeerkatError);
+        assert.equal(error.code, testCase.semanticCode);
+        assert.deepEqual(error.details, testCase.malformed);
+        return true;
+      });
+    }
+
+    const mismatched = meerkatErrorFromJsonRpcCode(
+      -32025,
+      "HOST_UNAVAILABLE",
+      "mismatched envelope",
+      { host: "host:remote-1" },
+    );
+    assert.equal(mismatched.constructor, MeerkatError);
   });
 });
 

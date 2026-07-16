@@ -1,6 +1,18 @@
 import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
 import type { AgentEvent, SkillKey } from './generated/events.js';
-import type { WireMobMemberStatus } from './generated/mob.js';
+import type {
+  WireHostRef,
+  WireMemberLifecycleCapabilities,
+  WireMemberProgressSnapshot,
+  WireMobMemberStatus,
+  WireNonPortableResourceKind,
+  WireReachability,
+} from './generated/mob.js';
+
+// This type appears in the public `MobMemberSnapshot` shape, so consumers
+// must be able to name it through the package root rather than an unexported
+// generated-module path.
+export type { WireMemberProgressSnapshot } from './generated/mob.js';
 
 // ─── Bootstrap / session config (generated wire parity) ─────────
 //
@@ -298,9 +310,12 @@ export interface SpawnSpec {
   agent_identity: string;
   runtime_mode?: 'turn_driven' | 'autonomous_host';
   initial_message?: string | ContentBlock[];
+  /** Bound host peer ID. The browser runtime rejects this with a typed capability error. */
+  placement?: WireHostRef;
   labels?: Record<string, string>;
   context?: Record<string, unknown>;
   additional_instructions?: string[];
+  model_override?: string;
 }
 
 /**
@@ -402,9 +417,19 @@ export interface MobMemberSnapshot {
   is_final: boolean;
   current_session_id?: string;
   resolved_capabilities?: ResolvedModelCapabilities;
+  progress?: WireMemberProgressSnapshot;
   external_member?: unknown;
   kickoff?: Record<string, unknown>;
   peer_connectivity?: MobPeerConnectivity;
+  /** Owning host; absent means the controlling host. */
+  placement?: WireHostRef;
+  control_reachability?: WireReachability;
+  comms_reachability?: WireReachability;
+  /** Observer-local monotonic milliseconds since last verified contact. */
+  last_seen_ms?: number;
+  freshness_reason?: string;
+  lifecycle_capabilities?: WireMemberLifecycleCapabilities;
+  non_portable_disabled?: WireNonPortableResourceKind[];
 }
 
 /** Result envelope for helper-style mob flows. */

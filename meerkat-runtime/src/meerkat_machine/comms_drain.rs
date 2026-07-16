@@ -151,6 +151,40 @@ pub struct CommsDrainSlot {
     task_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
 }
 
+/// Cancellation guard for the spawn-before-slot-publication interval.
+///
+/// Tokio detaches a task when its bare `JoinHandle` is dropped.  The machine
+/// must instead abort any drain whose handle has not yet been installed in the
+/// session-owned slot; otherwise request cancellation can leave an invisible
+/// producer that survives attachment replacement.
+struct UnpublishedCommsDrainTask {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl UnpublishedCommsDrainTask {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn publish(mut self) -> Result<tokio::task::JoinHandle<()>, RuntimeDriverError> {
+        self.handle.take().ok_or_else(|| {
+            RuntimeDriverError::Internal(
+                "unpublished comms drain task was already published".to_string(),
+            )
+        })
+    }
+}
+
+impl Drop for UnpublishedCommsDrainTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 struct SupervisorRotationTask {
     handle: crate::tokio::task::JoinHandle<()>,
 }
@@ -227,6 +261,17 @@ impl CommsDrainSlot {
         self.task_runtime
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, runtime))
+    }
+
+    pub(crate) fn task_is_live_for(
+        &self,
+        runtime: &Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> bool {
+        self.task_runtime_matches(runtime)
+            && self
+                .handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
     }
 
     pub(crate) fn task_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
@@ -604,6 +649,7 @@ impl MeerkatMachine {
                 session_id: session_id.clone(),
                 keep_alive,
                 comms_runtime,
+                expected_attachment: None,
                 mob_id: None,
             })
             .await?
@@ -611,6 +657,41 @@ impl MeerkatMachine {
             MeerkatMachineCommandResult::Spawned(spawned) => Ok(spawned),
             other => Err(RuntimeDriverError::Internal(format!(
                 "update_peer_ingress_context: unexpected command result variant: {other:?}"
+            ))),
+        }
+    }
+
+    /// Update session-owned peer ingress only while `witness` remains the
+    /// exact committed executor attachment for the session.
+    ///
+    /// This is the publication seam for surfaces that pair actor-owned comms
+    /// state with an executor attachment.  The witness is checked under the
+    /// same machine mutation gate that applies the peer-ingress transition,
+    /// closing delayed-publication ABA across same-session replacement.
+    pub async fn update_peer_ingress_context_if_current(
+        self: &Arc<Self>,
+        witness: &RuntimeExecutorAttachmentWitness,
+        keep_alive: bool,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    ) -> Result<bool, RuntimeDriverError> {
+        if !witness.belongs_to(self) {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "peer-ingress attachment witness belongs to another machine".to_string(),
+            });
+        }
+        match self
+            .execute_meerkat_machine_drain_command(MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: witness.session_id().clone(),
+                keep_alive,
+                comms_runtime,
+                expected_attachment: Some(witness.clone()),
+                mob_id: None,
+            })
+            .await?
+        {
+            MeerkatMachineCommandResult::Spawned(spawned) => Ok(spawned),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "update_peer_ingress_context_if_current: unexpected command result variant: {other:?}"
             ))),
         }
     }
@@ -631,6 +712,7 @@ impl MeerkatMachine {
                 session_id: session_id.clone(),
                 keep_alive,
                 comms_runtime,
+                expected_attachment: None,
                 mob_id: None,
             })
             .await?
@@ -723,6 +805,7 @@ impl MeerkatMachine {
                 session_id: session_id.clone(),
                 keep_alive: true,
                 comms_runtime: Some(comms_runtime),
+                expected_attachment: None,
                 mob_id: Some(mob_id),
             })
             .await?
@@ -732,6 +815,59 @@ impl MeerkatMachine {
                 "maybe_spawn_mob_comms_drain: unexpected command result variant: {other:?}"
             ))),
         }
+    }
+
+    /// Observation-grade serving witness for one materialized member runtime.
+    ///
+    /// A registered session, generated `Active` executor claim, or retained
+    /// comms runtime handle is not independently evidence that the member can
+    /// serve peer ingress. This samples the machine lifecycle and drain
+    /// authority together with the two process-local task carriers and only
+    /// reports `true` for the exact concrete mob-owned comms runtime whose
+    /// executor and drain tasks are both still live.
+    pub async fn materialized_member_runtime_is_serving(
+        &self,
+        session_id: &SessionId,
+        comms_runtime: &Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Result<bool, RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return Ok(false);
+        };
+        if !entry.generated_executor_registration_active()
+            || !entry.has_live_attachment()
+            || !entry.drain_slot.task_is_live_for(comms_runtime)
+        {
+            return Ok(false);
+        }
+
+        let control = entry.control_snapshot();
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        let dsl_phase = super::dsl_authority::runtime_phase_from_authority(&authority);
+        let dsl_pre_run_phase = super::dsl_authority::pre_run_phase_from_authority(&authority);
+        let visible_phase = super::resolve_visible_runtime_phase(
+            dsl_phase,
+            dsl_pre_run_phase,
+            control.phase,
+            control.pre_run_phase,
+            self.has_runtime_persistence(),
+        )
+        .map_err(RuntimeDriverError::Internal)?
+        .visible_phase;
+        let expected_runtime_id =
+            crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(comms_runtime);
+
+        Ok(matches!(
+            visible_phase,
+            RuntimeState::Attached | RuntimeState::Running
+        ) && state.drain_phase == crate::meerkat_machine::dsl::DrainPhase::Running
+            && state.peer_ingress_owner_kind
+                == crate::meerkat_machine::dsl::PeerIngressOwnerKind::MobOwned
+            && state.peer_ingress_comms_runtime_id.as_ref() == Some(&expected_runtime_id))
     }
 
     /// Read the current peer-ingress owner from DSL state.
@@ -926,17 +1062,19 @@ impl MeerkatMachine {
             CommsDrainMode::PersistentHost => Some(std::time::Duration::MAX),
             CommsDrainMode::Timed | CommsDrainMode::AttachedSession => None,
         };
-        let handle = crate::comms_drain::spawn_comms_drain(
-            Arc::clone(self),
-            session_id.clone(),
-            comms.clone(),
-            idle_timeout,
-        );
+        let unpublished_task =
+            UnpublishedCommsDrainTask::new(crate::comms_drain::spawn_comms_drain(
+                Arc::clone(self),
+                session_id.clone(),
+                comms.clone(),
+                idle_timeout,
+            ));
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
-            entry.drain_slot.install_task(comms.clone(), handle);
+            entry
+                .drain_slot
+                .install_task(comms.clone(), unpublished_task.publish()?);
         } else {
-            handle.abort();
             return Ok(false);
         }
 

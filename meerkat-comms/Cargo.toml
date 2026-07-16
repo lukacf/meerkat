@@ -24,7 +24,7 @@ inventory = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_bytes = "0.11"
-ciborium = "0.2"
+ciborium = { workspace = true }
 schemars = { workspace = true }
 
 # Encryption/Identity
@@ -60,7 +60,7 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "time", "test-util"] }
 tempfile = { workspace = true }
-ciborium = "0.2"
+ciborium = { workspace = true }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
 
 [features]

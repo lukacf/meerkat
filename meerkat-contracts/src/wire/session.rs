@@ -1,5 +1,6 @@
 //! Wire session types.
 
+use super::mob::WireToolAccessPolicy;
 use serde::{Deserialize, Serialize};
 
 fn serialize_raw_json_box<S>(
@@ -80,7 +81,7 @@ pub struct ForkSessionAtParams {
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    pub tool_access_policy: Option<WireToolAccessPolicy>,
 }
 
 /// Request payload for `session/fork_replace`.
@@ -99,7 +100,7 @@ pub struct ForkSessionReplaceParams {
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    pub tool_access_policy: Option<WireToolAccessPolicy>,
 }
 
 /// Public transcript message accepted by same-session rewrite APIs.
@@ -1551,7 +1552,11 @@ mod tests {
         let fork_at: ForkSessionAtParams = serde_json::from_value(serde_json::json!({
             "session_id": "session_123",
             "message_index": 2,
-            "running_behavior": "reject"
+            "running_behavior": "reject",
+            "tool_access_policy": {
+                "type": "allow_list",
+                "value": ["grep", "read"]
+            }
         }))
         .unwrap();
         assert_eq!(fork_at.session_id, "session_123");
@@ -1559,6 +1564,13 @@ mod tests {
         assert_eq!(
             fork_at.running_behavior,
             TranscriptEditRunningBehavior::Reject
+        );
+        assert_eq!(
+            fork_at.tool_access_policy,
+            Some(WireToolAccessPolicy::AllowList(vec![
+                "grep".to_string(),
+                "read".to_string(),
+            ]))
         );
 
         let fork_replace: ForkSessionReplaceParams = serde_json::from_value(serde_json::json!({

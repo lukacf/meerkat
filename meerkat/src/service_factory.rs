@@ -41,13 +41,18 @@ pub struct FactoryAgent {
     session_context: Option<Arc<dyn meerkat_core::handles::SessionContextHandle>>,
 }
 
-fn build_agent_error_to_agent_error(error: BuildAgentError) -> meerkat_core::error::AgentError {
+fn build_agent_error_to_session_error(error: BuildAgentError) -> SessionError {
     match error {
         #[cfg(feature = "comms")]
-        BuildAgentError::SessionIdentityInUse(session_id) => {
-            meerkat_core::error::AgentError::SessionIdentityInUse(session_id)
+        BuildAgentError::SessionIdentityInUse(session_id) => SessionError::Agent(
+            meerkat_core::error::AgentError::SessionIdentityInUse(session_id),
+        ),
+        BuildAgentError::LlmClient(error) => {
+            SessionError::build_llm_identity_unresolvable(error.to_string())
         }
-        other => meerkat_core::error::AgentError::BuildError(other.to_string()),
+        other => SessionError::Agent(meerkat_core::error::AgentError::BuildError(
+            other.to_string(),
+        )),
     }
 }
 
@@ -115,6 +120,12 @@ impl SessionAgent for FactoryAgent {
         &mut self,
     ) -> Result<(), meerkat_core::error::AgentError> {
         self.agent.abort_uncommitted_compaction_projections().await
+    }
+
+    fn take_runtime_terminal_failure_witness(
+        &mut self,
+    ) -> Result<Option<meerkat_core::TurnErrorMetadata>, meerkat_core::error::AgentError> {
+        self.agent.take_runtime_terminal_failure_witness()
     }
 
     async fn run_turn_with_events(
@@ -995,7 +1006,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .factory
             .build_agent(build_config, &config)
             .await
-            .map_err(|e| SessionError::Agent(build_agent_error_to_agent_error(e)))?;
+            .map_err(build_agent_error_to_session_error)?;
 
         Ok(FactoryAgent {
             agent,
@@ -1085,6 +1096,17 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    #[test]
+    fn llm_client_build_failure_keeps_typed_session_cause() {
+        let error = build_agent_error_to_session_error(BuildAgentError::LlmClient(
+            meerkat_client::FactoryError::ClientCreationFailed(
+                "backend diagnostic that callers must not classify by text".to_string(),
+            ),
+        ));
+
+        assert!(error.is_build_llm_identity_unresolvable());
+    }
 
     struct MockLlmClient {
         delta: &'static str,

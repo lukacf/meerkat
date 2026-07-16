@@ -123,6 +123,10 @@ impl HandleTeardownGate {
         self.closed.load(Ordering::Acquire)
     }
 
+    pub(crate) fn is_open(&self) -> bool {
+        !self.is_closed()
+    }
+
     fn ensure_open(&self, context: &'static str) -> Result<(), DslTransitionError> {
         if self.is_closed() {
             Err(DslTransitionError::no_matching(

@@ -318,7 +318,7 @@ pub fn wired_binding_from_runtime_adapter(
 #[cfg(feature = "runtime-adapter")]
 pub(super) fn attach_signal_dispatcher_to_runtime_adapter(
     runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
-    command_tx: mpsc::Sender<super::state::MobCommand>,
+    command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
 ) {
     let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
     let table = RouteTable::from_schema(&schema)
@@ -332,13 +332,13 @@ pub(super) fn attach_signal_dispatcher_to_runtime_adapter(
 
 #[cfg(feature = "runtime-adapter")]
 struct MobSignalConsumerSurface {
-    command_tx: mpsc::Sender<super::state::MobCommand>,
+    command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
     instance_id: MachineInstanceId,
 }
 
 #[cfg(feature = "runtime-adapter")]
 impl MobSignalConsumerSurface {
-    fn new(command_tx: mpsc::Sender<super::state::MobCommand>) -> Self {
+    fn new(command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>) -> Self {
         Self {
             command_tx,
             instance_id: mob_producer_instance_id(),
@@ -431,7 +431,11 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
     ) -> Result<(), meerkat_runtime::composition::ConsumerError> {
         let signal = build_mob_signal(&variant, &projected_fields)?;
-        let command = super::state::MobCommand::ProjectMachineSignal { signal };
+        // Machine-internal lifecycle signal projection: the internal
+        // authority lane (phase 5, DEC-P5E-2).
+        let command = super::scope_gate::RoutedMobCommand::internal(
+            super::state::MobCommand::ProjectMachineSignal { signal },
+        );
         match self.command_tx.try_send(command) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(command)) => {
@@ -1107,9 +1111,11 @@ mod tests {
             fence_token: mob_dsl::FenceToken(1),
         };
         command_tx
-            .try_send(MobCommand::ProjectMachineSignal {
-                signal: first_signal,
-            })
+            .try_send(super::super::scope_gate::RoutedMobCommand::internal(
+                MobCommand::ProjectMachineSignal {
+                    signal: first_signal,
+                },
+            ))
             .expect("test precondition: bounded actor queue is full");
 
         let consumer = MobSignalConsumerSurface::new(command_tx);
@@ -1130,7 +1136,7 @@ mod tests {
         .expect("full actor queue must not block routed lifecycle signal dispatch")
         .expect("deferred signal delivery should be accepted");
 
-        match command_rx.recv().await.expect("first queued command") {
+        match command_rx.recv().await.expect("first queued command").cmd {
             MobCommand::ProjectMachineSignal { signal } => assert!(matches!(
                 signal,
                 mob_dsl::MobMachineSignal::ObserveRuntimeReady {
@@ -1145,6 +1151,7 @@ mod tests {
             .await
             .expect("deferred signal should enqueue once capacity opens")
             .expect("deferred signal command")
+            .cmd
         {
             MobCommand::ProjectMachineSignal { signal } => assert!(matches!(
                 signal,

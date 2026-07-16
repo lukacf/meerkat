@@ -18,7 +18,7 @@ use crate::LlmClient;
 use meerkat_core::error::AgentError;
 use meerkat_core::handles::GeneratedAuthLeaseHandle;
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
-use meerkat_core::service::{SessionError, SessionService};
+use meerkat_core::service::SessionError;
 use meerkat_core::types::SessionId;
 use meerkat_core::{
     AgentLlmClient, AgentLlmClientDecorator, Config, ConfigRuntime, ModelRegistry,
@@ -394,6 +394,20 @@ impl SessionRuntimeLlmReconfigureHost {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
+    async fn acquire_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        RuntimeDriverError,
+    > {
+        Ok(Box::new(
+            self.service
+                .acquire_runtime_turn_finalization_guard(session_id)
+                .await,
+        ))
+    }
+
     async fn hydrate_session_llm_state(
         &self,
         session_id: &SessionId,
@@ -486,7 +500,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .build_request_policy_for_llm_identity(session_id, identity)
             .await?;
         self.service
-            .apply_runtime_session_llm_identity(
+            .apply_runtime_session_llm_identity_under_runtime_turn_boundary(
                 session_id,
                 adapter,
                 identity.clone(),
@@ -502,14 +516,17 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         visibility_state: Option<SessionToolVisibilityState>,
     ) -> Result<(), RuntimeDriverError> {
         self.service
-            .set_session_tool_visibility_state(session_id, visibility_state)
+            .apply_runtime_session_tool_visibility_state_under_runtime_turn_boundary(
+                session_id,
+                visibility_state,
+            )
             .await
             .map_err(session_error_to_runtime_driver)
     }
 
     async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
         self.service
-            .persist_live_session_now(session_id)
+            .persist_live_session_now_under_runtime_turn_boundary(session_id)
             .await
             .map(|_| ())
             .map_err(session_error_to_runtime_driver)
@@ -517,7 +534,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
         self.service
-            .discard_live_session(session_id)
+            .discard_live_session_under_runtime_turn_boundary(session_id)
             .await
             .map_err(session_error_to_runtime_driver)
     }

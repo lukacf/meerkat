@@ -207,7 +207,10 @@ RuntimeState {
 }
 ```
 
-`MobMcpState::new(service)` wraps `EphemeralSessionService<FactoryAgentBuilder>` as an embedded substrate. All mob operations create sessions through that same service, but runtime-owned surface semantics like `keep_alive` still belong to the hosting runtime layer.
+`MobMcpState::new(service, MobControlPrincipal::Owner)` wraps
+`EphemeralSessionService<FactoryAgentBuilder>` as an embedded, single-owner substrate. All
+mob operations create sessions through that same service, but runtime-owned surface semantics like
+`keep_alive` still belong to the hosting runtime layer.
 
 `destroy_runtime` zeroes `RUNTIME_STATE` and `REGISTRY`, closes outstanding subscriptions, and clears the external auth resolver.
 

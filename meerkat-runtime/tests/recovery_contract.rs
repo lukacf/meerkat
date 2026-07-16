@@ -27,6 +27,7 @@ use meerkat_runtime::store::{
 use meerkat_runtime::traits::RuntimeDriver;
 use meerkat_runtime::{EphemeralRuntimeDriver, MeerkatMachine, PersistentRuntimeDriver};
 use meerkat_store::MemoryBlobStore;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -91,6 +92,95 @@ fn make_prompt(text: &str) -> Input {
 
 fn make_session_snapshot() -> Vec<u8> {
     serde_json::to_vec(&meerkat_core::Session::new()).unwrap()
+}
+
+#[derive(serde::Serialize)]
+struct CompactionCommitFingerprintFixture<'a> {
+    selection: &'a meerkat_core::TranscriptRewriteSelection,
+    original_span_digest: &'a str,
+    replacement_digest: &'a str,
+    messages_before: usize,
+    messages_after: usize,
+    actor: &'a Option<String>,
+}
+
+fn compaction_commit_fingerprint(commit: &meerkat_core::TranscriptRewriteCommit) -> String {
+    use std::fmt::Write as _;
+
+    let canonical = serde_json::to_vec(&CompactionCommitFingerprintFixture {
+        selection: &commit.selection,
+        original_span_digest: &commit.original_span_digest,
+        replacement_digest: &commit.replacement_digest,
+        messages_before: commit.messages_before,
+        messages_after: commit.messages_after,
+        actor: &commit.actor,
+    })
+    .unwrap();
+    let mut fingerprint = String::from("sha256:");
+    for byte in Sha256::digest(canonical) {
+        write!(&mut fingerprint, "{byte:02x}").unwrap();
+    }
+    fingerprint
+}
+
+fn make_session_with_compaction_intent() -> (
+    meerkat_core::Session,
+    meerkat_core::CompactionProjectionIntent,
+) {
+    let mut session = meerkat_core::Session::new();
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("verbose context one"),
+    ));
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("verbose context two"),
+    ));
+    let parent = session.transcript_revision().unwrap();
+    session
+        .commit_transcript_rewrite(
+            meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+            vec![meerkat_core::types::Message::User(
+                meerkat_core::types::UserMessage::compaction_summary("compacted context"),
+            )],
+            meerkat_core::TranscriptRewriteReason::new("compaction"),
+            Some("runtime-store-conformance".to_string()),
+            Some(parent),
+        )
+        .unwrap();
+
+    // The persisted selection is the compaction-specific wire variant used by
+    // runtime-store validation. Keep this fixture in the shared suite so both
+    // backends exercise the exact same transaction input.
+    let mut encoded = serde_json::to_value(&session).unwrap();
+    encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["commits"][0]["selection"] = serde_json::json!({
+        "type": "compaction_message_range",
+        "range": { "start": 0, "end": 2 }
+    });
+    let mut session: meerkat_core::Session = serde_json::from_value(encoded).unwrap();
+    let commit = session
+        .transcript_history_state()
+        .unwrap()
+        .unwrap()
+        .commits
+        .last()
+        .unwrap()
+        .clone();
+    let commit_fingerprint = compaction_commit_fingerprint(&commit);
+    let intent = meerkat_core::CompactionProjectionIntent {
+        projection: serde_json::from_value(serde_json::json!({
+            "session_id": session.id(),
+            "parent_revision": &commit.parent_revision,
+            "revision": &commit.revision,
+            "commit_fingerprint": commit_fingerprint,
+        }))
+        .unwrap(),
+        summary_tokens: 5,
+        messages_before: 2,
+        messages_after: 1,
+    };
+    session
+        .add_compaction_projection_intent(intent.clone())
+        .unwrap();
+    (session, intent)
 }
 
 fn make_receipt(
@@ -311,6 +401,144 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
             "{}: the durable store should preserve the next machine-owned receipt sequence",
             harness.name
         );
+    }
+}
+
+#[tokio::test]
+async fn compaction_outbox_transaction_contract_is_shared_across_supported_backends() {
+    for harness in supported_store_harnesses() {
+        assert!(
+            harness.store.supports_compaction_projection_outbox(),
+            "{}: supported runtime store must advertise the compaction outbox it implements",
+            harness.name
+        );
+
+        let runtime_id = make_runtime_id(harness.name);
+        let (session, intent) = make_session_with_compaction_intent();
+        let pending_snapshot = serde_json::to_vec(&session).unwrap();
+        harness
+            .store
+            .atomic_apply(
+                &runtime_id,
+                Some(SessionDelta {
+                    session_snapshot: pending_snapshot.clone(),
+                }),
+                make_receipt(RunId::new(), Vec::new(), 1),
+                Vec::new(),
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compaction snapshot and outbox must commit atomically: {error}",
+                    harness.name
+                )
+            });
+        assert_eq!(
+            harness
+                .store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .unwrap(),
+            vec![intent.clone()],
+            "{}: committed compaction intent must be recoverable from the outbox",
+            harness.name
+        );
+
+        harness
+            .store
+            .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+            .await
+            .unwrap();
+        harness
+            .store
+            .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compaction finalization acknowledgement must be idempotent: {error}",
+                    harness.name
+                )
+            });
+        assert!(
+            harness
+                .store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{}: finalized compaction must leave no pending projection",
+            harness.name
+        );
+        let finalized_snapshot = harness
+            .store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .expect("finalized session snapshot");
+        let finalized_session: meerkat_core::Session =
+            serde_json::from_slice(&finalized_snapshot).unwrap();
+        assert!(
+            finalized_session
+                .compaction_projection_intents()
+                .unwrap()
+                .is_empty(),
+            "{}: outbox finalization and session intent removal must be one transaction",
+            harness.name
+        );
+
+        let replay_run_id = RunId::new();
+        let replay_error = harness
+            .store
+            .atomic_apply(
+                &runtime_id,
+                Some(SessionDelta {
+                    session_snapshot: pending_snapshot.clone(),
+                }),
+                make_receipt(replay_run_id.clone(), Vec::new(), 2),
+                Vec::new(),
+                Some(session.id().clone()),
+            )
+            .await
+            .expect_err("finalized compaction tombstone must reject stale atomic replay");
+        assert!(
+            replay_error
+                .to_string()
+                .contains("finalized compaction intent"),
+            "{}: stale replay must fail for the finalized-intent reason, got {replay_error}",
+            harness.name
+        );
+        assert!(
+            harness
+                .store
+                .load_boundary_receipt(&runtime_id, &replay_run_id, 2)
+                .await
+                .unwrap()
+                .is_none(),
+            "{}: rejected replay must roll back its boundary receipt",
+            harness.name
+        );
+        assert_eq!(
+            harness
+                .store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap(),
+            Some(finalized_snapshot),
+            "{}: rejected replay must preserve the finalized snapshot",
+            harness.name
+        );
+
+        harness
+            .store
+            .commit_session_snapshot(
+                &runtime_id,
+                SessionDelta {
+                    session_snapshot: pending_snapshot,
+                },
+            )
+            .await
+            .expect_err("non-boundary writes must not bypass a finalized compaction tombstone");
     }
 }
 

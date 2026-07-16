@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .generated.types import CommsSendResult
 from .types import (
     ContentBlock,
     PeerCorrelationId,
@@ -44,6 +45,7 @@ from .types import (
     TranscriptRewriteInputMessage,
     TranscriptRewriteReason,
     TranscriptRewriteSelection,
+    WireToolAccessPolicy,
 )
 
 if TYPE_CHECKING:
@@ -321,12 +323,14 @@ class Session:
         message_index: int,
         *,
         running_behavior: TranscriptEditRunningBehavior | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork this idle session at a transcript message index."""
         return await self._client.fork_session_at(  # noqa: SLF001
             self._id,
             message_index,
             running_behavior=running_behavior,
+            tool_access_policy=tool_access_policy,
         )
 
     async def fork_replace(
@@ -335,6 +339,7 @@ class Session:
         replacement: TranscriptReplacement,
         *,
         running_behavior: TranscriptEditRunningBehavior | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork this idle session and apply a typed transcript replacement."""
         return await self._client.fork_session_replace(  # noqa: SLF001
@@ -342,6 +347,7 @@ class Session:
             message_index,
             replacement,
             running_behavior=running_behavior,
+            tool_access_policy=tool_access_policy,
         )
 
     async def rewrite_transcript(
@@ -408,7 +414,7 @@ class Session:
 
     # -- Comms convenience -------------------------------------------------
 
-    async def send(self, **kwargs: Any) -> dict[str, Any]:
+    async def send(self, **kwargs: Any) -> CommsSendResult:
         """Send a comms command scoped to this session."""
         kwargs.pop("session_id", None)
         return await self._client._send(self._id, **kwargs)  # noqa: SLF001
@@ -606,12 +612,14 @@ class DeferredSession:
         message_index: int,
         *,
         running_behavior: TranscriptEditRunningBehavior | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork this idle session at a transcript message index."""
         return await self._client.fork_session_at(  # noqa: SLF001
             self._id,
             message_index,
             running_behavior=running_behavior,
+            tool_access_policy=tool_access_policy,
         )
 
     async def fork_replace(
@@ -620,6 +628,7 @@ class DeferredSession:
         replacement: TranscriptReplacement,
         *,
         running_behavior: TranscriptEditRunningBehavior | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork this idle session and apply a typed transcript replacement."""
         return await self._client.fork_session_replace(  # noqa: SLF001
@@ -627,6 +636,7 @@ class DeferredSession:
             message_index,
             replacement,
             running_behavior=running_behavior,
+            tool_access_policy=tool_access_policy,
         )
 
     async def rewrite_transcript(

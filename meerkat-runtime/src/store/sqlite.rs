@@ -14,8 +14,9 @@ mod inner {
     use crate::identifiers::LogicalRuntimeId;
     use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::store::{
-        AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, MachineLifecycleSnapshot,
-        MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError, SessionDelta,
+        AuthOAuthFlowSnapshotUpdate, InputStateBatchCasOutcome, MachineLifecycleCommit,
+        MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
+        SessionDelta, prepare_input_state_batch_cas,
     };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
@@ -65,6 +66,14 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
     intent_json BLOB NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'finalized')),
     PRIMARY KEY (runtime_id, session_id, parent_revision, revision, commit_fingerprint)
+);
+CREATE TABLE IF NOT EXISTS runtime_mob_host_bindings (
+    mob_id TEXT PRIMARY KEY,
+    record_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
+    mob_id TEXT PRIMARY KEY,
+    receipt_json BLOB NOT NULL
 )";
 
     fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
@@ -788,14 +797,101 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 // boundary receipt and input-state updates must also be skipped:
                 // advancing them against a retained (older) session snapshot
                 // would split receipt/input ordering identity from session
-                // truth. Commit the (no-op) transaction so the read lock is
-                // released cleanly.
+                // truth. Rejecting here drops and rolls back the untouched
+                // transaction, releasing its lock without publishing a false
+                // success to the stale writer.
                 if session_snapshot_superseded {
-                    tx.commit()
-                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                    return Ok(());
+                    return Err(RuntimeStoreError::SessionSnapshotSuperseded {
+                        runtime_id: runtime_id_text(&runtime_id).to_owned(),
+                    });
                 }
 
+                insert_compaction_projection_outbox_intents(
+                    &tx,
+                    &runtime_id,
+                    &compaction_intents,
+                )?;
+                insert_receipt(&tx, &runtime_id, &receipt)?;
+                upsert_input_states(&tx, &runtime_id, &input_updates)?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn atomic_apply_with_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+            receipt: RunBoundaryReceipt,
+            machine_lifecycle: MachineLifecycleCommit,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: meerkat_core::types::SessionId,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let lifecycle_snapshot = machine_lifecycle.into_snapshot();
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored)
+                .collect::<Vec<_>>();
+            tokio::task::spawn_blocking(move || {
+                let session = serde_json::from_slice::<meerkat_core::Session>(
+                    &session_delta.session_snapshot,
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let compaction_intents =
+                    crate::store::validated_compaction_projection_intents(&session)?;
+                if session.id() != &session_store_key {
+                    return Err(RuntimeStoreError::SessionKeyMismatch {
+                        expected: session_store_key,
+                        actual: session.id().clone(),
+                    });
+                }
+
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                reject_finalized_compaction_projection_replays(
+                    &tx,
+                    &runtime_id,
+                    &compaction_intents,
+                )?;
+                let previous = tx
+                    .query_row(
+                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .map(|bytes| deserialize_persisted_session(&bytes))
+                    .transpose()?;
+                if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                    &session,
+                    previous.as_ref(),
+                ) {
+                    if previous.as_ref().is_some_and(is_runtime_placeholder_session) {
+                        // The generated snapshot replaces the placeholder in
+                        // the same terminal transaction.
+                    } else if previous.as_ref().is_some_and(|previous| {
+                        meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                            previous,
+                            Some(&session),
+                        )
+                        .is_ok()
+                    }) {
+                        return Err(RuntimeStoreError::SessionSnapshotSuperseded {
+                            runtime_id: runtime_id_text(&runtime_id).to_owned(),
+                        });
+                    } else {
+                        return Err(RuntimeStoreError::WriteFailed(err.to_string()));
+                    }
+                }
+
+                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                upsert_machine_lifecycle_snapshot(&tx, &runtime_id, &lifecycle_snapshot)?;
                 insert_compaction_projection_outbox_intents(
                     &tx,
                     &runtime_id,
@@ -1157,6 +1253,104 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        async fn persist_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            records: &[InputStatePersistenceRecord],
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let states: Vec<_> = records
+                .iter()
+                .map(InputStatePersistenceRecord::clone_stored)
+                .collect();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                upsert_input_states(&tx, &runtime_id, &states)?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn compare_and_swap_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &[StoredInputState],
+            replacements: &[InputStatePersistenceRecord],
+        ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+            // Validate keys/counts and serialize both sides before opening the
+            // transaction. The transaction then contains only exact reads,
+            // deterministic writes, and commit.
+            let prepared = prepare_input_state_batch_cas(expected, replacements)?;
+            if prepared.is_empty() {
+                return Ok(InputStateBatchCasOutcome::Swapped);
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let mut all_expected = true;
+                let mut all_replacements = true;
+                for row in &prepared {
+                    let current = tx
+                        .query_row(
+                            r"
+                            SELECT state_json
+                            FROM runtime_input_states
+                            WHERE runtime_id = ?1 AND input_id = ?2
+                            ",
+                            params![runtime_id_text(&runtime_id), row.input_id.0.to_string()],
+                            |sql_row| Ok(sql_row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                        )
+                        .optional()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    let Some(current) = current else {
+                        return Ok(InputStateBatchCasOutcome::Stale);
+                    };
+                    if current != row.expected_json {
+                        all_expected = false;
+                    }
+                    if current != row.replacement_json {
+                        all_replacements = false;
+                    }
+                }
+
+                if all_replacements {
+                    return Ok(InputStateBatchCasOutcome::Swapped);
+                }
+                if !all_expected {
+                    return Ok(InputStateBatchCasOutcome::Stale);
+                }
+
+                for row in &prepared {
+                    tx.execute(
+                        r"
+                        INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                        VALUES (?1, ?2, ?3)
+                        ON CONFLICT(runtime_id, input_id) DO UPDATE
+                        SET state_json = excluded.state_json
+                        ",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            row.input_id.0.to_string(),
+                            &row.replacement_json,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(InputStateBatchCasOutcome::Swapped)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
         async fn load_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -1234,26 +1428,23 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
         async fn commit_unregister_finalization(
             &self,
             runtime_id: &LogicalRuntimeId,
-            commit: MachineLifecycleCommit,
-            input_states: &[InputStatePersistenceRecord],
+            finalization: crate::store::UnregisterFinalizationCommit,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let retired_ops_epoch = commit.retired_ops_epoch().cloned().ok_or_else(|| {
-                RuntimeStoreError::WriteFailed(
-                    "unregister finalization missing exact retired ops epoch".into(),
-                )
-            })?;
-            let snapshot = commit.into_snapshot();
+            let (snapshot, input_states, retired_ops_epoch) = finalization.into_parts();
             let input_states = input_states
-                .iter()
-                .map(InputStatePersistenceRecord::clone_stored)
+                .into_iter()
+                .map(|record| record.clone_stored())
                 .collect::<Vec<_>>();
             #[cfg(test)]
             let fault = self.unregister_finalization_fault.swap(0, Ordering::SeqCst);
             #[cfg(not(test))]
             let fault = 0_u8;
-            tokio::task::spawn_blocking(move || {
+            // Complete this rare finalization synchronously in the future's
+            // first poll. A detached blocking task could outlive cancellation
+            // and cross a same-runtime-ID replacement.
+            {
                 let mut conn = open_runtime_connection(&path)?;
                 let final_lifecycle_record =
                     MachineLifecycleStoreRecord::from_snapshot(&snapshot).encode()?;
@@ -1261,9 +1452,7 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                     .iter()
                     .map(|state| {
                         serde_json::to_vec(state)
-                            .map(|record| {
-                                (state.state.input_id.0.to_string(), Some(record))
-                            })
+                            .map(|record| (state.state.input_id.0.to_string(), Some(record)))
                             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1273,11 +1462,11 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                     .collect::<Vec<_>>();
                 let tx = begin_runtime_transaction(&mut conn)?;
                 let before_observation = observe_unregister_finalization(
-                        &tx,
-                        &runtime_id,
-                        &input_ids,
-                        &retired_ops_epoch,
-                    )?;
+                    &tx,
+                    &runtime_id,
+                    &input_ids,
+                    &retired_ops_epoch,
+                )?;
                 let final_ops_record = match before_observation.ops_record.as_ref() {
                     Some(bytes) => {
                         let persisted: crate::ops_lifecycle::PersistedOpsSnapshot =
@@ -1330,9 +1519,7 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 }
                 let commit_error = match tx.commit() {
                     Ok(()) if fault != 3 => return Ok(()),
-                    Ok(()) => {
-                        "synthetic lost acknowledgement after unregister commit".to_string()
-                    }
+                    Ok(()) => "synthetic lost acknowledgement after unregister commit".to_string(),
                     Err(err) => err.to_string(),
                 };
 
@@ -1367,9 +1554,7 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                         "commit acknowledgement failed ({commit_error}); reopened lifecycle/input/ops bytes match neither final nor pre-transaction authority"
                     ),
                 ))
-            })
-            .await
-            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+            }
         }
 
         async fn persist_ops_lifecycle(
@@ -1421,6 +1606,84 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        async fn initialize_ops_lifecycle_if_absent(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            candidate: &crate::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<crate::ops_lifecycle::PersistedOpsSnapshot, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let candidate = candidate.clone();
+            tokio::task::spawn_blocking(move || {
+                let state_json = serde_json::to_vec(&candidate)
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let retired = tx
+                    .query_row(
+                        r"
+                        SELECT 1
+                        FROM runtime_retired_ops_epochs
+                        WHERE runtime_id = ?1 AND epoch_id = ?2
+                        ",
+                        params![runtime_id_text(&runtime_id), candidate.epoch_id.to_string()],
+                        |_row| Ok(()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .is_some();
+                if retired {
+                    return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
+                        runtime_id: runtime_id.0.clone(),
+                        epoch_id: candidate.epoch_id,
+                    });
+                }
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_ops_lifecycle (runtime_id, state_json)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(runtime_id) DO NOTHING
+                    ",
+                    params![runtime_id_text(&runtime_id), state_json],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let canonical_json = tx
+                    .query_row(
+                        "SELECT state_json FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                let canonical: crate::ops_lifecycle::PersistedOpsSnapshot =
+                    serde_json::from_slice(&canonical_json)
+                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                let canonical_retired = tx
+                    .query_row(
+                        r"
+                        SELECT 1
+                        FROM runtime_retired_ops_epochs
+                        WHERE runtime_id = ?1 AND epoch_id = ?2
+                        ",
+                        params![runtime_id_text(&runtime_id), canonical.epoch_id.to_string()],
+                        |_row| Ok(()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .is_some();
+                if canonical_retired {
+                    return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
+                        runtime_id: runtime_id.0,
+                        epoch_id: canonical.epoch_id,
+                    });
+                }
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(canonical)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
         async fn load_ops_lifecycle(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -1467,6 +1730,230 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
+
+        async fn load_mob_host_binding(
+            &self,
+            mob_id: &str,
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let mob_id = mob_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                conn.query_row(
+                    "SELECT record_json FROM runtime_mob_host_bindings WHERE mob_id = ?1",
+                    params![mob_id],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn list_mob_host_bindings(
+            &self,
+        ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+            let path = self.path.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT mob_id, record_json FROM runtime_mob_host_bindings ORDER BY mob_id",
+                    )
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                        ))
+                    })
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn put_mob_host_binding_if_absent(
+            &self,
+            mob_id: &str,
+            record_json: &[u8],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let mob_id = mob_id.to_string();
+            let record_json = record_json.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let changed = tx
+                    .execute(
+                        "INSERT OR IGNORE INTO runtime_mob_host_bindings (mob_id, record_json) \
+                         VALUES (?1, ?2)",
+                        params![mob_id, record_json],
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                if changed > 0 {
+                    // A fresh replacement binding supersedes the prior
+                    // controller's revoke receipt at the same atomic
+                    // boundary. A delayed old RevokeHost can therefore
+                    // never replay across the replacement ceremony.
+                    tx.execute(
+                        "DELETE FROM runtime_mob_host_revocations WHERE mob_id = ?1",
+                        params![mob_id],
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                }
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(changed > 0)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn compare_and_put_mob_host_binding(
+            &self,
+            mob_id: &str,
+            expected_json: &[u8],
+            next_json: &[u8],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let mob_id = mob_id.to_string();
+            let expected_json = expected_json.to_vec();
+            let next_json = next_json.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let changed = tx
+                    .execute(
+                        "UPDATE runtime_mob_host_bindings \
+                         SET record_json = ?2 \
+                         WHERE mob_id = ?1 AND record_json = ?3",
+                        params![mob_id, next_json, expected_json],
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(changed > 0)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn delete_mob_host_binding(
+            &self,
+            mob_id: &str,
+            expected_json: &[u8],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let mob_id = mob_id.to_string();
+            let expected_json = expected_json.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let changed = tx
+                    .execute(
+                        "DELETE FROM runtime_mob_host_bindings \
+                         WHERE mob_id = ?1 AND record_json = ?2",
+                        params![mob_id, expected_json],
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(changed > 0)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn load_mob_host_revocation(
+            &self,
+            mob_id: &str,
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let mob_id = mob_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                conn.query_row(
+                    "SELECT receipt_json FROM runtime_mob_host_revocations WHERE mob_id = ?1",
+                    params![mob_id],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn list_mob_host_revocations(
+            &self,
+        ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+            let path = self.path.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT mob_id, receipt_json FROM runtime_mob_host_revocations ORDER BY mob_id",
+                    )
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                        ))
+                    })
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn revoke_mob_host_binding(
+            &self,
+            mob_id: &str,
+            expected_binding_json: &[u8],
+            receipt_json: &[u8],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let mob_id = mob_id.to_string();
+            let expected_binding_json = expected_binding_json.to_vec();
+            let receipt_json = receipt_json.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let changed = tx
+                    .execute(
+                        "DELETE FROM runtime_mob_host_bindings \
+                         WHERE mob_id = ?1 AND record_json = ?2",
+                        params![mob_id, expected_binding_json],
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                if changed == 0 {
+                    tx.rollback()
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    return Ok(false);
+                }
+                tx.execute(
+                    "INSERT INTO runtime_mob_host_revocations (mob_id, receipt_json) \
+                     VALUES (?1, ?2) \
+                     ON CONFLICT(mob_id) DO UPDATE SET receipt_json = excluded.receipt_json",
+                    params![mob_id, receipt_json],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(true)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
     }
 
     #[cfg(test)]
@@ -1502,6 +1989,25 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 InputId::new(),
             ))
             .expect("accepted test input state seed must be machine-authorized")
+        }
+
+        fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {
+            InputStatePersistenceRecord::from_machine_snapshot(bundle)
+                .expect("test input state seed must be machine-authorized")
+        }
+
+        fn replacement_records(
+            expected: &[StoredInputState],
+            recovery_count: u32,
+        ) -> Vec<InputStatePersistenceRecord> {
+            expected
+                .iter()
+                .cloned()
+                .map(|mut row| {
+                    row.state.recovery_count = recovery_count;
+                    persistable(row)
+                })
+                .collect()
         }
 
         fn session_with_one_turn() -> Session {
@@ -1876,7 +2382,7 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
         }
 
         #[tokio::test]
-        async fn superseded_snapshot_does_not_advance_sqlite_compaction_outbox() {
+        async fn superseded_snapshot_rejects_without_advancing_sqlite_compaction_outbox() {
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
             let (incoming, intent) = session_with_compaction_intent();
@@ -1895,7 +2401,7 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 )
                 .await
                 .unwrap();
-            store
+            let error = store
                 .atomic_apply(
                     &runtime_id,
                     Some(SessionDelta {
@@ -1913,7 +2419,11 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                     Some(incoming.id().clone()),
                 )
                 .await
-                .unwrap();
+                .expect_err("superseded compaction boundary must be explicitly rejected");
+            assert!(matches!(
+                error,
+                RuntimeStoreError::SessionSnapshotSuperseded { .. }
+            ));
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
                 Some(current_snapshot)
@@ -2096,6 +2606,164 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                     .is_some()
             );
             assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn input_state_batch_cas_two_handles_exactly_one_adopter_wins() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("input-cas-race.sqlite3");
+            let runtime_id = LogicalRuntimeId::new("input-cas-race");
+            let expected: Vec<_> = (0..8)
+                .map(|_| StoredInputState::new_accepted(InputId::new()))
+                .collect();
+            let initial: Vec<_> = expected.iter().cloned().map(persistable).collect();
+            SqliteRuntimeStore::new(path.clone())
+                .unwrap()
+                .persist_input_states_atomically(&runtime_id, &initial)
+                .await
+                .unwrap();
+
+            let expected_a = expected.clone();
+            let expected_b = expected.clone();
+            let replacements_a = replacement_records(&expected, 1);
+            let replacements_b = replacement_records(&expected, 2);
+            let runtime_a = runtime_id.clone();
+            let runtime_b = runtime_id.clone();
+            let path_a = path.clone();
+            let path_b = path.clone();
+            let adopter_a = tokio::spawn(async move {
+                SqliteRuntimeStore::new(path_a)
+                    .unwrap()
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_a,
+                        &expected_a,
+                        &replacements_a,
+                    )
+                    .await
+            });
+            let adopter_b = tokio::spawn(async move {
+                SqliteRuntimeStore::new(path_b)
+                    .unwrap()
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_b,
+                        &expected_b,
+                        &replacements_b,
+                    )
+                    .await
+            });
+            let outcome_a = adopter_a.await.unwrap().unwrap();
+            let outcome_b = adopter_b.await.unwrap().unwrap();
+            assert!(matches!(
+                (outcome_a, outcome_b),
+                (
+                    InputStateBatchCasOutcome::Swapped,
+                    InputStateBatchCasOutcome::Stale
+                ) | (
+                    InputStateBatchCasOutcome::Stale,
+                    InputStateBatchCasOutcome::Swapped
+                )
+            ));
+
+            let winner_count = if outcome_a == InputStateBatchCasOutcome::Swapped {
+                1
+            } else {
+                2
+            };
+            let rows = SqliteRuntimeStore::new(path)
+                .unwrap()
+                .load_input_states(&runtime_id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), expected.len());
+            assert!(
+                rows.iter()
+                    .all(|row| row.state.recovery_count == winner_count),
+                "the stale adopter must change no row"
+            );
+        }
+
+        #[tokio::test]
+        async fn input_state_batch_cas_sqlite_write_fault_rolls_back_every_row() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-cas-fault");
+            let expected: Vec<_> = (0..3)
+                .map(|_| StoredInputState::new_accepted(InputId::new()))
+                .collect();
+            let initial: Vec<_> = expected.iter().cloned().map(persistable).collect();
+            store
+                .persist_input_states_atomically(&runtime_id, &initial)
+                .await
+                .unwrap();
+            let replacements = replacement_records(&expected, 9);
+
+            let fault_input_id = expected[1].state.input_id.0.to_string();
+            let conn = open_runtime_connection(store.path()).unwrap();
+            conn.execute_batch(&format!(
+                r"
+                CREATE TRIGGER fail_exact_input_batch_cas
+                BEFORE UPDATE ON runtime_input_states
+                WHEN NEW.input_id = '{fault_input_id}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic exact input batch CAS fault');
+                END;
+                "
+            ))
+            .unwrap();
+            drop(conn);
+
+            let error = store
+                .compare_and_swap_input_states_atomically(&runtime_id, &expected, &replacements)
+                .await
+                .expect_err("trigger must abort the replacement transaction");
+            assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+            let rows = store.load_input_states(&runtime_id).await.unwrap();
+            assert_eq!(rows.len(), expected.len());
+            assert!(
+                rows.iter().all(|row| row.state.recovery_count == 0),
+                "a mid-batch write fault must roll back earlier updates"
+            );
+        }
+
+        #[tokio::test]
+        async fn input_state_batch_cas_sqlite_accepts_256_rows_atomically() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-cas-256");
+            let expected: Vec<_> = (0..crate::store::MAX_INPUT_STATE_BATCH_CAS)
+                .map(|_| StoredInputState::new_accepted(InputId::new()))
+                .collect();
+            let initial: Vec<_> = expected.iter().cloned().map(persistable).collect();
+            store
+                .persist_input_states_atomically(&runtime_id, &initial)
+                .await
+                .unwrap();
+            let replacements = replacement_records(&expected, 7);
+
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_id,
+                        &expected,
+                        &replacements,
+                    )
+                    .await
+                    .unwrap(),
+                InputStateBatchCasOutcome::Swapped
+            );
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_id,
+                        &expected,
+                        &replacements,
+                    )
+                    .await
+                    .unwrap(),
+                InputStateBatchCasOutcome::Swapped,
+                "retry after a lost CAS acknowledgement must observe the exact replacement as success"
+            );
+            let rows = store.load_input_states(&runtime_id).await.unwrap();
+            assert_eq!(rows.len(), crate::store::MAX_INPUT_STATE_BATCH_CAS);
+            assert!(rows.iter().all(|row| row.state.recovery_count == 7));
         }
 
         #[tokio::test]
@@ -2293,7 +2961,7 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 .await
                 .unwrap();
 
-            store
+            let error = store
                 .atomic_apply(
                     &runtime_id,
                     Some(SessionDelta {
@@ -2304,7 +2972,11 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                     Some(incoming.id().clone()),
                 )
                 .await
-                .unwrap();
+                .expect_err("superseded atomic commit must be explicitly rejected");
+            assert!(matches!(
+                error,
+                RuntimeStoreError::SessionSnapshotSuperseded { .. }
+            ));
 
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
@@ -2630,6 +3302,213 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
         }
 
         #[tokio::test]
+        async fn machine_terminal_atomic_apply_rolls_back_all_tables_on_receipt_conflict() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let receipt = RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            };
+            store
+                .atomic_apply(
+                    &runtime_id,
+                    None,
+                    receipt.clone(),
+                    vec![input_state()],
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let session = meerkat_core::Session::new();
+            let error = store
+                .atomic_apply_with_machine_lifecycle(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&session).unwrap(),
+                    },
+                    receipt,
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Idle,
+                        crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
+                    vec![input_state()],
+                    session.id().clone(),
+                )
+                .await
+                .expect_err("duplicate receipt should roll back the terminal transaction");
+            assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+            assert!(
+                store
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "failed terminal transaction must roll back the session snapshot"
+            );
+            assert_eq!(
+                crate::store::load_runtime_state(&store, &runtime_id)
+                    .await
+                    .unwrap(),
+                None,
+                "failed terminal transaction must roll back machine lifecycle"
+            );
+            assert_eq!(
+                store.load_input_states(&runtime_id).await.unwrap().len(),
+                1,
+                "failed terminal transaction must retain only the seeded input row"
+            );
+        }
+
+        #[tokio::test]
+        async fn machine_terminal_atomic_apply_tracks_and_tombstones_compaction_intents() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let (session, intent) = session_with_compaction_intent();
+            let encoded = serde_json::to_vec(&session).unwrap();
+            let receipt = |sequence| RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: None,
+                message_count: 0,
+                sequence,
+            };
+
+            store
+                .atomic_apply_with_machine_lifecycle(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: encoded.clone(),
+                    },
+                    receipt(0),
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Idle,
+                        crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
+                    Vec::new(),
+                    session.id().clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .unwrap(),
+                vec![intent.clone()]
+            );
+
+            store
+                .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+                .await
+                .unwrap();
+            let error = store
+                .atomic_apply_with_machine_lifecycle(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: encoded,
+                    },
+                    receipt(1),
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Idle,
+                        crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
+                    Vec::new(),
+                    session.id().clone(),
+                )
+                .await
+                .expect_err("a finalized compaction tombstone must reject stale terminal replay");
+            assert!(
+                error
+                    .to_string()
+                    .contains("replays finalized compaction intent")
+            );
+        }
+
+        #[tokio::test]
+        async fn machine_terminal_atomic_apply_rejects_superseded_snapshot_without_publication() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let incoming = session_with_user("failed turn input");
+            let mut durable_head = incoming.clone();
+            durable_head.push(Message::User(meerkat_core::types::UserMessage::text(
+                "already advanced",
+            )));
+            let durable_snapshot = serde_json::to_vec(&durable_head).unwrap();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: durable_snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let receipt = RunBoundaryReceipt {
+                run_id: RunId(uuid::Uuid::new_v4()),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![],
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            };
+            let error = store
+                .atomic_apply_with_machine_lifecycle(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    },
+                    receipt.clone(),
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Idle,
+                        crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
+                    vec![input_state()],
+                    incoming.id().clone(),
+                )
+                .await
+                .expect_err("superseded terminal snapshot must reject the entire transaction");
+            assert!(matches!(
+                error,
+                RuntimeStoreError::SessionSnapshotSuperseded { .. }
+            ));
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(durable_snapshot)
+            );
+            assert_eq!(
+                crate::store::load_runtime_state(&store, &runtime_id)
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert!(
+                store
+                    .load_input_states(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .load_boundary_receipt(&runtime_id, &receipt.run_id, receipt.sequence)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
         async fn atomic_apply_rejects_mismatched_session_store_key() {
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
@@ -2706,6 +3585,45 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
             assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
         }
 
+        #[tokio::test(flavor = "multi_thread")]
+        async fn concurrent_ops_initializers_return_one_canonical_snapshot() {
+            let (_dir, first_store) = temp_store();
+            let second_store = SqliteRuntimeStore::new(first_store.path().to_owned()).unwrap();
+            let runtime_id = runtime_id();
+            let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+            let first_candidate = registry
+                .capture_persistence_snapshot(
+                    meerkat_core::RuntimeEpochId::new(),
+                    &meerkat_core::EpochCursorState::new(),
+                )
+                .unwrap();
+            let second_candidate = registry
+                .capture_persistence_snapshot(
+                    meerkat_core::RuntimeEpochId::new(),
+                    &meerkat_core::EpochCursorState::new(),
+                )
+                .unwrap();
+            assert_ne!(first_candidate.epoch_id, second_candidate.epoch_id);
+
+            let (first, second) = tokio::join!(
+                first_store.initialize_ops_lifecycle_if_absent(&runtime_id, &first_candidate),
+                second_store.initialize_ops_lifecycle_if_absent(&runtime_id, &second_candidate),
+            );
+            let first = first.unwrap();
+            let second = second.unwrap();
+
+            assert_eq!(first.epoch_id, second.epoch_id);
+            assert_eq!(
+                first_store
+                    .load_ops_lifecycle(&runtime_id)
+                    .await
+                    .unwrap()
+                    .expect("canonical snapshot")
+                    .epoch_id,
+                first.epoch_id
+            );
+        }
+
         #[tokio::test]
         async fn unregister_finalization_power_cuts_reopen_without_split_epoch_truth() {
             for (fault, commit_was_durable) in [(1_u8, false), (2_u8, false), (3_u8, true)] {
@@ -2747,13 +3665,19 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 let result = store
                     .commit_unregister_finalization(
                         &runtime_id,
-                        MachineLifecycleCommit::new_with_binding(
-                            RuntimeState::Stopped,
-                            crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
-                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                        )
-                        .for_unregister_finalization(retired_ops_epoch.clone()),
-                        &[],
+                        crate::store::UnregisterFinalizationCommit::new(
+                            MachineLifecycleCommit::new_with_binding(
+                                RuntimeState::Stopped,
+                                crate::store::MachineLifecycleBindingFacts::new(
+                                    None, None, None, None,
+                                ),
+                                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                            ),
+                            vec![],
+                            retired_ops_epoch.clone(),
+                            crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(
+                            ),
+                        ),
                     )
                     .await;
                 if commit_was_durable {
@@ -2791,13 +3715,19 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 reopened
                     .commit_unregister_finalization(
                         &runtime_id,
-                        MachineLifecycleCommit::new_with_binding(
-                            RuntimeState::Stopped,
-                            crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
-                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                        )
-                        .for_unregister_finalization(retired_ops_epoch.clone()),
-                        &[],
+                        crate::store::UnregisterFinalizationCommit::new(
+                            MachineLifecycleCommit::new_with_binding(
+                                RuntimeState::Stopped,
+                                crate::store::MachineLifecycleBindingFacts::new(
+                                    None, None, None, None,
+                                ),
+                                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                            ),
+                            vec![],
+                            retired_ops_epoch.clone(),
+                            crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(
+                            ),
+                        ),
                     )
                     .await
                     .unwrap();
@@ -2823,6 +3753,14 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                     .expect_err("reopen must retain the exact retired-epoch fence");
                 assert!(matches!(
                     late_error,
+                    RuntimeStoreError::OpsLifecycleEpochRetired { epoch_id, .. }
+                        if epoch_id == retired_ops_epoch
+                ));
+                assert!(matches!(
+                    reopened_after_retry
+                        .initialize_ops_lifecycle_if_absent(&runtime_id, &stale_ops)
+                        .await
+                        .expect_err("reopen initialization must honor the retired-epoch fence"),
                     RuntimeStoreError::OpsLifecycleEpochRetired { epoch_id, .. }
                         if epoch_id == retired_ops_epoch
                 ));
@@ -2868,13 +3806,16 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
             store
                 .commit_unregister_finalization(
                     &runtime_id,
-                    MachineLifecycleCommit::new_with_binding(
-                        RuntimeState::Stopped,
-                        crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
-                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                    )
-                    .for_unregister_finalization(old_ops.epoch_id.clone()),
-                    &[],
+                    crate::store::UnregisterFinalizationCommit::new(
+                        MachineLifecycleCommit::new_with_binding(
+                            RuntimeState::Stopped,
+                            crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
+                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                        ),
+                        vec![],
+                        old_ops.epoch_id.clone(),
+                        crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
+                    ),
                 )
                 .await
                 .unwrap();
@@ -2901,6 +3842,215 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 .persist_ops_lifecycle(&runtime_id, &new_ops)
                 .await
                 .unwrap();
+        }
+
+        #[tokio::test]
+        async fn unregister_finalization_commits_lifecycle_inputs_and_ops_delete_together() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let ops_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+                .capture_persistence_snapshot(
+                    meerkat_core::RuntimeEpochId::new(),
+                    &meerkat_core::EpochCursorState::new(),
+                )
+                .unwrap();
+            store
+                .persist_ops_lifecycle(&runtime_id, &ops_snapshot)
+                .await
+                .unwrap();
+            let finalization = crate::store::UnregisterFinalizationCommit::new(
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                vec![input_state()],
+                ops_snapshot.epoch_id.clone(),
+                crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
+            );
+
+            store
+                .commit_unregister_finalization(&runtime_id, finalization)
+                .await
+                .unwrap();
+
+            let lifecycle = crate::store::load_machine_lifecycle(&store, &runtime_id)
+                .await
+                .unwrap()
+                .expect("terminal lifecycle");
+            assert_eq!(lifecycle.runtime_state(), RuntimeState::Idle);
+            assert_eq!(
+                lifecycle.binding(),
+                &crate::store::MachineLifecycleBindingFacts::default()
+            );
+            assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
+            assert!(
+                store
+                    .load_ops_lifecycle(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn unregister_finalization_rolls_back_lifecycle_and_inputs_when_delete_fails() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let ops_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+                .capture_persistence_snapshot(
+                    meerkat_core::RuntimeEpochId::new(),
+                    &meerkat_core::EpochCursorState::new(),
+                )
+                .unwrap();
+            store
+                .persist_ops_lifecycle(&runtime_id, &ops_snapshot)
+                .await
+                .unwrap();
+            let conn = open_runtime_connection(&store.path).unwrap();
+            conn.execute_batch(
+                r"
+                CREATE TRIGGER reject_unregister_ops_delete
+                BEFORE DELETE ON runtime_ops_lifecycle
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic unregister delete failure');
+                END;
+                ",
+            )
+            .unwrap();
+            let finalization = crate::store::UnregisterFinalizationCommit::new(
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                vec![input_state()],
+                ops_snapshot.epoch_id.clone(),
+                crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
+            );
+
+            store
+                .commit_unregister_finalization(&runtime_id, finalization)
+                .await
+                .expect_err("delete failure must abort the whole finalization transaction");
+
+            assert!(
+                crate::store::load_machine_lifecycle(&store, &runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "failed delete must roll back terminal lifecycle publication"
+            );
+            assert!(
+                store
+                    .load_input_states(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .load_ops_lifecycle(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "failed delete must retain the prior ops snapshot"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn cancelled_unregister_finalization_has_no_detached_sqlite_write() {
+            let (_dir, store) = temp_store();
+            let store = std::sync::Arc::new(store);
+            let runtime_id = runtime_id();
+            let ops_snapshot = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()
+                .capture_persistence_snapshot(
+                    meerkat_core::RuntimeEpochId::new(),
+                    &meerkat_core::EpochCursorState::new(),
+                )
+                .unwrap();
+            store
+                .persist_ops_lifecycle(&runtime_id, &ops_snapshot)
+                .await
+                .unwrap();
+            let finalization = crate::store::UnregisterFinalizationCommit::new(
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                vec![input_state()],
+                ops_snapshot.epoch_id.clone(),
+                crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
+            );
+
+            // Hold SQLite's write reservation on a dedicated thread so the
+            // finalizer is known to be inside its first, non-yielding poll when
+            // cancellation arrives.
+            let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let blocker_path = store.path.clone();
+            let blocker = std::thread::spawn(move || {
+                let mut blocker_conn = open_runtime_connection(&blocker_path).unwrap();
+                let blocker_tx = begin_runtime_transaction(&mut blocker_conn).unwrap();
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                drop(blocker_tx);
+            });
+            locked_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("blocking writer should acquire SQLite reservation");
+            let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+            let mut finalizer = tokio::spawn({
+                let store = std::sync::Arc::clone(&store);
+                let runtime_id = runtime_id.clone();
+                let entered = std::sync::Arc::clone(&entered);
+                async move {
+                    entered.notify_one();
+                    store
+                        .commit_unregister_finalization(&runtime_id, finalization)
+                        .await
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+                .await
+                .expect("finalizer task should start");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            finalizer.abort();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut finalizer,)
+                    .await
+                    .is_err(),
+                "cancellation must not return while a SQLite finalization poll can still mutate; a detached spawn_blocking write violates this fence"
+            );
+
+            release_tx.send(()).unwrap();
+            blocker.join().unwrap();
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(2), finalizer)
+                .await
+                .expect("finalizer should finish after the competing writer releases");
+            match joined {
+                Ok(Ok(())) => {}
+                Err(error) if error.is_cancelled() => {}
+                Ok(Err(error)) => panic!("finalizer failed after lock release: {error}"),
+                Err(error) => panic!("finalizer task failed unexpectedly: {error}"),
+            }
+
+            let lifecycle = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+                .await
+                .unwrap()
+                .expect("the in-progress atomic poll must finish before cancellation returns");
+            assert_eq!(lifecycle.runtime_state(), RuntimeState::Idle);
+            assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
+            assert!(
+                store
+                    .load_ops_lifecycle(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "cancellation may observe the complete transaction, never a delayed or split write"
+            );
         }
 
         #[tokio::test]
@@ -3313,6 +4463,211 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 .expect("load over TEXT snapshot must not fail")
                 .expect("snapshot present");
             assert_eq!(carried, snapshot, "TEXT snapshot bytes must round-trip");
+        }
+
+        #[tokio::test]
+        async fn mob_host_binding_rows_insert_cas_delete_and_list() {
+            let (_dir, store) = temp_store();
+
+            // Absent row: load None, list empty, CAS/delete no-ops.
+            assert!(
+                store
+                    .load_mob_host_binding("mob-a")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(store.list_mob_host_bindings().await.unwrap().is_empty());
+            assert!(
+                !store
+                    .compare_and_put_mob_host_binding("mob-a", b"old", b"new")
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !store
+                    .delete_mob_host_binding("mob-a", b"old")
+                    .await
+                    .unwrap()
+            );
+
+            // Insert-if-absent: first wins, second is refused.
+            assert!(
+                store
+                    .put_mob_host_binding_if_absent("mob-a", b"record-1")
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !store
+                    .put_mob_host_binding_if_absent("mob-a", b"record-other")
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                store
+                    .load_mob_host_binding("mob-a")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(b"record-1".as_slice())
+            );
+
+            // CAS honours the expected blob.
+            assert!(
+                !store
+                    .compare_and_put_mob_host_binding("mob-a", b"stale", b"record-2")
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .compare_and_put_mob_host_binding("mob-a", b"record-1", b"record-2")
+                    .await
+                    .unwrap()
+            );
+
+            // List is keyed and ordered.
+            assert!(
+                store
+                    .put_mob_host_binding_if_absent("mob-b", b"record-b")
+                    .await
+                    .unwrap()
+            );
+            let rows = store.list_mob_host_bindings().await.unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    ("mob-a".to_string(), b"record-2".to_vec()),
+                    ("mob-b".to_string(), b"record-b".to_vec()),
+                ]
+            );
+
+            // Delete honours the expected blob.
+            assert!(
+                !store
+                    .delete_mob_host_binding("mob-a", b"stale")
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .delete_mob_host_binding("mob-a", b"record-2")
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .load_mob_host_binding("mob-a")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn mob_host_revoke_is_atomic_durable_and_fresh_bind_supersedes_receipt() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("runtime.sqlite3");
+
+            {
+                let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+                assert!(
+                    store
+                        .put_mob_host_binding_if_absent("mob-r", b"binding-v1")
+                        .await
+                        .unwrap()
+                );
+
+                // A stale expected binding changes neither region.
+                assert!(
+                    !store
+                        .revoke_mob_host_binding("mob-r", b"stale", b"receipt-v1")
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(
+                    store
+                        .load_mob_host_binding("mob-r")
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some(b"binding-v1".as_slice())
+                );
+                assert!(
+                    store
+                        .load_mob_host_revocation("mob-r")
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "a failed revoke CAS must not publish a success receipt"
+                );
+
+                assert!(
+                    store
+                        .revoke_mob_host_binding("mob-r", b"binding-v1", b"receipt-v1")
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    store
+                        .load_mob_host_binding("mob-r")
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "the durable terminal contains no active binding"
+                );
+                assert_eq!(
+                    store.list_mob_host_revocations().await.unwrap(),
+                    vec![("mob-r".to_string(), b"receipt-v1".to_vec())]
+                );
+            }
+
+            // Both halves survive reopen: no binding can revive member rows,
+            // while the exact retry receipt remains available.
+            {
+                let restarted = SqliteRuntimeStore::new(path.clone()).unwrap();
+                assert!(
+                    restarted
+                        .load_mob_host_binding("mob-r")
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(
+                    restarted
+                        .load_mob_host_revocation("mob-r")
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some(b"receipt-v1".as_slice())
+                );
+
+                // Replacement bind and old-receipt removal share one
+                // transaction, so a delayed old revoke cannot replay across
+                // a successful replacement ceremony.
+                assert!(
+                    restarted
+                        .put_mob_host_binding_if_absent("mob-r", b"binding-v2")
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    restarted
+                        .load_mob_host_revocation("mob-r")
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(
+                    restarted
+                        .load_mob_host_binding("mob-r")
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some(b"binding-v2".as_slice())
+                );
+            }
         }
     }
 }

@@ -53,8 +53,8 @@ enum Commands {
     #[command(name = "rmat-audit")]
     RmatAudit(RmatAuditArgs),
     /// Structural effect-authority audit: runtime interrupt / runtime-effect
-    /// authority must stay machine-owned (syn AST port of the former
-    /// `scripts/audit-effect-authority.sh` gate).
+    /// authority stays machine-owned and CoreExecutor decoration stays
+    /// exhaustive (syn AST port of the former shell gate).
     #[command(name = "effect-authority")]
     EffectAuthority,
     /// W2-F structural bridge-classifier gate: production bridge code must

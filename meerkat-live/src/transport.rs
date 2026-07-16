@@ -889,6 +889,14 @@ impl LiveWsState {
                 return false;
             }
         };
+        if let Err(err) = self.host.prepare_channel_physical_close(&observation).await {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %err,
+                "live transport physical adapter close failed before generated feedback"
+            );
+            return false;
+        }
         let authority = match self
             .close_feedback
             .record_live_channel_closed(channel_id, &observation)
@@ -2923,6 +2931,9 @@ mod tests {
                     },
                 },
             )
+            .await
+            .unwrap();
+        host.prepare_channel_physical_close(&close_observation)
             .await
             .unwrap();
         let close_authority = host

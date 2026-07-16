@@ -433,6 +433,7 @@ mod orchestrator_e2e {
             realm_id: None,
             instance_id: None,
             backend: None,
+            ingress_reconciler: None,
         }
     }
 

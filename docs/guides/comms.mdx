@@ -222,10 +222,36 @@ When `CommsRuntime` is created, it automatically registers itself in the active 
 ```rust
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum MessageKind {
-    Message { body: String, blocks: Option<Vec<ContentBlock>>, handling_mode: Option<HandlingMode> },
-    Request { intent: String, params: JsonValue, blocks: Option<Vec<ContentBlock>>, handling_mode: Option<HandlingMode> },
+    Message {
+        body: String,
+        blocks: Option<Vec<ContentBlock>>,
+        content_taint: Option<SenderContentTaint>,
+        handling_mode: Option<HandlingMode>,
+    },
+    IncarnationFencedMessage {
+        body: String,
+        blocks: Option<Vec<ContentBlock>>,
+        content_taint: Option<SenderContentTaint>,
+        handling_mode: Option<HandlingMode>,
+        expected_recipient: PeerRecipientIncarnation,
+    },
+    Request {
+        intent: String,
+        params: JsonValue,
+        blocks: Option<Vec<ContentBlock>>,
+        reply_endpoint: Option<PeerAddress>,
+        content_taint: Option<SenderContentTaint>,
+        handling_mode: Option<HandlingMode>,
+    },
     Lifecycle { kind: PeerLifecycleKind, params: JsonValue },
-    Response { in_reply_to: Uuid, status: Status, result: JsonValue, blocks: Option<Vec<ContentBlock>>, handling_mode: Option<HandlingMode> },
+    Response {
+        in_reply_to: Uuid,
+        status: Status,
+        result: JsonValue,
+        blocks: Option<Vec<ContentBlock>>,
+        content_taint: Option<SenderContentTaint>,
+        handling_mode: Option<HandlingMode>,
+    },
     Ack { in_reply_to: Uuid },
 }
 
@@ -236,6 +262,18 @@ pub enum Status {
     Failed,
 }
 ```
+
+`content_taint` and `reply_endpoint` are omitted when absent, preserving the
+signed bytes of older envelopes. `reply_endpoint` is short-lived response
+transport metadata for one exact request correlation, never a durable trust
+route. Correlated callback admission requires a signature-verified TCP Request
+and combines its signed, nonzero declared port with the connection's
+kernel-observed source IP. The sender-selected host is discarded; payload peer
+addresses, UDS endpoints, unsigned/open-auth ingress, and arbitrary sender
+addresses are never callback authority. The legacy uncorrelated staging seam
+accepts only machine-authorized endpoints already held in runtime state.
+Controlled bridge responders use the correlated path for alternate-authority
+probes whose temporary listener port differs from the peer's durable route.
 </Accordion>
 
 ### ACK behavior

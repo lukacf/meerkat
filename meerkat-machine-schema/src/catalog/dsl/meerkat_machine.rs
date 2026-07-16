@@ -1166,6 +1166,7 @@ pub enum LiveOpenAdmissionRejection {
     #[default]
     AlreadyBound,
     ChannelAlreadyBound,
+    LifecycleClosed,
 }
 
 /// Typed public result class for `live/refresh` after the adapter command
@@ -2556,6 +2557,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             // `cancel_after_boundary` clears (turn start and turn-terminal
             // consumption).
             boundary_cancel_dispatch_pending: bool,
+            // Monotonic identity for the pending dispatch above. The shell
+            // releases its session mutation gate while invoking the
+            // executor-owned boundary hook, so unrelated machine inputs may
+            // commit before it resumes. Comparing this identity lets the
+            // shell distinguish that harmless state movement from the old
+            // dispatch being consumed and a successor dispatch being armed.
+            boundary_cancel_dispatch_generation: u64,
+            // Exact run that produced the retained turn terminal witness.
+            // Unlike current_run_id this survives lifecycle return, and unlike
+            // runtime_completion_result_run_id it is written by core turn
+            // terminalization rather than later runtime publication.
+            turn_terminal_run_id: Option<RunId>,
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
             terminal_cause_kind: Option<Enum<TurnTerminalCauseKind>>,
             last_runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
@@ -3074,6 +3087,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             boundary_count = 0,
             cancel_after_boundary = false,
             boundary_cancel_dispatch_pending = false,
+            boundary_cancel_dispatch_generation = 0,
+            turn_terminal_run_id = None,
             terminal_outcome = None,
             terminal_cause_kind = None,
             last_runtime_apply_failure_cause = None,
@@ -3390,6 +3405,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 generation: Option<Generation>,
                 runtime_epoch_id: Option<RuntimeEpochId>,
             },
+            BeginUnregisterUnservedAttachment {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+            },
             RuntimeLoopStoppedForUnregister { session_id: SessionId, forced_abort: bool },
             CommsDrainExitedForUnregister { session_id: SessionId, forced_abort: bool },
             CompletionWaitersResolvedForUnregister { session_id: SessionId },
@@ -3483,6 +3505,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 staged_promotion_busy: bool,
             },
             CancelAfterBoundary { reason: String },
+            AbortCancelAfterBoundaryDispatch { dispatch_generation: u64 },
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<ToolName, ToolVisibilityWitness> },
             PublishCommittedVisibleSet {
                 active_filter: ToolFilter,
@@ -3552,6 +3575,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             Reset,
             StopRuntimeExecutor { reason: String },
             RuntimeExecutorExited,
+            RecoverRuntimeCompletionResultCorrelation { run_id: RunId },
             ResolveRuntimeCompletionResult {
                 run_id: Option<RunId>,
                 terminal: Enum<RuntimeCompletionTerminalObservation>,
@@ -3872,6 +3896,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             StartImmediateContext { run_id: RunId },
             PrimitiveApplied { run_id: RunId },
             LlmReturnedToolCalls { run_id: RunId, tool_count: u64 },
+            CallbackPending { run_id: RunId },
             LlmReturnedTerminal { run_id: RunId },
             RegisterPendingOps {
                 run_id: RunId,
@@ -4478,6 +4503,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             ApplyMobPeerOverlay {
                 epoch: u64,
                 endpoints: Set<PeerEndpoint>,
+            },
+            AuthorizeInteractionTerminalOutboxAdoption {
+                batch_key: String,
+                candidate_digest: String,
+                session_id: SessionId,
+                previous_agent_runtime_id: AgentRuntimeId,
+                previous_fence_token: FenceToken,
+                previous_runtime_generation: Generation,
+                previous_runtime_epoch_id: Option<RuntimeEpochId>,
             },
         }
 
@@ -5161,6 +5195,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             RequestRuntimeLoopStopForUnregister { session_id: SessionId },
             RequestCommsDrainExitForUnregister { session_id: SessionId },
             RequestCompletionWaiterResolutionForUnregister { session_id: SessionId },
+            InteractionTerminalOutboxAdoptionAuthorized {
+                batch_key: String,
+                candidate_digest: String,
+                session_id: SessionId,
+                previous_agent_runtime_id: AgentRuntimeId,
+                previous_fence_token: FenceToken,
+                previous_runtime_generation: Generation,
+                previous_runtime_epoch_id: Option<RuntimeEpochId>,
+                next_agent_runtime_id: AgentRuntimeId,
+                next_fence_token: FenceToken,
+                next_runtime_generation: Generation,
+                next_runtime_epoch_id: Option<RuntimeEpochId>,
+            },
         }
 
         // =====================================================================
@@ -5183,6 +5230,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition CommittedVisibleSetPublished => external seam SurfaceResultAlignment,
         disposition RuntimeNotice => external seam SurfaceResultAlignment,
         disposition RuntimeEffectFact => local seam NoOwnerRealization,
+        disposition InteractionTerminalOutboxAdoptionAuthorized => local seam OwnerRealizationOnly,
         disposition RuntimeCompletionResultResolved => local seam SurfaceResultAlignment,
         disposition RuntimeCompletionCleanupResolved => local seam NoOwnerRealization,
         disposition RuntimeCompletionWaitFailureResolved => local seam SurfaceResultAlignment,
@@ -6051,6 +6099,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         // resets the per-session LLM state. Destroyed is intentionally absent:
         // RegisterSession is a resurrection input the DestroyedShapeInvariant
         // forbids, so the machine — not a shell preflight — rejects it there.
+        // Draining is also excluded on every registration arm: it is the
+        // machine-owned teardown tombstone that must fence service actor
+        // rematerialization until final UnregisterSession removes the entry.
         // Stopped is handled by the explicit revival arms below (2c/2d): a
         // stopped executor is a fact about the previous runtime epoch, so a
         // re-registration is the machine-owned resume intent, not a self-loop.
@@ -6071,6 +6122,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition RegisterSession {
             per_phase [Idle, Attached, Running, Retired]
             on input RegisterSession { session_id }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "new_session_binding" { self.session_id != Some(session_id) }
             update {
                 self.session_id = Some(session_id);
@@ -6100,6 +6152,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition RegisterSessionIdempotent {
             per_phase [Idle, Attached, Running, Retired]
             on input RegisterSession { session_id }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "same_session_binding" { self.session_id == Some(session_id) }
             update {}
             to Idle
@@ -6550,6 +6603,40 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RequestCompletionWaiterResolutionForUnregister { session_id: session_id }
         }
 
+        // A prepared executor that never crossed its serving gate is an
+        // attachment-transaction abort, not ordinary logical-session
+        // retirement. The exact Pending attachment is validated by the
+        // machine shell under M before this input is staged. Generated
+        // authority owns the durability verdict: seal the old in-process ops
+        // registry during unregister, but retain its epoch snapshot so
+        // compaction and interaction-terminal outboxes keep a recoverable
+        // exact owner on the next attachment. This transition deliberately
+        // does not predict RuntimeExecutorExited; the owned drain observes
+        // and joins the actual loop exit after the serving gate is closed.
+        transition BeginUnregisterUnservedAttachment {
+            per_phase [Idle, Attached, Running]
+            on input BeginUnregisterUnservedAttachment { session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_matches_observation" { self.active_runtime_id == agent_runtime_id }
+            guard "fence_binding_matches_observation" { self.active_fence_token == fence_token }
+            guard "generation_binding_matches_observation" { self.active_runtime_generation == generation }
+            guard "epoch_binding_matches_observation" { self.active_runtime_epoch_id == runtime_epoch_id }
+            guard "executor_registration_active" { self.registration_phase == RegistrationPhase::Active }
+            update {
+                self.registration_phase = RegistrationPhase::Draining;
+                self.unregister_runtime_loop_drain_pending = true;
+                self.unregister_comms_drain_exit_pending = true;
+                self.unregister_completion_waiter_drain_pending = true;
+                self.unregister_teardown_retains_snapshot = true;
+                self.unregister_runtime_loop_forced_abort = false;
+                self.unregister_comms_drain_forced_abort = false;
+            }
+            to Idle
+            emit RequestRuntimeLoopStopForUnregister { session_id: session_id }
+            emit RequestCommsDrainExitForUnregister { session_id: session_id }
+            emit RequestCompletionWaiterResolutionForUnregister { session_id: session_id }
+        }
+
         transition RuntimeLoopStoppedForUnregister {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RuntimeLoopStoppedForUnregister { session_id, forced_abort }
@@ -6631,8 +6718,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
-                self.registration_phase = RegistrationPhase::Queuing;
-                self.unregister_teardown_retains_snapshot = false;
+                // Keep the terminal cleanup tombstone until the shell removes
+                // the exact runtime entry. A cancelled post-commit finalizer
+                // can then resume without reopening registration or losing
+                // the generated ops-durability verdict.
             }
             to Idle
         }
@@ -6669,8 +6758,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
-                self.registration_phase = RegistrationPhase::Queuing;
-                self.unregister_teardown_retains_snapshot = false;
+                // Keep Draining + the durability verdict through exact entry
+                // removal; the next registration starts on a fresh authority.
             }
             to Idle
         }
@@ -6707,8 +6796,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
-                self.registration_phase = RegistrationPhase::Queuing;
-                self.unregister_teardown_retains_snapshot = false;
+                // Keep Draining + the durability verdict through exact entry
+                // removal; the next registration starts on a fresh authority.
             }
             to Idle
         }
@@ -6745,8 +6834,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
-                self.registration_phase = RegistrationPhase::Queuing;
-                self.unregister_teardown_retains_snapshot = false;
+                // Keep Draining + the durability verdict through exact entry
+                // removal; the next registration starts on a fresh authority.
             }
             to Retired
         }
@@ -6783,8 +6872,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
-                self.registration_phase = RegistrationPhase::Queuing;
-                self.unregister_teardown_retains_snapshot = false;
+                // Keep Draining + the durability verdict through exact entry
+                // removal; the next registration starts on a fresh authority.
             }
             to Idle
         }
@@ -8015,10 +8104,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the canonical seam stages RegisterSession (revival) before any
         // bindings preparation, so a PrepareBindings arriving at a Stopped
         // machine is an ordering bug that must surface as a loud
-        // GuardRejected, never a silent phase-preserving rebind.
+        // GuardRejected, never a silent phase-preserving rebind. Draining is
+        // likewise excluded from every arm so binding preparation cannot
+        // reopen service resources between post-stop cleanup and final
+        // unregister.
         transition PrepareBindingsIdempotent {
             per_phase [Initializing, Idle, Attached, Running, Retired]
             on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_exact" { self.active_runtime_id == Some(agent_runtime_id) }
             guard "fence_binding_exact" { self.active_fence_token == Some(fence_token) }
@@ -8032,6 +8125,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PrepareBindingsInitializing {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Initializing }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
             guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
@@ -8057,6 +8151,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PrepareBindingsIdle {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Idle }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
             guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
@@ -8082,6 +8177,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PrepareBindingsAttached {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Attached }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
             guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
@@ -8107,6 +8203,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PrepareBindingsRunning {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
             guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
@@ -8132,6 +8229,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition PrepareBindingsRetired {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, runtime_epoch_id, session_id }
             guard { self.lifecycle_phase == Phase::Retired }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             guard "session_matches_current" { self.session_id == Some(session_id) }
             guard "runtime_binding_absent_or_same" { self.active_runtime_id == None || self.active_runtime_id == Some(agent_runtime_id) }
             guard "fence_binding_absent_or_same" { self.active_fence_token == None || self.active_fence_token == Some(fence_token) }
@@ -8555,7 +8653,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // non-interruptible); this transition owns whether the public result is
         // success, not-found, session-busy, or conflict.
         transition ResolveUserInterruptPublicResultAccepted {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
             on input ResolveUserInterruptPublicResult { observation, target_present, staged_promotion_busy }
             guard "accepted" { observation == UserInterruptObservationKind::Accepted }
             update {}
@@ -8661,6 +8759,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "no_dispatch_outstanding" { self.boundary_cancel_dispatch_pending == false }
             update {
                 self.boundary_cancel_dispatch_pending = true;
+                self.boundary_cancel_dispatch_generation = self.boundary_cancel_dispatch_generation + 1;
             }
             to Attached
             emit RequestCancellationAtBoundary
@@ -8672,6 +8771,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "no_dispatch_outstanding" { self.boundary_cancel_dispatch_pending == false }
             update {
                 self.boundary_cancel_dispatch_pending = true;
+                self.boundary_cancel_dispatch_generation = self.boundary_cancel_dispatch_generation + 1;
             }
             to Running
             emit RequestCancellationAtBoundary
@@ -8692,6 +8792,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Running
             emit BoundaryCancelAlreadyPending
+        }
+
+        // Targeted compensation for a shell dispatch failure. The generation
+        // guard prevents a delayed callback from clearing a successor
+        // boundary-cancel dispatch, while the narrow field update preserves
+        // unrelated DSL mutations that committed during the live callback.
+        transition AbortCancelAfterBoundaryDispatch {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input AbortCancelAfterBoundaryDispatch { dispatch_generation }
+            guard "dispatch_outstanding" { self.boundary_cancel_dispatch_pending == true }
+            guard "dispatch_generation_matches" { self.boundary_cancel_dispatch_generation == dispatch_generation }
+            update {
+                self.boundary_cancel_dispatch_pending = false;
+            }
+            to Idle
         }
 
         // 12. BoundaryAppliedPublish: Running self-loop (signal)
@@ -9199,7 +9314,77 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Stopped
         }
 
-        // 16a. ResolveRuntimeCompletionResult: generated public completion
+        // 16a. Generated authority for adopting a durable interaction
+        // terminal outbox into the current runtime placement after recovery.
+        // The shell supplies only the prior durable binding and immutable
+        // batch/digest witnesses; the machine owns lineage admission and
+        // emits the exact current binding that may realize the CAS.
+        transition AuthorizeInteractionTerminalOutboxAdoption {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input AuthorizeInteractionTerminalOutboxAdoption {
+                batch_key, candidate_digest, session_id, previous_agent_runtime_id,
+                previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id
+            }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "current_runtime_binding_complete" {
+                self.active_runtime_id != None
+                && self.active_fence_token != None
+                && self.active_runtime_generation != None
+            }
+            guard "runtime_lineage_matches" {
+                self.active_runtime_id == Some(previous_agent_runtime_id)
+            }
+            guard "fence_not_regressed" {
+                self.active_fence_token.get("value") >= previous_fence_token
+            }
+            guard "generation_not_regressed" {
+                self.active_runtime_generation.get("value") >= previous_runtime_generation
+            }
+            guard "epoch_lineage_valid" {
+                self.active_runtime_epoch_id == previous_runtime_epoch_id
+                || self.active_fence_token.get("value") > previous_fence_token
+                || self.active_runtime_generation.get("value") > previous_runtime_generation
+            }
+            guard "batch_key_present" { batch_key != "" }
+            guard "candidate_digest_present" { candidate_digest != "" }
+            update {}
+            to Idle
+            emit InteractionTerminalOutboxAdoptionAuthorized {
+                batch_key: batch_key,
+                candidate_digest: candidate_digest,
+                session_id: session_id,
+                previous_agent_runtime_id: previous_agent_runtime_id,
+                previous_fence_token: previous_fence_token,
+                previous_runtime_generation: previous_runtime_generation,
+                previous_runtime_epoch_id: previous_runtime_epoch_id,
+                next_agent_runtime_id: self.active_runtime_id.get("value"),
+                next_fence_token: self.active_fence_token.get("value"),
+                next_runtime_generation: self.active_runtime_generation.get("value"),
+                next_runtime_epoch_id: self.active_runtime_epoch_id,
+            }
+        }
+
+        // A durable unpublished interaction-terminal batch is the recovery
+        // witness for a run whose ordinary in-memory RunCompleted correlation
+        // was lost with the prior process. The runtime validates and adopts
+        // that exact batch before applying this input. Keep the correlation
+        // single-valued: two different pending runs are recovery corruption,
+        // not an invitation for the shell to overwrite machine truth.
+        transition RecoverRuntimeCompletionResultCorrelation {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RecoverRuntimeCompletionResultCorrelation { run_id }
+            guard "session_registered" { self.session_id != None }
+            guard "correlation_absent_or_same" {
+                self.runtime_completion_result_run_id == None
+                || self.runtime_completion_result_run_id == Some(run_id)
+            }
+            update {
+                self.runtime_completion_result_run_id = Some(run_id);
+            }
+            to Idle
+        }
+
+        // 16b. ResolveRuntimeCompletionResult: generated public completion
         // result class for runtime-loop waiter observations. Runtime carries
         // payload bytes/JSON, but the public result variant is selected here.
         transition ResolveRuntimeCompletionResultCompleted {
@@ -9415,6 +9600,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "terminal_without_result" {
                 terminal == RuntimeCompletionTerminalObservation::NoResult
                 || terminal == RuntimeCompletionTerminalObservation::CallbackPending
+                || terminal == RuntimeCompletionTerminalObservation::MachineTerminal
             }
             update {}
             to Idle
@@ -10222,6 +10408,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition EnsureSessionWithExecutorRetired {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Retired }
+            guard "not_draining" { self.registration_phase != RegistrationPhase::Draining }
             update {}
             to Retired
         }
@@ -10358,17 +10545,31 @@ macro_rules! meerkat_catalog_machine_dsl {
         // The `wake_if_idle` flag is the machine-owned truth for "this
         // input must wake the runtime loop when it reaches idle" (e.g.
         // peer_response_terminal queued while the session is running).
-        // Idle/Attached queued arms already emit WakeLoop unconditionally
-        // — the caller is about to wake — so wake_if_idle is ignored in
-        // those guards. The Running+Queued path splits on it.
+        // Every queued phase splits on this fact. In particular,
+        // PeerResponseProgress resolves to `wake_if_idle == false`; waking it
+        // from Idle/Attached would contradict the admission plan and race a
+        // later Recover/Recycle/Retire command for the runtime authority gate.
         //
-        // Idle + queued (immediate=false, interrupt_yielding=false)
-        transition AcceptWithCompletionIdleQueued {
+        // Idle + queued passive (immediate=false, interrupt_yielding=false, wake_if_idle=false)
+        transition AcceptWithCompletionIdleQueuedPassive {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
             guard "interrupt_yielding" { interrupt_yielding == false }
+            guard "wake_if_idle" { wake_if_idle == false }
+            update {}
+            to Idle
+            emit IngressAccepted
+        }
+        // Idle + queued wake-if-idle (immediate=false, interrupt_yielding=false, wake_if_idle=true)
+        transition AcceptWithCompletionIdleQueuedWakeIfIdle {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            guard "wake_if_idle" { wake_if_idle == true }
             update {}
             to Idle
             emit IngressAccepted
@@ -10407,13 +10608,26 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
             emit SubmitRunPrimitive
         }
-        // Attached + queued (immediate=false, interrupt_yielding=false)
-        transition AcceptWithCompletionAttachedQueued {
+        // Attached + queued passive (immediate=false, interrupt_yielding=false, wake_if_idle=false)
+        transition AcceptWithCompletionAttachedQueuedPassive {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
             guard "interrupt_yielding" { interrupt_yielding == false }
+            guard "wake_if_idle" { wake_if_idle == false }
+            update {}
+            to Attached
+            emit IngressAccepted
+        }
+        // Attached + queued wake-if-idle (immediate=false, interrupt_yielding=false, wake_if_idle=true)
+        transition AcceptWithCompletionAttachedQueuedWakeIfIdle {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            guard "wake_if_idle" { wake_if_idle == true }
             update {}
             to Attached
             emit IngressAccepted
@@ -13896,6 +14110,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some(PreRunPhase::Idle);
+                self.turn_terminal_run_id = None;
                 self.runtime_completion_result_run_id = None;
             }
             to Running
@@ -13908,6 +14123,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some(PreRunPhase::Attached);
+                self.turn_terminal_run_id = None;
                 self.runtime_completion_result_run_id = None;
             }
             to Running
@@ -13921,6 +14137,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some(PreRunPhase::Retired);
+                self.turn_terminal_run_id = None;
                 self.runtime_completion_result_run_id = None;
             }
             to Running
@@ -13961,6 +14178,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14008,6 +14226,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14055,6 +14274,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14101,6 +14321,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14142,6 +14363,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14182,6 +14404,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14221,6 +14444,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14262,6 +14486,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14302,6 +14527,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14341,6 +14567,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.boundary_cancel_dispatch_pending = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
                 self.last_runtime_apply_failure_cause = None;
@@ -14386,6 +14613,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
@@ -14409,6 +14637,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_cancel_dispatch_pending = false;
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -14440,6 +14669,30 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.tool_calls_pending = 0;
             }
             to Running
+        }
+
+        transition CallbackPendingCompleted {
+            on input CallbackPending { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            guard "turn_waiting_for_ops" { self.turn_phase == TurnPhase::WaitingForOps }
+            update {
+                self.turn_phase = TurnPhase::Completed;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
+                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
+                self.terminal_cause_kind = None;
+            }
+            to Running
+            emit TurnRunCompleted {
+                run_id: self.current_run_id.get("value"),
+                outcome: TurnTerminalOutcome::Completed
+            }
         }
 
         transition LlmReturnedTerminal {
@@ -14536,6 +14789,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_cancel_dispatch_pending = false;
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -14553,6 +14807,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
@@ -14572,6 +14827,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_cancel_dispatch_pending = false;
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -14612,6 +14868,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Completed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
@@ -14642,6 +14899,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::Completed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 self.terminal_cause_kind = None;
             }
@@ -14665,6 +14923,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.extraction_attempts = self.extraction_attempts + 1;
                 self.turn_phase = TurnPhase::Completed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 self.terminal_cause_kind = None;
             }
@@ -14723,6 +14982,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(if terminal_failure_source == RunFailureSourceKind::TokenBudgetExceeded || terminal_failure_source == RunFailureSourceKind::ToolCallBudgetExceeded { TurnTerminalOutcome::BudgetExhausted } else { if terminal_failure_source == RunFailureSourceKind::TimeBudgetExceeded { TurnTerminalOutcome::TimeBudgetExceeded } else { if terminal_failure_source == RunFailureSourceKind::StructuredOutputValidationFailed || terminal_failure_source == RunFailureSourceKind::InvalidOutputSchema { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } });
                 self.terminal_cause_kind = Some(if terminal_failure_source == RunFailureSourceKind::HookDenied { TurnTerminalCauseKind::HookDenied } else { if terminal_failure_source == RunFailureSourceKind::HookTimeout || terminal_failure_source == RunFailureSourceKind::HookExecutionFailed || terminal_failure_source == RunFailureSourceKind::HookConfigInvalid { TurnTerminalCauseKind::HookFailure } else { if terminal_failure_source == RunFailureSourceKind::Llm { TurnTerminalCauseKind::LlmFailure } else { if terminal_failure_source == RunFailureSourceKind::ToolError || terminal_failure_source == RunFailureSourceKind::InvalidToolAccess { TurnTerminalCauseKind::ToolFailure } else { if terminal_failure_source == RunFailureSourceKind::StructuredOutputValidationFailed || terminal_failure_source == RunFailureSourceKind::InvalidOutputSchema { TurnTerminalCauseKind::StructuredOutputValidationFailed } else { if terminal_failure_source == RunFailureSourceKind::TokenBudgetExceeded || terminal_failure_source == RunFailureSourceKind::ToolCallBudgetExceeded { TurnTerminalCauseKind::BudgetExhausted } else { if terminal_failure_source == RunFailureSourceKind::TimeBudgetExceeded { TurnTerminalCauseKind::TimeBudgetExceeded } else { if terminal_failure_source == RunFailureSourceKind::LlmRetryExhausted { TurnTerminalCauseKind::RetryExhausted } else { if terminal_failure_source == RunFailureSourceKind::MaxTurnsReached { TurnTerminalCauseKind::TurnLimitReached } else { TurnTerminalCauseKind::FatalFailure } } } } } } } } });
             }
@@ -14787,6 +15047,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -14838,6 +15099,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::TurnLimitReached);
             }
@@ -14857,6 +15119,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::BudgetExhausted);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::BudgetExhausted);
             }
@@ -14876,6 +15139,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::TimeBudgetExceeded);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::TimeBudgetExceeded);
             }
@@ -14895,6 +15159,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = None;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
@@ -14913,6 +15178,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.extraction_active = false;
                     self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 }
+                self.turn_terminal_run_id = Some(run_id);
                 self.runtime_completion_result_run_id = Some(run_id);
             }
             to Running
@@ -14929,7 +15195,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
-            guard "turn_completed" { self.turn_phase == TurnPhase::Completed && self.terminal_outcome == Some(TurnTerminalOutcome::Completed) }
+            guard "turn_completed_or_failed" { self.turn_phase == TurnPhase::Completed || self.turn_phase == TurnPhase::Failed }
+            guard "completed_terminal_is_coherent" { self.turn_phase != TurnPhase::Completed || (self.terminal_outcome == Some(TurnTerminalOutcome::Completed) && self.terminal_cause_kind == None) }
+            guard "failed_terminal_has_specific_cause" { self.turn_phase != TurnPhase::Failed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
+            guard "failed_terminal_outcome_matches_cause" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -14941,7 +15210,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
-            guard "turn_completed" { self.turn_phase == TurnPhase::Completed && self.terminal_outcome == Some(TurnTerminalOutcome::Completed) }
+            guard "turn_completed_or_failed" { self.turn_phase == TurnPhase::Completed || self.turn_phase == TurnPhase::Failed }
+            guard "completed_terminal_is_coherent" { self.turn_phase != TurnPhase::Completed || (self.terminal_outcome == Some(TurnTerminalOutcome::Completed) && self.terminal_cause_kind == None) }
+            guard "failed_terminal_has_specific_cause" { self.turn_phase != TurnPhase::Failed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
+            guard "failed_terminal_outcome_matches_cause" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -14953,7 +15225,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
-            guard "turn_completed" { self.turn_phase == TurnPhase::Completed && self.terminal_outcome == Some(TurnTerminalOutcome::Completed) }
+            guard "turn_completed_or_failed" { self.turn_phase == TurnPhase::Completed || self.turn_phase == TurnPhase::Failed }
+            guard "completed_terminal_is_coherent" { self.turn_phase != TurnPhase::Completed || (self.terminal_outcome == Some(TurnTerminalOutcome::Completed) && self.terminal_cause_kind == None) }
+            guard "failed_terminal_has_specific_cause" { self.turn_phase != TurnPhase::Failed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
+            guard "failed_terminal_outcome_matches_cause" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -14974,6 +15249,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 if self.terminal_outcome == None || self.terminal_outcome == Some(TurnTerminalOutcome::None) {
                     self.terminal_outcome = Some(
                         if terminal_failure_source == Some(RunFailureSourceKind::TokenBudgetExceeded)
@@ -15069,6 +15345,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.turn_phase = TurnPhase::Cancelled;
                 self.extraction_active = false;
+                self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
                 self.runtime_completion_result_run_id = Some(run_id);
             }
@@ -18493,11 +18770,35 @@ macro_rules! meerkat_catalog_machine_dsl {
         // and duplicate-channel rejection are generated facts, not host map
         // policy. The LLM identity that the channel is bound to is recorded
         // here as generated behavior authority for later config propagation.
-        transition ResolveLiveOpenAdmissionAccepted {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+        transition ResolveLiveOpenAdmissionUnregistered {
+            per_phase [Idle]
             on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
+            guard "session_unregistered" { self.session_id == None }
+            update {
+                self.live_open_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: None,
+                admitted: false,
+                rejection: Some(LiveOpenAdmissionRejection::LifecycleClosed),
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition ResolveLiveOpenAdmissionAccepted {
+            per_phase [Idle, Attached, Running]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "session_registered" { self.session_id != None }
+            guard "session_matches_current" { meerkat_machine_session_id_matches_string(self.session_id, session_id) == true }
+            guard "registration_not_draining" { self.registration_phase != RegistrationPhase::Draining }
+            guard "runtime_not_stopping" { self.runtime_stop_deferred == false }
             guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
             guard "channel_not_bound" { !self.live_channel_session_by_channel.contains_key(channel_id) }
             update {
@@ -18518,10 +18819,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ResolveLiveOpenAdmissionSessionAlreadyBound {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running]
             on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
+            guard "session_registered" { self.session_id != None }
+            guard "session_matches_current" { meerkat_machine_session_id_matches_string(self.session_id, session_id) == true }
+            guard "registration_not_draining" { self.registration_phase != RegistrationPhase::Draining }
+            guard "runtime_not_stopping" { self.runtime_stop_deferred == false }
             guard "session_active" { self.live_active_channel_by_session.contains_key(session_id) }
             update {
                 self.live_open_admission_sequence += 1;
@@ -18538,10 +18843,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition ResolveLiveOpenAdmissionChannelAlreadyBound {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
+            per_phase [Idle, Attached, Running]
             on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
             guard "session_id_present" { session_id != "" }
             guard "channel_id_present" { channel_id != "" }
+            guard "session_registered" { self.session_id != None }
+            guard "session_matches_current" { meerkat_machine_session_id_matches_string(self.session_id, session_id) == true }
+            guard "registration_not_draining" { self.registration_phase != RegistrationPhase::Draining }
+            guard "runtime_not_stopping" { self.runtime_stop_deferred == false }
             guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
             guard "channel_bound" { self.live_channel_session_by_channel.contains_key(channel_id) }
             update {
@@ -18554,6 +18863,89 @@ macro_rules! meerkat_catalog_machine_dsl {
                 bound_llm_identity: None,
                 admitted: false,
                 rejection: Some(LiveOpenAdmissionRejection::ChannelAlreadyBound),
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition ResolveLiveOpenAdmissionDraining {
+            per_phase [Idle, Attached, Running]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "session_registered" { self.session_id != None }
+            guard "session_matches_current" { meerkat_machine_session_id_matches_string(self.session_id, session_id) == true }
+            guard "registration_draining" { self.registration_phase == RegistrationPhase::Draining }
+            update {
+                self.live_open_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: None,
+                admitted: false,
+                rejection: Some(LiveOpenAdmissionRejection::LifecycleClosed),
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition ResolveLiveOpenAdmissionStopDeferred {
+            per_phase [Attached, Running]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "session_registered" { self.session_id != None }
+            guard "session_matches_current" { meerkat_machine_session_id_matches_string(self.session_id, session_id) == true }
+            guard "registration_not_draining" { self.registration_phase != RegistrationPhase::Draining }
+            guard "runtime_stop_deferred" { self.runtime_stop_deferred == true }
+            update {
+                self.live_open_admission_sequence += 1;
+            }
+            to Idle
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: None,
+                admitted: false,
+                rejection: Some(LiveOpenAdmissionRejection::LifecycleClosed),
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition ResolveLiveOpenAdmissionRetired {
+            per_phase [Retired]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            update {
+                self.live_open_admission_sequence += 1;
+            }
+            to Retired
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: None,
+                admitted: false,
+                rejection: Some(LiveOpenAdmissionRejection::LifecycleClosed),
+                sequence: self.live_open_admission_sequence
+            }
+        }
+
+        transition ResolveLiveOpenAdmissionStopped {
+            per_phase [Stopped]
+            on input ResolveLiveOpenAdmission { session_id, channel_id, llm_identity }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            update {
+                self.live_open_admission_sequence += 1;
+            }
+            to Stopped
+            emit LiveOpenAdmissionResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                bound_llm_identity: None,
+                admitted: false,
+                rejection: Some(LiveOpenAdmissionRejection::LifecycleClosed),
                 sequence: self.live_open_admission_sequence
             }
         }
@@ -23424,6 +23816,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         impl MeerkatMachineAuthority {
+        fn meerkat_machine_session_id_matches_string(
+            current: &Option<SessionId>,
+            candidate: &str,
+        ) -> bool {
+            current
+                .as_ref()
+                .is_some_and(|session_id| session_id.0.as_str() == candidate)
+        }
+
         fn meerkat_peer_endpoint_set_cardinality_matches(
             endpoints: &std::collections::BTreeSet<PeerEndpoint>,
             endpoint_count: &u64,

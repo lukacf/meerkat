@@ -182,11 +182,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli = Cli::parse();
-    let tcp_bind_policy = if cli.allow_remote {
-        meerkat_rpc::secure_rpc::TcpBindPolicy::allow_remote()
-    } else {
-        meerkat_rpc::secure_rpc::TcpBindPolicy::local_only()
-    };
+    let tcp_bind_policy = resolved_tcp_bind_policy(cli.allow_remote);
     if let Some(ref tcp_addr) = cli.tcp {
         meerkat_rpc::secure_rpc::validate_tcp_bind_policy("rpc", tcp_addr, tcp_bind_policy)
             .map_err(|err| {
@@ -246,10 +242,33 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     let config_store: Arc<dyn ConfigStore> = Arc::new(tagged);
-    let mut config = config_store
+    // Compose inherited startup facts before building any process-owned
+    // runtime capability. In particular, `[mob_host]` listen/advertise may
+    // live in a parent realm while the head only tightens a resource bound.
+    let global_doc = Config::global_config_path()
+        .unwrap_or_else(|| locator.state_root.join("global").join("config.toml"));
+    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
+        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            locator.state_root.clone(),
+            global_doc,
+            meerkat_models::canonical(),
+        ));
+    let head_config = config_store
         .get()
         .await
         .unwrap_or_else(|_| Config::default());
+    let mut config = meerkat_core::EffectiveConfigReader::new(Arc::clone(&realm_config_source))
+        .effective_config_over_head(&locator.realm, head_config)
+        .await
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "failed to compose effective config for realm '{}': {err}",
+                    locator.realm
+                ),
+            )
+        })?;
     config.apply_env_overrides()?;
     config
         .validate(meerkat_models::canonical())
@@ -358,14 +377,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // `config_runtime` (read/write split). The reserved `global` realm maps to the
     // HOME-rooted doc; when no home is resolvable, fall back to a path under the
     // state root that will not exist, so `global` yields `None` (today's behavior).
-    let global_doc = Config::global_config_path()
-        .unwrap_or_else(|| locator.state_root.join("global").join("config.toml"));
-    let realm_config_source: Arc<dyn meerkat_core::RealmConfigSource> =
-        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
-            locator.state_root.clone(),
-            global_doc,
-            meerkat_models::canonical(),
-        ));
     runtime.set_realm_config_source(Arc::clone(&realm_config_source));
 
     // Per-open realtime credential resolution reads the SAME live config
@@ -391,6 +402,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let runtime = Arc::new(runtime);
+
+    #[cfg(feature = "mob")]
+    {
+        let controlling_acceptor = meerkat_mob::ControllingAcceptorConfig::from_mob_host_config(
+            &config.mob_host,
+            runtime.session_service(),
+        )
+        .map_err(|detail| std::io::Error::new(std::io::ErrorKind::InvalidInput, detail))?;
+        let mob_state = meerkat_rpc::router::compose_rpc_mob_state(
+            &runtime,
+            &config_store,
+            controlling_acceptor,
+        );
+        runtime.set_mob_state(mob_state);
+    }
 
     let lease = meerkat_store::start_realm_lease_in(
         &locator.state_root,
@@ -461,6 +487,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let live_ws = if let Some(ref live_ws_addr) = cli.live_ws {
+        validate_live_ws_bind(live_ws_addr, tcp_bind_policy).map_err(|err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
+        })?;
         let listener = tokio::net::TcpListener::bind(live_ws_addr).await?;
         let actual_addr = listener.local_addr()?;
         eprintln!(
@@ -549,4 +578,51 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     serve_result?;
 
     Ok(())
+}
+
+/// The ONE bind policy shared by every TCP listener this binary opens
+/// (`--tcp` and `--live-ws`): local-only unless `--allow-remote`.
+fn resolved_tcp_bind_policy(allow_remote: bool) -> meerkat_rpc::secure_rpc::TcpBindPolicy {
+    if allow_remote {
+        meerkat_rpc::secure_rpc::TcpBindPolicy::allow_remote()
+    } else {
+        meerkat_rpc::secure_rpc::TcpBindPolicy::local_only()
+    }
+}
+
+/// DL7: the live-ws listener obeys the same conservative bind policy as
+/// `--tcp`. A non-loopback `--live-ws` without `--allow-remote` is a typed
+/// startup error (previously it bound silently).
+fn validate_live_ws_bind(
+    live_ws_addr: &str,
+    policy: meerkat_rpc::secure_rpc::TcpBindPolicy,
+) -> Result<(), meerkat_rpc::secure_rpc::TcpBindPolicyError> {
+    meerkat_rpc::secure_rpc::validate_tcp_bind_policy("live-ws", live_ws_addr, policy)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// §W4.1 DL7 row: `rkat-rpc --live-ws 0.0.0.0:0` without
+    /// `--allow-remote` is a typed startup error — driven through the SAME
+    /// policy-derivation + validation pair `async_main` wires.
+    #[test]
+    fn live_ws_wildcard_bind_without_allow_remote_is_a_typed_startup_reject() {
+        let err = validate_live_ws_bind("0.0.0.0:0", resolved_tcp_bind_policy(false))
+            .expect_err("wildcard live-ws bind must be refused without --allow-remote");
+        assert!(
+            err.to_string().contains("live-ws"),
+            "the typed error names the offending surface: {err}"
+        );
+    }
+
+    #[test]
+    fn live_ws_bind_policy_admits_loopback_and_explicit_remote() {
+        validate_live_ws_bind("127.0.0.1:0", resolved_tcp_bind_policy(false))
+            .expect("loopback live-ws bind is always admissible");
+        validate_live_ws_bind("0.0.0.0:0", resolved_tcp_bind_policy(true))
+            .expect("--allow-remote admits the wildcard live-ws bind");
+    }
 }

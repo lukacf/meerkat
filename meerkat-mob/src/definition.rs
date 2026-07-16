@@ -82,6 +82,12 @@ pub struct SupervisorBridgeEndpointConfig {
     pub bind_address: Option<String>,
     /// Address advertised to external members, for example
     /// `tcp://supervisor.example.com:42000`.
+    ///
+    /// If `bind_address` uses port `0`, alternate-authority request probes
+    /// advertise this host with their kernel-assigned listener port. That
+    /// requires direct same-port reachability. Deployments behind a fixed-port
+    /// proxy or NAT mapping must configure a fixed bridge bind/advertised
+    /// endpoint so authority swaps reuse the stable listener instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertised_address: Option<String>,
 }

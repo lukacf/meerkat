@@ -403,19 +403,52 @@ export interface InteractionCompleteEvent {
   readonly structuredOutput?: unknown;
 }
 
+export type InteractionFailureReason =
+  | { readonly kind: "cancelled" }
+  | {
+      readonly kind: "extraction_failed";
+      readonly lastOutput: string;
+      readonly attempts: number;
+      readonly reason: string;
+    }
+  | { readonly kind: "abandoned"; readonly detail: string }
+  | { readonly kind: "finalization_failed"; readonly detail: string }
+  | {
+      readonly kind: "unknown";
+      readonly rawKind: string;
+      readonly raw: Readonly<Record<string, unknown>>;
+    };
+
 export interface InteractionFailedEvent {
   readonly type: "interaction_failed";
   readonly interactionId: string;
-  readonly error: string;
+  readonly reason: InteractionFailureReason;
 }
 
 // ---------------------------------------------------------------------------
 // Stream management events
 // ---------------------------------------------------------------------------
 
+export type StreamTruncationReason =
+  | { readonly kind: "channel_full" }
+  | { readonly kind: "stream_lagged"; readonly dropped: number }
+  | { readonly kind: "remote_cursor_overrun"; readonly watermark: number }
+  | {
+      readonly kind: "oversized_remote_event";
+      readonly durableSeq: number;
+      readonly encodedBytes: number;
+      readonly maxBytes: number;
+    }
+  | { readonly kind: "output_audio_degraded"; readonly dropped: number }
+  | {
+      readonly kind: "unknown";
+      readonly rawKind: string;
+      readonly raw: Readonly<Record<string, unknown>>;
+    };
+
 export interface StreamTruncatedEvent {
   readonly type: "stream_truncated";
-  readonly reason: string;
+  readonly reason: StreamTruncationReason;
 }
 
 export type ToolConfigChangeOperation = "add" | "remove" | "reload";
@@ -601,6 +634,17 @@ function requireNumberField(raw: Record<string, unknown>, field: string): number
   const value = raw[field];
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`${field} must be number`);
+  }
+  return value;
+}
+
+function requireNonNegativeIntegerField(
+  raw: Record<string, unknown>,
+  field: string,
+): number {
+  const value = requireNumberField(raw, field);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative safe integer`);
   }
   return value;
 }
@@ -987,6 +1031,54 @@ function parseSkillResolutionFailureReason(
   }
 }
 
+function parseInteractionFailureReason(raw: unknown): InteractionFailureReason {
+  if (!isPlainRecord(raw)) {
+    throw new Error("interaction_failed.reason must be object");
+  }
+  const kind = requireStringField(raw, "kind");
+  switch (kind) {
+    case "cancelled":
+      return { kind };
+    case "extraction_failed":
+      return {
+        kind,
+        lastOutput: requireStringField(raw, "last_output"),
+        attempts: requireNonNegativeIntegerField(raw, "attempts"),
+        reason: requireStringField(raw, "reason"),
+      };
+    case "abandoned":
+    case "finalization_failed":
+      return { kind, detail: requireStringField(raw, "detail") };
+    default:
+      return { kind: "unknown", rawKind: kind, raw };
+  }
+}
+
+function parseStreamTruncationReason(raw: unknown): StreamTruncationReason {
+  if (!isPlainRecord(raw)) {
+    throw new Error("stream_truncated.reason must be object");
+  }
+  const kind = requireStringField(raw, "kind");
+  switch (kind) {
+    case "channel_full":
+      return { kind };
+    case "stream_lagged":
+    case "output_audio_degraded":
+      return { kind, dropped: requireNonNegativeIntegerField(raw, "dropped") };
+    case "remote_cursor_overrun":
+      return { kind, watermark: requireNonNegativeIntegerField(raw, "watermark") };
+    case "oversized_remote_event":
+      return {
+        kind,
+        durableSeq: requireNonNegativeIntegerField(raw, "durable_seq"),
+        encodedBytes: requireNonNegativeIntegerField(raw, "encoded_bytes"),
+        maxBytes: requireNonNegativeIntegerField(raw, "max_bytes"),
+      };
+    default:
+      return { kind: "unknown", rawKind: kind, raw };
+  }
+}
+
 /**
  * Parse a raw wire event dict into a typed {@link StreamEvent}.
  *
@@ -1281,11 +1373,15 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
       };
     case "interaction_failed":
-      return { type, interactionId: requireStringField(raw, "interaction_id"), error: requireStringField(raw, "error") };
+      return {
+        type,
+        interactionId: requireStringField(raw, "interaction_id"),
+        reason: parseInteractionFailureReason(raw.reason),
+      };
 
     // Stream management
     case "stream_truncated":
-      return { type, reason: requireStringField(raw, "reason") };
+      return { type, reason: parseStreamTruncationReason(raw.reason) };
     case "tool_config_changed": {
       if (!isPlainRecord(raw.payload)) throw new Error("payload must be object");
       const payloadRaw = raw.payload;

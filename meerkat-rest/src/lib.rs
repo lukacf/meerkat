@@ -64,7 +64,7 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
@@ -240,11 +240,16 @@ struct RestSessionRuntimeBoundaryHandle {
 
 #[async_trait::async_trait]
 impl CoreExecutorBoundaryHandle for RestSessionRuntimeBoundaryHandle {
-    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
         self.context
             .session_service
             .cancel_after_boundary_with_machine_authority(
                 &self.session_id,
+                expected_run_id,
                 self.context.runtime_adapter.session_control_authority(),
             )
             .await
@@ -536,6 +541,8 @@ impl AppState {
         let provider_registry = factory.provider_runtime_registry();
 
         let max_sessions = config.max_sessions();
+        #[cfg(feature = "mob")]
+        let mob_host_config = config.mob_host.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store))
                 .with_realm_inheritance(Arc::clone(&realm_config_source), realm.clone());
@@ -594,11 +601,28 @@ impl AppState {
             schedule_host: Arc::new(schedule_host::ScheduleHostState::default()),
             #[cfg(feature = "mob")]
             mob_state: {
-                let state = Arc::new(
-                    meerkat_mob_mcp::MobMcpState::new(mob_session_service)
-                        .with_persistent_storage_root(Some(realm_paths.root.clone()))
-                        .with_workgraph_service(Some(workgraph_service.clone())),
-                );
+                let acceptor_service: Arc<dyn meerkat_mob::MobSessionService> =
+                    mob_session_service.clone();
+                let controlling_acceptor =
+                    meerkat_mob::ControllingAcceptorConfig::from_mob_host_config(
+                        &mob_host_config,
+                        acceptor_service,
+                    )
+                    .map_err(|detail| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, detail)
+                    })?;
+                let mut state = meerkat_mob_mcp::MobMcpState::new(
+                    mob_session_service,
+                    // A16: the local REST console is the owning operator
+                    // (phase 5 explicit mint, DEC-P5E-8).
+                    meerkat_mob::MobControlPrincipal::Owner,
+                )
+                .with_persistent_storage_root(Some(realm_paths.root.clone()))
+                .with_workgraph_service(Some(workgraph_service.clone()));
+                if let Some(acceptor) = controlling_acceptor {
+                    state = state.with_controlling_acceptor(acceptor);
+                }
+                let state = Arc::new(state);
                 *mob_tools_slot
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
@@ -1528,7 +1552,11 @@ fn prompt_video_input_error_to_api(error: PromptVideoInputValidationError) -> Ap
     }
 }
 
-async fn apply_runtime_turn(
+/// Apply callback invoked by `RestSessionRuntimeExecutor::apply` after the
+/// generated loop has acquired the service's non-reentrant turn-finalization
+/// boundary. Recovery and cleanup below must therefore use the explicit
+/// `*_under_runtime_turn_boundary` seams.
+async fn apply_runtime_turn_under_runtime_turn_boundary(
     context: &RestRuntimeExecutorContext,
     session_id: &SessionId,
     run_id: meerkat_core::lifecycle::RunId,
@@ -1565,7 +1593,12 @@ async fn apply_runtime_turn(
     // intent that requires a requester reaction turn.
     if primitive.is_context_only_apply_without_turn() {
         let RunPrimitive::StagedInput(staged) = primitive else {
-            unreachable!("context-only apply without turn only matches staged primitives");
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "context-only apply without turn was not carried by a staged primitive"
+                        .to_string(),
+                ),
+            ));
         };
         let appends = pending_system_context_appends(&staged.context_appends);
         let boundary = primitive.apply_boundary();
@@ -1724,6 +1757,22 @@ async fn apply_runtime_turn(
     result
 }
 
+#[cfg(test)]
+async fn apply_runtime_turn(
+    context: &RestRuntimeExecutorContext,
+    session_id: &SessionId,
+    run_id: meerkat_core::lifecycle::RunId,
+    primitive: &RunPrimitive,
+    prompt: ContentInput,
+) -> Result<CoreApplyOutput, SessionError> {
+    let _turn_finalization_guard = context
+        .session_service
+        .acquire_runtime_turn_finalization_guard(session_id)
+        .await;
+    apply_runtime_turn_under_runtime_turn_boundary(context, session_id, run_id, primitive, prompt)
+        .await
+}
+
 #[async_trait::async_trait]
 impl CoreExecutor for RestSessionRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
@@ -1740,6 +1789,37 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
         }))
     }
 
+    fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+        Some(meerkat::surface::persistent_runtime_publication_handle(
+            Arc::clone(&self.context.session_service),
+            self.session_id.clone(),
+        ))
+    }
+
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        true
+    }
+
+    fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+        Some(
+            meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+                Arc::clone(&self.context.session_service),
+                self.session_id.clone(),
+            ),
+        )
+    }
+
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationBoundaryHandle>> {
+        Some(
+            meerkat::surface::persistent_runtime_turn_finalization_boundary_handle(
+                Arc::clone(&self.context.session_service),
+                self.session_id.clone(),
+            ),
+        )
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -1747,7 +1827,14 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         let prompt = primitive.extract_content_input();
 
-        match apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt).await
+        match apply_runtime_turn_under_runtime_turn_boundary(
+            &self.context,
+            &self.session_id,
+            run_id,
+            &primitive,
+            prompt,
+        )
+        .await
         {
             Ok(output) => Ok(output),
             Err(error @ SessionError::NotFound { .. }) => {
@@ -1795,6 +1882,34 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        self.context
+            .session_service
+            .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
+                &self.session_id,
+                session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        self.context
+            .session_service
+            .publish_interaction_terminals_exact_batch(&self.session_id, events)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         self.context
             .session_service
@@ -1806,7 +1921,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .session_service
-            .cancel_after_boundary_with_machine_authority(
+            .cancel_current_after_boundary_with_machine_authority(
                 &self.session_id,
                 self.context.runtime_adapter.session_control_authority(),
             )
@@ -1823,15 +1938,12 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        match self
-            .context
-            .session_service
-            .discard_live_session(&self.session_id)
-            .await
-        {
-            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
-        }
+        meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+            Arc::clone(&self.context.session_service),
+            self.session_id.clone(),
+        )
+        .cleanup_after_runtime_stop_terminalized()
+        .await
     }
 }
 
@@ -2188,7 +2300,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/mob/{id}/members/{agent_identity}/respawn",
             post(mob_member_respawn),
-        );
+        )
+        // Phase 7 (SD-2): multi-host OBSERVATION GETs only. Host/grant/live
+        // admin stays on RPC/SDK plus CLI; hard-cancel stays RPC/SDK-only
+        // (recorded in rest_catalog.rs).
+        .route(
+            "/mob/{id}/members/{agent_identity}/history",
+            get(mob_member_history),
+        )
+        .route("/mob/{id}/hosts", get(mob_hosts))
+        .route("/mob/{id}/route-installs", get(mob_route_installs));
 
     #[cfg(feature = "mcp")]
     let r = r
@@ -2348,7 +2469,7 @@ async fn mob_event_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<MobEventStreamQuery>,
-) -> Result<Sse<std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>, ApiError>
+) -> Result<Sse<std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>, Response>
 {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
 
@@ -2360,7 +2481,7 @@ async fn mob_event_stream(
                 .mob_state
                 .subscribe_agent_events(&mob_id, &identity)
                 .await
-                .map_err(|e| ApiError::NotFound(e.to_string()))?;
+                .map_err(|err| mob_rest_error(&err, ApiError::NotFound))?;
 
             Box::pin(async_stream::stream! {
                 match serde_json::to_string(&json!({
@@ -2393,7 +2514,7 @@ async fn mob_event_stream(
                 .mob_state
                 .subscribe_mob_events(&mob_id)
                 .await
-                .map_err(|e| ApiError::NotFound(e.to_string()))?;
+                .map_err(|err| mob_rest_error(&err, ApiError::NotFound))?;
 
             Box::pin(async_stream::stream! {
                 match serde_json::to_string(&json!({
@@ -2475,7 +2596,7 @@ async fn mob_spawn_helper(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SpawnHelperRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, Response> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     // #115: the surface must not mint mob-member identity. A missing
     // `agent_identity` fails closed rather than fabricating a synthetic
@@ -2485,13 +2606,15 @@ async fn mob_spawn_helper(
         return Err(ApiError::BadRequest(
             "spawn-helper requires agent_identity; the surface does not allocate member identity"
                 .to_string(),
-        ));
+        )
+        .into_response());
     };
     let identity = meerkat_mob::AgentIdentity::from(agent_identity);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
+    options.model_override = req.model_override;
     // Reconstruct the server-owned `origin` provenance as Configured (the client
     // names {realm, binding, profile} only and cannot forge the env-default
     // discriminant that drives is_env_default() credential-resolution authority).
@@ -2502,10 +2625,10 @@ async fn mob_spawn_helper(
         .mob_state
         .mob_spawn_helper(&mob_id, identity, req.prompt, options)
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
 
     let payload = serde_json::to_value(result)
-        .map_err(|e| ApiError::Internal(format!("serialize helper result: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("serialize helper result: {e}")).into_response())?;
     Ok(Json(payload))
 }
 
@@ -2534,7 +2657,7 @@ async fn mob_wait_kickoff(
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Option<Json<WaitKickoffRequest>>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, Response> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let request = body.map(|Json(value)| value).unwrap_or_default();
     let member_ids = request.member_ids.map(|member_ids| {
@@ -2547,7 +2670,7 @@ async fn mob_wait_kickoff(
         .mob_state
         .mob_wait_kickoff(&mob_id, member_ids, request.timeout_ms)
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
 
     Ok(Json(json!({ "members": members })))
 }
@@ -2558,7 +2681,7 @@ async fn mob_wire_members_batch(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<RestMobWireMembersBatchRequest>,
-) -> Result<Json<meerkat_contracts::MobWireMembersBatchResult>, ApiError> {
+) -> Result<Json<meerkat_contracts::MobWireMembersBatchResult>, Response> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let edges = req
         .edges
@@ -2574,10 +2697,10 @@ async fn mob_wire_members_batch(
         .mob_state
         .handle_for(&mob_id)
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?
         .wire_members_batch(edges)
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
 
     Ok(Json(meerkat_contracts::MobWireMembersBatchResult {
         requested: report.requested,
@@ -2600,7 +2723,7 @@ async fn mob_fork_helper(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<ForkHelperRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, Response> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let source_identity = meerkat_mob::AgentIdentity::from(req.source_member_id.as_str());
     // #115: the surface must not mint mob-member identity (no synthetic
@@ -2609,7 +2732,8 @@ async fn mob_fork_helper(
         return Err(ApiError::BadRequest(
             "fork-helper requires agent_identity; the surface does not allocate member identity"
                 .to_string(),
-        ));
+        )
+        .into_response());
     };
     let identity = meerkat_mob::AgentIdentity::from(agent_identity);
     let fork_context = req
@@ -2620,6 +2744,7 @@ async fn mob_fork_helper(
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
+    options.model_override = req.model_override;
     // Reconstruct the server-owned `origin` provenance as Configured (the client
     // names {realm, binding, profile} only and cannot forge the env-default
     // discriminant that drives is_env_default() credential-resolution authority).
@@ -2637,10 +2762,10 @@ async fn mob_fork_helper(
             options,
         )
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
 
     let payload = serde_json::to_value(result)
-        .map_err(|e| ApiError::Internal(format!("serialize helper result: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("serialize helper result: {e}")).into_response())?;
     Ok(Json(payload))
 }
 
@@ -2649,18 +2774,18 @@ async fn mob_fork_helper(
 async fn mob_member_status(
     State(state): State<AppState>,
     Path((id, agent_identity)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, Response> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
     let snapshot = state
         .mob_state
         .mob_member_status(&mob_id, &identity)
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
     let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
     let result = snapshot
         .to_member_status_result(member_ref)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|err| mob_rest_error(&err, ApiError::Internal))?;
     Ok(Json(json!(result)))
 }
 
@@ -2669,15 +2794,122 @@ async fn mob_member_status(
 async fn mob_force_cancel(
     State(state): State<AppState>,
     Path((id, agent_identity)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, Response> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
     state
         .mob_state
         .mob_force_cancel(&mob_id, identity)
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
     Ok(Json(json!({"cancelled": true})))
+}
+
+/// Phase 7 (§17.4, ADJ-P7-4): typed REST rendering for mob console errors.
+/// `MobError::wire_detail()` (meerkat-mob owns the variant→code mapping)
+/// classifies the four multi-host codes into
+/// `ErrorCode::http_status()`-mapped wire errors with the BARE typed detail
+/// struct as `details`; everything else is delegated to the route's exact
+/// pre-existing fallback renderer.
+#[cfg(feature = "mob")]
+trait MobRestWireErrorSource: std::fmt::Display {
+    fn mob_wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail>;
+}
+
+#[cfg(feature = "mob")]
+impl MobRestWireErrorSource for meerkat_mob::MobError {
+    fn mob_wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
+        self.wire_detail()
+    }
+}
+
+#[cfg(feature = "mob")]
+impl MobRestWireErrorSource for meerkat_mob::MobRespawnError {
+    fn mob_wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
+        self.wire_detail()
+    }
+}
+
+#[cfg(feature = "mob")]
+fn mob_rest_error<E>(err: &E, fallback: fn(String) -> ApiError) -> Response
+where
+    E: MobRestWireErrorSource,
+{
+    match err.mob_wire_detail() {
+        Some(detail) => match detail.detail_value() {
+            Ok(details) => {
+                rest_wire_error_with_details(detail.code(), err.to_string(), Some(details))
+            }
+            // Fail closed: a detail that cannot serialize is an internal
+            // fault, never silently downgraded to a status-only error.
+            Err(serialize_error) => rest_wire_error(
+                ErrorCode::InternalError,
+                format!("failed to serialize mob error detail: {serialize_error}"),
+            ),
+        },
+        None => fallback(err.to_string()).into_response(),
+    }
+}
+
+/// Query parameters for `GET /mob/{id}/members/{agent_identity}/history`.
+#[cfg(feature = "mob")]
+#[derive(Debug, Deserialize)]
+struct MobMemberHistoryQuery {
+    #[serde(default)]
+    from_index: Option<u64>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// GET /mob/{id}/members/{agent_identity}/history — member transcript page
+/// by identity (phase 7, SD-2: one shape local and remote; the wrapper is
+/// the single envelope-assembly point for placement + provenance).
+#[cfg(feature = "mob")]
+async fn mob_member_history(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+    Query(query): Query<MobMemberHistoryQuery>,
+) -> Result<Json<meerkat_contracts::wire::MobMemberHistoryResult>, Response> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
+    let result = state
+        .mob_state
+        .mob_member_history(&mob_id, identity, query.from_index, query.limit)
+        .await
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
+    Ok(Json(result))
+}
+
+/// GET /mob/{id}/hosts — tracked member hosts with bind phase and declared
+/// capabilities (phase 7, SD-2).
+#[cfg(feature = "mob")]
+async fn mob_hosts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<meerkat_contracts::wire::MobHostsResult>, Response> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let result = state
+        .mob_state
+        .mob_hosts(&mob_id)
+        .await
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
+    Ok(Json(result))
+}
+
+/// GET /mob/{id}/route-installs — outstanding cross-host route-install
+/// obligations (phase 7, SD-2).
+#[cfg(feature = "mob")]
+async fn mob_route_installs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<meerkat_contracts::wire::MobRouteInstallsResult>, Response> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let result = state
+        .mob_state
+        .mob_route_installs(&mob_id)
+        .await
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
+    Ok(Json(result))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/respawn — retire + respawn member.
@@ -2686,14 +2918,16 @@ async fn mob_member_respawn(
     State(state): State<AppState>,
     Path((id, agent_identity)): Path<(String, String)>,
     body: Option<Json<Value>>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, Response> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
     let initial_message = body
         .and_then(|Json(v)| v.get("initial_message").cloned())
         .map(serde_json::from_value::<ContentInput>)
         .transpose()
-        .map_err(|e| ApiError::BadRequest(format!("invalid initial_message: {e}")))?;
+        .map_err(|e| {
+            ApiError::BadRequest(format!("invalid initial_message: {e}")).into_response()
+        })?;
     match state
         .mob_state
         .mob_respawn(&mob_id, identity, initial_message)
@@ -2711,7 +2945,7 @@ async fn mob_member_respawn(
             "receipt": receipt,
             "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
         }))),
-        Err(e) => Err(ApiError::BadRequest(e.to_string())),
+        Err(err) => Err(mob_rest_error(&err, ApiError::BadRequest)),
     }
 }
 
@@ -3382,6 +3616,7 @@ fn rest_runtime_host_surface_options(
     );
     options.runtime_backed_sessions = true;
     options.mobs = cfg!(feature = "mob");
+    options.multi_host_mobs = cfg!(feature = "mob");
     options.mcp_live = cfg!(feature = "mcp");
     options.comms = cfg!(feature = "comms");
     options.blobs = true;
@@ -4159,6 +4394,40 @@ fn extract_request_context(
     }
 }
 
+/// Install cancellation for the exact input accepted for this request.
+///
+/// Before admission, cancellation remains request-local. `RequestContext`
+/// linearizes this action with the cancel transition, so cancellation that
+/// won during admission immediately targets the accepted input rather than a
+/// replacement session run.
+async fn install_exact_rest_input_cancel(
+    context: &RequestContext,
+    adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: SessionId,
+    input_id: meerkat_core::lifecycle::InputId,
+) -> meerkat::surface::CancelActionInstallOutcome {
+    context
+        .install_cancel_action_or_cancelled(request_action(move || {
+            let adapter = Arc::clone(&adapter);
+            let session_id = session_id.clone();
+            let input_id = input_id.clone();
+            async move {
+                if let Err(error) = adapter
+                    .cancel_input_if_present(&session_id, &input_id, "REST request cancelled")
+                    .await
+                {
+                    tracing::warn!(
+                        %session_id,
+                        %input_id,
+                        %error,
+                        "exact REST request input cancellation did not settle"
+                    );
+                }
+            }
+        }))
+        .await
+}
+
 /// Drive a `RequestTerminal` outcome through the canonical surface request
 /// executor: `Publish(val)` must claim committed publication before the
 /// response is returned; if cancel arrived first, the cancellation response
@@ -4384,62 +4653,21 @@ async fn create_session_inner(
     #[cfg(not(feature = "mcp"))]
     let mcp_external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>> = None;
 
-    // Install unpublished cleanup: archive + mcp cleanup + comms drain abort + unregister.
     if let Some(ctx) = req_ctx.as_ref() {
-        let cleanup_state = state.clone();
-        let cleanup_session_id = session_id.clone();
-        ctx.set_unpublished_cleanup(request_action(move || {
-            let state = cleanup_state.clone();
-            let sid = cleanup_session_id.clone();
-            async move {
-                if let Err(error) = state
-                    .session_service
-                    .archive_with_machine_protocol(
-                        &sid,
-                        MachineSessionArchiveProtocol::from_machine(state.runtime_adapter.as_ref()),
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        session_id = %sid,
-                        error = %error,
-                        "REST unpublished create archive failed; leaving runtime state registered"
-                    );
-                    return;
-                }
-                if let Err(error) = cleanup_archived_session_runtime(&state, &sid).await {
-                    tracing::error!(
-                        session_id = %sid,
-                        error = %error,
-                        "REST unpublished create cleanup failed"
-                    );
-                }
-            }
-        }));
-
-        // Install cancel action: interrupt the session. If a cancel already
-        // landed before this install, install_cancel_action fires the newly
-        // installed action immediately and reports the observed phase.
-        let cancel_adapter = state.runtime_adapter.clone();
-        let cancel_sid = session_id.clone();
-        let phase = ctx
-            .install_cancel_action_or_cancelled(request_action(move || {
-                let adapter = cancel_adapter.clone();
-                let sid = cancel_sid.clone();
-                async move {
-                    let _ = adapter
-                        .hard_cancel_current_run(&sid, "REST request cancelled")
-                        .await;
-                }
-            }))
+        // The session is not durable yet, so a cancelled preclaim may release
+        // only its provisional runtime/MCP resources. No run is owned until an
+        // exact accepted InputId is available below.
+        if ctx.cancel_already_requested() {
+            let error = cleanup_rest_session_after_api_error(
+                state,
+                &session_id,
+                ApiError::RequestCancelled { details: None },
+                "clean up cancelled REST session preclaim",
+            )
             .await;
-
-        if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::RespondWithoutPublish(Err(ApiError::RequestCancelled {
-                details: None,
-            }));
+            return RequestTerminal::RespondWithoutPublish(Err(error));
         }
     }
 
@@ -4485,6 +4713,8 @@ async fn create_session_inner(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
+        session_comms_runtime_override: None,
+        host_prompt_sections: Default::default(),
         agent_llm_client_decorator: None,
         override_builtins: ToolCategoryOverride::from_override(req.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(req.enable_shell),
@@ -4649,9 +4879,8 @@ async fn create_session_inner(
         .with_injected_context(req.injected_context.unwrap_or_default()),
     );
 
-    // Final cancel recheck before submitting input — interrupt() is a no-op
-    // when no turn is running, so cancel between the last recheck and here
-    // would be lost without this gate.
+    // Final cancel recheck before submitting input. The exact cancellation
+    // action cannot be installed until acceptance returns its InputId.
     if let Some(ctx) = req_ctx.as_ref()
         && ctx.cancel_already_requested()
     {
@@ -4682,6 +4911,18 @@ async fn create_session_inner(
             }));
         }
     };
+
+    if let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = &outcome
+        && let Some(ctx) = req_ctx.as_ref()
+    {
+        let _ = install_exact_rest_input_cancel(
+            ctx,
+            Arc::clone(&adapter),
+            session_id.clone(),
+            input_id.clone(),
+        )
+        .await;
+    }
 
     let handle = handle.map(|handle| {
         wrap_rest_runtime_completion_cleanup(state.clone(), session_id.clone(), handle)
@@ -5569,6 +5810,8 @@ async fn continue_session_inner(
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            session_comms_runtime_override: None,
+            host_prompt_sections: Default::default(),
             agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
@@ -5710,7 +5953,8 @@ async fn continue_session_inner(
             Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // Rebuilt session now exists; discard that live rebuild if cancel
-        // fires before the turn starts, and interrupt as the running cancel action.
+        // fires before the turn starts. Until admission returns an InputId,
+        // this request owns no session run that it may interrupt.
         if let Some(ctx) = req_ctx.as_ref() {
             let cleanup_state = state.clone();
             let cleanup_sid = session_id.clone();
@@ -5735,23 +5979,7 @@ async fn continue_session_inner(
                 }
             }));
 
-            let cancel_adapter = state.runtime_adapter.clone();
-            let cancel_sid = session_id.clone();
-            let phase = ctx
-                .install_cancel_action_or_cancelled(request_action(move || {
-                    let adapter = cancel_adapter.clone();
-                    let sid = cancel_sid.clone();
-                    async move {
-                        let _ = adapter
-                            .hard_cancel_current_run(&sid, "REST request cancelled")
-                            .await;
-                    }
-                }))
-                .await;
-
-            // If cancel raced with install, install_cancel_action already ran
-            // the newly installed action; bail out with a cancelled terminal.
-            if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+            if ctx.cancel_already_requested() {
                 let error = discard_rebuilt_rest_session_after_api_error_locked(
                     state,
                     &session_id,
@@ -5851,6 +6079,17 @@ async fn continue_session_inner(
                 return RequestTerminal::RespondWithoutPublish(Err(error));
             }
         };
+        if let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = &outcome
+            && let Some(ctx) = req_ctx.as_ref()
+        {
+            let _ = install_exact_rest_input_cancel(
+                ctx,
+                Arc::clone(&adapter),
+                session_id.clone(),
+                input_id.clone(),
+            )
+            .await;
+        }
         drop(runtime_registration_guard);
         drop(runtime_registration_lock);
         let handle = handle.map(|handle| {
@@ -6024,25 +6263,10 @@ async fn continue_session_inner(
             return RequestTerminal::RespondWithoutPublish(Err(error));
         }
 
-        // Install cancel action: interrupt the session.
         if let Some(ctx) = req_ctx.as_ref() {
-            let cancel_adapter = state.runtime_adapter.clone();
-            let cancel_sid = session_id.clone();
-            let phase = ctx
-                .install_cancel_action_or_cancelled(request_action(move || {
-                    let adapter = cancel_adapter.clone();
-                    let sid = cancel_sid.clone();
-                    async move {
-                        let _ = adapter
-                            .hard_cancel_current_run(&sid, "REST request cancelled")
-                            .await;
-                    }
-                }))
-                .await;
-
-            // If cancel raced with install, install_cancel_action already ran
-            // the newly installed action; bail out with a cancelled terminal.
-            if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+            // No input/run is owned until admission below. Cancellation before
+            // that point only unwinds this request's exact preparation.
+            if ctx.cancel_already_requested() {
                 let error = unregister_rest_runtime_after_api_error_locked(
                     state,
                     &session_id,
@@ -6329,6 +6553,21 @@ async fn continue_session_inner(
                 return RequestTerminal::RespondWithoutPublish(Err(error));
             }
         };
+
+        if let meerkat_runtime::AcceptOutcome::Accepted {
+            input_id: accepted_input_id,
+            ..
+        } = &outcome
+            && let Some(ctx) = req_ctx.as_ref()
+        {
+            let _ = install_exact_rest_input_cancel(
+                ctx,
+                Arc::clone(&adapter),
+                session_id.clone(),
+                accepted_input_id.clone(),
+            )
+            .await;
+        }
 
         if let Err(cleanup) = cleanup_result {
             let primary = missing_runtime_terminal_evidence_error(
@@ -7488,8 +7727,7 @@ mod tests {
         async fn commit_unregister_finalization(
             &self,
             runtime_id: &meerkat_runtime::LogicalRuntimeId,
-            commit: meerkat_runtime::store::MachineLifecycleCommit,
-            input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+            finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
         ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
             if self.fail_delete.swap(false, AtomicOrdering::AcqRel) {
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
@@ -7499,8 +7737,7 @@ mod tests {
             meerkat_runtime::RuntimeStore::commit_unregister_finalization(
                 self.inner.as_ref(),
                 runtime_id,
-                commit,
-                input_states,
+                finalization,
             )
             .await
         }
@@ -7514,6 +7751,20 @@ mod tests {
                 self.inner.as_ref(),
                 runtime_id,
                 snapshot,
+            )
+            .await
+        }
+
+        async fn initialize_ops_lifecycle_if_absent(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            candidate: &meerkat_runtime::PersistedOpsSnapshot,
+        ) -> Result<meerkat_runtime::PersistedOpsSnapshot, meerkat_runtime::RuntimeStoreError>
+        {
+            meerkat_runtime::RuntimeStore::initialize_ops_lifecycle_if_absent(
+                self.inner.as_ref(),
+                runtime_id,
+                candidate,
             )
             .await
         }
@@ -10720,6 +10971,7 @@ mod tests {
             meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                 state.session_service.clone(),
                 Some(state.runtime_adapter.clone()),
+                meerkat_mob::MobControlPrincipal::Owner,
             )
             .with_persistent_storage_root(Some(temp.path().to_path_buf()))
             .with_default_llm_client(Some(mock_client)),
@@ -10758,6 +11010,258 @@ mod tests {
             "reserved mob label rejection should explain the trust boundary: {}",
             String::from_utf8_lossy(&body)
         );
+    }
+
+    /// Phase 7 (T-A7) fixture: one mob inserted into the given console
+    /// state (the phase-5 `grant_test_state_and_mob` shape, REST-side).
+    #[cfg(feature = "mob")]
+    async fn insert_console_test_mob(
+        state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        label: &str,
+    ) -> meerkat_mob::MobId {
+        let mob_id = meerkat_mob::MobId::from(label);
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            })),
+        );
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles = profiles;
+        let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+            .with_session_service(state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create REST console test mob");
+        state.mob_insert_handle(mob_id.clone(), handle).await;
+        mob_id
+    }
+
+    /// Phase 7 (T-A7): the three observation GETs serve typed payloads on
+    /// the owner console — empty host roster, complete route-install set —
+    /// and a missing member surfaces the byte-identical BadRequest fallback
+    /// (MemberNotFound carries no multi-host wire classification).
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_observation_gets_serve_typed_payloads() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mob_id = insert_console_test_mob(&state.mob_state, "rest-console-observation").await;
+        let app = router(state);
+
+        let get = |uri: String| {
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let response = app
+            .clone()
+            .oneshot(get(format!("/mob/{}/hosts", mob_id.as_str())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let hosts: meerkat_contracts::wire::MobHostsResult =
+            serde_json::from_slice(&body).expect("typed hosts payload");
+        assert!(hosts.hosts.is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(get(format!("/mob/{}/route-installs", mob_id.as_str())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let installs: meerkat_contracts::wire::MobRouteInstallsResult =
+            serde_json::from_slice(&body).expect("typed route-installs payload");
+        assert!(installs.outstanding.is_empty());
+        assert!(installs.complete);
+
+        let response = app
+            .clone()
+            .oneshot(get(format!(
+                "/mob/{}/members/nobody/history",
+                mob_id.as_str()
+            )))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "an unclassified MemberNotFound keeps the BadRequest fallback"
+        );
+    }
+
+    /// Phase 7 (T-A7): a named console principal without `List` is denied
+    /// at the resolver gate and the denial renders through
+    /// `ErrorCode::http_status()` — 403 with the typed BARE
+    /// `{required, presented}` details, never a laundered 400 string.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_observation_gets_render_scope_denied_as_403() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory_as(
+            meerkat_mob::MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("viewer").expect("valid principal"),
+            ),
+        );
+        let mob_id = insert_console_test_mob(&state.mob_state, "rest-console-denied").await;
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/mob/{}/hosts", mob_id.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["details"]["required"], json!("list"));
+        assert_eq!(payload["details"]["presented"], json!([]));
+
+        // This route predates the phase-7 observation GETs. It must use the
+        // same projector rather than laundering a typed denial into its
+        // legacy 400 fallback.
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/mob/{}/wait-kickoff", mob_id.as_str()))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], json!("SCOPE_DENIED"));
+        assert_eq!(payload["details"]["required"], json!("subscribe_events"));
+        assert_eq!(payload["details"]["presented"], json!([]));
+    }
+
+    /// Phase 7 (T-A7): the shared REST projector pins every multi-host status
+    /// and bare detail shape, preserves a route-selected fallback for
+    /// unclassified `MobError`, and delegates through `MobRespawnError::Mob`.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_rest_error_projects_all_typed_details_and_route_fallbacks() {
+        use http_body_util::BodyExt;
+
+        let scope_error = meerkat_mob::MobError::ScopeDenied(meerkat_mob::ScopeDenial {
+            required: meerkat_mob::ControlScope::AdminHost,
+            presented: std::collections::BTreeSet::from([meerkat_mob::ControlScope::List]),
+        });
+        let runtime_id =
+            meerkat_mob::AgentRuntimeId::initial(meerkat_mob::AgentIdentity::from("remote-worker"));
+        let cases = vec![
+            (
+                scope_error,
+                StatusCode::FORBIDDEN,
+                "SCOPE_DENIED",
+                json!({"required": "admin_host", "presented": ["list"]}),
+            ),
+            (
+                meerkat_mob::MobError::BridgeRequestTimedOut {
+                    request_envelope_id: "request-1".to_string(),
+                    timeout_ms: 12_000,
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "HOST_UNAVAILABLE",
+                json!({"timeout_ms": 12_000}),
+            ),
+            (
+                meerkat_mob::MobError::StaleEventCursor {
+                    after_cursor: 41,
+                    latest_cursor: 7,
+                },
+                StatusCode::GONE,
+                "STALE_CURSOR",
+                json!({"watermark": 7, "requested": 41}),
+            ),
+            (
+                meerkat_mob::MobError::StaleFenceToken {
+                    runtime_id: runtime_id.clone(),
+                    expected: meerkat_mob::FenceToken::new(2),
+                    actual: meerkat_mob::FenceToken::new(1),
+                },
+                StatusCode::CONFLICT,
+                "STALE_FENCE",
+                json!({
+                    "runtime_id": runtime_id.to_string(),
+                    "expected": 2,
+                    "actual": 1,
+                }),
+            ),
+        ];
+
+        for (error, expected_status, expected_code, expected_details) in cases {
+            let response = mob_rest_error(&error, ApiError::BadRequest);
+            assert_eq!(response.status(), expected_status, "error: {error}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["code"], json!(expected_code), "error: {error}");
+            assert_eq!(payload["details"], expected_details, "error: {error}");
+        }
+
+        let unclassified =
+            meerkat_mob::MobError::MemberNotFound(meerkat_mob::AgentIdentity::from("missing"));
+        let response = mob_rest_error(&unclassified, ApiError::NotFound);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], json!("NOT_FOUND"));
+
+        let respawn =
+            meerkat_mob::MobRespawnError::Mob(meerkat_mob::MobError::BridgeRequestTimedOut {
+                request_envelope_id: "respawn-request".to_string(),
+                timeout_ms: 5_000,
+            });
+        let response = mob_rest_error(&respawn, ApiError::BadRequest);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], json!("HOST_UNAVAILABLE"));
+        assert_eq!(payload["details"], json!({"timeout_ms": 5_000}));
     }
 
     #[tokio::test]
@@ -11452,6 +11956,11 @@ mod tests {
         assert_eq!(payload["capabilities"]["features"]["event_replay"], false);
         assert_eq!(payload["capabilities"]["features"]["artifacts"], false);
         assert_eq!(payload["capabilities"]["features"]["approvals"], false);
+        assert_eq!(
+            payload["capabilities"]["features"]["multi_host_mobs"],
+            cfg!(feature = "mob"),
+            "REST host projection must advertise the compiled multi-host mob surface"
+        );
 
         let text = serde_json::to_string(&payload).unwrap();
         for forbidden in ["topology", "registry", "lease", "claim", "project"] {
@@ -13290,8 +13799,11 @@ mod tests {
             .unwrap();
         let mock_client: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
         state.mob_state = Arc::new(
-            meerkat_mob_mcp::MobMcpState::new(state.session_service.clone())
-                .with_default_llm_client(Some(mock_client)),
+            meerkat_mob_mcp::MobMcpState::new(
+                state.session_service.clone(),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .with_default_llm_client(Some(mock_client)),
         );
         let mut definition =
             meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from("test_mob"));

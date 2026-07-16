@@ -553,6 +553,9 @@ fn build_service_infrastructure(
     let session_service = service.clone();
     let mob_state = Arc::new(MobMcpState::new(
         service as Arc<dyn meerkat_mob::MobSessionService>,
+        // Browser mobs are single-host owner consoles (§17.6): the embedding
+        // page IS the operator (A16, phase 5 explicit mint).
+        meerkat_mob::MobControlPrincipal::Owner,
     ));
     Ok((session_service, mob_state))
 }
@@ -2075,24 +2078,19 @@ fn parse_mob_event_cursor(after_cursor: &str) -> Result<u64, serde_json::Value> 
 /// Returns JSON array of typed result entries per spec.
 #[wasm_bindgen]
 pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValue> {
-    let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let specs: Vec<SpawnSpecInput> =
         serde_json::from_str(specs_json).map_err(|e| err_str("invalid_specs", e))?;
 
     let mut spawn_specs = Vec::with_capacity(specs.len());
     for s in specs {
-        let mut spec =
-            meerkat_mob::SpawnMemberSpec::new(s.profile.as_str(), s.agent_identity.as_str());
-        spec.initial_message = s.initial_message;
-        spec.runtime_mode = s.runtime_mode;
-        spec.backend = s.backend;
-        spec.context = s.context;
-        spec.labels = s.labels;
-        spec.additional_instructions = s.additional_instructions;
-        spawn_specs.push(spec);
+        if let Some(placement) = s.placement.as_ref() {
+            return Err(js_from_value(browser_placement_error_value(placement)));
+        }
+        spawn_specs.push(lower_browser_spawn_spec(s));
     }
 
+    let mob_state = with_mob_state(Ok)?;
     let results = mob_state
         .mob_spawn_many(&id, spawn_specs)
         .await
@@ -2121,6 +2119,11 @@ struct SpawnSpecInput {
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
     backend: Option<meerkat_mob::MobBackendKind>,
+    /// Remote placement is part of the portable wire contract, but the
+    /// single-process browser runtime has no host bridge. Keep the carrier so
+    /// callers receive a typed capability error instead of a serde unknown-field error.
+    #[serde(default)]
+    placement: Option<meerkat_contracts::wire::WireHostRef>,
     /// Application-defined labels for this member.
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
@@ -2130,6 +2133,33 @@ struct SpawnSpecInput {
     /// Additional instruction sections appended to the system prompt.
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
+    /// Field-scoped model override applied over the resolved role profile.
+    #[serde(default)]
+    model_override: Option<String>,
+}
+
+fn lower_browser_spawn_spec(s: SpawnSpecInput) -> meerkat_mob::SpawnMemberSpec {
+    let mut spec = meerkat_mob::SpawnMemberSpec::new(s.profile.as_str(), s.agent_identity.as_str());
+    spec.initial_message = s.initial_message;
+    spec.runtime_mode = s.runtime_mode;
+    spec.backend = s.backend;
+    spec.context = s.context;
+    spec.labels = s.labels;
+    spec.additional_instructions = s.additional_instructions;
+    spec.model_override = s.model_override;
+    spec
+}
+
+fn browser_placement_error_value(
+    placement: &meerkat_contracts::wire::WireHostRef,
+) -> serde_json::Value {
+    err_value(
+        "CAPABILITY_UNAVAILABLE",
+        format!(
+            "member placement on host '{}' is unavailable in the browser runtime",
+            placement.0
+        ),
+    )
 }
 
 /// Retire a member from a mob.
@@ -2375,6 +2405,7 @@ struct MobMemberSendOptions {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MobSpawnHelperOptions {
     prompt: String,
     #[serde(default)]
@@ -2392,6 +2423,7 @@ struct MobSpawnHelperOptions {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MobForkHelperOptions {
     source_member_id: String,
     prompt: String,
@@ -3421,6 +3453,45 @@ capabilities = [{capability_values}]
         assert!(
             specs_result.is_err(),
             "legacy generation field should be rejected as an unknown field; the runtime owns member generations"
+        );
+    }
+
+    #[test]
+    fn spawn_spec_input_lowers_model_override() {
+        let payload = json!({
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "model_override": "gpt-5.4",
+        });
+
+        let input: super::SpawnSpecInput =
+            serde_json::from_value(payload).expect("model override is a recognized spawn field");
+        let spec = super::lower_browser_spawn_spec(input);
+
+        assert_eq!(spec.model_override.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn spawn_spec_input_accepts_placement_but_reports_typed_browser_capability_error() {
+        let payload = json!([{
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "placement": "host-b-peer",
+        }]);
+
+        let specs: Vec<super::SpawnSpecInput> =
+            serde_json::from_value(payload).expect("placement is a recognized spawn field");
+        let placement = specs[0]
+            .placement
+            .as_ref()
+            .expect("placement survives typed deserialization");
+        let error = super::browser_placement_error_value(placement);
+        assert_eq!(error["code"], "CAPABILITY_UNAVAILABLE");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("host-b-peer")),
+            "typed capability error should identify the unsupported host"
         );
     }
 

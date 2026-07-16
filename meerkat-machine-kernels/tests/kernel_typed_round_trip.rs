@@ -132,6 +132,57 @@ fn applying_typed_input_yields_typed_transition_outcome() {
     }
 }
 
+/// Phase-1 multi-host BeginSpawnExec observation fields: a local spawn with no
+/// placement and no non-portable/secret-bearing observations.
+fn begin_spawn_multi_host_fields() -> Vec<(FieldId, KernelValue)> {
+    [
+        "workgraph_required",
+        "rust_bundles_present",
+        "per_spawn_external_tools_present",
+        "mob_default_external_tools_present",
+        "default_llm_client_override_present",
+        "host_surface_mcp_allowlist_present",
+        "inherited_tool_filter_present",
+        "shell_env_present",
+        "mcp_stdio_env_present",
+        "mcp_http_headers_present",
+        "memory_required",
+        "mcp_required",
+    ]
+    .into_iter()
+    .map(|name| (field(name), KernelValue::Bool(false)))
+    .chain([
+        (field("placement"), KernelValue::None),
+        (field("resume_session_id"), KernelValue::None),
+        (field("placed_spawn_id"), KernelValue::None),
+        (field("placed_provision_operation_id"), KernelValue::None),
+        (
+            field("placed_operation_owner_session_id"),
+            KernelValue::None,
+        ),
+        (
+            field("effective_profile_override_present"),
+            KernelValue::Bool(false),
+        ),
+        (
+            field("effective_model_override_present"),
+            KernelValue::Bool(false),
+        ),
+    ])
+    .collect()
+}
+
+/// Phase-1 CommitSpawnMembership local-arm ack fields (all absent).
+fn commit_membership_ack_fields() -> Vec<(FieldId, KernelValue)> {
+    vec![
+        (field("member_peer_endpoint"), KernelValue::None),
+        (field("spec_digest_echo"), KernelValue::None),
+        (field("ack_engine_version"), KernelValue::None),
+        (field("placed_spawn_id"), KernelValue::None),
+        (field("provision_operation_id"), KernelValue::None),
+    ]
+}
+
 #[test]
 fn mob_spawn_produces_typed_effect_variants() {
     let kernel = GeneratedMachineKernel::new(mob_machine());
@@ -169,6 +220,7 @@ fn mob_spawn_produces_typed_effect_variants() {
                     (field("provider_params_digest"), KernelValue::None),
                     (field("output_schema_digest"), KernelValue::None),
                     (field("external_addressable"), KernelValue::Bool(false)),
+                    (field("resolved_spec_digest"), KernelValue::None),
                 ]),
             },
         )
@@ -192,7 +244,7 @@ fn mob_spawn_produces_typed_effect_variants() {
                 named_string("AgentRuntimeId", "runtime.worker.1"),
             ),
             (field("fence_token"), named_u64("FenceToken", 1)),
-            (field("generation"), named_u64("Generation", 1)),
+            (field("generation"), named_u64("Generation", 0)),
             (
                 field("profile_material_digest"),
                 KernelValue::String(profile_material_digest.to_owned()),
@@ -214,7 +266,11 @@ fn mob_spawn_produces_typed_effect_variants() {
             &authorized.next_state,
             &KernelInput {
                 variant: input("BeginSpawnExec"),
-                fields: spawn_fields(),
+                fields: {
+                    let mut fields = spawn_fields();
+                    fields.extend(begin_spawn_multi_host_fields());
+                    fields
+                },
             },
         )
         .expect("begin spawn exec");
@@ -225,7 +281,11 @@ fn mob_spawn_produces_typed_effect_variants() {
             &opened.next_state,
             &KernelInput {
                 variant: input("CommitSpawnMembership"),
-                fields: spawn_fields(),
+                fields: {
+                    let mut fields = spawn_fields();
+                    fields.extend(commit_membership_ack_fields());
+                    fields
+                },
             },
         )
         .expect("commit spawn membership");
@@ -279,6 +339,7 @@ fn mob_spawn_rejects_unauthorized_addressability() {
                     (field("provider_params_digest"), KernelValue::None),
                     (field("output_schema_digest"), KernelValue::None),
                     (field("external_addressable"), KernelValue::Bool(false)),
+                    (field("resolved_spec_digest"), KernelValue::None),
                 ]),
             },
         )
@@ -302,7 +363,7 @@ fn mob_spawn_rejects_unauthorized_addressability() {
                         named_string("AgentRuntimeId", "runtime.worker.1"),
                     ),
                     (field("fence_token"), named_u64("FenceToken", 1)),
-                    (field("generation"), named_u64("Generation", 1)),
+                    (field("generation"), named_u64("Generation", 0)),
                     (
                         field("profile_material_digest"),
                         KernelValue::String(profile_material_digest.to_owned()),
@@ -317,7 +378,10 @@ fn mob_spawn_rejects_unauthorized_addressability() {
                         option_some(named_string("SessionId", "bridge.worker.1")),
                     ),
                     (field("replacing"), KernelValue::None),
-                ]),
+                ])
+                .into_iter()
+                .chain(begin_spawn_multi_host_fields())
+                .collect(),
             },
         )
         .expect_err("addressability must match spawn profile authorization");

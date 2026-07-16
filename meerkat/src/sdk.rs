@@ -22,8 +22,15 @@ use meerkat_tools::{
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+/// Canonical root for durable session-scoped comms identities.
+///
+/// Public: the `rkat mob host` daemon passes this root into the member-host
+/// materialization substrate (multi-host mobs DEC-P3H-3) so a member's
+/// per-session keypair is durable across restarts — the same root the
+/// factory's own session-scoped comms construction uses (one owner for the
+/// identity-root fact).
 #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
-fn canonical_session_comms_identity_root(
+pub fn canonical_session_comms_identity_root(
     user_config_root: Option<&Path>,
 ) -> Result<std::path::PathBuf, String> {
     if let Some(root) = user_config_root {
@@ -74,6 +81,41 @@ fn canonical_session_comms_identity_root(
     {
         Err("session-scoped comms identity root is unsupported on this platform".to_string())
     }
+}
+
+/// Typed wrapper for a pre-built session comms runtime riding
+/// `SessionBuildOptions.session_comms_runtime_override` (multi-host mobs
+/// DEC-P3H-3 — the `llm_client_override` type-erasure precedent).
+/// `SessionBuildOptions` lives in `meerkat-core` and cannot name
+/// `meerkat_comms::CommsRuntime`, so the override travels as
+/// `Arc<dyn Any + Send + Sync>` and is downcast fail-closed at the factory's
+/// comms arm.
+#[cfg(feature = "comms")]
+#[derive(Clone)]
+struct ErasedSessionCommsRuntimeOverride(std::sync::Arc<crate::CommsRuntime>);
+
+/// Encode a pre-built session comms runtime for transport in
+/// `SessionBuildOptions.session_comms_runtime_override`.
+#[cfg(feature = "comms")]
+pub fn encode_session_comms_runtime_override_for_service(
+    runtime: std::sync::Arc<crate::CommsRuntime>,
+) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
+    std::sync::Arc::new(ErasedSessionCommsRuntimeOverride(runtime))
+}
+
+/// Decode a session comms runtime override. Accepts exactly the typed
+/// wrapper produced by [`encode_session_comms_runtime_override_for_service`];
+/// any other payload decodes to `None` — the factory arm treats that as a
+/// typed build failure (fail closed), never a silent fallback to config-mode
+/// construction.
+#[cfg(feature = "comms")]
+pub fn decode_session_comms_runtime_override_from_service(
+    value: &std::sync::Arc<dyn std::any::Any + Send + Sync>,
+) -> Option<std::sync::Arc<crate::CommsRuntime>> {
+    value
+        .as_ref()
+        .downcast_ref::<ErasedSessionCommsRuntimeOverride>()
+        .map(|typed| typed.0.clone())
 }
 
 /// Resolve layered hooks config (global -> project) without duplicating project entries.

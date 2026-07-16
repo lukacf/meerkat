@@ -1294,6 +1294,7 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::WaitingForOps,
         turn_terminal: false,
         active_run_id: Some(RunId::new()),
+        terminal_run_id: None,
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: Some(
             meerkat_core::turn_execution_authority::ContentShape::Conversation,
@@ -1352,6 +1353,7 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
         turn_terminal: false,
         active_run_id: None,
+        terminal_run_id: None,
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: None,
         vision_enabled: false,
@@ -1410,6 +1412,7 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
         turn_terminal: false,
         active_run_id: None,
+        terminal_run_id: None,
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
         admitted_content_shape: None,
         vision_enabled: false,

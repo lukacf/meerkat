@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 
-
 # K20: catalog-named contract types adopted by the totalized RPC method
 # catalog (config/get|set|patch, turn/interrupt, workgraph list/ready/events,
 # initialize, skills/list). Schema-driven; the inventory-coverage ratchet
@@ -130,6 +129,30 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobStreamOpenResult",
     "MobStreamCloseParams",
     "MobStreamCloseResult",
+    "MobGrantScopesParams",
+    "MobGrantScopesResult",
+    "MobRevokeScopesParams",
+    "MobRevokeScopesResult",
+    "MobGrantsResult",
+    # Phase 7 (DEC-P7A-1/W-A8): the multi-host console verb contracts.
+    "MobMemberHistoryParams",
+    "MobMemberHistoryResult",
+    "WireMemberHistoryPageBody",
+    "MobHostsResult",
+    "MobHostStatus",
+    "WireHostCapabilityFlags",
+    "MobRouteInstallsResult",
+    "WireRouteInstallObligation",
+    "MobBindHostParams",
+    "MobBindHostResult",
+    "MobRevokeHostParams",
+    "MobRevokeHostResult",
+    "MobHardCancelParams",
+    "MobHardCancelResult",
+    "MobMemberLiveOpenParams",
+    "MobMemberLiveChannelParams",
+    "MobMemberLiveStatusParams",
+    "MobMemberLiveControlParams",
 ]
 
 COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES = [
@@ -191,6 +214,57 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
     "SendTaintOverride",
 ]
 
+# Schema-local types carried by the public supervisor bridge contracts. These
+# must be promoted and emitted by name before the bridge aliases are rendered;
+# otherwise refs in newly exposed command/delivery fields degrade to
+# `Any`/`unknown` even though the Rust schema is fully typed.
+BRIDGE_NESTED_CONTRACT_TYPES = [
+    "BridgeHostCapabilityRequirements",
+    "BridgeMemberIncarnation",
+    "BridgeTurnCorrelation",
+    "BridgeTurnDirective",
+    "BridgeTurnOutcomeAck",
+    "WireFlowFailureDetail",
+    "BridgeTurnOutcomeRecord",
+    "BridgeMobPeerOverlayHandoff",
+]
+
+BRIDGE_NESTED_ALIAS_TYPES = [
+    "RunId",
+    "OperationId",
+    "BridgeEventCursor",
+    "BridgeOutboundTaintTarget",
+    "BridgeTrackedInputCancelOutcome",
+    "LiveOpenTransport",
+    "WireFlowTurnOutcome",
+]
+
+# Typed detail vocabulary used transitively by `BridgeRejectionCause`.
+# `MemberBuildRejection` and `BridgeRejectionCause` are externally tagged
+# unions; the generator emits named payload records for them below.
+BRIDGE_REJECTION_NESTED_ALIAS_TYPES = [
+    "AuthErrorKind",
+    "ConnectionTargetErrorKind",
+    "WireControlScope",
+    "MemberBuildRejection",
+]
+
+# Typed records carried by the canonical `SystemNoticeBlock` transcript union.
+# Other notice `payload` slots are intentionally arbitrary JSON; only these
+# schema-owned fields and their transitive vocabulary are promoted.
+SYSTEM_NOTICE_NESTED_CONTRACT_TYPES = [
+    "SystemNoticePeer",
+    "DeferredCatalogDelta",
+    "ToolConfigChangedPayload",
+]
+
+SYSTEM_NOTICE_NESTED_ALIAS_TYPES = [
+    "ToolConfigChangeDomain",
+    "ToolConfigChangeOperation",
+    "ExternalToolDeltaPhase",
+    "ToolConfigChangeStatus",
+]
+
 PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "ApprovalDecideParams",
     "ApprovalGetParams",
@@ -242,6 +316,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "RestoreSessionTranscriptRevisionParams",
     "RewriteSessionTranscriptParams",
     "RuntimeHostCapabilities",
+    "RuntimeHostFeatureFlags",
     "RuntimeHostHealth",
     "RuntimeHostInfo",
     "Schedule",
@@ -327,7 +402,6 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireMemberLaunchMode",
     "WireForkContext",
     "WireToolAccessPolicy",
-    "WireBudgetSplitPolicy",
     "WireToolFilter",
     "WireMemberState",
     "WireMobMemberStatus",
@@ -346,6 +420,19 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "MobSpawnPolicyInput",
     "MobStepOutputFormatInput",
     "WireMobReconcileStage",
+    # Phase 7 (DEC-P7A-1/W-A8): enum/newtype vocabulary referenced by the
+    # multi-host console verb contracts. Aliases join
+    # MOB_RPC_PROMOTED_SCHEMA_DEFS so struct fields keep named typed refs.
+    "WireHostRef",
+    "WireHostBindPhase",
+    "WireProjectionProvenance",
+    "WireReachability",
+    "WireNonPortableResourceKind",
+    "WireMobRunStatus",
+    "WirePeerConnectivity",
+    "WireHostBindingDescriptorKind",
+    "BridgeLiveControlVerb",
+    "BridgeLiveControlOutcome",
 ]
 
 MOB_RPC_CONTRACT_HELPER_TYPES = [
@@ -371,6 +458,13 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "MobReconcileOptionsWire",
     "MobReconcileReportWire",
     "MobReconcileFailureWire",
+    # Phase 7 (W-A8): the host-binding descriptor struct referenced by
+    # `MobBindHostParams.descriptor`.
+    "WireHostBindingDescriptor",
+    # Control-scope RPC results embed this schema-local row. Keep the row a
+    # named public SDK type instead of widening it to an opaque map.
+    "WireGrantRecord",
+    "WireMemberLifecycleCapabilities",
 ]
 
 # Item 6 / K20 pattern: the `skills/list` RPC result is catalog-typed
@@ -402,6 +496,29 @@ TOOL_IDENTITY_ALIAS_TYPES = [
 
 MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
     [
+        # These public object contracts are also schema-local `$defs` when
+        # nested by another result. Keep the promotion list explicit: the
+        # public contract roster also contains enum/oneOf aliases, and routing
+        # those through the object emitter would silently turn them into `{}`.
+        # `WireHistoryRow` is a transparent alias to the canonical
+        # `WireSessionMessage` union. It must be promoted even though it is
+        # emitted later as an alias: otherwise the page emitter treats the
+        # schema-local ref as private and widens `messages` to `Any`/`unknown`.
+        "WireHistoryRow",
+        # Connectivity is exposed by the public member-status projection.
+        # Preserve both nested hops instead of widening Known.snapshot or its
+        # unreachable peer rows to opaque object maps.
+        "WirePeerConnectivitySnapshot",
+        "WireUnreachablePeer",
+        *BRIDGE_NESTED_CONTRACT_TYPES,
+        *BRIDGE_NESTED_ALIAS_TYPES,
+        *BRIDGE_REJECTION_NESTED_ALIAS_TYPES,
+        *SYSTEM_NOTICE_NESTED_CONTRACT_TYPES,
+        *SYSTEM_NOTICE_NESTED_ALIAS_TYPES,
+        "WireMemberHistoryPageBody",
+        "MobHostStatus",
+        "WireHostCapabilityFlags",
+        "WireRouteInstallObligation",
         *MOB_RPC_CONTRACT_ALIAS_TYPES,
         *MOB_RPC_CONTRACT_HELPER_TYPES,
         "MobMemberListEntryWire",
@@ -472,6 +589,18 @@ def _schema_root_with_local_defs(root_schema: dict[str, Any], schema: dict[str, 
     return schema_root
 
 
+SESSION_TRANSCRIPT_SCHEMA_ROOTS = {
+    "TranscriptRewriteReason",
+    "TranscriptRewriteSelection",
+    "WireTranscriptReplacement",
+}
+
+PUBLIC_TRANSITIVE_SCHEMA_ROOTS = {
+    "WireAssistantBlock",
+    *SESSION_TRANSCRIPT_SCHEMA_ROOTS,
+}
+
+
 def _schema_root_with_nested_defs(root_schema: dict[str, Any]) -> dict[str, Any]:
     """Promote schema-local $defs into the lookup root.
 
@@ -481,15 +610,24 @@ def _schema_root_with_nested_defs(root_schema: dict[str, Any]) -> dict[str, Any]
     """
     schema_root = dict(root_schema)
     defs = dict(root_schema.get("$defs", {}))
-    for schema in root_schema.values():
-        if isinstance(schema, dict):
-            defs.update(
-                {
-                    name: nested
-                    for name, nested in schema.get("$defs", {}).items()
-                    if _promote_nested_schema_def(name)
-                }
-            )
+    for schema_name, schema in root_schema.items():
+        if not isinstance(schema, dict):
+            continue
+        local_defs = schema.get("$defs", {})
+        if not isinstance(local_defs, dict):
+            continue
+        promoted = {name for name in local_defs if _promote_nested_schema_def(name)}
+        # A public schema-local root is only useful when every named schema it
+        # references remains named as well. Derive that transitive closure from
+        # the artifact instead of maintaining a second hand-copied dependency
+        # roster (which previously left fork replacements and their transcript
+        # blocks widened to opaque maps).
+        transitive_roots = promoted.intersection(PUBLIC_TRANSITIVE_SCHEMA_ROOTS)
+        if schema_name in PUBLIC_TRANSITIVE_SCHEMA_ROOTS:
+            transitive_roots.update(_schema_ref_names(schema).intersection(local_defs))
+        promoted.update(_reachable_local_schema_defs(local_defs, transitive_roots))
+        for name in sorted(promoted):
+            defs[name] = local_defs[name]
     schema_root["$defs"] = defs
     schema_root["__promoted_defs"] = set(defs)
     return schema_root
@@ -497,6 +635,11 @@ def _schema_root_with_nested_defs(root_schema: dict[str, Any]) -> dict[str, Any]
 
 def _promote_nested_schema_def(name: str) -> bool:
     return name.startswith("Realtime") or name in {
+        # RuntimeHostCapabilities nests both public contracts locally even
+        # though the generator emits them as named top-level SDK types. Keep
+        # those refs named instead of widening them to opaque maps.
+        "ContractVersion",
+        "RuntimeHostFeatureFlags",
         "WireTrustedPeerIdentity",
         # G5: keep `tools/register`'s callback-tool entry typed inside the
         # public method params instead of widening the array entries to maps.
@@ -544,6 +687,10 @@ def _promote_nested_schema_def(name: str) -> bool:
         # widens it to `Record<string, unknown>` and SDK consumers cannot
         # narrow on the typed `kind: "spoken" | "unknown"` lane provenance.
         "WireTranscriptSource",
+        # Public transcript-edit roots carried by fork/rewrite requests. Their
+        # range/message/content dependencies are promoted transitively by
+        # `_schema_root_with_nested_defs` above.
+        *SESSION_TRANSCRIPT_SCHEMA_ROOTS,
         # R8 (P2): promote `WireProvider` so `ChannelIdentitySwap.from_provider`
         # / `to_provider` carry the typed enum shape into SDK codegen instead
         # of being widened to `unknown` / `Any`.
@@ -579,6 +726,86 @@ def _promote_nested_schema_def(name: str) -> bool:
     }
 
 
+def _schema_ref_names(schema: Any) -> set[str]:
+    """Return local `$defs` names referenced anywhere below *schema*."""
+
+    names: set[str] = set()
+    if isinstance(schema, dict):
+        ref = schema.get("$ref")
+        if isinstance(ref, str):
+            ref_name = _resolve_schema_ref_name(ref)
+            if ref_name is not None:
+                names.add(ref_name)
+        for value in schema.values():
+            names.update(_schema_ref_names(value))
+    elif isinstance(schema, list):
+        for value in schema:
+            names.update(_schema_ref_names(value))
+    return names
+
+
+def _reachable_local_schema_defs(
+    local_defs: dict[str, Any],
+    roots: set[str] | list[str] | tuple[str, ...],
+) -> list[str]:
+    """Return a deterministic dependency-first closure within local `$defs`."""
+
+    ordered: list[str] = []
+    visited: set[str] = set()
+    visiting: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited or name not in local_defs:
+            return
+        if name in visiting:
+            # JSON-schema recursion is legal. Forward annotations handle the
+            # cycle; append the node when its first DFS frame unwinds.
+            return
+        visiting.add(name)
+        for dependency in sorted(_schema_ref_names(local_defs[name])):
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(name)
+
+    for root in sorted(roots):
+        visit(root)
+    return ordered
+
+
+def _named_schema_dependency_order(
+    root: dict[str, Any],
+    roots: set[str] | list[str] | tuple[str, ...],
+) -> list[str]:
+    """Return dependency-first named schemas reachable from public roots."""
+
+    named = {
+        name: schema
+        for name in {
+            *root.keys(),
+            *(
+                root.get("$defs", {}).keys()
+                if isinstance(root.get("$defs"), dict)
+                else []
+            ),
+        }
+        if isinstance((schema := _lookup_named_schema(root, name)), dict) and schema
+    }
+    return _reachable_local_schema_defs(named, roots)
+
+
+def _is_plain_object_schema(schema: Any) -> bool:
+    """Whether a named schema should emit as a record rather than an alias."""
+
+    return (
+        isinstance(schema, dict)
+        and schema.get("type") == "object"
+        and "oneOf" not in schema
+        and "anyOf" not in schema
+        and "$ref" not in schema
+    )
+
+
 def _runtime_state_result_root(wire_schema: dict[str, Any]) -> dict[str, Any]:
     root = dict(wire_schema)
     root["RuntimeStateResult"] = {
@@ -599,8 +826,27 @@ def _variant_type_prefix(name: str) -> str:
     return name.removesuffix("Request")
 
 
-def _typed_dict_variant_name(alias_name: str, discriminator_value: str) -> str:
-    return f"{_variant_type_prefix(alias_name)}{_pascal_case(discriminator_value)}"
+def _typed_dict_variant_name(
+    alias_name: str,
+    discriminator_value: str,
+    *,
+    discriminator: str | None = None,
+    variant: dict[str, Any] | None = None,
+    disambiguate: bool = False,
+) -> str:
+    name = f"{_variant_type_prefix(alias_name)}{_pascal_case(discriminator_value)}"
+    if not disambiguate or discriminator is None or variant is None:
+        return name
+    properties = variant.get("properties", {})
+    if not isinstance(properties, dict):
+        return name
+    for field_name, field_schema in properties.items():
+        if field_name == discriminator or not isinstance(field_schema, dict):
+            continue
+        const = field_schema.get("const")
+        if isinstance(const, str):
+            name += _pascal_case(const)
+    return name
 
 
 def _is_inline_object_payload(field_schema: Any) -> bool:
@@ -670,6 +916,77 @@ def _merge_ref_variant(root: dict[str, Any], variant: dict[str, Any]) -> dict[st
     return merged
 
 
+def _merge_object_variant_schemas(
+    base: dict[str, Any],
+    overlay: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge object-schema facts for serde-flatten/ref-overlay variants."""
+
+    merged = {key: value for key, value in base.items() if key != "oneOf"}
+    merged.update(
+        {
+            key: value
+            for key, value in overlay.items()
+            if key not in {"properties", "required", "$ref"}
+        }
+    )
+    merged["properties"] = {
+        **(
+            base.get("properties", {})
+            if isinstance(base.get("properties"), dict)
+            else {}
+        ),
+        **(
+            overlay.get("properties", {})
+            if isinstance(overlay.get("properties"), dict)
+            else {}
+        ),
+    }
+    required: list[str] = []
+    for candidate in (base.get("required", []), overlay.get("required", [])):
+        if not isinstance(candidate, list):
+            continue
+        for field_name in candidate:
+            if field_name not in required:
+                required.append(field_name)
+    if required:
+        merged["required"] = required
+    merged["type"] = "object"
+    return merged
+
+
+def _expand_flattened_object_variants(
+    root: dict[str, Any],
+    variant: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Expand an object variant containing a flattened nested `oneOf`.
+
+    Schemars represents `#[serde(flatten)]` enum payloads as base object
+    properties plus a sibling `oneOf`. SDK variants must form the Cartesian
+    merge (for example image + inline/blob), otherwise source/data/blob_id/uri
+    silently disappear from generated public types.
+    """
+
+    variant = _merge_ref_variant(root, variant)
+    nested = variant.get("oneOf")
+    base_properties = variant.get("properties")
+    if not isinstance(nested, list) or not isinstance(base_properties, dict):
+        return [variant]
+
+    expanded: list[dict[str, Any]] = []
+    for branch in nested:
+        if not isinstance(branch, dict):
+            return [variant]
+        branch = _merge_ref_variant(root, branch)
+        if branch.get("type") != "object" or not isinstance(
+            branch.get("properties"), dict
+        ):
+            return [variant]
+        merged = _merge_object_variant_schemas(variant, branch)
+        expanded.extend(_expand_flattened_object_variants(root, merged))
+    return expanded
+
+
 def _one_of_typed_dict_variants(
     root: dict[str, Any],
     schema: Any,
@@ -677,33 +994,109 @@ def _one_of_typed_dict_variants(
     if not isinstance(schema, dict) or not isinstance(schema.get("oneOf"), list):
         return None
 
-    discriminator: str | None = None
-    variants: list[tuple[str, dict[str, Any]]] = []
+    expanded_variants: list[dict[str, Any]] = []
     for variant in schema["oneOf"]:
-        if isinstance(variant, dict):
-            variant = _merge_ref_variant(root, variant)
-        if not isinstance(variant, dict) or variant.get("type") != "object":
+        if not isinstance(variant, dict):
+            return None
+        expanded_variants.extend(_expand_flattened_object_variants(root, variant))
+
+    const_fields_by_variant: list[dict[str, str]] = []
+    for variant in expanded_variants:
+        if variant.get("type") != "object":
             return None
         properties = variant.get("properties")
         if not isinstance(properties, dict):
             return None
-        const_fields = [
-            (field_name, field_schema["const"])
-            for field_name, field_schema in properties.items()
-            if isinstance(field_schema, dict) and isinstance(field_schema.get("const"), str)
-        ]
-        if len(const_fields) != 1:
-            return None
-        field_name, discriminator_value = const_fields[0]
-        if discriminator is None:
-            discriminator = field_name
-        elif discriminator != field_name:
-            return None
-        variants.append((discriminator_value, variant))
+        const_fields_by_variant.append(
+            {
+                field_name: field_schema["const"]
+                for field_name, field_schema in properties.items()
+                if isinstance(field_schema, dict)
+                and isinstance(field_schema.get("const"), str)
+            }
+        )
 
-    if discriminator is None or not variants:
+    if not const_fields_by_variant:
         return None
+    common_discriminators = set(const_fields_by_variant[0])
+    for const_fields in const_fields_by_variant[1:]:
+        common_discriminators.intersection_update(const_fields)
+    if not common_discriminators:
+        return None
+    # Prefer the common const field that distinguishes the most arms. Stable
+    # lexical tie-breaking keeps generation byte deterministic.
+    discriminator = min(
+        common_discriminators,
+        key=lambda field_name: (
+            -len({fields[field_name] for fields in const_fields_by_variant}),
+            field_name,
+        ),
+    )
+    variants = [
+        (const_fields[discriminator], variant)
+        for const_fields, variant in zip(
+            const_fields_by_variant,
+            expanded_variants,
+            strict=True,
+        )
+    ]
     return (discriminator, variants)
+
+
+def _one_of_external_tagged_variants(
+    schema: Any,
+) -> list[tuple[str, str, Any | None]] | None:
+    """Return mixed unit/external-tag variants for a serde-style enum.
+
+    Each result is ``(kind, tag, payload_schema)`` where ``kind`` is either
+    ``"unit"`` for a string constant or ``"payload"`` for an externally
+    tagged single-key object. This is deliberately separate from
+    `_one_of_typed_dict_variants`, which handles internally tagged objects.
+    """
+    if not isinstance(schema, dict) or not isinstance(schema.get("oneOf"), list):
+        return None
+
+    variants: list[tuple[str, str, Any | None]] = []
+    has_payload = False
+    for variant in schema["oneOf"]:
+        if not isinstance(variant, dict):
+            return None
+        const = variant.get("const")
+        # Schemars may coalesce adjacent unit arms into one string `enum`
+        # rather than emitting one `const` per arm. Expand that closed set so
+        # mixed unit/payload enums keep every unit member in generated SDKs.
+        if const is None:
+            enum_values = variant.get("enum")
+            if (
+                isinstance(enum_values, list)
+                and enum_values
+                and all(isinstance(value, str) for value in enum_values)
+            ):
+                variants.extend(("unit", value, None) for value in enum_values)
+                continue
+        if isinstance(const, str):
+            variants.append(("unit", const, None))
+            continue
+        if (
+            variant.get("type") != "object"
+            or variant.get("additionalProperties") is not False
+        ):
+            return None
+        properties = variant.get("properties")
+        required = variant.get("required")
+        if (
+            not isinstance(properties, dict)
+            or len(properties) != 1
+            or not isinstance(required, list)
+        ):
+            return None
+        ((tag, payload_schema),) = properties.items()
+        if tag not in required or not isinstance(payload_schema, dict):
+            return None
+        variants.append(("payload", tag, payload_schema))
+        has_payload = True
+
+    return variants if variants and has_payload else None
 
 
 # ---------------------------------------------------------------------------
@@ -912,8 +1305,12 @@ def _build_contract_schema_roots(
     rewrites property slots in place, and the loaded artifacts are shared
     between the per-language generator invocations.
     """
-    params_schema = _schema_root_with_nested_defs(copy.deepcopy(schemas.get("params", {})))
-    wire_schema = _schema_root_with_nested_defs(copy.deepcopy(schemas.get("wire-types", {})))
+    params_schema = _schema_root_with_nested_defs(
+        copy.deepcopy(schemas.get("params", {}))
+    )
+    wire_schema = _schema_root_with_nested_defs(
+        copy.deepcopy(schemas.get("wire-types", {}))
+    )
     runtime_host_schema = _schema_root_with_nested_defs(
         copy.deepcopy(schemas.get("runtime-host", {}))
     )
@@ -924,6 +1321,10 @@ def _build_contract_schema_roots(
     wire_schema["$defs"] = {
         **wire_schema.get("$defs", {}),
         **runtime_host_schema.get("$defs", {}),
+    }
+    wire_schema["__promoted_defs"] = {
+        *wire_schema.get("__promoted_defs", set()),
+        *runtime_host_schema.get("__promoted_defs", set()),
     }
     roster = _sdk_contract_type_roster()
     params_report = _promote_inline_object_defs(params_schema, roster, roster)
@@ -1028,12 +1429,29 @@ def _classify_parser_schema(schema_root: dict[str, Any], schema: dict[str, Any])
     )
 
 
-def _ref_is_named(root: dict[str, Any], ref_name: str | None, resolved: Any, local_defs: set[str]) -> bool:
-    """Mirror of the named-reference rule used by the type emitters."""
-    return bool(
+def _ref_is_named(
+    root: dict[str, Any], ref_name: str | None, resolved: Any, local_defs: set[str]
+) -> bool:
+    """Whether a reference needs its own generated parser function.
+
+    Type generation may preserve a promoted scalar/array alias by name, but
+    parser generation should validate those shapes inline. Only records,
+    tagged unions, and closed enums need entries in the parser closure.
+    """
+
+    named_type = bool(
         ref_name
         and resolved
-        and (ref_name not in local_defs or ref_name in root.get("__promoted_defs", set()))
+        and (
+            ref_name not in local_defs or ref_name in root.get("__promoted_defs", set())
+        )
+    )
+    if not named_type or not isinstance(resolved, dict):
+        return False
+    return bool(
+        isinstance(resolved.get("properties"), dict)
+        or _one_of_typed_dict_variants(root, resolved) is not None
+        or _flat_string_enum_values(resolved) is not None
     )
 
 
@@ -1632,8 +2050,8 @@ function expectWireBoolean(value: unknown, context: string): boolean {
 }
 
 function expectWireInteger(value: unknown, context: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw wireParseError(context, "expected integer");
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw wireParseError(context, "expected safe integer");
   }
   return value;
 }
@@ -1677,7 +2095,22 @@ def _python_type_from_schema(
     field_schema: Any,
     local_defs: set[str] | None = None,
 ) -> tuple[str, bool]:
-    """Return (python_type, optional)."""
+    """Return ``(python_type, optional_by_shape)``.
+
+    JSON ``null`` is a value, not property absence. It is therefore rendered
+    into ``python_type`` as ``Optional[...]`` while the boolean is reserved
+    for malformed/unknown shapes that still need the historical optional
+    fallback. Field emitters decide ``Required``/``NotRequired`` exclusively
+    from the schema's ``required`` inventory.
+    """
+
+    def nullable(inner: str, allows_null: bool) -> str:
+        if not allows_null or inner == "None" or inner.startswith("Optional["):
+            return inner
+        if "None" in {part.strip() for part in inner.split("|")}:
+            return inner
+        return f"Optional[{inner}]"
+
     if field_schema is True:
         return ("Any", False)
     if field_schema is False or not isinstance(field_schema, dict):
@@ -1690,28 +2123,44 @@ def _python_type_from_schema(
                 for variant in variants
                 if not (isinstance(variant, dict) and variant.get("type") == "null")
             ]
-            optional = len(non_null) != len(variants)
+            allows_null = len(non_null) != len(variants)
+            if not non_null:
+                return ("None", False)
             if len(non_null) == 1:
-                inner_type, inner_optional = _python_type_from_schema(root, non_null[0], local_defs)
-                return (inner_type, optional or inner_optional)
+                inner_type, inner_optional = _python_type_from_schema(
+                    root, non_null[0], local_defs
+                )
+                return (nullable(inner_type, allows_null), inner_optional)
             const_values = _const_variants(non_null)
             if const_values is not None:
                 values = ", ".join(repr(value) for value in const_values)
-                return (f"Literal[{values}]", optional)
+                return (nullable(f"Literal[{values}]", allows_null), False)
             variant_types: list[str] = []
+            optional_by_shape = False
             for variant in non_null:
-                inner_type, _ = _python_type_from_schema(root, variant, local_defs)
+                inner_type, inner_optional = _python_type_from_schema(
+                    root, variant, local_defs
+                )
+                optional_by_shape = optional_by_shape or inner_optional
                 if inner_type not in variant_types:
                     variant_types.append(inner_type)
             if variant_types:
-                return (" | ".join(variant_types), optional)
+                return (
+                    nullable(" | ".join(variant_types), allows_null),
+                    optional_by_shape,
+                )
     if "$ref" in field_schema:
         ref_name = _resolve_schema_ref_name(str(field_schema["$ref"]))
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
         if not resolved and ref_name:
             resolved = _lookup_named_schema(root, ref_name)
-        if ref_name and resolved and (
-            ref_name not in (local_defs or set()) or ref_name in root.get("__promoted_defs", set())
+        if (
+            ref_name
+            and resolved
+            and (
+                ref_name not in (local_defs or set())
+                or ref_name in root.get("__promoted_defs", set())
+            )
         ):
             return (ref_name, False)
         return _python_type_from_schema(root, resolved, local_defs)
@@ -1720,43 +2169,65 @@ def _python_type_from_schema(
         return (f"Literal[{field_schema['const']!r}]", False)
 
     schema_type = field_schema.get("type")
-    optional = False
+    allows_null = False
     if isinstance(schema_type, list):
-        optional = "null" in schema_type
+        allows_null = "null" in schema_type
         non_null = [t for t in schema_type if t != "null"]
-        schema_type = non_null[0] if non_null else None
+        if not non_null:
+            return ("None", False)
+        if len(non_null) > 1:
+            variant_types: list[str] = []
+            optional_by_shape = False
+            for candidate in non_null:
+                candidate_schema = dict(field_schema)
+                candidate_schema["type"] = candidate
+                inner_type, inner_optional = _python_type_from_schema(
+                    root, candidate_schema, local_defs
+                )
+                optional_by_shape = optional_by_shape or inner_optional
+                if inner_type not in variant_types:
+                    variant_types.append(inner_type)
+            return (
+                nullable(" | ".join(variant_types), allows_null),
+                optional_by_shape,
+            )
+        schema_type = non_null[0]
 
     match schema_type:
         case "string":
             if "enum" in field_schema and isinstance(field_schema["enum"], list):
                 values = ", ".join([repr(v) for v in field_schema["enum"]])
-                return (f"Literal[{values}]", optional)
-            return ("str", optional)
+                return (nullable(f"Literal[{values}]", allows_null), False)
+            return (nullable("str", allows_null), False)
         case "boolean":
-            return ("bool", optional)
+            return (nullable("bool", allows_null), False)
         case "integer":
-            return ("int", optional)
+            return (nullable("int", allows_null), False)
         case "number":
-            return ("float", optional)
+            return (nullable("float", allows_null), False)
         case "array":
             item_schema = field_schema.get("items")
             item_type, _ = _python_type_from_schema(root, item_schema, local_defs)
             if item_type == "Any":
-                return ("list[Any]", optional)
-            return (f"list[{item_type}]", optional)
+                return (nullable("list[Any]", allows_null), False)
+            return (nullable(f"list[{item_type}]", allows_null), False)
         case "object":
             properties = field_schema.get("properties")
             additional = field_schema.get("additionalProperties", True)
             if isinstance(additional, dict) and not properties:
                 value_type, _ = _python_type_from_schema(root, additional, local_defs)
-                return (f"dict[str, {value_type}]", optional)
-            if isinstance(properties, dict) and len(properties) == 1 and additional is False:
-                (_, value_schema), = properties.items()
+                return (nullable(f"dict[str, {value_type}]", allows_null), False)
+            if (
+                isinstance(properties, dict)
+                and len(properties) == 1
+                and additional is False
+            ):
+                ((_, value_schema),) = properties.items()
                 value_type, _ = _python_type_from_schema(root, value_schema)
-                return (f"dict[str, {value_type}]", optional)
-            return ("dict[str, Any]", optional)
+                return (nullable(f"dict[str, {value_type}]", allows_null), False)
+            return (nullable("dict[str, Any]", allows_null), False)
         case _:
-            return ("Any", optional)
+            return (nullable("Any", allows_null), False)
 
 
 def _typescript_type_from_schema(
@@ -1766,7 +2237,11 @@ def _typescript_type_from_schema(
     *,
     inline_objects: bool = False,
 ) -> tuple[str, bool]:
-    """Return (typescript_type, optional).
+    """Return ``(typescript_type, optional_by_shape)``.
+
+    Explicit JSON ``null`` is retained in ``typescript_type`` as a union arm;
+    it never makes the containing property optional. Property absence remains
+    owned by the schema's ``required`` inventory.
 
     When `inline_objects` is True, anonymous JSON-schema objects that declare
     `properties` are emitted as inline structural TypeScript object types
@@ -1778,6 +2253,12 @@ def _typescript_type_from_schema(
     anonymous objects keep the existing widening behavior to bound the
     blast radius.
     """
+
+    def nullable(inner: str, allows_null: bool) -> str:
+        if not allows_null or "null" in {part.strip() for part in inner.split("|")}:
+            return inner
+        return f"{inner} | null"
+
     if field_schema is True:
         return ("unknown", False)
     if field_schema is False or not isinstance(field_schema, dict):
@@ -1790,28 +2271,44 @@ def _typescript_type_from_schema(
                 for variant in variants
                 if not (isinstance(variant, dict) and variant.get("type") == "null")
             ]
-            optional = len(non_null) != len(variants)
+            allows_null = len(non_null) != len(variants)
+            if not non_null:
+                return ("null", False)
             if len(non_null) == 1:
-                inner_type, inner_optional = _typescript_type_from_schema(root, non_null[0], local_defs)
-                return (inner_type, optional or inner_optional)
+                inner_type, inner_optional = _typescript_type_from_schema(
+                    root, non_null[0], local_defs
+                )
+                return (nullable(inner_type, allows_null), inner_optional)
             const_values = _const_variants(non_null)
             if const_values is not None:
                 values = " | ".join(json.dumps(value) for value in const_values)
-                return (values, optional)
+                return (nullable(values, allows_null), False)
             variant_types: list[str] = []
+            optional_by_shape = False
             for variant in non_null:
-                inner_type, _ = _typescript_type_from_schema(root, variant, local_defs)
+                inner_type, inner_optional = _typescript_type_from_schema(
+                    root, variant, local_defs
+                )
+                optional_by_shape = optional_by_shape or inner_optional
                 if inner_type not in variant_types:
                     variant_types.append(inner_type)
             if variant_types:
-                return (" | ".join(variant_types), optional)
+                return (
+                    nullable(" | ".join(variant_types), allows_null),
+                    optional_by_shape,
+                )
     if "$ref" in field_schema:
         ref_name = _resolve_schema_ref_name(str(field_schema["$ref"]))
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
         if not resolved and ref_name:
             resolved = _lookup_named_schema(root, ref_name)
-        if ref_name and resolved and (
-            ref_name not in (local_defs or set()) or ref_name in root.get("__promoted_defs", set())
+        if (
+            ref_name
+            and resolved
+            and (
+                ref_name not in (local_defs or set())
+                or ref_name in root.get("__promoted_defs", set())
+            )
         ):
             return (ref_name, False)
         return _typescript_type_from_schema(root, resolved, local_defs)
@@ -1820,42 +2317,69 @@ def _typescript_type_from_schema(
         return (json.dumps(field_schema["const"]), False)
 
     schema_type = field_schema.get("type")
-    optional = False
+    allows_null = False
     if isinstance(schema_type, list):
-        optional = "null" in schema_type
+        allows_null = "null" in schema_type
         non_null = [t for t in schema_type if t != "null"]
-        schema_type = non_null[0] if non_null else None
+        if not non_null:
+            return ("null", False)
+        if len(non_null) > 1:
+            variant_types: list[str] = []
+            optional_by_shape = False
+            for candidate in non_null:
+                candidate_schema = dict(field_schema)
+                candidate_schema["type"] = candidate
+                inner_type, inner_optional = _typescript_type_from_schema(
+                    root, candidate_schema, local_defs
+                )
+                optional_by_shape = optional_by_shape or inner_optional
+                if inner_type not in variant_types:
+                    variant_types.append(inner_type)
+            return (
+                nullable(" | ".join(variant_types), allows_null),
+                optional_by_shape,
+            )
+        schema_type = non_null[0]
 
     match schema_type:
         case "string":
             if "enum" in field_schema and isinstance(field_schema["enum"], list):
                 values = " | ".join([f'"{v}"' for v in field_schema["enum"]])
-                return (values, optional)
-            return ("string", optional)
+                return (nullable(values, allows_null), False)
+            return (nullable("string", allows_null), False)
         case "boolean":
-            return ("boolean", optional)
+            return (nullable("boolean", allows_null), False)
         case "integer":
-            return ("number", optional)
+            return (nullable("number", allows_null), False)
         case "number":
-            return ("number", optional)
+            return (nullable("number", allows_null), False)
         case "array":
             item_schema = field_schema.get("items")
             item_type, _ = _typescript_type_from_schema(root, item_schema, local_defs)
             if item_type == "unknown":
-                return ("unknown[]", optional)
+                return (nullable("unknown[]", allows_null), False)
             if "|" in item_type and not item_type.strip().startswith(("(", "{")):
                 item_type = f"({item_type})"
-            return (f"{item_type}[]", optional)
+            return (nullable(f"{item_type}[]", allows_null), False)
         case "object":
             properties = field_schema.get("properties")
             additional = field_schema.get("additionalProperties", True)
             if isinstance(additional, dict) and not properties:
-                value_type, _ = _typescript_type_from_schema(root, additional, local_defs)
-                return (f"Record<string, {value_type}>", optional)
-            if isinstance(properties, dict) and len(properties) == 1 and additional is False:
-                (field_name, value_schema), = properties.items()
+                value_type, _ = _typescript_type_from_schema(
+                    root, additional, local_defs
+                )
+                return (nullable(f"Record<string, {value_type}>", allows_null), False)
+            if (
+                isinstance(properties, dict)
+                and len(properties) == 1
+                and additional is False
+            ):
+                ((field_name, value_schema),) = properties.items()
                 value_type, _ = _typescript_type_from_schema(root, value_schema)
-                return (f"{{ {field_name}: {value_type} }}", optional)
+                return (
+                    nullable(f"{{ {field_name}: {value_type} }}", allows_null),
+                    False,
+                )
             # R7-1 (P2): when the caller is emitting a discriminated-union
             # variant payload (`inline_objects=True`), inline the typed
             # property shape rather than widening to `Record<string, unknown>`.
@@ -1872,12 +2396,544 @@ def _typescript_type_from_schema(
                     inline_type, inline_optional = _typescript_type_from_schema(
                         root, inline_schema, local_defs
                     )
-                    suffix = "" if (inline_field in required_set and not inline_optional) else "?"
+                    suffix = (
+                        ""
+                        if (inline_field in required_set and not inline_optional)
+                        else "?"
+                    )
                     inline_parts.append(f"{inline_field}{suffix}: {inline_type}")
-                return (f"{{ {'; '.join(inline_parts)} }}", optional)
-            return ("Record<string, unknown>", optional)
+                return (
+                    nullable(f"{{ {'; '.join(inline_parts)} }}", allows_null),
+                    False,
+                )
+            return (nullable("Record<string, unknown>", allows_null), False)
         case _:
-            return ("unknown", optional)
+            return (nullable("unknown", allows_null), False)
+
+
+def _schema_string_values(schema: Any) -> list[str]:
+    """Collect a schema's closed string vocabulary (enum/const/union)."""
+    if not isinstance(schema, dict):
+        return []
+    values: list[str] = []
+    if isinstance(schema.get("const"), str):
+        values.append(schema["const"])
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list):
+        values.extend(value for value in enum_values if isinstance(value, str))
+    for key in ("oneOf", "anyOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list):
+            for variant in variants:
+                values.extend(_schema_string_values(variant))
+    return list(dict.fromkeys(values))
+
+
+def _schema_allows_null(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    schema_type = schema.get("type")
+    if schema_type == "null":
+        return True
+    if isinstance(schema_type, list) and "null" in schema_type:
+        return True
+    return any(
+        _schema_allows_null(variant)
+        for key in ("oneOf", "anyOf")
+        for variant in (schema.get(key) if isinstance(schema.get(key), list) else [])
+    )
+
+
+def _multi_host_error_specs(schemas: dict) -> list[dict[str, Any]]:
+    """Resolve the SDK error roster from errors.json plus wire detail schemas."""
+    error_schemas = schemas.get("errors", {})
+    numeric_codes = error_schemas.get("JsonRpcErrorCodes")
+    if not isinstance(numeric_codes, dict) or not numeric_codes:
+        raise KeyError("errors.json JsonRpcErrorCodes must be a non-empty object")
+    semantic_codes = set(_schema_string_values(error_schemas.get("ErrorCode", {})))
+    wire_schema = schemas.get("wire-types", {})
+    specs: list[dict[str, Any]] = []
+    for semantic_code, rpc_code in numeric_codes.items():
+        if not isinstance(semantic_code, str) or semantic_code not in semantic_codes:
+            raise KeyError(
+                f"JsonRpcErrorCodes contains unknown semantic code {semantic_code!r}"
+            )
+        if isinstance(rpc_code, bool) or not isinstance(rpc_code, int):
+            raise TypeError(
+                f"JsonRpcErrorCodes[{semantic_code!r}] must be an integer"
+            )
+        stem = _pascal_case(semantic_code)
+        detail_name = f"Wire{stem}Detail"
+        detail_schema = _lookup_named_schema(wire_schema, detail_name)
+        if not detail_schema:
+            raise KeyError(f"wire-types.json is missing {detail_name}")
+        if detail_schema.get("type") != "object":
+            raise TypeError(f"{detail_name} must be an object schema")
+        if detail_schema.get("additionalProperties") is not False:
+            raise TypeError(f"{detail_name} must reject unknown fields")
+        specs.append(
+            {
+                "semantic_code": semantic_code,
+                "rpc_code": rpc_code,
+                "stem": stem,
+                "class_name": f"{stem}Error",
+                "detail_name": detail_name,
+                "detail_schema": detail_schema,
+                "schema_root": _schema_root_with_local_defs(
+                    wire_schema, detail_schema
+                ),
+            }
+        )
+    return sorted(specs, key=lambda spec: abs(spec["rpc_code"]))
+
+
+def _typescript_error_value_check(
+    value: str,
+    root: dict[str, Any],
+    schema: Any,
+    local_defs: set[str],
+) -> str:
+    if schema is True:
+        return "true"
+    if schema is False or not isinstance(schema, dict):
+        return "false"
+    variants = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(variants, list) and variants:
+        return (
+            "("
+            + " || ".join(
+                _typescript_error_value_check(value, root, variant, local_defs)
+                for variant in variants
+            )
+            + ")"
+        )
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        resolved = _resolve_schema_ref(root, ref)
+        if not resolved:
+            ref_name = _resolve_schema_ref_name(ref)
+            resolved = _lookup_named_schema(root, ref_name) if ref_name else {}
+        return _typescript_error_value_check(value, root, resolved, local_defs)
+    if "const" in schema:
+        return f"{value} === {json.dumps(schema['const'])}"
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list):
+        checks = [f"{value} === {json.dumps(item)}" for item in enum_values]
+        return "(" + " || ".join(checks) + ")"
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        branches = []
+        for candidate in schema_type:
+            candidate_schema = dict(schema)
+            candidate_schema["type"] = candidate
+            branches.append(
+                _typescript_error_value_check(value, root, candidate_schema, local_defs)
+            )
+        return "(" + " || ".join(branches) + ")"
+    if schema_type == "null":
+        return f"{value} === null"
+    if schema_type == "string":
+        return f'typeof {value} === "string"'
+    if schema_type == "boolean":
+        return f'typeof {value} === "boolean"'
+    if schema_type in {"integer", "number"}:
+        checks = [f'typeof {value} === "number"', f"Number.isFinite({value})"]
+        if schema_type == "integer":
+            checks.append(f"Number.isSafeInteger({value})")
+        if isinstance(schema.get("minimum"), (int, float)):
+            checks.append(f"{value} >= {schema['minimum']}")
+        return "(" + " && ".join(checks) + ")"
+    if schema_type == "array":
+        item_check = _typescript_error_value_check(
+            "item", root, schema.get("items", True), local_defs
+        )
+        return f"(Array.isArray({value}) && {value}.every((item) => {item_check}))"
+    if schema_type == "object":
+        return f"isErrorDetailRecord({value})"
+    return "false"
+
+
+def _python_error_value_check(
+    value: str,
+    root: dict[str, Any],
+    schema: Any,
+    local_defs: set[str],
+) -> str:
+    if schema is True:
+        return "True"
+    if schema is False or not isinstance(schema, dict):
+        return "False"
+    variants = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(variants, list) and variants:
+        return "(" + " or ".join(
+            _python_error_value_check(value, root, variant, local_defs)
+            for variant in variants
+        ) + ")"
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        resolved = _resolve_schema_ref(root, ref)
+        if not resolved:
+            ref_name = _resolve_schema_ref_name(ref)
+            resolved = _lookup_named_schema(root, ref_name) if ref_name else {}
+        return _python_error_value_check(value, root, resolved, local_defs)
+    if "const" in schema:
+        return f"{value} == {schema['const']!r}"
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list):
+        return f"{value} in {tuple(enum_values)!r}"
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        branches = []
+        for candidate in schema_type:
+            candidate_schema = dict(schema)
+            candidate_schema["type"] = candidate
+            branches.append(
+                _python_error_value_check(value, root, candidate_schema, local_defs)
+            )
+        return "(" + " or ".join(branches) + ")"
+    if schema_type == "null":
+        return f"{value} is None"
+    if schema_type == "string":
+        return f"isinstance({value}, str)"
+    if schema_type == "boolean":
+        return f"isinstance({value}, bool)"
+    if schema_type in {"integer", "number"}:
+        number_type = "int" if schema_type == "integer" else "(int, float)"
+        checks = [
+            f"isinstance({value}, {number_type})",
+            f"not isinstance({value}, bool)",
+        ]
+        if isinstance(schema.get("minimum"), (int, float)):
+            checks.append(f"{value} >= {schema['minimum']}")
+        return "(" + " and ".join(checks) + ")"
+    if schema_type == "array":
+        item_check = _python_error_value_check(
+            "item", root, schema.get("items", True), local_defs
+        )
+        return f"(isinstance({value}, list) and all({item_check} for item in {value}))"
+    if schema_type == "object":
+        return f"isinstance({value}, dict)"
+    return "False"
+
+
+def _typescript_multi_host_error_types(schemas: dict) -> str:
+    specs = _multi_host_error_specs(schemas)
+    lines: list[str] = []
+    for spec in specs:
+        schema = spec["detail_schema"]
+        root = spec["schema_root"]
+        local_defs = set(schema.get("$defs", {}).keys())
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        lines.append(f"export interface {spec['detail_name']} {{")
+        for field_name, field_schema in properties.items():
+            field_type, _ = _typescript_type_from_schema(root, field_schema, local_defs)
+            optional = "" if field_name in required else "?"
+            lines.append(f"  {field_name}{optional}: {field_type};")
+        lines.extend(["}", ""])
+    semantic_union = " | ".join(json.dumps(spec["semantic_code"]) for spec in specs)
+    lines.extend(
+        [
+            f"export type MultiHostErrorCode = {semantic_union};",
+            "",
+            "export const MULTI_HOST_JSON_RPC_ERROR_CODES: Readonly<",
+            "  Partial<Record<number, MultiHostErrorCode>>",
+            "> = {",
+        ]
+    )
+    for spec in specs:
+        lines.append(f"  [{spec['rpc_code']}]: {json.dumps(spec['semantic_code'])},")
+    lines.extend(
+        [
+            "};",
+            "",
+            "function isErrorDetailRecord(value: unknown): value is Record<string, unknown> {",
+            '  return typeof value === "object" && value !== null && !Array.isArray(value);',
+            "}",
+            "",
+        ]
+    )
+    for spec in specs:
+        schema = spec["detail_schema"]
+        root = spec["schema_root"]
+        local_defs = set(schema.get("$defs", {}).keys())
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        allowed = json.dumps(list(properties))
+        validator_name = f"is{spec['stem']}Detail"
+        lines.extend(
+            [
+                f"function {validator_name}(value: unknown): value is {spec['detail_name']} {{",
+                "  if (!isErrorDetailRecord(value)) return false;",
+                f"  const allowed = {allowed} as readonly string[];",
+                "  if (!Object.keys(value).every((key) => allowed.includes(key))) return false;",
+                "  return (",
+            ]
+        )
+        checks: list[str] = []
+        for field_name, field_schema in properties.items():
+            value_expr = f"value.{field_name}"
+            value_check = _typescript_error_value_check(
+                value_expr, root, field_schema, local_defs
+            )
+            if field_name in required:
+                checks.append(
+                    f"Object.prototype.hasOwnProperty.call(value, {json.dumps(field_name)}) && {value_check}"
+                )
+            else:
+                checks.append(
+                    f"(!Object.prototype.hasOwnProperty.call(value, {json.dumps(field_name)}) || {value_check})"
+                )
+        if checks:
+            for index, check in enumerate(checks):
+                suffix = " &&" if index < len(checks) - 1 else ""
+                lines.append(f"    {check}{suffix}")
+        else:
+            lines.append("    true")
+        lines.extend(["  );", "}", ""])
+    return "\n".join(lines)
+
+
+def _python_multi_host_error_types(schemas: dict) -> str:
+    specs = _multi_host_error_specs(schemas)
+    lines: list[str] = []
+    for spec in specs:
+        schema = spec["detail_schema"]
+        root = spec["schema_root"]
+        local_defs = set(schema.get("$defs", {}).keys())
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        lines.append(f"class {spec['detail_name']}(TypedDict, total=False):")
+        for field_name, field_schema in properties.items():
+            field_type, _ = _python_type_from_schema(root, field_schema, local_defs)
+            wrapper = "Required" if field_name in required else "NotRequired"
+            lines.append(
+                f"    {_python_identifier(field_name)}: {wrapper}[{field_type}]"
+            )
+        if not properties:
+            lines.append("    pass")
+        lines.append("")
+    semantic_values = ", ".join(repr(spec["semantic_code"]) for spec in specs)
+    lines.extend(
+        [
+            f"MultiHostErrorCode = Literal[{semantic_values}]",
+            "",
+            "MULTI_HOST_JSON_RPC_ERROR_CODES: dict[int, MultiHostErrorCode] = {",
+        ]
+    )
+    for spec in specs:
+        lines.append(f"    {spec['rpc_code']}: {spec['semantic_code']!r},")
+    lines.extend(["}", ""])
+    for spec in specs:
+        schema = spec["detail_schema"]
+        root = spec["schema_root"]
+        local_defs = set(schema.get("$defs", {}).keys())
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        validator_name = f"_is_{spec['semantic_code'].lower()}_detail"
+        lines.append(
+            f"def {validator_name}(value: Any) -> TypeGuard[{spec['detail_name']}]:"
+        )
+        lines.append("    if not isinstance(value, dict):")
+        lines.append("        return False")
+        allowed_fields = tuple(properties)
+        lines.append(f"    if not set(value).issubset({allowed_fields!r}):")
+        lines.append("        return False")
+        checks: list[str] = []
+        for field_name, field_schema in properties.items():
+            value_expr = f"value.get({field_name!r})"
+            value_check = _python_error_value_check(
+                value_expr, root, field_schema, local_defs
+            )
+            if field_name in required:
+                checks.append(f"({field_name!r} in value and {value_check})")
+            else:
+                checks.append(f"({field_name!r} not in value or {value_check})")
+        if checks:
+            lines.append("    return (")
+            for index, check in enumerate(checks):
+                suffix = " and" if index < len(checks) - 1 else ""
+                lines.append(f"        {check}{suffix}")
+            lines.append("    )")
+        else:
+            lines.append("    return True")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _typescript_multi_host_error_factories(schemas: dict) -> str:
+    specs = _multi_host_error_specs(schemas)
+    lines: list[str] = []
+    for spec in specs:
+        lines.extend(
+            [
+                f"export class {spec['class_name']} extends MeerkatError {{",
+                f"  declare public readonly details: {spec['detail_name']};",
+                "  constructor(",
+                "    message: string,",
+                f"    details: {spec['detail_name']},",
+                "    capabilityHint?: { capability_id: string; message: string },",
+                "  ) {",
+                f"    super({json.dumps(spec['semantic_code'])}, message, details, capabilityHint);",
+                f"    this.name = {json.dumps(spec['class_name'])};",
+                "  }",
+                "}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "export function meerkatErrorFromSemanticCode(",
+            "  code: string,",
+            "  message: string,",
+            "  details?: unknown,",
+            "  capabilityHint?: { capability_id: string; message: string },",
+            "): MeerkatError {",
+        ]
+    )
+    for spec in specs:
+        lines.extend(
+            [
+                f"  if (code === {json.dumps(spec['semantic_code'])} && is{spec['stem']}Detail(details)) {{",
+                f"    return new {spec['class_name']}(message, details, capabilityHint);",
+                "  }",
+            ]
+        )
+    lines.extend(
+        [
+            "  return new MeerkatError(code, message, details, capabilityHint);",
+            "}",
+            "",
+            "function normalizeJsonRpcCode(code: number | string): number | undefined {",
+            "  if (typeof code === \"number\") {",
+            "    return Number.isInteger(code) ? code : undefined;",
+            "  }",
+            "  if (!/^-?\\d+$/.test(code)) return undefined;",
+            "  const parsed = Number(code);",
+            "  return Number.isSafeInteger(parsed) && String(parsed) === code ? parsed : undefined;",
+            "}",
+            "",
+            "export function meerkatErrorFromJsonRpcCode(",
+            "  rpcCode: number | string,",
+            "  semanticCode: string | undefined,",
+            "  message: string,",
+            "  details?: unknown,",
+            "  capabilityHint?: { capability_id: string; message: string },",
+            "): MeerkatError {",
+            "  const normalizedRpcCode = normalizeJsonRpcCode(rpcCode);",
+            "  const mappedSemantic =",
+            "    normalizedRpcCode === undefined",
+            "      ? undefined",
+            "      : MULTI_HOST_JSON_RPC_ERROR_CODES[normalizedRpcCode];",
+            "  if (semanticCode !== undefined) {",
+            "    if (mappedSemantic !== undefined && mappedSemantic !== semanticCode) {",
+            "      return new MeerkatError(semanticCode, message, details, capabilityHint);",
+            "    }",
+            "    return meerkatErrorFromSemanticCode(",
+            "      semanticCode,",
+            "      message,",
+            "      details,",
+            "      capabilityHint,",
+            "    );",
+            "  }",
+            "  if (mappedSemantic !== undefined) {",
+            "    return meerkatErrorFromSemanticCode(",
+            "      mappedSemantic,",
+            "      message,",
+            "      details,",
+            "      capabilityHint,",
+            "    );",
+            "  }",
+            "  return new MeerkatError(String(rpcCode), message, details, capabilityHint);",
+            "}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _python_multi_host_error_factories(schemas: dict) -> str:
+    specs = _multi_host_error_specs(schemas)
+    lines: list[str] = []
+    for spec in specs:
+        lines.extend(
+            [
+                f"class {spec['class_name']}(MeerkatError):",
+                f"    \"\"\"Raised for {spec['semantic_code']} with validated typed details.\"\"\"",
+                "",
+                "    def __init__(",
+                "        self,",
+                "        message: str,",
+                f"        details: {spec['detail_name']},",
+                "        capability_hint: Any = None,",
+                "    ) -> None:",
+                f"        super().__init__({spec['semantic_code']!r}, message, details, capability_hint)",
+                "",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "def meerkat_error_from_semantic_code(",
+            "    code: str,",
+            "    message: str,",
+            "    details: Any = None,",
+            "    capability_hint: Any = None,",
+            ") -> MeerkatError:",
+        ]
+    )
+    for spec in specs:
+        lines.extend(
+            [
+                f"    if code == {spec['semantic_code']!r} and _is_{spec['semantic_code'].lower()}_detail(details):",
+                f"        return {spec['class_name']}(message, details, capability_hint)",
+            ]
+        )
+    lines.extend(
+        [
+            "    return MeerkatError(code, message, details, capability_hint)",
+            "",
+            "",
+            "def _normalize_jsonrpc_code(code: int | str) -> int | None:",
+            "    if isinstance(code, bool):",
+            "        return None",
+            "    if isinstance(code, int):",
+            "        return code",
+            "    if not isinstance(code, str):",
+            "        return None",
+            "    try:",
+            "        parsed = int(code)",
+            "    except ValueError:",
+            "        return None",
+            "    return parsed if str(parsed) == code else None",
+            "",
+            "",
+            "def meerkat_error_from_jsonrpc_code(",
+            "    rpc_code: int | str,",
+            "    semantic_code: str | None,",
+            "    message: str,",
+            "    details: Any = None,",
+            "    capability_hint: Any = None,",
+            ") -> MeerkatError:",
+            "    numeric_code = _normalize_jsonrpc_code(rpc_code)",
+            "    mapped_semantic = MULTI_HOST_JSON_RPC_ERROR_CODES.get(numeric_code)",
+            "    if semantic_code is not None:",
+            "        if mapped_semantic is not None and mapped_semantic != semantic_code:",
+            "            return MeerkatError(",
+            "                semantic_code, message, details, capability_hint",
+            "            )",
+            "        return meerkat_error_from_semantic_code(",
+            "            semantic_code, message, details, capability_hint",
+            "        )",
+            "    if mapped_semantic is not None:",
+            "        return meerkat_error_from_semantic_code(",
+            "            mapped_semantic, message, details, capability_hint",
+            "        )",
+            "    return MeerkatError(str(rpc_code), message, details, capability_hint)",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _known_event_types(schemas: dict) -> list[str]:
@@ -1990,28 +3046,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    schema_warnings: Optional[list[Any]] = None\n"
     types_content += "    skill_diagnostics: Optional[dict] = None\n\n\n"
 
-    types_content += "@dataclass\nclass WireProviderMeta:\n"
-    types_content += '    """Provider continuity metadata."""\n'
-    types_content += "    provider: str = ''\n\n\n"
-
     types_content += "@dataclass\nclass WireToolResult:\n"
     types_content += '    """Tool result transcript item."""\n'
     types_content += "    tool_use_id: str = ''\n"
     types_content += "    content: Optional[WireToolResultContent] = None\n"
     types_content += "    is_error: Optional[bool] = None\n\n\n"
-
-    types_content += "@dataclass\nclass WireSessionMessage:\n"
-    types_content += '    """Canonical transcript message."""\n'
-    types_content += "    role: str = ''\n"
-    types_content += "    created_at: str = ''\n"
-    types_content += "    kind: Optional[str] = None\n"
-    types_content += "    body: Optional[str] = None\n"
-    types_content += "    content: Optional[WireContentInput] = None\n"
-    types_content += "    stop_reason: Optional[WireStopReason] = None\n"
-    types_content += "    interaction_id: Optional[str] = None\n"
-    types_content += "    run_id: Optional[str] = None\n"
-    types_content += "    blocks: Optional[list[WireAssistantBlock]] = None\n"
-    types_content += "    results: Optional[list[WireToolResult]] = None\n\n\n"
 
     types_content += "@dataclass\nclass WireSessionHistory:\n"
     types_content += '    """Paginated transcript page."""\n'
@@ -2065,7 +3104,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     parser_closure = _wire_parser_closure(wire_schema, WORKGRAPH_PARSER_ROOT_TYPES)
     types_content += _PYTHON_WIRE_PARSE_PRELUDE + "\n"
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
-    emitted_python_dataclasses: set[str] = set()
+    emitted_python_dataclasses: set[str] = {"WireToolResult"}
+    emitted_python_named_types: set[str] = {"WireToolResult"}
     emitted_from_wire_parsers: set[str] = set()
 
     def append_python_dataclass(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
@@ -2100,7 +3140,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
             )
             is_required = field_name in required
             annotation = field_type
-            if not is_required or is_optional_type:
+            if (
+                (not is_required and not _schema_allows_null(field_schema))
+                or is_optional_type
+            ):
                 annotation = f"Optional[{field_type}]"
             if is_required:
                 required_lines.append(f"    {python_field_name}: {annotation}\n")
@@ -2115,6 +3158,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
             emitted_from_wire_parsers.add(name)
         types_content += "\n"
         emitted_python_dataclasses.add(name)
+        emitted_python_named_types.add(name)
 
     def append_python_contract_dataclass(name: str) -> None:
         if _lookup_named_schema(params_schema, name):
@@ -2127,7 +3171,21 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
 
     def append_python_alias(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
         nonlocal types_content
+        if name in emitted_python_named_types:
+            return
         schema = _lookup_named_schema(root_schema, name)
+        root_ref_name = (
+            _resolve_schema_ref_name(str(schema["$ref"]))
+            if isinstance(schema, dict) and "$ref" in schema
+            else None
+        )
+        if root_ref_name in emitted_python_named_types:
+            doc = schema.get("description", default_doc)
+            doc_lines = str(doc).splitlines() or [""]
+            doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
+            types_content += f"\n{doc_block}\n{name} = {root_ref_name}\n"
+            emitted_python_named_types.add(name)
+            return
         local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
         schema_root = _schema_root_with_local_defs(root_schema, schema)
         typed_dict_variants = _one_of_typed_dict_variants(schema_root, schema)
@@ -2137,12 +3195,30 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
             doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
             types_content += f"\n{doc_block}\n"
             variant_names: list[str] = []
-            for discriminator_value, variant in typed_dict_variants[1]:
+            discriminator, variant_entries = typed_dict_variants
+            discriminator_counts: dict[str, int] = {}
+            for discriminator_value, _ in variant_entries:
+                discriminator_counts[discriminator_value] = (
+                    discriminator_counts.get(discriminator_value, 0) + 1
+                )
+            for discriminator_value, variant in variant_entries:
                 properties = variant.get("properties", {})
-                variant_name = _typed_dict_variant_name(name, discriminator_value)
+                variant_name = _typed_dict_variant_name(
+                    name,
+                    discriminator_value,
+                    discriminator=discriminator,
+                    variant=variant,
+                    disambiguate=discriminator_counts[discriminator_value] > 1,
+                )
+                if variant_name in variant_names:
+                    raise RuntimeError(
+                        f"schema variants for {name} cannot be named uniquely: {variant_name}"
+                    )
                 variant_names.append(variant_name)
                 required = set(variant.get("required", []))
-                local_variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+                local_variant_defs = (
+                    set(variant.get("$defs", {}).keys()) | local_defs
+                ) - emitted_python_named_types
                 # R7-1 Python lift: mirror the TS `inline_objects=True` path.
                 # For each variant property whose schema is an anonymous
                 # inline object (has `properties`, no `$ref`/`oneOf`/`anyOf`),
@@ -2204,13 +3280,81 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
                 types_content += "\n"
             if variant_names:
                 types_content += f"{name} = {' | '.join(variant_names)}\n"
+                emitted_python_named_types.add(name)
                 return
+        external_variants = (
+            _one_of_external_tagged_variants(schema)
+            if name
+            in {
+                "MemberBuildRejection",
+                "BridgeRejectionCause",
+                "BridgeOutboundTaintTarget",
+                "WireFlowTurnOutcome",
+            }
+            else None
+        )
+        if external_variants is not None:
+            doc = schema.get("description", default_doc)
+            doc_lines = str(doc).splitlines() or [""]
+            doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
+            types_content += f"\n{doc_block}\n"
+            union_members: list[str] = []
+            for kind, tag, payload_schema in external_variants:
+                if kind == "unit":
+                    union_members.append(f"Literal[{tag!r}]")
+                    continue
+                assert isinstance(payload_schema, dict)
+                variant_name = f"{name}{_pascal_case(tag)}"
+                # Externally tagged tuple/newtype variants are represented as
+                # a one-key object whose value is commonly a direct `$ref`
+                # (for example `{ "placed": BridgeMemberIncarnation }`).
+                # Preserve that exact closed shape instead of wrapping the
+                # reference in an empty `*Payload` TypedDict or widening it to
+                # `dict[str, T]`.
+                if isinstance(payload_schema.get("$ref"), str):
+                    field_type, _ = _python_type_from_schema(
+                        schema_root,
+                        payload_schema,
+                        local_defs,
+                    )
+                    types_content += f"class {variant_name}(TypedDict, total=False):\n"
+                    types_content += (
+                        f"    {_python_identifier(tag)}: Required[{field_type}]\n\n"
+                    )
+                    emitted_python_named_types.add(variant_name)
+                    union_members.append(variant_name)
+                    continue
+                payload_name = f"{variant_name}Payload"
+                payload_properties = payload_schema.get("properties", {})
+                payload_required = set(payload_schema.get("required", []) or [])
+                types_content += f"class {payload_name}(TypedDict, total=False):\n"
+                if not payload_properties:
+                    types_content += "    pass\n"
+                for field_name, field_schema in payload_properties.items():
+                    field_type, _ = _python_type_from_schema(
+                        schema_root,
+                        field_schema,
+                        local_defs,
+                    )
+                    wrapper = "Required" if field_name in payload_required else "NotRequired"
+                    types_content += (
+                        f"    {_python_identifier(field_name)}: {wrapper}[{field_type}]\n"
+                    )
+                types_content += "\n"
+                types_content += f"class {variant_name}(TypedDict, total=False):\n"
+                types_content += f"    {_python_identifier(tag)}: Required[{payload_name}]\n\n"
+                emitted_python_named_types.update((payload_name, variant_name))
+                union_members.append(variant_name)
+            types_content += f"{name} = {' | '.join(union_members)}\n"
+            emitted_python_named_types.add(name)
+            return
         alias_type, _ = _python_type_from_schema(schema_root, schema, local_defs)
         doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
         # Ensure multi-line descriptions are fully commented out.
         doc_lines = str(doc).splitlines() or [""]
         doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
         types_content += f"\n{doc_block}\n{name} = {alias_type}\n"
+        emitted_python_named_types.add(name)
 
     for name in MCP_CONFIG_HELPER_TYPES:
         append_python_contract_dataclass(name)
@@ -2268,7 +3412,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("MobWireParams", params_schema, "Request payload for mob/wire.")
     append_python_dataclass("MobUnwireParams", params_schema, "Request payload for mob/unwire.")
     for name in MOB_RPC_CONTRACT_TYPES:
-        append_python_contract_dataclass(name)
+        if name not in MOB_RPC_CONTRACT_ALIAS_TYPES:
+            append_python_contract_dataclass(name)
     for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
     for name in WORKGRAPH_RPC_CONTRACT_TYPES:
@@ -2281,6 +3426,16 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     for name in wire_promotion["minted"]:
         append_python_dataclass(name, wire_schema, f"Promoted inline object type {name}.")
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
+        append_python_contract_dataclass(name)
+    for name in BRIDGE_NESTED_CONTRACT_TYPES:
+        append_python_contract_dataclass(name)
+    for name in BRIDGE_NESTED_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Supervisor bridge nested type {name}.")
+    for name in BRIDGE_REJECTION_NESTED_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"Supervisor bridge rejection type {name}.")
+    for name in SYSTEM_NOTICE_NESTED_ALIAS_TYPES:
+        append_python_alias(name, wire_schema, f"System notice nested type {name}.")
+    for name in SYSTEM_NOTICE_NESTED_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
     append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
     append_python_dataclass("ListSchedulesParams", params_schema, "Request payload for schedule/list.")
@@ -2481,7 +3636,12 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     )
     append_python_dataclass("WireSessionInfo", wire_schema, "Detailed session metadata payload.")
     append_python_dataclass("WireSessionSummary", wire_schema, "Session summary payload returned by session/list.")
-    append_python_dataclass("ContractVersion", schemas.get("models", {}), "Semantic contract version triple.")
+    # ContractVersion is schema-local on models/runtime-host contracts and is
+    # promoted into the shared wire lookup root above. Emitting it from the
+    # raw models artifact misses that nested definition and silently produces
+    # an empty class, even though RuntimeHostCapabilities references the
+    # three-field version triple.
+    append_python_dataclass("ContractVersion", wire_schema, "Semantic contract version triple.")
     append_python_dataclass("CatalogModelEntry", schemas.get("models", {}), "Catalog model entry.")
     append_python_dataclass("ProviderCatalog", schemas.get("models", {}), "Provider grouping in the model catalog.")
     append_python_dataclass("ModelsCatalogResponse", schemas.get("models", {}), "Response payload for models/catalog.")
@@ -2559,11 +3719,37 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     # so the generated `Transcript` variant's inline `data.source` field
     # references the typed `kind`-tagged union by name.
     append_python_alias(
+        "WireProviderMeta",
+        wire_schema,
+        "Provider continuity metadata for transcript blocks.",
+    )
+    append_python_alias(
         "WireTranscriptSource",
         wire_schema,
         "Wire projection of TranscriptSource (tagged on `kind`).",
     )
     append_python_alias("WireAssistantBlock", wire_schema, "Block assistant transcript item.")
+    # Emit every named schema reachable from the public transcript-edit roots.
+    # The dependency list is derived from the schema artifact, not maintained
+    # beside it, so adding a new typed transcript arm cannot silently widen the
+    # generated SDK field back to `dict[str, Any]`.
+    for name in _named_schema_dependency_order(
+        params_schema,
+        SESSION_TRANSCRIPT_SCHEMA_ROOTS,
+    ):
+        schema = _lookup_named_schema(params_schema, name)
+        if _is_plain_object_schema(schema):
+            append_python_dataclass(
+                name,
+                params_schema,
+                f"Fork transcript replacement helper type for {name}.",
+            )
+        else:
+            append_python_alias(
+                name,
+                params_schema,
+                f"Fork transcript replacement helper type for {name}.",
+            )
     append_python_alias("WireImageOperationPhase", wire_schema, "Machine-owned image operation phase.")
     append_python_alias("WireModelTier", schemas.get("models", {}), "Wire-level model recommendation tier.")
     append_python_alias(
@@ -2572,8 +3758,39 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "Typed comms/send command (serde-tagged on `kind`).",
     )
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES:
-        root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
+        # Only a top-level params owner outranks the standalone wire schema.
+        # `_lookup_named_schema` also sees schema-local `$defs`; selecting one
+        # of those flattened copies can erase its own referenced definitions
+        # (BridgeCommand.objective_id was the first concrete regression).
+        root_schema = params_schema if isinstance(params_schema.get(name), dict) else wire_schema
         append_python_alias(name, root_schema, f"Comms/session-stream RPC contract for {name}.")
+    wire_session_message_schema = _lookup_named_schema(
+        wire_schema, "WireSessionMessage"
+    )
+    wire_session_message_root = _schema_root_with_local_defs(
+        wire_schema, wire_session_message_schema
+    )
+    system_notice_root = dict(wire_session_message_root)
+    system_notice_schema = dict(
+        _lookup_named_schema(wire_session_message_root, "SystemNoticeBlock")
+    )
+    system_notice_schema["$defs"] = wire_session_message_schema.get("$defs", {})
+    system_notice_root["SystemNoticeBlock"] = system_notice_schema
+    append_python_alias(
+        "SystemNoticeBlock",
+        system_notice_root,
+        "Typed runtime-authored system-notice transcript block.",
+    )
+    append_python_alias(
+        "WireSessionMessage",
+        wire_schema,
+        "Canonical role-discriminated transcript message.",
+    )
+    append_python_alias(
+        "WireHistoryRow",
+        wire_schema,
+        "Exact canonical transcript row used by member history.",
+    )
     # K21: module-level fail-closed parsers for the workgraph union/enum
     # aliases (struct types carry `from_wire` classmethods inline).
     types_content += "\n\n" + _python_alias_parsers(wire_schema, parser_closure)
@@ -2590,7 +3807,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     (output_dir / "types.py").write_text(types_content)
 
     # Generate error types
-    errors_content = '"""Generated error types for Meerkat SDK."""\n\n\n'
+    errors_content = '"""Generated error types for Meerkat SDK."""\n\n'
+    errors_content += "from __future__ import annotations\n\n"
+    errors_content += (
+        "from typing import Any, Literal, NotRequired, Optional, Required, "
+        "TypeGuard, TypedDict\n\n\n"
+    )
+    errors_content += _python_multi_host_error_types(schemas) + "\n\n"
     errors_content += "class MeerkatError(Exception):\n"
     errors_content += '    """Base error for Meerkat SDK."""\n\n'
     errors_content += "    def __init__(self, code: str, message: str, details=None, capability_hint=None):\n"
@@ -2610,7 +3833,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
 
     errors_content += "class SkillNotFoundError(MeerkatError):\n"
     errors_content += '    """Raised when a skill reference cannot be resolved."""\n'
-    errors_content += "    pass\n"
+    errors_content += "    pass\n\n\n"
+
+    errors_content += _python_multi_host_error_factories(schemas)
 
     (output_dir / "errors.py").write_text(errors_content)
 
@@ -2650,28 +3875,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  schema_warnings?: Array<{ provider: string; path: string; message: string }>;\n"
     types_content += "}\n\n"
 
-    types_content += "export interface WireProviderMeta {\n"
-    types_content += "  provider: string;\n"
-    types_content += "  [key: string]: unknown;\n"
-    types_content += "}\n\n"
-
     types_content += "export interface WireToolResult {\n"
     types_content += "  tool_use_id: string;\n"
     types_content += "  content: WireToolResultContent;\n"
     types_content += "  is_error?: boolean;\n"
-    types_content += "}\n\n"
-
-    types_content += "export interface WireSessionMessage {\n"
-    types_content += "  role: string;\n"
-    types_content += "  created_at: string;\n"
-    types_content += "  kind?: string;\n"
-    types_content += "  body?: string;\n"
-    types_content += "  content?: WireContentInput;\n"
-    types_content += "  stop_reason?: WireStopReason;\n"
-    types_content += "  interaction_id?: string;\n"
-    types_content += "  run_id?: string;\n"
-    types_content += "  blocks?: WireAssistantBlock[];\n"
-    types_content += "  results?: WireToolResult[];\n"
     types_content += "}\n\n"
 
     types_content += "export interface WireSessionHistory {\n"
@@ -2721,7 +3928,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     )
     parser_closure = _wire_parser_closure(wire_schema, WORKGRAPH_PARSER_ROOT_TYPES)
     runtime_state_result_root = _runtime_state_result_root(wire_schema)
-    emitted_typescript_interfaces: set[str] = set()
+    emitted_typescript_interfaces: set[str] = {"WireToolResult"}
+    emitted_typescript_named_types: set[str] = {"WireToolResult"}
 
     def append_typescript_interface(name: str, root_schema: dict[str, Any]) -> None:
         nonlocal types_content
@@ -2751,6 +3959,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
             types_content += f"  {field_name}{optional}: {field_type};\n"
         types_content += "}\n"
         emitted_typescript_interfaces.add(name)
+        emitted_typescript_named_types.add(name)
 
     def append_typescript_contract_interface(name: str) -> None:
         if _lookup_named_schema(params_schema, name):
@@ -2763,18 +3972,47 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     def append_typescript_alias(name: str, root_schema: dict[str, Any]) -> None:
         nonlocal types_content
+        if name in emitted_typescript_named_types:
+            return
         schema = _lookup_named_schema(root_schema, name)
+        root_ref_name = (
+            _resolve_schema_ref_name(str(schema["$ref"]))
+            if isinstance(schema, dict) and "$ref" in schema
+            else None
+        )
+        if root_ref_name in emitted_typescript_named_types:
+            types_content += f"\nexport type {name} = {root_ref_name};\n"
+            emitted_typescript_named_types.add(name)
+            return
         local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
         schema_root = _schema_root_with_local_defs(root_schema, schema)
         typed_dict_variants = _one_of_typed_dict_variants(schema_root, schema)
         if typed_dict_variants is not None:
             variant_names: list[str] = []
-            for discriminator_value, variant in typed_dict_variants[1]:
+            discriminator, variant_entries = typed_dict_variants
+            discriminator_counts: dict[str, int] = {}
+            for discriminator_value, _ in variant_entries:
+                discriminator_counts[discriminator_value] = (
+                    discriminator_counts.get(discriminator_value, 0) + 1
+                )
+            for discriminator_value, variant in variant_entries:
                 properties = variant.get("properties", {})
-                variant_name = _typed_dict_variant_name(name, discriminator_value)
+                variant_name = _typed_dict_variant_name(
+                    name,
+                    discriminator_value,
+                    discriminator=discriminator,
+                    variant=variant,
+                    disambiguate=discriminator_counts[discriminator_value] > 1,
+                )
+                if variant_name in variant_names:
+                    raise RuntimeError(
+                        f"schema variants for {name} cannot be named uniquely: {variant_name}"
+                    )
                 variant_names.append(variant_name)
                 required = set(variant.get("required", []))
-                local_variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+                local_variant_defs = (
+                    set(variant.get("$defs", {}).keys()) | local_defs
+                ) - emitted_typescript_named_types
                 types_content += f"\nexport interface {variant_name} {{\n"
                 for field_name, field_schema in properties.items():
                     # R7-1 (P2): inline anonymous-object payload schemas so
@@ -2795,9 +4033,54 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
                 types_content += "}\n"
             if variant_names:
                 types_content += f"\nexport type {name} = {' | '.join(variant_names)};\n"
+                emitted_typescript_named_types.add(name)
                 return
+        external_variants = (
+            _one_of_external_tagged_variants(schema)
+            if name
+            in {
+                "MemberBuildRejection",
+                "BridgeRejectionCause",
+                "WireFlowTurnOutcome",
+            }
+            else None
+        )
+        if external_variants is not None:
+            union_members: list[str] = []
+            for kind, tag, payload_schema in external_variants:
+                if kind == "unit":
+                    union_members.append(json.dumps(tag))
+                    continue
+                assert isinstance(payload_schema, dict)
+                variant_name = f"{name}{_pascal_case(tag)}"
+                payload_name = f"{variant_name}Payload"
+                payload_properties = payload_schema.get("properties", {})
+                payload_required = set(payload_schema.get("required", []) or [])
+                types_content += f"\nexport interface {payload_name} {{\n"
+                for field_name, field_schema in payload_properties.items():
+                    field_type, optional_by_type = _typescript_type_from_schema(
+                        schema_root,
+                        field_schema,
+                        local_defs,
+                    )
+                    optional = (
+                        "?"
+                        if field_name not in payload_required or optional_by_type
+                        else ""
+                    )
+                    types_content += f"  {field_name}{optional}: {field_type};\n"
+                types_content += "}\n"
+                types_content += f"\nexport interface {variant_name} {{\n"
+                types_content += f"  {tag}: {payload_name};\n"
+                types_content += "}\n"
+                emitted_typescript_named_types.update((payload_name, variant_name))
+                union_members.append(variant_name)
+            types_content += f"\nexport type {name} = {' | '.join(union_members)};\n"
+            emitted_typescript_named_types.add(name)
+            return
         alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         types_content += f"\nexport type {name} = {alias_type};\n"
+        emitted_typescript_named_types.add(name)
 
     for name in MCP_CONFIG_HELPER_TYPES:
         append_typescript_contract_interface(name)
@@ -2836,7 +4119,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("MobWireParams", params_schema)
     append_typescript_interface("MobUnwireParams", params_schema)
     for name in MOB_RPC_CONTRACT_TYPES:
-        append_typescript_contract_interface(name)
+        if name not in MOB_RPC_CONTRACT_ALIAS_TYPES:
+            append_typescript_contract_interface(name)
     for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)
     for name in WORKGRAPH_RPC_CONTRACT_TYPES:
@@ -2849,6 +4133,16 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     for name in wire_promotion["minted"]:
         append_typescript_interface(name, wire_schema)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
+        append_typescript_contract_interface(name)
+    for name in BRIDGE_NESTED_CONTRACT_TYPES:
+        append_typescript_contract_interface(name)
+    for name in BRIDGE_NESTED_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in BRIDGE_REJECTION_NESTED_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in SYSTEM_NOTICE_NESTED_ALIAS_TYPES:
+        append_typescript_alias(name, wire_schema)
+    for name in SYSTEM_NOTICE_NESTED_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_interface("ScheduleIdParams", params_schema)
     append_typescript_interface("ListSchedulesParams", params_schema)
@@ -2902,7 +4196,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireModelTier", schemas.get("models", {}))
     append_typescript_alias("CommsCommandRequest", wire_schema)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES:
-        root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
+        root_schema = params_schema if isinstance(params_schema.get(name), dict) else wire_schema
         append_typescript_alias(name, root_schema)
     append_typescript_interface("WireRenderMetadata", wire_schema)
     append_typescript_alias("WireTrustedPeerIdentity", wire_schema)
@@ -2979,7 +4273,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireResolvedModelCapabilities", schemas.get("models", {}))
     append_typescript_interface("WireSessionInfo", wire_schema)
     append_typescript_interface("WireSessionSummary", wire_schema)
-    append_typescript_interface("ContractVersion", schemas.get("models", {}))
+    append_typescript_interface("ContractVersion", wire_schema)
     append_typescript_interface("CatalogModelEntry", schemas.get("models", {}))
     append_typescript_interface("ProviderCatalog", schemas.get("models", {}))
     append_typescript_interface("ModelsCatalogResponse", schemas.get("models", {}))
@@ -3013,9 +4307,34 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     # R7-1 (P2): emit `WireTranscriptSource` alias before `WireAssistantBlock`
     # so the generated `Transcript` variant references the typed `kind`-tagged
     # union by name.
+    append_typescript_alias("WireProviderMeta", wire_schema)
     append_typescript_alias("WireTranscriptSource", wire_schema)
     append_typescript_alias("WireAssistantBlock", wire_schema)
+    for name in _named_schema_dependency_order(
+        params_schema,
+        SESSION_TRANSCRIPT_SCHEMA_ROOTS,
+    ):
+        schema = _lookup_named_schema(params_schema, name)
+        if _is_plain_object_schema(schema):
+            append_typescript_interface(name, params_schema)
+        else:
+            append_typescript_alias(name, params_schema)
     append_typescript_alias("WireImageOperationPhase", wire_schema)
+    wire_session_message_schema = _lookup_named_schema(
+        wire_schema, "WireSessionMessage"
+    )
+    wire_session_message_root = _schema_root_with_local_defs(
+        wire_schema, wire_session_message_schema
+    )
+    system_notice_root = dict(wire_session_message_root)
+    system_notice_schema = dict(
+        _lookup_named_schema(wire_session_message_root, "SystemNoticeBlock")
+    )
+    system_notice_schema["$defs"] = wire_session_message_schema.get("$defs", {})
+    system_notice_root["SystemNoticeBlock"] = system_notice_schema
+    append_typescript_alias("SystemNoticeBlock", system_notice_root)
+    append_typescript_alias("WireSessionMessage", wire_schema)
+    append_typescript_alias("WireHistoryRow", wire_schema)
 
     # K21: fail-closed wire parsers for the workgraph read types (the
     # `parseInitResult` precedent from the web emission, applied to the
@@ -3038,6 +4357,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     # Generate errors
     errors_content = "// Generated error types for Meerkat SDK\n\n"
+    errors_content += _typescript_multi_host_error_types(schemas) + "\n"
     errors_content += "export class MeerkatError extends Error {\n"
     errors_content += "  constructor(\n"
     errors_content += "    public readonly code: string,\n"
@@ -3069,7 +4389,9 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     errors_content += "    super(code, message);\n"
     errors_content += "    this.name = 'SkillNotFoundError';\n"
     errors_content += "  }\n"
-    errors_content += "}\n"
+    errors_content += "}\n\n"
+
+    errors_content += _typescript_multi_host_error_factories(schemas)
 
     (output_dir / "errors.ts").write_text(errors_content)
 
@@ -3461,7 +4783,6 @@ def _auth_rpc_methods(schemas: dict[str, Any]) -> dict[str, str]:
     if missing:
         raise KeyError(f"rpc-methods.json is missing auth methods: {missing}")
     return {_auth_rpc_method_key(name): name for name in expected}
-
 
 
 def generate_web_runtime_types(output_dir: Path) -> None:
@@ -4503,17 +5824,85 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
             else set()
         )
         schema_root = _schema_root_with_local_defs(wire_schema, schema)
+        typed_variants = _one_of_typed_dict_variants(schema_root, schema)
+        if typed_variants is not None:
+            variant_names: list[str] = []
+            discriminator, variant_entries = typed_variants
+            discriminator_counts: dict[str, int] = {}
+            for discriminator_value, _ in variant_entries:
+                discriminator_counts[discriminator_value] = (
+                    discriminator_counts.get(discriminator_value, 0) + 1
+                )
+            for discriminator_value, variant in variant_entries:
+                variant_name = _typed_dict_variant_name(
+                    name,
+                    discriminator_value,
+                    discriminator=discriminator,
+                    variant=variant,
+                    disambiguate=discriminator_counts[discriminator_value] > 1,
+                )
+                if variant_name in variant_names:
+                    raise RuntimeError(
+                        f"schema variants for {name} cannot be named uniquely: {variant_name}"
+                    )
+                variant_names.append(variant_name)
+                properties = variant.get("properties", {})
+                required = set(variant.get("required", []))
+                variant_local_defs = set(variant.get("$defs", {}).keys()) | local_defs
+                lines.append(f"export interface {variant_name} {{")
+                for field_name, field_schema in properties.items():
+                    field_type, _ = _typescript_type_from_schema(
+                        schema_root,
+                        field_schema,
+                        variant_local_defs,
+                        inline_objects=True,
+                    )
+                    optional = "" if field_name in required else "?"
+                    lines.append(f"  {field_name}{optional}: {field_type};")
+                lines.append("}")
+                lines.append("")
+            lines.append(f"export type {name} = {' | '.join(variant_names)};")
+            lines.append("")
+            emitted.add(name)
+            return
         alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         lines.append(f"export type {name} = {alias_type};")
         lines.append("")
         emitted.add(name)
 
+    def append_string_enum(name: str, const_name: str) -> None:
+        if name in emitted:
+            return
+        schema = _lookup_named_schema(wire_schema, name)
+        if not schema:
+            raise KeyError(f"schema for generated web mob enum {name} not found")
+        values = _schema_string_values(schema)
+        if not values:
+            raise ValueError(f"generated web mob enum {name} has no string values")
+        lines.append(f"export const {const_name} = [")
+        lines.extend(f"  {json.dumps(value)}," for value in values)
+        lines.append("] as const;")
+        lines.append(f"export type {name} = typeof {const_name}[number];")
+        lines.append("")
+        emitted.add(name)
+
+    append_string_enum(
+        "MobSpawnManyFailureCause",
+        "MOB_SPAWN_MANY_FAILURE_CAUSES",
+    )
     append_alias("WireMobMemberStatus")
     append_alias("WireMemberRef")
     append_alias("WireMemberProgressEvent")
     append_alias("WireMemberRunState")
     append_alias("WireMemberHealthClass")
     append_interface("WireMemberProgressSnapshot")
+    append_alias("WireHostRef")
+    append_alias("WireReachability")
+    append_interface("WireUnreachablePeer")
+    append_interface("WirePeerConnectivitySnapshot")
+    append_alias("WirePeerConnectivity")
+    append_alias("WireNonPortableResourceKind")
+    append_interface("WireMemberLifecycleCapabilities")
     append_interface("MobStatusResult")
     lines.append("export interface MobListResult {")
     lines.append("  mobs: MobStatusResult[];")

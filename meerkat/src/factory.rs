@@ -270,6 +270,67 @@ pub fn decode_llm_client_override_from_service(
         .map(|typed| typed.0.clone())
 }
 
+/// Resolve a pre-built session comms runtime override (multi-host mobs
+/// DEC-P3H-3). Fail closed on both failure modes: an unrecognized payload
+/// never falls back to config-mode construction, and a runtime whose
+/// participant name disagrees with the build's `comms_name` never builds a
+/// session under the wrong identity.
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+fn resolve_session_comms_runtime_override(
+    override_payload: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    expected_comms_name: Option<&str>,
+) -> Result<Option<Arc<meerkat_comms::CommsRuntime>>, BuildAgentError> {
+    let Some(payload) = override_payload else {
+        return Ok(None);
+    };
+    let Some(runtime) = crate::sdk::decode_session_comms_runtime_override_from_service(&payload)
+    else {
+        return Err(BuildAgentError::Config(
+            "session_comms_runtime_override carried an unrecognized payload; refusing to fall \
+             back to config-mode comms construction"
+                .to_string(),
+        ));
+    };
+    let actual = runtime.participant_name().to_string();
+    match expected_comms_name {
+        Some(expected) if expected == actual => Ok(Some(runtime)),
+        Some(expected) => Err(BuildAgentError::Config(format!(
+            "session comms runtime override name '{actual}' does not match the build's \
+             comms_name '{expected}'"
+        ))),
+        None => Err(BuildAgentError::Config(
+            "session comms runtime override provided without a comms_name on the build".to_string(),
+        )),
+    }
+}
+
+/// wasm32 posture for the session comms runtime override: the encoding
+/// helper (`sdk`) and every producer of the payload (the member-host
+/// daemon's materializer) are native-only, so a payload arriving here is a
+/// wiring error — fail closed, never silently ignore it.
+#[cfg(all(feature = "comms", target_arch = "wasm32"))]
+fn resolve_session_comms_runtime_override(
+    override_payload: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    _expected_comms_name: Option<&str>,
+) -> Result<Option<Arc<meerkat_comms::CommsRuntime>>, BuildAgentError> {
+    match override_payload {
+        None => Ok(None),
+        Some(_) => Err(BuildAgentError::Config(
+            "session_comms_runtime_override is not supported on wasm32 builds".to_string(),
+        )),
+    }
+}
+
+/// A1/ADJ-17 predicate: the factory-appended skill-inventory prompt section
+/// applies to `Full` builds only. `SpecPinned` (set ONLY by the member-host
+/// spec decompiler, and by revival re-running it) keeps spec-built session
+/// prompts byte-pinned across placements; local mobs are unchanged.
+fn skill_inventory_prompt_section_enabled(
+    sections: meerkat_core::service::HostPromptSections,
+) -> bool {
+    matches!(sections, meerkat_core::service::HostPromptSections::Full)
+}
+
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
 #[derive(Clone)]
 pub struct AgentBuildConfig {
@@ -524,6 +585,18 @@ pub struct AgentBuildConfig {
     /// `SessionMetadata.tooling.tool_access_policy` so children can inherit
     /// it transitively.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Pre-built session comms runtime, type-erased (multi-host mobs
+    /// DEC-P3H-3 — the `llm_client_override` precedent). Produced by
+    /// [`crate::encode_session_comms_runtime_override_for_service`]; the
+    /// factory's comms arm downcasts fail-closed, verifies the participant
+    /// name equals `comms_name`, and skips config-mode construction. Set by
+    /// the mob member-host materializer; never by ordinary surfaces.
+    pub session_comms_runtime_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// ADJ-17 prompt-section policy: `SpecPinned` (set ONLY by the member
+    /// host's spec decompiler, and by revival re-running it) suppresses the
+    /// factory-appended skill-inventory section so spec-built prompts are
+    /// byte-pinned across placements. `Full` (default) is unchanged.
+    pub host_prompt_sections: meerkat_core::service::HostPromptSections,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -635,6 +708,11 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
             .field("tool_access_policy", &self.tool_access_policy)
+            .field(
+                "session_comms_runtime_override",
+                &self.session_comms_runtime_override.is_some(),
+            )
+            .field("host_prompt_sections", &self.host_prompt_sections)
             .finish()
     }
 }
@@ -710,6 +788,8 @@ impl AgentBuildConfig {
             initial_tool_visibility_state: None,
             initial_tool_filter: None,
             tool_access_policy: None,
+            session_comms_runtime_override: None,
+            host_prompt_sections: meerkat_core::service::HostPromptSections::default(),
         }
     }
 
@@ -828,6 +908,11 @@ impl AgentBuildConfig {
         self.call_timeout_override = build.call_timeout_override.clone();
         self.resume_override_mask = build.resume_override_mask;
         self.runtime_build_mode = build.runtime_build_mode.clone();
+        // Carried erased: the comms arm downcasts fail-closed at build time
+        // (a foreign payload is a typed build error there, never a silent
+        // drop here).
+        self.session_comms_runtime_override = build.session_comms_runtime_override.clone();
+        self.host_prompt_sections = build.host_prompt_sections;
     }
 
     /// Convert build options to the service transport representation.
@@ -892,6 +977,8 @@ impl AgentBuildConfig {
             resume_override_mask: self.resume_override_mask,
             runtime_build_mode: self.runtime_build_mode.clone(),
             initial_turn_metadata: None,
+            session_comms_runtime_override: self.session_comms_runtime_override.clone(),
+            host_prompt_sections: self.host_prompt_sections,
         }
     }
 }
@@ -981,6 +1068,21 @@ pub enum BuildAgentError {
     #[error("keep_alive requires comms_name to be set")]
     #[cfg(feature = "comms")]
     KeepAliveRequiresCommsName,
+}
+
+/// Authoritative, side-effect-free-with-respect-to-session-state LLM
+/// preflight used by remote materializers before they create a session.
+///
+/// Credential resolution may refresh its normal host-local credential lease,
+/// exactly as the subsequent factory build would, but this seam never writes
+/// session, runtime, or mob state.  The two variants preserve which typed
+/// materialization rejection the caller must publish.
+#[derive(Debug, thiserror::Error)]
+pub enum LlmIdentityPreflightError {
+    #[error("model/provider identity is not registered on this host: {detail}")]
+    ModelUnresolvable { detail: String },
+    #[error("provider binding or client is not resolvable on this host: {detail}")]
+    BindingUnresolvable { detail: String },
 }
 
 #[cfg(feature = "comms")]
@@ -3176,6 +3278,152 @@ impl AgentFactory {
             .await
     }
 
+    /// Validate one exact model/provider/binding tuple through the same model
+    /// registry and provider-runtime resolver used by [`Self::build_agent`].
+    ///
+    /// Remote materialization uses this before any session side effect.  A
+    /// provider hint does not make an arbitrary model id constructible: the
+    /// model must exist in the host registry after the request's digest-bound
+    /// custom models are merged.  Credential commands, external resolvers,
+    /// managed tokens, platform resolvers, and ordinary env bindings then run
+    /// through the factory's canonical provider-runtime path rather than a
+    /// parallel presence heuristic.
+    pub async fn preflight_llm_identity(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        custom_models: &BTreeMap<String, meerkat_core::config::CustomModelConfig>,
+        preferred_realm: Option<&RealmId>,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+    ) -> Result<(), LlmIdentityPreflightError> {
+        let registry = if custom_models.is_empty() {
+            self.model_registry(config).map_err(|error| {
+                LlmIdentityPreflightError::ModelUnresolvable {
+                    detail: error.to_string(),
+                }
+            })?
+        } else {
+            ModelRegistry::from_config_with_models(
+                config,
+                custom_models,
+                meerkat_models::canonical(),
+            )
+            .map_err(|error| LlmIdentityPreflightError::ModelUnresolvable {
+                detail: error.to_string(),
+            })?
+        };
+        registry
+            .entry_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| LlmIdentityPreflightError::ModelUnresolvable {
+                detail: format!(
+                    "model '{}' is not registered for provider '{}'",
+                    identity.model,
+                    identity.provider.as_str()
+                ),
+            })?;
+
+        if matches!(identity.provider, Provider::SelfHosted) {
+            return self
+                .build_self_hosted_client_for_identity(
+                    config,
+                    &registry,
+                    identity,
+                    auth_lease_handle,
+                    preferred_realm,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+                    detail: error.to_string(),
+                });
+        }
+
+        // Match build_agent's test-only client override exactly: model
+        // registry validation above still runs, while credential material is
+        // intentionally unnecessary in this mode.
+        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
+            return Ok(());
+        }
+
+        #[allow(unused_mut)]
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(persistence) =
+                self.resolution_provider_auth_persistence()
+                    .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+                        detail: error.to_string(),
+                    })?
+            {
+                env = env.with_provider_auth_persistence(persistence);
+            }
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+
+        let explicit_auth_binding = identity.auth_binding.is_some();
+        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            preferred_realm,
+        )
+        .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+            detail: error.to_string(),
+        })?;
+        let mut first_error = None;
+        for target in candidates {
+            let mut candidate_env = env.clone();
+            if (!target.auth_binding.is_env_default() || explicit_auth_binding)
+                && let Some(handle) = auth_lease_handle.clone()
+            {
+                candidate_env = candidate_env.with_auth_lease_handle(handle);
+            }
+            match self
+                .provider_registry
+                .resolve(&target.realm, &target.auth_binding, &candidate_env)
+                .await
+            {
+                Ok(connection) => {
+                    if connection.provider != identity.provider {
+                        return Err(LlmIdentityPreflightError::BindingUnresolvable {
+                            detail: format!(
+                                "resolved provider '{}' does not match requested provider '{}'",
+                                connection.provider.as_str(),
+                                identity.provider.as_str()
+                            ),
+                        });
+                    }
+                    return self
+                        .provider_registry
+                        .build_client(connection)
+                        .map(|_| ())
+                        .map_err(|error| LlmIdentityPreflightError::BindingUnresolvable {
+                            detail: error.to_string(),
+                        });
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    if explicit_auth_binding {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(LlmIdentityPreflightError::BindingUnresolvable {
+            detail: first_error.map_or_else(
+                || {
+                    format!(
+                        "no auth binding candidates resolved for provider '{}'",
+                        identity.provider.as_str()
+                    )
+                },
+                |error| error.to_string(),
+            ),
+        })
+    }
+
     pub async fn build_llm_client_for_identity_with_auth_lease(
         &self,
         config: &Config,
@@ -4790,10 +5038,23 @@ impl AgentFactory {
         }
 
         // 6b. Create comms runtime before tool wiring.
+        // A per-session override (DEC-P3H-3: the mob member-host
+        // materializer pre-builds the member runtime with a durable
+        // session-scoped keypair and the machine-claimed session identity)
+        // wins outright: downcast fail-closed, participant name verified
+        // against comms_name, config-mode construction skipped. peer_meta /
+        // blob-store were already applied by the materializer.
+        #[cfg(feature = "comms")]
+        let session_comms_runtime_override = resolve_session_comms_runtime_override(
+            build_config.session_comms_runtime_override.take(),
+            build_config.comms_name.as_deref(),
+        )?;
         // If the factory has a pre-built runtime (surface with stable identity),
         // use it directly. Otherwise create a per-session runtime from config.
         #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
-        let comms_runtime = if let Some(ref shared) = self.comms_runtime
+        let comms_runtime = if let Some(runtime) = session_comms_runtime_override {
+            Some(runtime)
+        } else if let Some(ref shared) = self.comms_runtime
             && build_config.comms_name.is_none()
         {
             // Use the factory's shared runtime only when no per-session comms_name
@@ -4855,7 +5116,9 @@ impl AgentFactory {
             None
         };
         #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let comms_runtime = if let Some(ref shared) = self.comms_runtime
+        let comms_runtime = if let Some(runtime) = session_comms_runtime_override {
+            Some(runtime)
+        } else if let Some(ref shared) = self.comms_runtime
             && build_config.comms_name.is_none()
         {
             Some(Arc::clone(shared))
@@ -4891,6 +5154,15 @@ impl AgentFactory {
         } else {
             None
         };
+        #[cfg(not(feature = "comms"))]
+        if build_config.session_comms_runtime_override.take().is_some() {
+            // Fail closed: a pre-built comms runtime cannot be honored
+            // without the comms feature; ignoring it would build the member
+            // under the wrong (absent) identity.
+            return Err(BuildAgentError::Config(
+                "session comms runtime override requires the comms feature".to_string(),
+            ));
+        }
         #[cfg(not(feature = "comms"))]
         #[allow(clippy::no_effect_underscore_binding)]
         let _comms_runtime: Option<()> = None;
@@ -5521,8 +5793,13 @@ impl AgentFactory {
         // 12. Build system prompt (single canonical path)
         let mut extra_sections: Vec<&str> = Vec::new();
         // Only inject skill inventory (with tool guidance) when builtins are
-        // enabled — otherwise browse_skills/load_skill don't exist.
-        if !inventory_section.is_empty() && effective_builtins {
+        // enabled — otherwise browse_skills/load_skill don't exist — and only
+        // for `Full` prompt-section builds (A1/ADJ-17: SpecPinned mob-
+        // materialized builds keep spec-built prompts byte-pinned).
+        if !inventory_section.is_empty()
+            && effective_builtins
+            && skill_inventory_prompt_section_enabled(build_config.host_prompt_sections)
+        {
             extra_sections.push(inventory_section.as_str());
         }
         for section in &preloaded_skill_sections {
@@ -7145,6 +7422,197 @@ mod tests {
 
         assert_eq!(provider, Provider::OpenAI);
         assert_eq!(server_id, None);
+    }
+
+    #[tokio::test]
+    async fn materialize_preflight_rejects_uncatalogued_explicit_provider_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let identity = SessionLlmIdentity {
+            model: "uncatalogued-openai-model".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let error = factory
+            .preflight_llm_identity(&Config::default(), &identity, &BTreeMap::new(), None, None)
+            .await
+            .expect_err("remote materialization must require a registered model/provider pair");
+
+        assert!(
+            matches!(error, LlmIdentityPreflightError::ModelUnresolvable { .. }),
+            "unknown model should reject before credential resolution: {error}"
+        );
+    }
+
+    #[cfg(all(feature = "openai", unix, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn materialize_preflight_executes_command_credential_through_canonical_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "command_token".to_string(),
+            AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::Command {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".to_string(), "printf sk-preflight-command".to_string()],
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    timeout_ms: 2_000,
+                    refresh_interval_ms: None,
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "command_openai".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "command_token".to_string(),
+                default_model: None,
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        let preferred_realm = meerkat_core::mob_realm_id("preflight").unwrap();
+        config
+            .realm
+            .insert(preferred_realm.as_str().to_string(), section);
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let auth_lease_handle =
+            meerkat_runtime::MeerkatMachine::ephemeral().generated_auth_lease_handle();
+
+        factory
+            .preflight_llm_identity(
+                &config,
+                &identity,
+                &BTreeMap::new(),
+                Some(&preferred_realm),
+                Some(auth_lease_handle),
+            )
+            .await
+            .expect(
+                "command credentials in the member's preferred mob realm are resolved by the canonical factory preflight",
+            );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn materialize_preflight_uses_runtime_auth_lease_for_managed_store() {
+        use meerkat_core::auth::TokenStore as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let token_store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
+        let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            token_store.clone(),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .with_provider_auth_persistence(persistence);
+        let preferred_realm = meerkat_core::mob_realm_id("managed-preflight").unwrap();
+        let auth_binding = AuthBindingRef {
+            realm: preferred_realm.clone(),
+            binding: BindingId::parse("managed_openai").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        let token_key = meerkat_core::auth::TokenKey::from_auth_binding(&auth_binding);
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let auth_lease_handle = runtime.generated_auth_lease_handle();
+        let tokens = meerkat_core::auth::PersistedTokens::api_key("sk-managed-preflight");
+        let transition = meerkat_core::publish_token_lifecycle_acquired(
+            &auth_lease_handle,
+            &auth_binding,
+            &tokens,
+        )
+        .expect("fixture AuthMachine must admit the managed credential lifecycle");
+        let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &token_key,
+            &tokens,
+            &transition,
+        )
+        .expect("fixture token must carry the durable lifecycle marker");
+        token_store
+            .save(&token_key, &committed_tokens)
+            .await
+            .unwrap();
+
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "managed_token".to_string(),
+            AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "managed_openai".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "managed_token".to_string(),
+                default_model: None,
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        let mut config = Config::default();
+        config
+            .realm
+            .insert(preferred_realm.as_str().to_string(), section);
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(auth_binding),
+        };
+
+        factory
+            .preflight_llm_identity(
+                &config,
+                &identity,
+                &BTreeMap::new(),
+                Some(&preferred_realm),
+                Some(auth_lease_handle),
+            )
+            .await
+            .expect(
+                "managed credentials must resolve under the same runtime AuthMachine authority the subsequent SessionOwned build uses",
+            );
     }
 
     #[test]
@@ -12815,6 +13283,93 @@ mod prompt_tests {
         assert!(
             visible_names.contains("secret_lookup"),
             "the session-plane tool should remain inline until adaptive deferred mode activates"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "comms"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod session_comms_override_tests {
+    use super::*;
+
+    fn scratch_runtime(name: &str) -> Arc<meerkat_comms::CommsRuntime> {
+        Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+                name,
+                None,
+                meerkat_comms::Keypair::generate(),
+                Arc::new(std::collections::HashSet::new()),
+            )
+            .expect("scratch runtime"),
+        )
+    }
+
+    // T22 — foreign payload: typed reject, never a silent fallback.
+    #[test]
+    fn foreign_override_payload_is_a_typed_build_error() {
+        let payload: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u32);
+        let Err(err) = resolve_session_comms_runtime_override(Some(payload), Some("mob-1/w/a"))
+        else {
+            panic!("foreign payload must fail closed");
+        };
+        assert!(matches!(err, BuildAgentError::Config(_)));
+    }
+
+    // T22 — comms-name mismatch: typed reject.
+    #[test]
+    fn override_comms_name_mismatch_is_a_typed_build_error() {
+        let runtime = scratch_runtime("mob-1/worker/w-1");
+        let payload = crate::encode_session_comms_runtime_override_for_service(runtime);
+        let Err(err) =
+            resolve_session_comms_runtime_override(Some(payload), Some("mob-1/worker/OTHER"))
+        else {
+            panic!("name mismatch must fail closed");
+        };
+        assert!(matches!(err, BuildAgentError::Config(_)));
+    }
+
+    // T22 — matching override resolves to the SAME runtime (no second
+    // construction; pointer identity is the proof).
+    #[test]
+    fn matching_override_resolves_to_the_injected_runtime() {
+        let runtime = scratch_runtime("mob-1/worker/w-2");
+        let payload =
+            crate::encode_session_comms_runtime_override_for_service(Arc::clone(&runtime));
+        let resolved =
+            resolve_session_comms_runtime_override(Some(payload), Some("mob-1/worker/w-2"))
+                .expect("resolves")
+                .expect("present");
+        assert!(Arc::ptr_eq(&resolved, &runtime));
+    }
+
+    #[test]
+    fn absent_override_resolves_to_none() {
+        assert!(
+            resolve_session_comms_runtime_override(None, None)
+                .expect("resolves")
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod host_prompt_sections_tests {
+    use super::*;
+
+    // T23 — the A1 switch: SpecPinned suppresses the skill-inventory
+    // section; Full (default) keeps it.
+    #[test]
+    fn spec_pinned_suppresses_the_skill_inventory_section() {
+        assert!(skill_inventory_prompt_section_enabled(
+            meerkat_core::service::HostPromptSections::Full
+        ));
+        assert!(!skill_inventory_prompt_section_enabled(
+            meerkat_core::service::HostPromptSections::SpecPinned
+        ));
+        assert_eq!(
+            meerkat_core::service::HostPromptSections::default(),
+            meerkat_core::service::HostPromptSections::Full,
+            "local builds default to Full"
         );
     }
 }

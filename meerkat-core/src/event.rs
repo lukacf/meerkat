@@ -1514,6 +1514,18 @@ pub enum StreamTruncationReason {
         /// session's live channel.
         dropped: u64,
     },
+    /// A remote member's retained event window advanced beyond the
+    /// controlling-side durable cursor. The pump resumes immediately after
+    /// `watermark`; subscribers receive this marker before later events.
+    RemoteCursorOverrun { watermark: u64 },
+    /// One immutable durable event row could not cross the bounded member
+    /// bridge reply. The pump skips exactly this row and resumes at the next
+    /// durable sequence; the omission is visible rather than log-only.
+    OversizedRemoteEvent {
+        durable_seq: u64,
+        encoded_bytes: u64,
+        max_bytes: u64,
+    },
 }
 
 impl std::fmt::Display for StreamTruncationReason {
@@ -1523,6 +1535,18 @@ impl std::fmt::Display for StreamTruncationReason {
             Self::StreamLagged { dropped } => write!(
                 f,
                 "event stream lagged; {dropped} events dropped (terminal event remains authoritative)"
+            ),
+            Self::RemoteCursorOverrun { watermark } => write!(
+                f,
+                "remote event cursor overran retained history; resumed after durable watermark {watermark}"
+            ),
+            Self::OversizedRemoteEvent {
+                durable_seq,
+                encoded_bytes,
+                max_bytes,
+            } => write!(
+                f,
+                "remote durable event {durable_seq} omitted: encoded row was {encoded_bytes} bytes, exceeding the {max_bytes}-byte bridge limit"
             ),
             Self::OutputAudioDegraded { dropped } => write!(
                 f,
@@ -1564,6 +1588,18 @@ pub enum InteractionFailureReason {
         /// Display projection of the finalization error.
         detail: String,
     },
+    /// The main interaction run completed, but structured-output extraction
+    /// failed. Keeping the extraction facts typed lets journal consumers
+    /// preserve the extraction terminal class even though the exact
+    /// per-input carrier is an `InteractionFailed` event.
+    ExtractionFailed {
+        /// The committed main-turn output extraction attempted to transform.
+        last_output: String,
+        /// Number of extraction attempts made before failure.
+        attempts: u32,
+        /// Human-readable extraction failure reason.
+        reason: String,
+    },
 }
 
 impl InteractionFailureReason {
@@ -1586,6 +1622,14 @@ impl std::fmt::Display for InteractionFailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => write!(f, "cancelled"),
+            Self::ExtractionFailed {
+                last_output,
+                attempts,
+                reason,
+            } => write!(
+                f,
+                "structured output extraction failed after {attempts} attempt(s): {reason}; last_output={last_output:?}"
+            ),
             Self::Abandoned { detail } => write!(f, "{detail}"),
             Self::InteractionStreamAbandoned { reason } => reason.fmt(f),
             Self::FinalizationFailed { detail } => write!(f, "{detail}"),

@@ -10,7 +10,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
-use meerkat_contracts::wire::{WireAuthBindingRef, WireMobProfile};
+use meerkat_contracts::wire::{WireAuthBindingRef, WireHostRef, WireMobProfile};
 use meerkat_contracts::{
     ErrorCode, MobAppendSystemContextResult, MobCancelAllWorkResult, MobCancelWorkResult,
     MobConcludeObjectiveParams, MobConcludeObjectiveResult, MobCreateParams, MobCreateResult,
@@ -32,13 +32,72 @@ use meerkat_mob::{
     AgentIdentity, FlowId, MemberRespawnReceipt, MobBackendKind, MobError, MobId, MobMemberStatus,
     MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult, ToolConfig,
 };
-use meerkat_mob_mcp::{MobMcpDestroyError, MobMcpState};
+use meerkat_mob_mcp::{MobAppendSystemContextError, MobMcpDestroyError, MobMcpState};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
 fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse {
     RpcResponse::error(id, error::INVALID_PARAMS, message.into())
+}
+
+/// Phase 7 (§17.4, ADJ-P7-4): the ONE wire projection every mob handler
+/// renders through. `MobError::wire_detail()` (meerkat-mob owns the
+/// variant→code mapping) classifies the four multi-host codes — ScopeDenied
+/// (-32025, byte-identical to the phase-5 rendering), HostUnavailable
+/// (-32026), StaleCursor (-32027), StaleFence (-32028) — each with its
+/// typed BARE detail struct as `data`. Everything else keeps the
+/// `invalid_params` string rendering byte-identical.
+trait MobWireErrorSource: std::fmt::Display {
+    fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail>;
+}
+
+impl MobWireErrorSource for MobError {
+    fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
+        MobError::wire_detail(self)
+    }
+}
+
+impl MobWireErrorSource for MobRespawnError {
+    fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
+        MobRespawnError::wire_detail(self)
+    }
+}
+
+impl MobWireErrorSource for MobMcpDestroyError {
+    fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
+        MobMcpDestroyError::wire_detail(self)
+    }
+}
+
+impl MobWireErrorSource for MobAppendSystemContextError {
+    fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
+        MobAppendSystemContextError::wire_detail(self)
+    }
+}
+
+fn mob_call_error<E: MobWireErrorSource>(id: Option<RpcId>, err: &E) -> RpcResponse {
+    match err.wire_detail() {
+        Some(detail) => match detail.detail_value() {
+            Ok(data) => RpcResponse::error_with_data(
+                id,
+                detail.code().jsonrpc_code(),
+                err.to_string(),
+                data,
+            ),
+            // Fail closed, mirroring the phase-5 serialize-failure posture.
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize mob error detail: {serialize_error}"),
+            ),
+        },
+        None => invalid_params(id, err.to_string()),
+    }
+}
+
+pub(crate) fn mob_error_response(id: Option<RpcId>, err: &MobError) -> RpcResponse {
+    mob_call_error(id, err)
 }
 
 fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse {
@@ -92,7 +151,7 @@ fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse
                 ),
             }
         }
-        _ => invalid_params(id, err.to_string()),
+        _ => mob_call_error(id, err),
     }
 }
 
@@ -295,14 +354,14 @@ pub async fn handle_create(
                 mob_id: mob_id.to_string(),
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
 pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
     let mobs = match state.mob_list().await {
         Ok(mobs) => mobs,
-        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        Err(err) => return mob_call_error(id, &err),
     };
     let mobs = mobs
         .into_iter()
@@ -340,7 +399,7 @@ pub async fn handle_status(
                 status: meerkat_mob_mcp::wire_mob_lifecycle_status(status),
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -381,7 +440,7 @@ pub async fn handle_members(
                 }
             }
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -403,11 +462,10 @@ pub struct MobSpawnParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
-    // DELETE_ME A10: `SpawnMemberSpec` has 15 public fields; the RPC
-    // mirrors every non-internal one. The first pass added `binding`,
-    // `shell_env`, and `auto_wire_parent`; A3 + C1 unblocked
-    // `launch_mode`; and this pass adds `tool_access_policy`,
-    // `budget_split_policy`, `inherited_tool_filter`, and
+    // DELETE_ME A10: the RPC mirrors every non-internal `SpawnMemberSpec`
+    // field. The first pass added `binding`, `shell_env`, and
+    // `auto_wire_parent`; A3 + C1 unblocked `launch_mode`; and this pass
+    // adds `tool_access_policy`, `inherited_tool_filter`, and
     // `override_profile` to reach full parity with Rust-in-process spawn.
     // Internal-only profile fields stay behind the RPC boundary: override
     // profiles parse through a public wire-owned profile shape and are then
@@ -432,10 +490,6 @@ pub struct MobSpawnParams {
     /// (maps to SpawnMemberSpec::tool_access_policy).
     #[serde(default)]
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
-    /// Budget split policy from the orchestrator to this member
-    /// (maps to SpawnMemberSpec::budget_split_policy).
-    #[serde(default)]
-    pub budget_split_policy: Option<meerkat_mob::BudgetSplitPolicy>,
     /// Legacy name-only inherited tool filter. Runtime-backed spawn rejects
     /// this field because inherited visibility now requires witnesses from
     /// agent-owned spawn tooling.
@@ -456,6 +510,11 @@ pub struct MobSpawnParams {
     /// that owns auth resolution.
     #[serde(default)]
     pub auth_binding: Option<WireAuthBindingRef>,
+    /// Multi-host placement (ADJ-7): the bound member host's comms
+    /// `PeerId` string. `None` places on the controlling host. Admission
+    /// (bound host, capabilities, portability) is machine-owned.
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 pub async fn handle_spawn(
@@ -502,8 +561,8 @@ pub async fn handle_spawn(
     if let Some(tool_access_policy) = params.tool_access_policy {
         spec.tool_access_policy = Some(tool_access_policy);
     }
-    if let Some(budget_split_policy) = params.budget_split_policy {
-        spec.budget_split_policy = Some(budget_split_policy);
+    if let Some(placement) = params.placement {
+        spec.placement = Some(meerkat_mob::machines::mob_machine::HostId::from(placement));
     }
     if params.inherited_tool_filter.is_some() {
         return invalid_params(
@@ -526,7 +585,7 @@ pub async fn handle_spawn(
     }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -562,7 +621,30 @@ pub struct MobSpawnSpecParams {
     #[serde(default)]
     pub model_override: Option<String>,
     #[serde(default)]
+    pub placement: Option<WireHostRef>,
+    #[serde(default)]
     pub auth_binding: Option<WireAuthBindingRef>,
+}
+
+fn spawn_many_spec_from_params(params: &MobSpawnSpecParams) -> Result<SpawnMemberSpec, String> {
+    meerkat::surface::validate_public_surface_metadata(
+        params.labels.as_ref(),
+        params.context.as_ref(),
+    )?;
+    let mut spec = SpawnMemberSpec::new(params.profile.as_str(), params.agent_identity.as_str());
+    spec.initial_message = params.initial_message.clone();
+    spec.runtime_mode = params.runtime_mode;
+    spec.backend = params.backend;
+    spec.context = params.context.clone();
+    spec.labels = params.labels.clone();
+    spec.additional_instructions = params.additional_instructions.clone();
+    spec.model_override = params.model_override.clone();
+    spec.placement = params
+        .placement
+        .clone()
+        .map(|host| meerkat_mob::machines::mob_machine::HostId::from(host.0));
+    spec.auth_binding = params.auth_binding.clone().map(Into::into);
+    Ok(spec)
 }
 
 /// Handle `mob/spawn_many` — batch spawn multiple members.
@@ -582,22 +664,10 @@ pub async fn handle_spawn_many(
 
     let mut specs = Vec::with_capacity(params.specs.len());
     for s in &params.specs {
-        if let Err(err) = meerkat::surface::validate_public_surface_metadata(
-            s.labels.as_ref(),
-            s.context.as_ref(),
-        ) {
-            return invalid_params(id, err);
+        match spawn_many_spec_from_params(s) {
+            Ok(spec) => specs.push(spec),
+            Err(err) => return invalid_params(id, err),
         }
-        let mut spec = SpawnMemberSpec::new(s.profile.as_str(), s.agent_identity.as_str());
-        spec.initial_message = s.initial_message.clone();
-        spec.runtime_mode = s.runtime_mode;
-        spec.backend = s.backend;
-        spec.context = s.context.clone();
-        spec.labels = s.labels.clone();
-        spec.additional_instructions = s.additional_instructions.clone();
-        spec.model_override = s.model_override.clone();
-        spec.auth_binding = s.auth_binding.clone().map(Into::into);
-        specs.push(spec);
     }
 
     match state.mob_spawn_many(&mob_id, specs).await {
@@ -617,7 +687,7 @@ pub async fn handle_spawn_many(
                 .collect();
             RpcResponse::success(id, MobSpawnManyResult { results: entries })
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -645,7 +715,7 @@ pub async fn handle_retire(
         .await
     {
         Ok(()) => RpcResponse::success(id, MobRetireResult { retired: true }),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -725,7 +795,7 @@ fn respawn_result_response(
                     .collect(),
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -759,7 +829,7 @@ pub async fn handle_wire(
         .await
     {
         Ok(()) => RpcResponse::success(id, MobWireResult { wired: true }),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -795,7 +865,7 @@ pub async fn handle_wire_members_batch(
         .collect::<Vec<_>>();
     let handle = match state.handle_for(&mob_id).await {
         Ok(handle) => handle,
-        Err(err) => return invalid_params(id, err.to_string()),
+        Err(err) => return mob_call_error(id, &err),
     };
     match handle.wire_members_batch(edges).await {
         Ok(report) => RpcResponse::success(
@@ -814,7 +884,7 @@ pub async fn handle_wire_members_batch(
                     .collect(),
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -840,7 +910,7 @@ pub async fn handle_unwire(
         .await
     {
         Ok(()) => RpcResponse::success(id, MobUnwireResult { unwired: true }),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -865,26 +935,26 @@ pub async fn handle_lifecycle(
     let destroy_report = match params.action {
         WireMobLifecycleAction::Stop => match state.mob_stop(&mob_id).await {
             Ok(()) => None,
-            Err(err) => return invalid_params(id, err.to_string()),
+            Err(err) => return mob_call_error(id, &err),
         },
         WireMobLifecycleAction::Resume => match state.mob_resume(&mob_id).await {
             Ok(()) => None,
-            Err(err) => return invalid_params(id, err.to_string()),
+            Err(err) => return mob_call_error(id, &err),
         },
         WireMobLifecycleAction::Complete => match state.mob_complete(&mob_id).await {
             Ok(()) => None,
-            Err(err) => return invalid_params(id, err.to_string()),
+            Err(err) => return mob_call_error(id, &err),
         },
         WireMobLifecycleAction::Reset => match state.mob_reset(&mob_id).await {
             Ok(()) => None,
-            Err(err) => return invalid_params(id, err.to_string()),
+            Err(err) => return mob_call_error(id, &err),
         },
         WireMobLifecycleAction::Destroy => match state.mob_destroy(&mob_id).await {
             Ok(report) => Some(report),
             Err(MobMcpDestroyError::Incomplete { report }) => {
                 return destroy_incomplete_response(id, &report);
             }
-            Err(MobMcpDestroyError::Mob(err)) => return invalid_params(id, err.to_string()),
+            Err(MobMcpDestroyError::Mob(err)) => return mob_call_error(id, &err),
         },
     };
     let destroy_report = match destroy_report {
@@ -966,7 +1036,7 @@ pub async fn handle_member_send(
                 },
             )
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -987,26 +1057,36 @@ pub async fn handle_ingress_interaction(
         Ok(spec) => spec,
         Err(err) => return invalid_params(id, err),
     };
-    let identity = spec.identity.clone();
     let content = match ContentInput::try_from(params.content) {
         Ok(content) => content,
         Err(error) => return invalid_params(id, error),
     };
-    let handle = match state.handle_for(&mob_id).await {
-        Ok(handle) => handle,
-        Err(err) => return invalid_params(id, err.to_string()),
+    let outcome = match state
+        .mob_ingress_interaction(
+            &mob_id,
+            spec,
+            content,
+            params.handling_mode.into(),
+            params.render_metadata.map(Into::into),
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(err) => return mob_call_error(id, &err),
     };
-    let events_after_cursor = match handle.events().latest_cursor().await {
-        Ok(cursor) => cursor,
-        Err(err) => return invalid_params(id, err.to_string()),
-    };
-    let ensure_outcome = match handle.ensure_member(spec).await {
-        Ok(meerkat_mob::runtime::EnsureMemberOutcome::Spawned(spawn)) => {
+    let meerkat_mob_mcp::MobIngressInteractionOutcome {
+        ensure_outcome,
+        delivery: receipt,
+        events_after_cursor,
+        latest_event_cursor,
+    } = outcome;
+    let ensure_outcome = match ensure_outcome {
+        meerkat_mob::runtime::EnsureMemberOutcome::Spawned(spawn) => {
             meerkat_contracts::MobEnsureMemberOutcomeWire::Spawned(spawn_receipt_wire(
                 &mob_id, &spawn,
             ))
         }
-        Ok(meerkat_mob::runtime::EnsureMemberOutcome::Existed(entry)) => {
+        meerkat_mob::runtime::EnsureMemberOutcome::Existed(entry) => {
             match member_list_entry_wire(&mob_id, &entry) {
                 Ok(wire) => meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(wire),
                 Err(projection_error) => {
@@ -1014,26 +1094,6 @@ pub async fn handle_ingress_interaction(
                 }
             }
         }
-        Err(err) => return invalid_params(id, err.to_string()),
-    };
-    let member = match handle.member(&identity).await {
-        Ok(member) => member,
-        Err(err) => return invalid_params(id, err.to_string()),
-    };
-    let receipt = match member
-        .send_with_render_metadata(
-            content,
-            params.handling_mode.into(),
-            params.render_metadata.map(Into::into),
-        )
-        .await
-    {
-        Ok(receipt) => receipt,
-        Err(err) => return invalid_params(id, err.to_string()),
-    };
-    let latest_event_cursor = match handle.events().latest_cursor().await {
-        Ok(cursor) => cursor,
-        Err(err) => return invalid_params(id, err.to_string()),
     };
     let identity_str = receipt.identity.to_string();
     let delivery = MobMemberSendResult {
@@ -1093,7 +1153,7 @@ pub async fn handle_append_system_context(
                 status: result.status.into(),
             },
         ),
-        Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1149,7 +1209,7 @@ pub async fn handle_events(
                 ),
             }
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1174,7 +1234,7 @@ pub async fn handle_flows(
                 flows,
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1214,7 +1274,7 @@ pub async fn handle_flow_run(
                 run_id: run_id.to_string(),
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1246,7 +1306,7 @@ pub async fn handle_run(
                 run_id: run_id.to_string(),
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1291,9 +1351,9 @@ pub async fn handle_flow_status(
     match state.mob_flow_status(&mob_id, run_id).await {
         Ok(run) => match meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref()) {
             Ok(run) => RpcResponse::success(id, meerkat_contracts::MobFlowStatusResult { run }),
-            Err(err) => invalid_params(id, err.to_string()),
+            Err(err) => mob_call_error(id, &err),
         },
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1317,9 +1377,9 @@ pub async fn handle_run_result(
     match state.mob_flow_status(&mob_id, run_id).await {
         Ok(run) => match meerkat_mob::MobRun::public_run_result_value(run.as_ref()) {
             Ok(run) => RpcResponse::success(id, MobRunResult { run }),
-            Err(err) => invalid_params(id, err.to_string()),
+            Err(err) => mob_call_error(id, &err),
         },
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1349,7 +1409,7 @@ pub async fn handle_flow_cancel(
     };
     match state.mob_cancel_flow(&mob_id, run_id).await {
         Ok(()) => RpcResponse::success(id, MobFlowCancelResult { canceled: true }),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1429,7 +1489,7 @@ pub async fn handle_spawn_helper(
                 },
             )
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1522,7 +1582,7 @@ pub async fn handle_fork_helper(
                 },
             )
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1548,7 +1608,7 @@ pub async fn handle_force_cancel(
         .await
     {
         Ok(()) => RpcResponse::success(id, MobForceCancelResult { cancelled: true }),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1593,7 +1653,7 @@ pub async fn handle_destroy(
             )
         }
         Err(MobMcpDestroyError::Incomplete { report }) => destroy_incomplete_response(id, &report),
-        Err(MobMcpDestroyError::Mob(err)) => invalid_params(id, err.to_string()),
+        Err(MobMcpDestroyError::Mob(err)) => mob_call_error(id, &err),
     }
 }
 
@@ -1620,11 +1680,11 @@ pub async fn handle_snapshot(
     };
     let status = match state.mob_status(&mob_id).await {
         Ok(status) => meerkat_mob_mcp::wire_mob_lifecycle_status(status),
-        Err(err) => return invalid_params(id, err.to_string()),
+        Err(err) => return mob_call_error(id, &err),
     };
     let members = match state.mob_list_members(&mob_id).await {
         Ok(members) => members,
-        Err(err) => return invalid_params(id, err.to_string()),
+        Err(err) => return mob_call_error(id, &err),
     };
     let members: Result<Vec<MobMemberListEntryWire>, String> = members
         .iter()
@@ -1697,9 +1757,29 @@ pub use meerkat_contracts::{
 /// fence token. Replaces binding-era `{generation, fence_token}` arguments
 /// from app callers — clients pass the opaque token, the server looks up the
 /// current incarnation.
+#[derive(Debug)]
+enum ResolveMemberRefError {
+    Invalid(String),
+    Mob(MobError),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MemberRefOperation {
+    SendCommand,
+    Cancel,
+}
+
+fn resolve_member_ref_error(id: Option<RpcId>, error: ResolveMemberRefError) -> RpcResponse {
+    match error {
+        ResolveMemberRefError::Invalid(message) => invalid_params(id, message),
+        ResolveMemberRefError::Mob(error) => mob_call_error(id, &error),
+    }
+}
+
 async fn resolve_member_ref(
     member_ref: &WireMemberRef,
     state: &Arc<MobMcpState>,
+    operation: MemberRefOperation,
 ) -> Result<
     (
         MobId,
@@ -1707,23 +1787,26 @@ async fn resolve_member_ref(
         meerkat_mob::AgentRuntimeId,
         meerkat_mob::FenceToken,
     ),
-    String,
+    ResolveMemberRefError,
 > {
     let (mob_id_str, identity_str) = member_ref
         .decode()
-        .map_err(|err| format!("invalid member_ref: {err}"))?;
+        .map_err(|err| ResolveMemberRefError::Invalid(format!("invalid member_ref: {err}")))?;
     let mob_id = MobId::from(mob_id_str);
     let identity = AgentIdentity::from(identity_str);
-    let entry = state
-        .mob_list_members(&mob_id)
-        .await
-        .map_err(|err| err.to_string())?
-        .into_iter()
-        .find(|entry| entry.agent_identity == identity)
-        .ok_or_else(|| format!("member {identity} not found in mob {mob_id}"))?;
-    let (agent_runtime_id, fence_token) = entry
-        .binding_atoms()
-        .ok_or_else(|| format!("member {identity} has no MobMachine runtime binding"))?;
+    let binding = match operation {
+        MemberRefOperation::SendCommand => {
+            state
+                .mob_member_binding_for_send_command(&mob_id, &identity)
+                .await
+        }
+        MemberRefOperation::Cancel => {
+            state
+                .mob_member_binding_for_cancel(&mob_id, &identity)
+                .await
+        }
+    };
+    let (agent_runtime_id, fence_token) = binding.map_err(ResolveMemberRefError::Mob)?;
     Ok((mob_id, identity, agent_runtime_id, fence_token))
 }
 
@@ -1736,11 +1819,16 @@ pub async fn handle_submit_work(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
-    let (mob_id, _identity, runtime_id, fence_token) =
-        match resolve_member_ref(&params.member_ref, state).await {
-            Ok(resolved) => resolved,
-            Err(err) => return invalid_params(id, err),
-        };
+    let (mob_id, _identity, runtime_id, fence_token) = match resolve_member_ref(
+        &params.member_ref,
+        state,
+        MemberRefOperation::SendCommand,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(err) => return resolve_member_ref_error(id, err),
+    };
     let work_ref = match params.work_ref {
         Some(ref s) if !s.is_empty() => match meerkat_mob::WorkRef::from_str(s) {
             Ok(wr) => wr,
@@ -1796,7 +1884,7 @@ pub async fn handle_submit_work(
             };
             RpcResponse::success(id, body)
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1812,9 +1900,15 @@ pub async fn handle_conclude_objective(
     if params.outcome.trim().is_empty() {
         return invalid_params(id, "outcome must not be empty");
     }
-    let (mob_id, identity, _, _) = match resolve_member_ref(&params.member_ref, state).await {
+    let (mob_id, identity, _, _) = match resolve_member_ref(
+        &params.member_ref,
+        state,
+        MemberRefOperation::SendCommand,
+    )
+    .await
+    {
         Ok(resolved) => resolved,
-        Err(err) => return invalid_params(id, err),
+        Err(err) => return resolve_member_ref_error(id, err),
     };
     let objective_id = match uuid::Uuid::parse_str(&params.objective_id) {
         Ok(id) => meerkat_core::interaction::ObjectiveId(id),
@@ -1832,7 +1926,7 @@ pub async fn handle_conclude_objective(
                 concluded: true,
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1863,7 +1957,7 @@ pub async fn handle_cancel_work(
                 ok: true,
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1877,9 +1971,9 @@ pub async fn handle_cancel_all_work(
         Err(resp) => return resp.with_id(id),
     };
     let (mob_id, _identity, runtime_id, fence_token) =
-        match resolve_member_ref(&params.member_ref, state).await {
+        match resolve_member_ref(&params.member_ref, state, MemberRefOperation::Cancel).await {
             Ok(resolved) => resolved,
-            Err(err) => return invalid_params(id, err),
+            Err(err) => return resolve_member_ref_error(id, err),
         };
     match state
         .mob_cancel_all_work(&mob_id, runtime_id, fence_token)
@@ -1892,7 +1986,7 @@ pub async fn handle_cancel_all_work(
                 ok: true,
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1927,7 +2021,7 @@ pub async fn handle_member_status(
                 ),
             }
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -1969,7 +2063,7 @@ pub async fn handle_wait_kickoff(
         .await
     {
         Ok(members) => wait_members_response(id, &members),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2022,7 +2116,7 @@ pub async fn handle_wait_ready(
         .await
     {
         Ok(members) => wait_members_response(id, &members),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2068,7 +2162,7 @@ pub async fn handle_profile_create(
         .await
     {
         Ok(stored) => RpcResponse::success(id, meerkat_mob::stored_realm_profile_to_wire(&stored)),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2096,7 +2190,7 @@ pub async fn handle_profile_get(
                 updated_at: None,
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2109,7 +2203,7 @@ pub async fn handle_profile_list(id: Option<RpcId>, state: &Arc<MobMcpState>) ->
                 .collect();
             RpcResponse::success(id, meerkat_contracts::MobProfileListResult { profiles })
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2127,7 +2221,7 @@ pub async fn handle_profile_update(
         .await
     {
         Ok(stored) => RpcResponse::success(id, meerkat_mob::stored_realm_profile_to_wire(&stored)),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2151,7 +2245,7 @@ pub async fn handle_profile_delete(
                 deleted_revision: deleted.revision,
             },
         ),
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2204,17 +2298,12 @@ pub async fn handle_mob_turn_start(
     };
     let identity = AgentIdentity::from(mob_params.agent_identity.as_str());
 
-    // Resolve identity → bridge session ID.
-    let handle = match state.handle_for(&mob_id).await {
-        Ok(h) => h,
-        Err(err) => return invalid_params(id, err.to_string()),
+    // Resolve identity → bridge session ID only after the composite turn
+    // verb has passed the actor-linearized SendCommand gate.
+    let (runtime_mode, session_id) = match state.mob_turn_start_target(&mob_id, &identity).await {
+        Ok(target) => target,
+        Err(err) => return mob_call_error(id, &err),
     };
-    let runtime_mode = handle
-        .list_members()
-        .await
-        .into_iter()
-        .find(|entry| entry.agent_identity == identity)
-        .map(|entry| entry.runtime_mode);
     if matches!(runtime_mode, Some(MobRuntimeMode::AutonomousHost)) {
         return invalid_params(
             id,
@@ -2224,7 +2313,7 @@ pub async fn handle_mob_turn_start(
             ),
         );
     }
-    let session_id = match handle.resolve_bridge_session_id(&identity).await {
+    let session_id = match session_id {
         Some(sid) => sid,
         None => {
             return invalid_params(
@@ -2316,6 +2405,10 @@ fn spawn_spec_from_wire(
     spec.context = spec_wire.context.clone();
     spec.labels = spec_wire.labels.clone();
     spec.additional_instructions = spec_wire.additional_instructions.clone();
+    spec.placement = spec_wire
+        .placement
+        .clone()
+        .map(|host| meerkat_mob::machines::mob_machine::HostId::from(host.0));
     if let Some(binding) = spec_wire.binding.clone() {
         spec.binding = Some(runtime_binding_from_wire(binding)?);
     }
@@ -2349,15 +2442,11 @@ pub async fn handle_ensure_member(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let handle = match state.handle_for(&mob_id).await {
-        Ok(h) => h,
-        Err(err) => return invalid_params(id, err.to_string()),
-    };
     let spec = match spawn_spec_from_wire(&params.spec) {
         Ok(s) => s,
         Err(err) => return invalid_params(id, err),
     };
-    match handle.ensure_member(spec).await {
+    match state.mob_ensure_member(&mob_id, spec).await {
         Ok(meerkat_mob::runtime::EnsureMemberOutcome::Spawned(spawn)) => {
             let outcome = meerkat_contracts::MobEnsureMemberOutcomeWire::Spawned(
                 spawn_receipt_wire(&mob_id, &spawn),
@@ -2375,7 +2464,7 @@ pub async fn handle_ensure_member(
                 }
             }
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2392,10 +2481,6 @@ pub async fn handle_reconcile(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let handle = match state.handle_for(&mob_id).await {
-        Ok(h) => h,
-        Err(err) => return invalid_params(id, err.to_string()),
-    };
     let desired: Vec<SpawnMemberSpec> = match params
         .desired
         .iter()
@@ -2408,7 +2493,7 @@ pub async fn handle_reconcile(
     let options = meerkat_mob::runtime::ReconcileOptions {
         retire_stale: params.options.retire_stale,
     };
-    match handle.reconcile(desired, options).await {
+    match state.mob_reconcile(&mob_id, desired, options).await {
         Ok(report) => {
             let wire_report = meerkat_contracts::MobReconcileReportWire {
                 desired: report
@@ -2458,7 +2543,7 @@ pub async fn handle_reconcile(
                 },
             )
         }
-        Err(err) => invalid_params(id, err.to_string()),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2475,10 +2560,6 @@ pub async fn handle_list_members_matching(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let handle = match state.handle_for(&mob_id).await {
-        Ok(h) => h,
-        Err(err) => return invalid_params(id, err.to_string()),
-    };
     let filter = meerkat_mob::runtime::MemberFilter {
         labels: params.filter.labels,
         role: params
@@ -2493,9 +2574,9 @@ pub async fn handle_list_members_matching(
             meerkat_contracts::WireMobMemberStatus::Unknown => MobMemberStatus::Unknown,
         }),
     };
-    let entries = match handle.list_members_matching(filter).await {
+    let entries = match state.mob_list_members_matching(&mob_id, filter).await {
         Ok(entries) => entries,
-        Err(err) => return invalid_params(id, err.to_string()),
+        Err(err) => return mob_call_error(id, &err),
     };
     let members: Result<Vec<Value>, String> = entries
         .iter()
@@ -2511,6 +2592,373 @@ pub async fn handle_list_members_matching(
             meerkat_contracts::MobListMembersMatchingResult { members },
         ),
         Err(projection_error) => RpcResponse::error(id, error::INTERNAL_ERROR, projection_error),
+    }
+}
+
+// ─── Control-scope grants (phase 5, §17.2 SD-3) ─────────────────────────
+//
+// The handlers do no scope checking: grant/revoke are gated at chokepoint
+// (a) under AdminGrants and `grants` self-gates in its actor arm (owner
+// passes implicitly ⇒ zero v1 behavior change). Principal strings are
+// validated into `meerkat_core::auth::PrincipalId` HERE, at the boundary —
+// an unresolvable principal is an ordinary invalid-params error, never a
+// scope denial.
+
+pub async fn handle_grant_scopes(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobGrantScopesParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let principal = match meerkat_core::auth::PrincipalId::new(params.principal) {
+        Ok(principal) => principal,
+        Err(parse_error) => return invalid_params(id, format!("invalid principal: {parse_error}")),
+    };
+    if params.scopes.is_empty() {
+        return invalid_params(id, "scopes must not be empty");
+    }
+    let scopes: std::collections::BTreeSet<_> = params
+        .scopes
+        .into_iter()
+        .map(meerkat_mob::machines::mob_machine::ControlScope::from)
+        .collect();
+    match state
+        .mob_grant_scopes(&mob_id, principal, scopes, params.expires_at_ms)
+        .await
+    {
+        Ok(record) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobGrantScopesResult {
+                record: record.to_wire(),
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_revoke_scopes(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobRevokeScopesParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let principal = match meerkat_core::auth::PrincipalId::new(params.principal) {
+        Ok(principal) => principal,
+        Err(parse_error) => return invalid_params(id, format!("invalid principal: {parse_error}")),
+    };
+    let scopes = params.scopes.map(|scopes| {
+        scopes
+            .into_iter()
+            .map(meerkat_mob::machines::mob_machine::ControlScope::from)
+            .collect::<std::collections::BTreeSet<_>>()
+    });
+    match state.mob_revoke_scopes(&mob_id, principal, scopes).await {
+        Ok(removed) => {
+            RpcResponse::success(id, meerkat_contracts::MobRevokeScopesResult { removed })
+        }
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_grants(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_grants(&mob_id).await {
+        Ok(grants) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobGrantsResult {
+                grants: grants
+                    .iter()
+                    .map(meerkat_mob::OperatorGrant::to_wire)
+                    .collect(),
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+// ─── Multi-host console verbs (phase 7, §17 SD-3, DEC-P7A-1) ────────────
+//
+// Thin shims: parse → ONE `state.mob_*` call → render via `mob_call_error`
+// (DEC-P7A-6). The handlers gate nothing — scope enforcement lives at the
+// mob chokepoints (actor arms for the caller-scoped verbs; the MobMcpState
+// resolver gate for the two watch-read projections), and the console
+// principal is the state-level seam (ADJ-P5-10: `handle_for` rebinds every
+// handed-out handle).
+
+pub async fn handle_member_history(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobMemberHistoryParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state
+        .mob_member_history(&mob_id, identity, params.from_index, params.limit)
+        .await
+    {
+        // The wrapper is the single envelope-assembly point (ADJ-P7-3):
+        // placement + provenance arrive typed; the handler adds nothing.
+        Ok(result) => RpcResponse::success(id, result),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_hosts(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_hosts(&mob_id).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_route_installs(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_route_installs(&mob_id).await {
+        Ok(result) => RpcResponse::success(id, result),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_bind_host(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobBindHostParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    // Descriptor → domain bind request at the boundary; an unresolvable
+    // descriptor identity is an ordinary invalid-params error (WiringError
+    // carries no wire classification), never a scope denial.
+    let request = match meerkat_mob::HostBindRequest::from_descriptor(&params.descriptor) {
+        Ok(request) => request,
+        Err(err) => return mob_call_error(id, &err),
+    };
+    match state.mob_bind_host(&mob_id, request).await {
+        Ok(report) => RpcResponse::success(
+            id,
+            meerkat_contracts::wire::MobBindHostResult {
+                host_id: meerkat_contracts::wire::WireHostRef(report.host_id.clone()),
+                capabilities: report.capabilities.to_wire(),
+                authority_epoch: report.epoch,
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_revoke_host(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobRevokeHostParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_revoke_host(&mob_id, &params.host_id.0).await {
+        Ok(report) => RpcResponse::success(
+            id,
+            meerkat_contracts::wire::MobRevokeHostResult {
+                host_id: meerkat_contracts::wire::WireHostRef(report.host_id.clone()),
+                released_members: report
+                    .released_members
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_hard_cancel_member(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobHardCancelParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state
+        .mob_hard_cancel_member(&mob_id, identity, params.reason)
+        .await
+    {
+        Ok(()) => RpcResponse::success(
+            id,
+            meerkat_contracts::wire::MobHardCancelResult { cancelled: true },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_member_live_open(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobMemberLiveOpenParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state
+        .mob_member_live_open(&mob_id, identity, params.turning_mode, params.transport)
+        .await
+    {
+        // VERBATIM pass-through (DEC-P6B-C7/C8): the result carries the
+        // owning host's WS URL + single-use token — never Debug-formatted,
+        // logged, or retained here.
+        Ok(open) => RpcResponse::success(id, open),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_member_live_close(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobMemberLiveChannelParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state
+        .mob_member_live_close(&mob_id, identity, params.channel_id)
+        .await
+    {
+        Ok(status) => RpcResponse::success(id, meerkat_contracts::wire::LiveCloseResult { status }),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_member_live_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobMemberLiveStatusParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state
+        .mob_member_live_status(&mob_id, identity, params.channel_id)
+        .await
+    {
+        Ok(domain) => RpcResponse::success(
+            id,
+            meerkat_contracts::wire::LiveStatusResult {
+                channel_id: domain.channel_id,
+                status: domain.status,
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+pub async fn handle_member_live_control(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::wire::MobMemberLiveControlParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state
+        .mob_member_live_control(&mob_id, identity, params.channel_id, params.verb)
+        .await
+    {
+        Ok(outcome) => RpcResponse::success(id, outcome),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -2860,14 +3308,14 @@ mod tests {
         assert!(err.to_string().contains("unknown field `owner_session_id`"));
     }
 
-    /// DELETE_ME A10 regression: `MobSpawnParams` now carries all 15
-    /// `SpawnMemberSpec` public fields so RPC spawn reaches parity with
+    /// DELETE_ME A10 regression: `MobSpawnParams` carries every non-internal
+    /// `SpawnMemberSpec` public field so RPC spawn reaches parity with
     /// Rust-in-process spawn. The first A10 partial covered binding /
     /// shell_env / auto_wire_parent; A3+C1 unblocked launch_mode; this
-    /// final pass adds tool_access_policy, budget_split_policy,
-    /// inherited_tool_filter, and override_profile. This test pins each
-    /// new field to round-trip through serde while override_profile stays
-    /// on the public wire-owned profile shape.
+    /// final pass adds tool_access_policy, inherited_tool_filter, and
+    /// override_profile. This test pins each new field to round-trip
+    /// through serde while override_profile stays on the public wire-owned
+    /// profile shape.
     #[test]
     fn mob_spawn_params_carry_full_member_spec_surface() {
         use meerkat_core::ops::ToolAccessPolicy;
@@ -2882,7 +3330,6 @@ mod tests {
                 "type": "allow_list",
                 "value": ["grep", "read"]
             },
-            "budget_split_policy": { "type": "remaining" },
             "inherited_tool_filter": { "Allow": ["grep", "read"] },
             "override_profile": {
                 "model": "claude-sonnet-4-6",
@@ -2915,11 +3362,19 @@ mod tests {
             other => panic!("expected AllowList, got {other:?}"),
         }
 
-        // budget_split_policy is Remaining.
-        assert!(matches!(
-            params.budget_split_policy,
-            Some(meerkat_mob::BudgetSplitPolicy::Remaining)
-        ));
+        // budget_split_policy is deleted vocabulary (multi-host O4): both the
+        // handler params and the contracts wire params are
+        // `deny_unknown_fields`, so a payload still carrying it is rejected.
+        let with_deleted_budget_split = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+            "budget_split_policy": { "type": "remaining" },
+        });
+        serde_json::from_value::<MobSpawnParams>(with_deleted_budget_split.clone())
+            .expect_err("handler MobSpawnParams must reject the deleted budget_split_policy");
+        serde_json::from_value::<meerkat_contracts::MobSpawnParams>(with_deleted_budget_split)
+            .expect_err("contracts MobSpawnParams must reject the deleted budget_split_policy");
 
         // inherited_tool_filter round-trips through serde.
         assert!(matches!(
@@ -2955,7 +3410,6 @@ mod tests {
             .expect("spawn params without optional fields deserialize");
         assert!(minimal_params.launch_mode.is_none());
         assert!(minimal_params.tool_access_policy.is_none());
-        assert!(minimal_params.budget_split_policy.is_none());
         assert!(minimal_params.inherited_tool_filter.is_none());
         assert!(minimal_params.override_profile.is_none());
         assert!(minimal_params.auth_binding.is_none());
@@ -2965,7 +3419,7 @@ mod tests {
     /// `MobSpawnParams` and the canonical contracts wire `MobSpawnParams`
     /// (`meerkat_contracts::MobSpawnParams`, which feeds `params.json` + SDK
     /// codegen) are serde-equivalent by construction: identical field names and
-    /// identical enum reprs (domain `MobRuntimeMode`/`BudgetSplitPolicy`/... and
+    /// identical enum reprs (domain `MobRuntimeMode`/... and
     /// their `Wire*` twins share `#[serde]` tagging). Both carry
     /// `#[serde(deny_unknown_fields)]`, so a field added to one but not the
     /// other makes one of these two deserializations fail. This pins the two
@@ -2986,7 +3440,6 @@ mod tests {
             "auto_wire_parent": true,
             "launch_mode": { "mode": "fresh" },
             "tool_access_policy": { "type": "allow_list", "value": ["grep", "read"] },
-            "budget_split_policy": { "type": "remaining" },
             "inherited_tool_filter": { "Allow": ["grep", "read"] },
             "override_profile": {
                 "model": "claude-sonnet-4-6",
@@ -3268,6 +3721,7 @@ mod tests {
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            placement: None,
             binding: None,
             context: Some(serde_json::json!({"meerkat.runtime_id": "spoof"})),
             labels: None,
@@ -3278,6 +3732,34 @@ mod tests {
         let result = spawn_spec_from_wire(&spec);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("meerkat.runtime_id"));
+    }
+
+    #[test]
+    fn spawn_many_and_declarative_specs_lower_placement_to_host_id() {
+        let batch: MobSpawnSpecParams = serde_json::from_value(serde_json::json!({
+            "profile": "worker",
+            "agent_identity": "w1",
+            "placement": "host-b-peer"
+        }))
+        .expect("placed spawn-many params parse");
+        let batch = spawn_many_spec_from_params(&batch).expect("batch spec lowers");
+        assert_eq!(
+            batch.placement.as_ref().map(|host| host.as_str()),
+            Some("host-b-peer")
+        );
+
+        let declarative: meerkat_contracts::MobMemberSpecWire =
+            serde_json::from_value(serde_json::json!({
+                "profile": "worker",
+                "agent_identity": "w2",
+                "placement": "host-c-peer"
+            }))
+            .expect("placed declarative spec parses");
+        let declarative = spawn_spec_from_wire(&declarative).expect("declarative spec lowers");
+        assert_eq!(
+            declarative.placement.as_ref().map(|host| host.as_str()),
+            Some("host-c-peer")
+        );
     }
 
     #[test]
@@ -3363,5 +3845,469 @@ mod tests {
         assert_eq!(params.member_ids.unwrap_or_default(), vec!["a", "b"]);
         assert_eq!(params.timeout_ms, Some(2500));
         Ok(())
+    }
+    async fn grant_test_state_and_mob(
+        console: meerkat_mob::MobControlPrincipal,
+        mob_label: &str,
+    ) -> (Arc<MobMcpState>, MobId) {
+        let state = MobMcpState::new_in_memory_as(console);
+        let mob_id = MobId::from(mob_label);
+        let handle = MobBuilder::new(
+            rpc_destroy_test_definition(&mob_id),
+            MobStorage::in_memory(),
+        )
+        .with_session_service(state.session_service())
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create grant test mob");
+        state.mob_insert_handle(mob_id.clone(), handle).await;
+        (state, mob_id)
+    }
+
+    /// Phase 5 §4.6: grant → grants reflects → revoke(None) removes → the
+    /// grant verbs round-trip through the RPC handlers on the owner console.
+    #[tokio::test]
+    async fn grant_roundtrip_via_rpc_handlers() {
+        let (state, mob_id) = grant_test_state_and_mob(
+            meerkat_mob::MobControlPrincipal::Owner,
+            "rpc-grant-roundtrip",
+        )
+        .await;
+
+        let params = serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "principal": "viewer",
+            "scopes": ["cancel", "list"],
+        });
+        let raw = serde_json::value::RawValue::from_string(params.to_string()).expect("params");
+        let response = handle_grant_scopes(Some(RpcId::Num(1)), Some(&raw), &state).await;
+        assert!(
+            response.error.is_none(),
+            "owner grant must succeed: {:?}",
+            response.error
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(response.result.expect("grant result").get())
+                .expect("grant result decodes");
+        let record = result.get("record").cloned().expect("record field");
+        assert_eq!(
+            record.get("principal").and_then(serde_json::Value::as_str),
+            Some("viewer")
+        );
+        assert_eq!(
+            record.get("scopes").cloned(),
+            Some(serde_json::json!(["list", "cancel"])),
+            "scopes render as snake_case wire names in ControlScope order"
+        );
+
+        let params = serde_json::json!({ "mob_id": mob_id.as_str() });
+        let raw = serde_json::value::RawValue::from_string(params.to_string()).expect("params");
+        let response = handle_grants(Some(RpcId::Num(2)), Some(&raw), &state).await;
+        let result: serde_json::Value =
+            serde_json::from_str(response.result.expect("grants result").get())
+                .expect("grants result decodes");
+        let grants = result.get("grants").cloned().expect("grants field");
+        assert_eq!(
+            grants.as_array().map(std::vec::Vec::len),
+            Some(1),
+            "the recorded grant reflects in mob/grants: {grants}"
+        );
+
+        let params = serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "principal": "viewer",
+        });
+        let raw = serde_json::value::RawValue::from_string(params.to_string()).expect("params");
+        let response = handle_revoke_scopes(Some(RpcId::Num(3)), Some(&raw), &state).await;
+        let result: serde_json::Value =
+            serde_json::from_str(response.result.expect("revoke result").get())
+                .expect("revoke result decodes");
+        let removed = result.get("removed").and_then(serde_json::Value::as_bool);
+        assert_eq!(removed, Some(true), "revoke-all removes the record");
+
+        // Idempotent second revoke: removed=false, not an error (ADJ-P5-3).
+        let raw = serde_json::value::RawValue::from_string(
+            serde_json::json!({ "mob_id": mob_id.as_str(), "principal": "viewer" }).to_string(),
+        )
+        .expect("params");
+        let response = handle_revoke_scopes(Some(RpcId::Num(4)), Some(&raw), &state).await;
+        let result: serde_json::Value =
+            serde_json::from_str(response.result.expect("idempotent revoke result").get())
+                .expect("idempotent revoke result decodes");
+        assert_eq!(
+            result.get("removed").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
+
+    /// Phase 5 §17.11 (RPC portion): a Named console principal denied at a
+    /// mob verb renders JSON-RPC error -32025 with typed
+    /// `WireScopeDeniedDetail` data — never a laundered string.
+    #[tokio::test]
+    async fn scope_denied_renders_minus_32025_with_typed_data() {
+        let (state, mob_id) = grant_test_state_and_mob(
+            meerkat_mob::MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("viewer").expect("valid principal"),
+            ),
+            "rpc-grant-denied",
+        )
+        .await;
+
+        let params = serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "agent_identity": "nobody",
+        });
+        let raw = serde_json::value::RawValue::from_string(params.to_string()).expect("params");
+        let response = handle_retire(Some(RpcId::Num(5)), Some(&raw), &state).await;
+        assert!(response.result.is_none());
+        let error = response.error.expect("scope denial is an error");
+        assert_eq!(
+            error.code,
+            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+            "ScopeDenied renders -32025"
+        );
+        let data = error.data.expect("typed WireScopeDeniedDetail data");
+        let detail: meerkat_contracts::WireScopeDeniedDetail =
+            serde_json::from_value(data).expect("data decodes as WireScopeDeniedDetail");
+        assert_eq!(detail.required, meerkat_contracts::WireControlScope::Retire);
+        assert!(
+            detail.presented.is_empty(),
+            "an ungranted principal presents the empty set"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_handlers_preserve_operation_scope_denials() {
+        let (state, mob_id) = grant_test_state_and_mob(
+            meerkat_mob::MobControlPrincipal::External(
+                meerkat_core::auth::PrincipalId::new("composite-viewer").expect("valid principal"),
+            ),
+            "rpc-composite-denials",
+        )
+        .await;
+
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "specs": [],
+        }));
+        assert_scope_denied(
+            handle_spawn_many(Some(RpcId::Num(11)), Some(&raw), &state).await,
+            meerkat_contracts::WireControlScope::SendCommand,
+            &[],
+            "empty spawn_many batch",
+        );
+
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "spec": { "profile": "worker", "agent_identity": "missing" },
+        }));
+        assert_scope_denied(
+            handle_ensure_member(Some(RpcId::Num(12)), Some(&raw), &state).await,
+            meerkat_contracts::WireControlScope::SendCommand,
+            &[],
+            "ensure_member before machine projection",
+        );
+
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "filter": {},
+        }));
+        assert_scope_denied(
+            handle_list_members_matching(Some(RpcId::Num(13)), Some(&raw), &state).await,
+            meerkat_contracts::WireControlScope::List,
+            &[],
+            "list_members_matching before watch read",
+        );
+
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "work_ref": meerkat_mob::WorkRef::new().to_string(),
+        }));
+        assert_scope_denied(
+            handle_cancel_work(Some(RpcId::Num(14)), Some(&raw), &state).await,
+            meerkat_contracts::WireControlScope::Cancel,
+            &[],
+            "cancel_work before unsupported result",
+        );
+    }
+
+    #[tokio::test]
+    async fn non_owner_mob_list_renders_typed_scope_denial() {
+        let state = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::External(
+            meerkat_core::auth::PrincipalId::new("viewer").expect("valid principal"),
+        ));
+
+        let response = handle_list(Some(RpcId::Num(6)), &state).await;
+
+        assert_scope_denied(
+            response,
+            meerkat_contracts::WireControlScope::List,
+            &[],
+            "owner-only mob/list",
+        );
+    }
+
+    // ─── Phase 7 (T-A3): console verb round-trips on the owner state ────
+
+    fn raw_params(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
+        serde_json::value::RawValue::from_string(value.to_string()).expect("params")
+    }
+
+    /// T-A3: `mob/hosts` on a host-less mob renders the typed empty roster
+    /// and `mob/route_installs` with no outstanding obligations renders
+    /// `complete: true` — both through the real handler → wrapper →
+    /// handle path. (The post-bind fixture rows — bound host labelled with
+    /// `durable_sessions=false`, history page-walk, hard-cancel ack — live
+    /// in the e2e-fast console row, which has real host daemons.)
+    #[tokio::test]
+    async fn hosts_and_route_installs_roundtrip_via_rpc_handlers() {
+        let (state, mob_id) = grant_test_state_and_mob(
+            meerkat_mob::MobControlPrincipal::Owner,
+            "rpc-console-projections",
+        )
+        .await;
+
+        let raw = raw_params(serde_json::json!({ "mob_id": mob_id.as_str() }));
+        let response = handle_hosts(Some(RpcId::Num(1)), Some(&raw), &state).await;
+        assert!(
+            response.error.is_none(),
+            "owner hosts read must succeed: {:?}",
+            response.error
+        );
+        let result: meerkat_contracts::wire::MobHostsResult =
+            serde_json::from_str(response.result.expect("hosts result").get())
+                .expect("hosts result decodes");
+        assert!(result.hosts.is_empty(), "no hosts are tracked yet");
+
+        let raw = raw_params(serde_json::json!({ "mob_id": mob_id.as_str() }));
+        let response = handle_route_installs(Some(RpcId::Num(2)), Some(&raw), &state).await;
+        assert!(
+            response.error.is_none(),
+            "owner route-installs read must succeed: {:?}",
+            response.error
+        );
+        let result: meerkat_contracts::wire::MobRouteInstallsResult =
+            serde_json::from_str(response.result.expect("route installs result").get())
+                .expect("route installs result decodes");
+        assert!(result.outstanding.is_empty());
+        assert!(result.complete, "empty obligation set is complete");
+    }
+
+    /// T-A3: a bind descriptor whose identity does not resolve renders as
+    /// an ordinary INVALID_PARAMS error (boundary parse failure) — never a
+    /// scope denial and never a typed multi-host code.
+    #[tokio::test]
+    async fn bind_host_bad_descriptor_renders_invalid_params_not_scope_denied() {
+        let (state, mob_id) = grant_test_state_and_mob(
+            meerkat_mob::MobControlPrincipal::Owner,
+            "rpc-bind-bad-descriptor",
+        )
+        .await;
+
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "descriptor": {
+                "kind": "host",
+                "address": "tcp://127.0.0.1:0",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": "not-a-key",
+                },
+                "bootstrap_token": "token",
+            },
+        }));
+        let response = handle_bind_host(Some(RpcId::Num(3)), Some(&raw), &state).await;
+        assert!(response.result.is_none());
+        let error = response.error.expect("bad descriptor is an error");
+        assert_eq!(
+            error.code,
+            crate::error::INVALID_PARAMS,
+            "descriptor parse failure is an ordinary invalid-params error"
+        );
+        assert_ne!(
+            error.code,
+            ErrorCode::ScopeDenied.jsonrpc_code(),
+            "descriptor parse failure must not launder into ScopeDenied"
+        );
+    }
+
+    // ─── Phase 7 (T-A4): scope matrix over the new methods ──────────────
+
+    fn assert_scope_denied(
+        response: RpcResponse,
+        required: meerkat_contracts::WireControlScope,
+        presented: &[meerkat_contracts::WireControlScope],
+        context: &str,
+    ) {
+        assert!(response.result.is_none(), "{context}: expected an error");
+        let error = response.error.expect("scope denial is an error");
+        assert_eq!(
+            error.code,
+            ErrorCode::ScopeDenied.jsonrpc_code(),
+            "{context}: ScopeDenied renders -32025"
+        );
+        let data = error.data.expect("typed WireScopeDeniedDetail data");
+        let detail: meerkat_contracts::WireScopeDeniedDetail =
+            serde_json::from_value(data).expect("data decodes as WireScopeDeniedDetail");
+        assert_eq!(detail.required, required, "{context}: required scope");
+        assert_eq!(detail.presented, presented, "{context}: presented set");
+    }
+
+    /// T-A4: a `ReadHistory`-only principal reads history (the gate passes;
+    /// the missing member surfaces as an ordinary error, never a denial)
+    /// but cannot hard-cancel — the denial carries typed
+    /// `{required: Cancel, presented: [ReadHistory]}`. A `Live`-less caller
+    /// is denied `Live` at open, and the two watch-read projections deny
+    /// without `List` at the resolver gate (chokepoint (b)).
+    #[tokio::test]
+    async fn scope_matrix_over_phase7_methods() {
+        // Two console states share ONE mob handle: the owner records the
+        // viewer's grant; the viewer state drives the gated verbs.
+        let (owner, mob_id) = grant_test_state_and_mob(
+            meerkat_mob::MobControlPrincipal::Owner,
+            "rpc-phase7-scope-matrix",
+        )
+        .await;
+        let viewer = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::External(
+            meerkat_core::auth::PrincipalId::new("viewer").expect("valid principal"),
+        ));
+        let handle = owner.handle_for(&mob_id).await.expect("owner handle");
+        viewer.mob_insert_handle(mob_id.clone(), handle).await;
+
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "principal": "viewer",
+            "scopes": ["read_history"],
+        }));
+        let response = handle_grant_scopes(Some(RpcId::Num(1)), Some(&raw), &owner).await;
+        assert!(
+            response.error.is_none(),
+            "owner grant must succeed: {:?}",
+            response.error
+        );
+
+        // ReadHistory passes the gate: the missing member is an ordinary
+        // invalid-params error, NOT a denial.
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "agent_identity": "nobody",
+        }));
+        let response = handle_member_history(Some(RpcId::Num(2)), Some(&raw), &viewer).await;
+        let error = response.error.expect("missing member is an error");
+        assert_eq!(
+            error.code,
+            crate::error::INVALID_PARAMS,
+            "granted ReadHistory reaches the member lookup: {}",
+            error.message
+        );
+
+        // Cancel is not granted: hard-cancel denies with the typed detail.
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "agent_identity": "nobody",
+            "reason": "operator interrupt",
+        }));
+        let response = handle_hard_cancel_member(Some(RpcId::Num(3)), Some(&raw), &viewer).await;
+        assert_scope_denied(
+            response,
+            meerkat_contracts::WireControlScope::Cancel,
+            &[meerkat_contracts::WireControlScope::ReadHistory],
+            "hard_cancel without Cancel",
+        );
+
+        // Live is not granted: the open denies before any member lookup.
+        let raw = raw_params(serde_json::json!({
+            "mob_id": mob_id.as_str(),
+            "agent_identity": "nobody",
+        }));
+        let response = handle_member_live_open(Some(RpcId::Num(4)), Some(&raw), &viewer).await;
+        assert_scope_denied(
+            response,
+            meerkat_contracts::WireControlScope::Live,
+            &[meerkat_contracts::WireControlScope::ReadHistory],
+            "member_live_open without Live",
+        );
+
+        // The watch-read projections gate at the resolver (chokepoint (b))
+        // under List.
+        let raw = raw_params(serde_json::json!({ "mob_id": mob_id.as_str() }));
+        let response = handle_hosts(Some(RpcId::Num(5)), Some(&raw), &viewer).await;
+        assert_scope_denied(
+            response,
+            meerkat_contracts::WireControlScope::List,
+            &[meerkat_contracts::WireControlScope::ReadHistory],
+            "hosts without List",
+        );
+        let raw = raw_params(serde_json::json!({ "mob_id": mob_id.as_str() }));
+        let response = handle_route_installs(Some(RpcId::Num(6)), Some(&raw), &viewer).await;
+        assert_scope_denied(
+            response,
+            meerkat_contracts::WireControlScope::List,
+            &[meerkat_contracts::WireControlScope::ReadHistory],
+            "route_installs without List",
+        );
+    }
+
+    // ─── Phase 7 (T-A5): `mob_call_error` classifier rendering ──────────
+
+    /// T-A5: the four multi-host codes render their JSON-RPC codes with
+    /// typed BARE detail data; everything else stays byte-identical to the
+    /// phase-5 `invalid_params` rendering.
+    #[test]
+    fn mob_call_error_renders_classified_codes_with_typed_data() {
+        use meerkat_mob::{AgentRuntimeId, FenceToken};
+
+        // StaleCursor (-32027): watermark is the recovery fact.
+        let err = MobError::StaleEventCursor {
+            after_cursor: 40,
+            latest_cursor: 25,
+        };
+        let response = mob_call_error(Some(RpcId::Num(1)), &err);
+        let error = response.error.expect("stale cursor is an error");
+        assert_eq!(error.code, ErrorCode::StaleCursor.jsonrpc_code());
+        let data = error.data.expect("typed stale-cursor data");
+        assert_eq!(data["watermark"], serde_json::json!(25));
+        assert_eq!(data["requested"], serde_json::json!(40));
+
+        // StaleFence (-32028): local checks carry the fence numbers.
+        let err = MobError::StaleFenceToken {
+            runtime_id: AgentRuntimeId::initial(AgentIdentity::from("worker")),
+            expected: FenceToken::new(3),
+            actual: FenceToken::new(2),
+        };
+        let response = mob_call_error(Some(RpcId::Num(2)), &err);
+        let error = response.error.expect("stale fence is an error");
+        assert_eq!(error.code, ErrorCode::StaleFence.jsonrpc_code());
+        let data = error.data.expect("typed stale-fence data");
+        assert_eq!(data["expected"], serde_json::json!(3));
+        assert_eq!(data["actual"], serde_json::json!(2));
+
+        // HostUnavailable (-32026): bridge reply-deadline expiry carries
+        // the timeout.
+        let err = MobError::BridgeRequestTimedOut {
+            request_envelope_id: "env-1".to_string(),
+            timeout_ms: 15_000,
+        };
+        let response = mob_call_error(Some(RpcId::Num(3)), &err);
+        let error = response.error.expect("host unavailable is an error");
+        assert_eq!(error.code, ErrorCode::HostUnavailable.jsonrpc_code());
+        let data = error.data.expect("typed host-unavailable data");
+        assert_eq!(data["timeout_ms"], serde_json::json!(15_000));
+    }
+
+    /// T-A5 regression pin: an unclassified error renders byte-identical
+    /// to the phase-5 `invalid_params` shape (message-only, no data).
+    #[test]
+    fn mob_call_error_unclassified_stays_invalid_params() {
+        let err = MobError::MobNotFound(MobId::from("mob-x"));
+        let response = mob_call_error(Some(RpcId::Num(4)), &err);
+        let error = response.error.expect("unclassified error");
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+        assert_eq!(error.message, err.to_string());
+        assert!(
+            error.data.is_none(),
+            "unclassified errors carry no data payload"
+        );
     }
 }

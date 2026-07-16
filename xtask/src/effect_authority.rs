@@ -16,7 +16,12 @@
 //! - banned log-message strings (e.g. warn-only boundary-cancel text) are
 //!   checked as string-literal *content* via the AST (`visit_lit_str`),
 //!   because the emitted text itself is the banned artifact.
+//!
+//! The audit also owns the exhaustive `CoreExecutor` decorator ratchet. It
+//! cross-checks the core trait against the runtime decorator so a permissive
+//! default can never silently replace forwarding.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,8 +48,9 @@ pub fn run_effect_authority() -> Result<()> {
 
 /// Idents whose mere structural presence in peer-admission / comms-drain code
 /// proves reach into hard interrupt authority.
-const HARD_INTERRUPT_AUTHORITY_IDENTS: [&str; 7] = [
+const HARD_INTERRUPT_AUTHORITY_IDENTS: [&str; 8] = [
     "hard_cancel_current_run",
+    "hard_cancel_run_if_current",
     "interrupt_handle",
     "interrupt_handle_for",
     "interrupt_current_run_with_reason",
@@ -74,6 +80,41 @@ const SURFACE_INTERRUPT_FILES: [&str; 9] = [
 /// EphemeralSessionService and has no runtime-owned MeerkatMachine authority
 /// to route through.
 const EXAMPLE_INTERRUPT_ALLOWLIST: [&str; 1] = ["examples/034-codemob-mcp/src/tools/consult.rs"];
+
+const CORE_EXECUTOR_TRAIT_REL: &str = "meerkat-core/src/lifecycle/core_executor.rs";
+const MACHINE_MANAGED_EXECUTOR_REL: &str =
+    "meerkat-runtime/src/meerkat_machine/session_management.rs";
+
+/// Methods for which `MachineManagedPostStopExecutor` is a transparent
+/// decorator. The structural gate below requires the body to remain a single
+/// call to the same method on `self.inner`.
+const CORE_EXECUTOR_PURE_FORWARD_METHODS: &[&str] = &[
+    "boundary_handle",
+    "interrupt_handle",
+    "publication_handle",
+    "turn_finalization_boundary_handle",
+    "apply",
+    "checkpoint_committed_session_snapshot",
+    "reconcile_committed_compaction_projections",
+    "abort_uncommitted_compaction_projections",
+    "publish_interaction_terminals",
+    "cancel_after_boundary",
+];
+
+/// Methods that must forward to the inner executor before adding decorator
+/// mechanics.
+const CORE_EXECUTOR_FORWARD_PLUS_OVERRIDE_METHODS: &[&str] = &["stop_runtime_executor"];
+
+/// Methods whose semantics are intentionally owned by the decorator.
+const CORE_EXECUTOR_LOCAL_OVERRIDE_METHODS: &[&str] = &["cleanup_after_runtime_stop_terminalized"];
+
+/// Capabilities sampled from the inner executor before decoration. The
+/// decorator implements these explicitly as false/None so later trait-default
+/// changes cannot silently alter its already-consumed capability surface.
+const CORE_EXECUTOR_CONSUMED_BEFORE_WRAP_METHODS: &[&str] = &[
+    "machine_managed_post_stop_unregister",
+    "post_stop_cleanup_handle",
+];
 
 /// Files that constitute this gate itself: its rule tables necessarily name
 /// the banned tokens, so they are excluded from the tombstone text scan
@@ -132,6 +173,8 @@ pub fn collect_effect_authority_findings(root: &Path) -> Result<Vec<String>> {
         };
         audit_rust_file(&file.rel, parsed, &mut findings);
     }
+
+    collect_core_executor_decorator_findings(root, &mut findings)?;
 
     findings.sort();
     findings.dedup();
@@ -283,6 +326,7 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
             label: "peer-admission code can reach hard interrupt authority",
             interrupt_receivers: &["runtime", "session_service"],
             ban_interrupt_current_run_calls: false,
+            allowed_fns: &[],
             findings,
         };
         visitor.visit_file(&parsed);
@@ -294,6 +338,9 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
             label: "comms-drain code can reach hard interrupt authority",
             interrupt_receivers: &["runtime", "adapter", "session_service"],
             ban_interrupt_current_run_calls: true,
+            // Phase 6 (DEC-P6E-7 / §10.6): the machine-admitted hard-cancel
+            // serving arm is the single sanctioned reach.
+            allowed_fns: &["serve_hard_cancel_member"],
             findings,
         };
         visitor.visit_file(&parsed);
@@ -310,16 +357,6 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
 
     if rel == "meerkat-runtime/src/control_plane.rs" {
         let mut visitor = WarnOnlyBoundaryCancelVisitor { rel, findings };
-        visitor.visit_file(&parsed);
-    }
-
-    if rel == "meerkat-runtime/src/runtime_loop.rs" {
-        let mut visitor = CalleeNameVisitor {
-            rel,
-            banned: &["stop_runtime_executor"],
-            label: "runtime_loop must not call executor stop_runtime_executor directly",
-            findings,
-        };
         visitor.visit_file(&parsed);
     }
 
@@ -341,12 +378,23 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
     // dropped structurally before the walk.
     strip_cfg_test_items(&mut parsed.items);
 
-    if matches!(
-        rel,
-        "meerkat-runtime/src/comms_drain.rs"
-            | "meerkat-mob/src/runtime/actor.rs"
-            | "meerkat-mob/src/runtime/provisioner.rs"
-    ) {
+    if rel == "meerkat-runtime/src/runtime_loop.rs" {
+        let mut visitor = CalleeNameVisitor {
+            rel,
+            banned: &["stop_runtime_executor"],
+            label: "runtime_loop must not call executor stop_runtime_executor directly",
+            findings,
+        };
+        visitor.visit_file(&parsed);
+    }
+
+    // Phase 6 (§10.6) sanctions exactly one hard-cancel SENDER (the
+    // provisioner's hard_cancel_member/hard_cancel_placed_member verbs) and
+    // one RECEIVER (comms_drain's serve_hard_cancel_member arm + honest
+    // capability report) — those two files come off this ban. actor.rs stays
+    // banned: the actor must route through the provisioner verb, never
+    // construct bridge hard-cancel commands directly.
+    if rel == "meerkat-mob/src/runtime/actor.rs" {
         let mut visitor = BridgeHardCancelVisitor { rel, findings };
         visitor.visit_file(&parsed);
     }
@@ -472,6 +520,506 @@ fn subtree_has_call_named(expr: &syn::Expr, name: &str) -> bool {
     let mut finder = CallFinder { name, found: false };
     finder.visit_expr(expr);
     finder.found
+}
+
+/// Exhaustive delegation ratchet for the runtime-owned CoreExecutor decorator.
+///
+/// `CoreExecutor` deliberately has permissive defaults for optional
+/// capabilities and compatibility projections. That makes an ordinary manual
+/// decorator unsafe: a newly added default method compiles while silently
+/// bypassing the wrapped executor. Keep the trait surface, decorator impl, and
+/// the four semantic delegation categories in exact set equality.
+fn collect_core_executor_decorator_findings(root: &Path, findings: &mut Vec<String>) -> Result<()> {
+    let trait_path = root.join(CORE_EXECUTOR_TRAIT_REL);
+    let decorator_path = root.join(MACHINE_MANAGED_EXECUTOR_REL);
+    let trait_exists = trait_path.is_file();
+    let decorator_exists = decorator_path.is_file();
+
+    if !trait_exists && !decorator_exists {
+        // Small fixture workspaces for unrelated effect-authority rules do not
+        // need to synthesize the complete cross-crate delegation contract.
+        return Ok(());
+    }
+    if !trait_exists {
+        findings.push(format!(
+            "{CORE_EXECUTOR_TRAIT_REL}:1: CoreExecutor decorator delegation ratchet is missing the trait source"
+        ));
+    }
+    if !decorator_exists {
+        findings.push(format!(
+            "{MACHINE_MANAGED_EXECUTOR_REL}:1: CoreExecutor decorator delegation ratchet is missing the decorator source"
+        ));
+    }
+    if !trait_exists || !decorator_exists {
+        return Ok(());
+    }
+
+    let trait_source = fs::read_to_string(&trait_path)
+        .with_context(|| format!("read {}", trait_path.display()))?;
+    let trait_file = syn::parse_file(&trait_source)
+        .with_context(|| format!("parse {CORE_EXECUTOR_TRAIT_REL}"))?;
+    let decorator_source = fs::read_to_string(&decorator_path)
+        .with_context(|| format!("read {}", decorator_path.display()))?;
+    let decorator_file = syn::parse_file(&decorator_source)
+        .with_context(|| format!("parse {MACHINE_MANAGED_EXECUTOR_REL}"))?;
+
+    let mut trait_declarations = Vec::new();
+    collect_named_traits(&trait_file.items, "CoreExecutor", &mut trait_declarations);
+    if trait_declarations.len() != 1 {
+        findings.push(format!(
+            "{CORE_EXECUTOR_TRAIT_REL}:1: CoreExecutor decorator delegation ratchet expected exactly one CoreExecutor trait, found {}",
+            trait_declarations.len()
+        ));
+        return Ok(());
+    }
+    let trait_declaration = trait_declarations[0];
+
+    let mut decorator_impls = Vec::new();
+    collect_named_trait_impls(
+        &decorator_file.items,
+        "CoreExecutor",
+        "MachineManagedPostStopExecutor",
+        &mut decorator_impls,
+    );
+    if decorator_impls.len() != 1 {
+        findings.push(format!(
+            "{MACHINE_MANAGED_EXECUTOR_REL}:1: CoreExecutor decorator delegation ratchet expected exactly one MachineManagedPostStopExecutor impl, found {}",
+            decorator_impls.len()
+        ));
+        return Ok(());
+    }
+    let decorator_impl = decorator_impls[0];
+
+    let categories = [
+        ("pure-forward", CORE_EXECUTOR_PURE_FORWARD_METHODS),
+        (
+            "forward-plus-override",
+            CORE_EXECUTOR_FORWARD_PLUS_OVERRIDE_METHODS,
+        ),
+        ("local-override", CORE_EXECUTOR_LOCAL_OVERRIDE_METHODS),
+        (
+            "consumed-before-wrap",
+            CORE_EXECUTOR_CONSUMED_BEFORE_WRAP_METHODS,
+        ),
+    ];
+    let mut classified_methods = BTreeSet::new();
+    for (category, methods) in categories {
+        for method in methods {
+            if !classified_methods.insert((*method).to_string()) {
+                findings.push(format!(
+                    "{MACHINE_MANAGED_EXECUTOR_REL}:1: CoreExecutor decorator delegation method `{method}` is classified more than once (latest category `{category}`)"
+                ));
+            }
+        }
+    }
+
+    let mut trait_methods = BTreeSet::new();
+    for item in &trait_declaration.items {
+        if let syn::TraitItem::Fn(method) = item {
+            let name = method.sig.ident.to_string();
+            if !trait_methods.insert(name.clone()) {
+                findings.push(format!(
+                    "{CORE_EXECUTOR_TRAIT_REL}:{}: CoreExecutor trait declares duplicate method `{name}`",
+                    method.sig.ident.span().start().line
+                ));
+            }
+        }
+    }
+    push_core_executor_method_set_drift(
+        findings,
+        CORE_EXECUTOR_TRAIT_REL,
+        trait_declaration.ident.span().start().line,
+        "trait/category",
+        &classified_methods,
+        &trait_methods,
+    );
+
+    let mut decorator_methods = BTreeMap::new();
+    for item in &decorator_impl.items {
+        if let syn::ImplItem::Fn(method) = item {
+            let name = method.sig.ident.to_string();
+            if decorator_methods.insert(name.clone(), method).is_some() {
+                findings.push(format!(
+                    "{MACHINE_MANAGED_EXECUTOR_REL}:{}: MachineManagedPostStopExecutor declares duplicate method `{name}`",
+                    method.sig.ident.span().start().line
+                ));
+            }
+        }
+    }
+    let decorator_method_names = decorator_methods.keys().cloned().collect();
+    push_core_executor_method_set_drift(
+        findings,
+        MACHINE_MANAGED_EXECUTOR_REL,
+        decorator_impl.impl_token.span.start().line,
+        "decorator/category",
+        &classified_methods,
+        &decorator_method_names,
+    );
+
+    for name in CORE_EXECUTOR_PURE_FORWARD_METHODS {
+        let Some(method) = decorator_methods.get(*name) else {
+            continue;
+        };
+        if !is_exact_inner_forward(method, name) {
+            findings.push(format!(
+                "{MACHINE_MANAGED_EXECUTOR_REL}:{}: pure CoreExecutor decorator method `{name}` must be exactly one call to `self.inner.{name}(...)`",
+                method.sig.ident.span().start().line
+            ));
+        }
+    }
+
+    if let Some(method) = decorator_methods.get("stop_runtime_executor") {
+        if !block_has_method_call_on_receiver(&method.block, "inner", "stop_runtime_executor") {
+            findings.push(format!(
+                "{MACHINE_MANAGED_EXECUTOR_REL}:{}: CoreExecutor stop override must forward to `self.inner.stop_runtime_executor(...)`",
+                method.sig.ident.span().start().line
+            ));
+        }
+        if !block_has_method_call_on_receiver(
+            &method.block,
+            "machine",
+            "lock_post_stop_cleanup_attachment",
+        ) {
+            findings.push(format!(
+                "{MACHINE_MANAGED_EXECUTOR_REL}:{}: CoreExecutor stop override must acquire the exact post-stop attachment fence",
+                method.sig.ident.span().start().line
+            ));
+        }
+    }
+
+    if let Some(method) = decorator_methods.get("cleanup_after_runtime_stop_terminalized")
+        && !block_has_method_call_on_receiver(
+            &method.block,
+            "machine",
+            "complete_terminalized_runtime_loop_cleanup_if_current_with_guard",
+        )
+    {
+        findings.push(format!(
+            "{MACHINE_MANAGED_EXECUTOR_REL}:{}: CoreExecutor cleanup override must hand off through the exact machine unregister seam",
+            method.sig.ident.span().start().line
+        ));
+    }
+
+    if let Some(method) = decorator_methods.get("machine_managed_post_stop_unregister")
+        && !block_is_false(&method.block)
+    {
+        findings.push(format!(
+            "{MACHINE_MANAGED_EXECUTOR_REL}:{}: consumed machine-managed capability must be explicitly false after decoration",
+            method.sig.ident.span().start().line
+        ));
+    }
+    if let Some(method) = decorator_methods.get("post_stop_cleanup_handle")
+        && !block_is_none(&method.block)
+    {
+        findings.push(format!(
+            "{MACHINE_MANAGED_EXECUTOR_REL}:{}: consumed post-stop cleanup handle must be explicitly None after decoration",
+            method.sig.ident.span().start().line
+        ));
+    }
+
+    check_pre_wrap_core_executor_capability_capture(&decorator_file, findings);
+    Ok(())
+}
+
+fn collect_named_traits<'a>(
+    items: &'a [syn::Item],
+    trait_name: &str,
+    output: &mut Vec<&'a syn::ItemTrait>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Trait(item_trait) if item_trait.ident == trait_name => {
+                output.push(item_trait);
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_named_traits(nested, trait_name, output);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_named_trait_impls<'a>(
+    items: &'a [syn::Item],
+    trait_name: &str,
+    type_name: &str,
+    output: &mut Vec<&'a syn::ItemImpl>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Impl(item_impl)
+                if item_impl
+                    .trait_
+                    .as_ref()
+                    .is_some_and(|(_, path, _)| path_tail_is(path, trait_name))
+                    && type_tail_is(&item_impl.self_ty, type_name) =>
+            {
+                output.push(item_impl);
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_named_trait_impls(nested, trait_name, type_name, output);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn type_tail_is(ty: &syn::Type, name: &str) -> bool {
+    match ty {
+        syn::Type::Path(path) => path.qself.is_none() && path_tail_is(&path.path, name),
+        syn::Type::Group(group) => type_tail_is(&group.elem, name),
+        syn::Type::Paren(paren) => type_tail_is(&paren.elem, name),
+        _ => false,
+    }
+}
+
+fn push_core_executor_method_set_drift(
+    findings: &mut Vec<String>,
+    rel: &str,
+    line: usize,
+    relation: &str,
+    expected: &BTreeSet<String>,
+    actual: &BTreeSet<String>,
+) {
+    let missing = expected.difference(actual).cloned().collect::<Vec<_>>();
+    let unclassified = actual.difference(expected).cloned().collect::<Vec<_>>();
+    if missing.is_empty() && unclassified.is_empty() {
+        return;
+    }
+    findings.push(format!(
+        "{rel}:{line}: CoreExecutor {relation} method-set drift: missing={missing:?}, unclassified={unclassified:?}"
+    ));
+}
+
+fn is_exact_inner_forward(method: &syn::ImplItemFn, forwarded_name: &str) -> bool {
+    struct CallShape<'a> {
+        forwarded_name: &'a str,
+        total_calls: usize,
+        matching_inner_calls: usize,
+        macros: usize,
+    }
+
+    impl<'ast> Visit<'ast> for CallShape<'_> {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.total_calls += 1;
+            if node.method == self.forwarded_name
+                && receiver_tail_ident(&node.receiver).as_deref() == Some("inner")
+            {
+                self.matching_inner_calls += 1;
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            self.total_calls += 1;
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            self.macros += 1;
+            syn::visit::visit_macro(self, node);
+        }
+    }
+
+    let mut shape = CallShape {
+        forwarded_name,
+        total_calls: 0,
+        matching_inner_calls: 0,
+        macros: 0,
+    };
+    shape.visit_block(&method.block);
+    let [syn::Stmt::Expr(expression, None)] = method.block.stmts.as_slice() else {
+        return false;
+    };
+    let expression = peel_forward_expression(expression);
+    let syn::Expr::MethodCall(call) = expression else {
+        return false;
+    };
+    call.method == forwarded_name
+        && expression_is_self_inner(&call.receiver)
+        && shape.total_calls == 1
+        && shape.matching_inner_calls == 1
+        && shape.macros == 0
+}
+
+fn peel_forward_expression(mut expression: &syn::Expr) -> &syn::Expr {
+    loop {
+        expression = match expression {
+            syn::Expr::Await(awaited) => &awaited.base,
+            syn::Expr::Try(tried) => &tried.expr,
+            syn::Expr::Group(grouped) => &grouped.expr,
+            syn::Expr::Paren(parenthesized) => &parenthesized.expr,
+            _ => return expression,
+        };
+    }
+}
+
+fn expression_is_self_inner(expression: &syn::Expr) -> bool {
+    match expression {
+        syn::Expr::Group(grouped) => expression_is_self_inner(&grouped.expr),
+        syn::Expr::Paren(parenthesized) => expression_is_self_inner(&parenthesized.expr),
+        syn::Expr::Field(field) => {
+            let syn::Member::Named(member) = &field.member else {
+                return false;
+            };
+            let syn::Expr::Path(base) = field.base.as_ref() else {
+                return false;
+            };
+            member == "inner" && base.qself.is_none() && base.path.is_ident("self")
+        }
+        _ => false,
+    }
+}
+
+fn block_has_method_call_on_receiver(block: &syn::Block, receiver: &str, method: &str) -> bool {
+    struct MethodCallFinder<'a> {
+        receiver: &'a str,
+        method: &'a str,
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for MethodCallFinder<'_> {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == self.method
+                && receiver_tail_ident(&node.receiver).as_deref() == Some(self.receiver)
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let mut finder = MethodCallFinder {
+        receiver,
+        method,
+        found: false,
+    };
+    finder.visit_block(block);
+    finder.found
+}
+
+fn block_is_false(block: &syn::Block) -> bool {
+    let [syn::Stmt::Expr(expr, None)] = block.stmts.as_slice() else {
+        return false;
+    };
+    matches!(
+        expr,
+        syn::Expr::Lit(literal)
+            if matches!(&literal.lit, syn::Lit::Bool(value) if !value.value)
+    )
+}
+
+fn block_is_none(block: &syn::Block) -> bool {
+    let [syn::Stmt::Expr(expr, None)] = block.stmts.as_slice() else {
+        return false;
+    };
+    matches!(
+        expr,
+        syn::Expr::Path(path) if path.qself.is_none() && path.path.is_ident("None")
+    )
+}
+
+fn check_pre_wrap_core_executor_capability_capture(
+    decorator_file: &syn::File,
+    findings: &mut Vec<String>,
+) {
+    let mut materializers = Vec::new();
+    collect_impl_methods_named(
+        &decorator_file.items,
+        "ensure_session_with_executor_factory_inner",
+        &mut materializers,
+    );
+    if materializers.len() != 1 {
+        findings.push(format!(
+            "{MACHINE_MANAGED_EXECUTOR_REL}:1: CoreExecutor delegation ratchet expected exactly one pre-wrap materializer, found {}",
+            materializers.len()
+        ));
+        return;
+    }
+
+    struct CaptureVisitor {
+        wrapper_lines: Vec<usize>,
+        capture_lines: BTreeMap<String, Vec<usize>>,
+    }
+
+    impl<'ast> Visit<'ast> for CaptureVisitor {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if receiver_tail_ident(&node.receiver).as_deref() == Some("executor")
+                && CORE_EXECUTOR_CONSUMED_BEFORE_WRAP_METHODS
+                    .iter()
+                    .any(|method| node.method == *method)
+            {
+                self.capture_lines
+                    .entry(node.method.to_string())
+                    .or_default()
+                    .push(node.method.span().start().line);
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            if path_tail_is(&node.path, "MachineManagedPostStopExecutor") {
+                self.wrapper_lines.push(node.path.span().start().line);
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+    }
+
+    let materializer = materializers[0];
+    let mut visitor = CaptureVisitor {
+        wrapper_lines: Vec::new(),
+        capture_lines: BTreeMap::new(),
+    };
+    visitor.visit_block(&materializer.block);
+    let Some(wrapper_line) = visitor.wrapper_lines.into_iter().min() else {
+        findings.push(format!(
+            "{MACHINE_MANAGED_EXECUTOR_REL}:{}: CoreExecutor pre-wrap materializer never constructs MachineManagedPostStopExecutor",
+            materializer.sig.ident.span().start().line
+        ));
+        return;
+    };
+
+    for capability in CORE_EXECUTOR_CONSUMED_BEFORE_WRAP_METHODS {
+        let captured_before_wrap = visitor
+            .capture_lines
+            .get(*capability)
+            .is_some_and(|lines| lines.iter().any(|line| *line < wrapper_line));
+        if !captured_before_wrap {
+            findings.push(format!(
+                "{MACHINE_MANAGED_EXECUTOR_REL}:{wrapper_line}: CoreExecutor capability `{capability}` must be captured from `executor` before MachineManagedPostStopExecutor construction"
+            ));
+        }
+    }
+}
+
+fn collect_impl_methods_named<'a>(
+    items: &'a [syn::Item],
+    method_name: &str,
+    output: &mut Vec<&'a syn::ImplItemFn>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Impl(item_impl) => {
+                for item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = item
+                        && method.sig.ident == method_name
+                    {
+                        output.push(method);
+                    }
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_impl_methods_named(nested, method_name, output);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// String-literal contents inside a macro invocation's token stream
@@ -784,10 +1332,33 @@ struct HardInterruptAuthorityVisitor<'a> {
     label: &'a str,
     interrupt_receivers: &'a [&'a str],
     ban_interrupt_current_run_calls: bool,
+    /// Functions sanctioned to reach hard interrupt authority (phase 6: the
+    /// member drain's extracted `serve_hard_cancel_member` arm is the ONE
+    /// machine-admitted bridge reach). The visitor skips their bodies and
+    /// keeps the ban everywhere else in the file.
+    allowed_fns: &'a [&'a str],
     findings: &'a mut Vec<String>,
 }
 
 impl<'ast> Visit<'ast> for HardInterruptAuthorityVisitor<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if self
+            .allowed_fns
+            .contains(&node.sig.ident.to_string().as_str())
+        {
+            return;
+        }
+        syn::visit::visit_item_fn(self, node);
+    }
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if self
+            .allowed_fns
+            .contains(&node.sig.ident.to_string().as_str())
+        {
+            return;
+        }
+        syn::visit::visit_impl_item_fn(self, node);
+    }
     fn visit_ident(&mut self, node: &'ast proc_macro2::Ident) {
         let name = node.to_string();
         if HARD_INTERRUPT_AUTHORITY_IDENTS.contains(&name.as_str()) {

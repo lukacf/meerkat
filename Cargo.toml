@@ -75,6 +75,7 @@ toml = "0.9"
 toml_edit = "0.25"
 sha2 = "0.10"
 base64 = "0.22"
+ciborium = "0.2"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -126,6 +127,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 rmcp = "1.4"
 
 # Crypto
+hmac = "0.12"
 subtle = "2.6"
 
 # Testing

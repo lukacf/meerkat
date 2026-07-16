@@ -2034,8 +2034,7 @@ mod tests {
         async fn commit_unregister_finalization(
             &self,
             _runtime_id: &LogicalRuntimeId,
-            _commit: crate::store::MachineLifecycleCommit,
-            _input_states: &[InputStatePersistenceRecord],
+            _finalization: crate::store::UnregisterFinalizationCommit,
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "commit_unregister_finalization".to_string(),

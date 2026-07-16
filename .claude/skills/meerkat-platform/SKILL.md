@@ -71,6 +71,10 @@ For a remote `rkat` process, use `rkat run --comms-listen-tcp <host:port> --comm
 
 `rkat-rpc --tcp` is not this channel. It exposes JSON-RPC to hosts and SDKs; signed Meerkat peer traffic uses the `rkat run --comms-*` comms listener.
 
+For the intentional RPC/REST/MCP/CLI/SDK exposure boundaries of managed
+multi-host mobs, use the authoritative
+[multi-host surface matrix](references/mobs.md#multi-host-surface-matrix).
+
 ## Surfaces
 
 | Surface | Protocol | Use case |

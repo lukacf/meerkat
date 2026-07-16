@@ -83,19 +83,7 @@ pub enum WireForkContext {
     },
 }
 
-/// Budget split policy for a spawned mob member.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum WireBudgetSplitPolicy {
-    #[default]
-    Equal,
-    Proportional,
-    Remaining,
-    Fixed(u64),
-}
-
-/// Tool access policy for a spawned mob member.
+/// Public tool access policy for a spawned member or delegated session fork.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -104,6 +92,26 @@ pub enum WireToolAccessPolicy {
     Inherit,
     AllowList(Vec<String>),
     DenyList(Vec<String>),
+}
+
+impl WireToolAccessPolicy {
+    /// Lower the closed public wire vocabulary into the core session policy.
+    ///
+    /// Keeping this conversion at the contract boundary lets schemas and
+    /// generated SDKs retain the discriminated union instead of widening the
+    /// fork request field to an untyped JSON object.
+    #[must_use]
+    pub fn into_core(self) -> meerkat_core::ops::ToolAccessPolicy {
+        match self {
+            Self::Inherit => meerkat_core::ops::ToolAccessPolicy::Inherit,
+            Self::AllowList(names) => {
+                meerkat_core::ops::ToolAccessPolicy::AllowList(names.into_iter().collect())
+            }
+            Self::DenyList(names) => {
+                meerkat_core::ops::ToolAccessPolicy::DenyList(names.into_iter().collect())
+            }
+        }
+    }
 }
 
 /// Pre-resolved tool filter inherited by a spawned mob member.
@@ -710,8 +718,6 @@ pub struct MobSpawnParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access_policy: Option<WireToolAccessPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_split_policy: Option<WireBudgetSplitPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_tool_filter: Option<WireToolFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_profile: Option<WireMobProfile>,
@@ -719,6 +725,13 @@ pub struct MobSpawnParams {
     pub model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
+    /// Requested placement host ref (comms `PeerId` string — the
+    /// `MemberOperatorSpawnSpec.placement` representation); `None` places
+    /// on the controlling host (§7.3 default). Admission is machine-owned
+    /// (`ResolveSpawnMemberAdmission` host-bound/capability arms), never a
+    /// surface-side check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
 }
 
 /// Response payload for `mob/spawn`.
@@ -749,6 +762,9 @@ pub struct MobSpawnSpecParams {
     pub context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
+    /// Bound host peer ID for placed execution; omit for the controlling host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<WireHostRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1379,6 +1395,9 @@ pub struct MobMemberSpecWire {
     pub runtime_mode: Option<WireMobRuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<WireMobBackendKind>,
+    /// Bound host peer ID for placed execution; omit for the controlling host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<WireHostRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<WireRuntimeBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2051,6 +2070,32 @@ pub struct MobMemberStatusResult {
     pub resolved_capabilities: Option<crate::wire::WireResolvedModelCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<WireMemberProgressSnapshot>,
+    // Multi-host projections (SD-5): placement and reachability are TYPED
+    // fields here — never smuggled inside the opaque `external_member`
+    // value. All optional + absent-omitted for byte-compat with released
+    // SDKs.
+    /// Host the member is materialized on; `None` = controlling host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<WireHostRef>,
+    /// Bridge control-plane reachability of the owning host/member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_reachability: Option<WireReachability>,
+    /// Comms data-plane reachability of the member peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comms_reachability: Option<WireReachability>,
+    /// Observer-local monotonic ms since last verified contact — never a
+    /// remote wall-clock comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_reason: Option<String>,
+    /// Lifecycle capability flags for this member's placement (§19.L7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_capabilities: Option<WireMemberLifecycleCapabilities>,
+    /// Reserved portability projection; placed v1 members report an empty
+    /// list because non-portable resources are rejected, never disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_portable_disabled: Option<Vec<super::portable_spec::WireNonPortableResourceKind>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2134,6 +2179,13 @@ mod member_status_capability_tests {
             external_member: None,
             resolved_capabilities: Some(capabilities.clone()),
             progress: None,
+            placement: None,
+            control_reachability: None,
+            comms_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            lifecycle_capabilities: None,
+            non_portable_disabled: None,
         };
 
         let json = serde_json::to_string(&result)?;
@@ -2485,6 +2537,477 @@ pub struct MobListMembersMatchingResult {
     pub members: Vec<Value>,
 }
 
+// ---------------------------------------------------------------------------
+// Multi-host mob DTOs (V4): control scopes, host roster, remote history,
+// grants, member live console. Types only — RPC catalog entries land with
+// the surface phases.
+// ---------------------------------------------------------------------------
+
+/// Closed control-plane scope vocabulary (A9). Grants and bridge scope
+/// denials speak exactly this set.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireControlScope {
+    List,
+    ReadHistory,
+    SubscribeEvents,
+    SendCommand,
+    Cancel,
+    Retire,
+    WireTopology,
+    Live,
+    AdminHost,
+    AdminGrants,
+}
+
+/// Observer-computed reachability class (§7.5). A projection from typed
+/// bridge/pump outcomes — never a membership fact, and a DIFFERENT fact
+/// from the bridge's own `BridgePeerConnectivity`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireReachability {
+    Reachable,
+    Stale,
+    Unreachable,
+    Unknown,
+}
+
+/// Opaque host reference: the host's canonical comms `PeerId` string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct WireHostRef(pub String);
+
+/// Lifecycle capabilities available for a member at its placement (§19.L7).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMemberLifecycleCapabilities {
+    pub transcript_edits: bool,
+    pub revisions: bool,
+    pub resume_after_restart: bool,
+}
+
+/// Host bind lifecycle phase as recorded by the controlling machine.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireHostBindPhase {
+    Requested,
+    Bound,
+}
+
+/// Wire mirror of the DSL `HostCapabilityFlags` single enumeration (§6.1) —
+/// the machine owns the fact; this is its console projection.
+///
+/// Field vocabulary matches the machine maps and the domain
+/// `HostCapabilityReport` exactly (ADJ-P7-1, FLAG-A2): `u64` protocol bounds
+/// and an OPEN `BTreeSet<String>` provider vocabulary — a newer member host
+/// advertising a provider this build's enum lacks must stay representable
+/// (no silent caps).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireHostCapabilityFlags {
+    pub protocol_min: u64,
+    pub protocol_max: u64,
+    pub engine_version: String,
+    pub durable_sessions: bool,
+    pub autonomous_members: bool,
+    pub hard_cancel_member: bool,
+    #[serde(default)]
+    pub tracked_input_cancel: bool,
+    pub memory_store: bool,
+    pub mcp: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub resolvable_providers: std::collections::BTreeSet<String>,
+    pub approval_forwarding: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_endpoint: Option<String>,
+}
+
+/// One tracked host row for `mob/hosts` (A13).
+///
+/// `endpoint`, `authority_epoch`, and `capabilities` are the CommitHostBind
+/// facts — present for `Bound` hosts, typed-absent for a `Requested`-phase
+/// host (an open or failed bind window commits nothing; fabricating empty
+/// values would launder ceremony state into committed facts).
+///
+/// `control_reachability`/`last_seen_ms`/`freshness_reason` are fed by the
+/// observer-local periodic `HostStatus` driver shared with orphan
+/// reconciliation. They remain typed-absent until the first observation and
+/// never become durable membership facts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobHostStatus {
+    pub host_id: WireHostRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub bind_phase: WireHostBindPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<WireHostCapabilityFlags>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_reachability: Option<WireReachability>,
+    /// Observer-local monotonic ms since last verified contact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_reason: Option<String>,
+    pub materialized_member_count: u64,
+}
+
+/// Response payload for `mob/hosts`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobHostsResult {
+    pub hosts: Vec<MobHostStatus>,
+}
+
+/// One outstanding cross-host route-install obligation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireRouteInstallObligation {
+    pub edge_a: String,
+    pub edge_b: String,
+    pub host: WireHostRef,
+}
+
+/// Response payload for the route-install status projection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRouteInstallsResult {
+    pub outstanding: Vec<WireRouteInstallObligation>,
+    pub complete: bool,
+}
+
+/// Who attests a remotely-served projection (§7/§20): `HostClaimed` facts
+/// are only what the owning host reports; `ControllingHostVerified` facts
+/// were checked against controlling-machine records.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireProjectionProvenance {
+    HostClaimed,
+    ControllingHostVerified,
+}
+
+/// Equality adapter over a canonical wire transcript row.
+///
+/// `WireSessionMessage` deliberately derives no `PartialEq` (opaque
+/// tool-call args ride `RawValue`), but the bridge reply chain that
+/// carries history pages must be `Eq` (the comms envelope enums derive
+/// it). Equality here is semantic-JSON equality of the serialized wire
+/// form — exactly the fact reply comparison needs. Transparent: the wire
+/// shape stays the raw row object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct WireHistoryRow(pub super::session::WireSessionMessage);
+
+impl PartialEq for WireHistoryRow {
+    fn eq(&self, other: &Self) -> bool {
+        match (
+            serde_json::to_value(&self.0),
+            serde_json::to_value(&other.0),
+        ) {
+            (Ok(a), Ok(b)) => a == b,
+            // Unreachable for transcript rows (their serialization is
+            // infallible); kept fail-closed rather than laundering a
+            // serialize error into equality.
+            _ => false,
+        }
+    }
+}
+
+impl Eq for WireHistoryRow {}
+
+/// Shared transcript page body used by both the bridge
+/// `MemberHistoryPage` reply and the console `mob/member_history` result —
+/// same page shape for local and remote members.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMemberHistoryPageBody {
+    pub from_index: u64,
+    pub messages: Vec<WireHistoryRow>,
+    /// Total transcript length — carried so offset math (e.g. fork
+    /// `LastMessages`) needs no extra round-trip.
+    pub message_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_index: Option<u64>,
+    pub complete: bool,
+}
+
+impl WireMemberHistoryPageBody {
+    /// THE page-shape projection (multi-host mobs DEC-P6E-6): the member
+    /// host's `ReadMemberHistory` arm AND the controlling host's local
+    /// history branch both call this, so "remote page read == local page
+    /// shape" holds by construction, not by test luck.
+    pub fn try_from_history_page(
+        page: &meerkat_core::service::SessionHistoryPage,
+    ) -> Result<Self, super::error::WireConversionError> {
+        let invalid =
+            |reason: String| super::error::WireConversionError::MemberHistoryPage { debug: reason };
+        let message_count = u64::try_from(page.message_count).map_err(|_| {
+            invalid(format!(
+                "message_count {} exceeds the u64 wire domain",
+                page.message_count
+            ))
+        })?;
+        let from_index = u64::try_from(page.offset).map_err(|_| {
+            invalid(format!(
+                "offset {} exceeds the u64 wire domain",
+                page.offset
+            ))
+        })?;
+        let served = u64::try_from(page.messages.len()).map_err(|_| {
+            invalid(format!(
+                "served row count {} exceeds the u64 wire domain",
+                page.messages.len()
+            ))
+        })?;
+        let next_index = if page.has_more {
+            if served == 0 {
+                return Err(invalid(format!(
+                    "page at offset {from_index} claims more rows but serves none"
+                )));
+            }
+            Some(from_index.checked_add(served).ok_or_else(|| {
+                invalid(format!(
+                    "offset {from_index} plus served row count {served} exhausts the u64 cursor domain"
+                ))
+            })?)
+        } else {
+            None
+        };
+        Ok(Self {
+            from_index,
+            messages: page
+                .messages
+                .iter()
+                .map(|message| {
+                    WireHistoryRow(super::session::WireSessionMessage::from(message.clone()))
+                })
+                .collect(),
+            message_count,
+            next_index,
+            complete: !page.has_more,
+        })
+    }
+}
+
+/// Request payload for `mob/member_history`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberHistoryParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Response payload for `mob/member_history`. Pagination facts live inside
+/// `page` (one owner); this envelope adds the placement/provenance facts
+/// only the controlling host knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobMemberHistoryResult {
+    pub page: WireMemberHistoryPageBody,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<WireHostRef>,
+    pub provenance: WireProjectionProvenance,
+}
+
+/// Request payload for `mob/bind_host`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobBindHostParams {
+    pub mob_id: String,
+    pub descriptor: super::supervisor_bridge::WireHostBindingDescriptor,
+}
+
+/// Response payload for `mob/bind_host`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobBindHostResult {
+    pub host_id: WireHostRef,
+    pub capabilities: WireHostCapabilityFlags,
+    pub authority_epoch: u64,
+}
+
+/// Request payload for `mob/revoke_host`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRevokeHostParams {
+    pub mob_id: String,
+    pub host_id: WireHostRef,
+}
+
+/// Response payload for `mob/revoke_host`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRevokeHostResult {
+    pub host_id: WireHostRef,
+    /// Agent identities whose materializations were released by the
+    /// revocation.
+    pub released_members: Vec<String>,
+}
+
+/// One control-plane grant record (A9).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireGrantRecord {
+    pub principal: String,
+    pub scopes: Vec<WireControlScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
+
+/// Request payload for `mob/grant_scopes`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobGrantScopesParams {
+    pub mob_id: String,
+    pub principal: String,
+    pub scopes: Vec<WireControlScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
+
+/// Response payload for `mob/grant_scopes`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobGrantScopesResult {
+    pub record: WireGrantRecord,
+}
+
+/// Request payload for `mob/revoke_scopes`. `scopes: None` revokes the
+/// principal's entire grant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRevokeScopesParams {
+    pub mob_id: String,
+    pub principal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<WireControlScope>>,
+}
+
+/// Response payload for `mob/revoke_scopes`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRevokeScopesResult {
+    pub removed: bool,
+}
+
+/// Response payload for `mob/grants`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobGrantsResult {
+    pub grants: Vec<WireGrantRecord>,
+}
+
+/// Typed `details` payload for `ErrorCode::ScopeDenied` (§17.4). Every
+/// console surface serializes exactly this struct into the wire error's
+/// `details` carrier; the field shape mirrors
+/// `BridgeRejectionCause::ScopeDenied` so bridge and console denials speak
+/// one shape. `presented` is the denied caller's own effective (post-expiry)
+/// scope set — never another principal's grants.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireScopeDeniedDetail {
+    pub required: WireControlScope,
+    pub presented: Vec<WireControlScope>,
+}
+
+/// Request payload for `mob/member_live_open` (§16.4). Result reuses
+/// `LiveOpenResult` verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberLiveOpenParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turning_mode: Option<super::realtime::RealtimeTurningMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<super::live::LiveOpenTransport>,
+}
+
+/// Request payload for `mob/member_live_close`. Close-what-you-name
+/// (ADJ-P6B-15): `channel_id` is REQUIRED — a reconciling console can never
+/// race-kill a channel a concurrent legitimate open just minted. The status
+/// read has its own params type ([`MobMemberLiveStatusParams`]) because its
+/// `channel_id` is optional by contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberLiveChannelParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub channel_id: String,
+}
+
+/// Request payload for `mob/member_live_status` (§16.9, ADJ-P6B-2).
+/// `channel_id: None` IS the reply-loss discovery primitive — it resolves
+/// "the member's active channel" on the owning host, so an orphaned open's
+/// id can be discovered and closed. A dedicated type (not
+/// [`MobMemberLiveChannelParams`]) so the wire cannot amputate the
+/// discovery read (DEC-P7A-2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberLiveStatusParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+}
+
+/// Request payload for `mob/hard_cancel_member` (DEC-P6E-8). `reason` is
+/// REQUIRED: the handle verb demands one, and a handler-minted default
+/// string would be handler-owned meaning (DEC-P7A-2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobHardCancelParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub reason: String,
+}
+
+/// Response payload for `mob/hard_cancel_member`. A dedicated type (not
+/// [`MobForceCancelResult`] reuse) so the hard/force distinction stays
+/// legible in SDK type names (DEC-P7A-2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobHardCancelResult {
+    pub cancelled: bool,
+}
+
+/// Request payload for `mob/member_live_control`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberLiveControlParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub channel_id: String,
+    pub verb: super::supervisor_bridge::BridgeLiveControlVerb,
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -2630,6 +3153,59 @@ mod tests {
     }
 
     #[test]
+    fn mob_spawn_many_spec_placement_is_optional_and_round_trips() {
+        let placed: MobSpawnSpecParams = serde_json::from_value(serde_json::json!({
+            "profile": "worker",
+            "agent_identity": "w1",
+            "placement": "host-b-peer"
+        }))
+        .expect("placed spawn-many spec parses");
+        assert_eq!(
+            placed.placement.as_ref().map(|host| host.0.as_str()),
+            Some("host-b-peer")
+        );
+        assert_eq!(
+            serde_json::to_value(&placed).expect("placed spawn-many spec serializes")["placement"],
+            "host-b-peer"
+        );
+
+        let local: MobSpawnSpecParams = serde_json::from_value(serde_json::json!({
+            "profile": "worker",
+            "agent_identity": "w2"
+        }))
+        .expect("local spawn-many spec parses");
+        assert!(local.placement.is_none());
+        assert!(
+            serde_json::to_value(&local)
+                .expect("local spawn-many spec serializes")
+                .get("placement")
+                .is_none(),
+            "absent placement must remain omitted for source and wire compatibility"
+        );
+    }
+
+    #[test]
+    fn mob_member_spec_placement_is_optional_and_round_trips() {
+        let placed: MobMemberSpecWire = serde_json::from_value(serde_json::json!({
+            "profile": "worker",
+            "agent_identity": "w1",
+            "placement": "host-b-peer"
+        }))
+        .expect("placed declarative member spec parses");
+        assert_eq!(
+            placed.placement.as_ref().map(|host| host.0.as_str()),
+            Some("host-b-peer")
+        );
+
+        let local: MobMemberSpecWire = serde_json::from_value(serde_json::json!({
+            "profile": "worker",
+            "agent_identity": "w2"
+        }))
+        .expect("local declarative member spec parses");
+        assert!(local.placement.is_none());
+    }
+
+    #[test]
     fn mob_member_spec_exposes_shared_surface_metadata() {
         let spec = MobMemberSpecWire {
             profile: "worker".into(),
@@ -2637,6 +3213,7 @@ mod tests {
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            placement: None,
             binding: None,
             context: Some(serde_json::json!({"client_ref": "member-card"})),
             labels: Some(BTreeMap::from([("client.member_id".into(), "w1".into())])),
@@ -2663,6 +3240,7 @@ mod tests {
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            placement: None,
             binding: None,
             context: None,
             labels: Some(BTreeMap::from([("mob_id".into(), "spoof".into())])),
@@ -3170,5 +3748,428 @@ mod tests {
             params.definition.flows["review"].steps["draft"].role,
             "worker"
         );
+    }
+
+    /// DEC-1 absence pin: `budget_split_policy` was deleted (functionally
+    /// unconsumed; accepted-then-discarded budget instructions are a
+    /// fail-quiet containment lie). A payload still carrying it FAILS
+    /// decode — replaces the old parity fixtures.
+    #[test]
+    fn mob_spawn_params_reject_deleted_budget_split_policy() {
+        let err = serde_json::from_value::<MobSpawnParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "budget_split_policy": { "type": "equal" }
+        }))
+        .expect_err("deleted budget_split_policy must fail closed at the wire boundary");
+        assert!(
+            err.to_string()
+                .contains("unknown field `budget_split_policy`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// ADJ-7 pin: `placement` is an optional comms `PeerId` string; absent
+    /// stays `None` (byte-compat with pre-placement payloads) and `None`
+    /// never serializes.
+    #[test]
+    fn mob_spawn_params_placement_round_trips_and_defaults_absent() {
+        let params = serde_json::from_value::<MobSpawnParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "profile": "worker",
+            "agent_identity": "worker-1"
+        }))
+        .expect("placement-less params must decode");
+        assert_eq!(params.placement, None);
+        let encoded = serde_json::to_value(&params).expect("serialize params");
+        assert!(
+            encoded.get("placement").is_none(),
+            "absent placement must not serialize: {encoded}"
+        );
+
+        let params = serde_json::from_value::<MobSpawnParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "placement": "host-peer-b"
+        }))
+        .expect("placed params must decode");
+        assert_eq!(params.placement.as_deref(), Some("host-peer-b"));
+        let encoded = serde_json::to_value(&params).expect("serialize params");
+        assert_eq!(encoded["placement"], serde_json::json!("host-peer-b"));
+    }
+
+    fn minimal_member_status() -> MobMemberStatusResult {
+        MobMemberStatusResult {
+            status: WireMobMemberStatus::Active,
+            member_ref: WireMemberRef::encode("mob-1", "worker-1"),
+            output_preview: None,
+            error: None,
+            tokens_used: 0,
+            is_final: false,
+            current_session_id: None,
+            peer_connectivity: None,
+            kickoff: None,
+            external_member: None,
+            resolved_capabilities: None,
+            progress: None,
+            placement: None,
+            control_reachability: None,
+            comms_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            lifecycle_capabilities: None,
+            non_portable_disabled: None,
+        }
+    }
+
+    /// Byte-compat with released SDKs: every multi-host field skips when
+    /// `None`, and a pre-field JSON payload still decodes.
+    #[test]
+    fn member_status_multi_host_fields_skip_when_absent_and_decode_legacy() {
+        let value = serde_json::to_value(minimal_member_status()).expect("serialize member status");
+        for absent in [
+            "placement",
+            "control_reachability",
+            "comms_reachability",
+            "last_seen_ms",
+            "freshness_reason",
+            "lifecycle_capabilities",
+            "non_portable_disabled",
+        ] {
+            assert!(
+                value.get(absent).is_none(),
+                "absent {absent} must be omitted from the wire form: {value}"
+            );
+        }
+
+        // Pre-multi-host payload (as a released SDK would emit) decodes.
+        let legacy = serde_json::json!({
+            "status": "active",
+            "member_ref": WireMemberRef::encode("mob-1", "worker-1"),
+            "tokens_used": 3,
+            "is_final": false,
+        });
+        let decoded: MobMemberStatusResult =
+            serde_json::from_value(legacy).expect("legacy member status decodes");
+        assert!(decoded.placement.is_none());
+        assert!(decoded.lifecycle_capabilities.is_none());
+    }
+
+    /// SD-5 pin: placement facts live ONLY at the typed keys — never
+    /// inside the opaque `external_member` value.
+    #[test]
+    fn member_status_carries_placement_only_at_typed_keys() {
+        let mut status = minimal_member_status();
+        status.placement = Some(WireHostRef("host-b-peer".to_string()));
+        status.control_reachability = Some(WireReachability::Stale);
+        status.comms_reachability = Some(WireReachability::Reachable);
+        status.last_seen_ms = Some(1_234);
+        status.freshness_reason = Some("pump idle".to_string());
+        status.lifecycle_capabilities = Some(WireMemberLifecycleCapabilities {
+            transcript_edits: false,
+            revisions: false,
+            resume_after_restart: true,
+        });
+        status.non_portable_disabled = Some(vec![
+            super::super::portable_spec::WireNonPortableResourceKind::WorkgraphTools,
+        ]);
+        status.external_member = Some(serde_json::json!({"endpoint": "tcp://10.0.0.2:7101"}));
+
+        let value = serde_json::to_value(&status).expect("serialize member status");
+        assert_eq!(value["placement"], serde_json::json!("host-b-peer"));
+        assert_eq!(value["control_reachability"], serde_json::json!("stale"));
+        assert_eq!(
+            value["non_portable_disabled"],
+            serde_json::json!(["workgraph_tools"])
+        );
+        assert!(
+            value["external_member"].get("placement").is_none(),
+            "placement must not ride the opaque external_member value (SD-5)"
+        );
+
+        let decoded: MobMemberStatusResult =
+            serde_json::from_value(value).expect("decode member status");
+        assert_eq!(decoded.placement, status.placement);
+        assert_eq!(decoded.control_reachability, status.control_reachability);
+    }
+
+    #[test]
+    fn control_scope_and_reachability_round_trip_snake_case() {
+        let scopes: &[(WireControlScope, &str)] = &[
+            (WireControlScope::List, "list"),
+            (WireControlScope::ReadHistory, "read_history"),
+            (WireControlScope::SubscribeEvents, "subscribe_events"),
+            (WireControlScope::SendCommand, "send_command"),
+            (WireControlScope::Cancel, "cancel"),
+            (WireControlScope::Retire, "retire"),
+            (WireControlScope::WireTopology, "wire_topology"),
+            (WireControlScope::Live, "live"),
+            (WireControlScope::AdminHost, "admin_host"),
+            (WireControlScope::AdminGrants, "admin_grants"),
+        ];
+        for (scope, expected) in scopes {
+            let value = serde_json::to_value(scope).expect("serialize scope");
+            assert_eq!(value, serde_json::json!(expected));
+            let decoded: WireControlScope = serde_json::from_value(value).expect("decode scope");
+            assert_eq!(decoded, *scope);
+        }
+        assert!(
+            serde_json::from_value::<WireControlScope>(serde_json::json!("admin")).is_err(),
+            "unknown scopes must fail decode (closed vocabulary)"
+        );
+
+        let classes: &[(WireReachability, &str)] = &[
+            (WireReachability::Reachable, "reachable"),
+            (WireReachability::Stale, "stale"),
+            (WireReachability::Unreachable, "unreachable"),
+            (WireReachability::Unknown, "unknown"),
+        ];
+        for (class, expected) in classes {
+            let value = serde_json::to_value(class).expect("serialize reachability");
+            assert_eq!(value, serde_json::json!(expected));
+            let decoded: WireReachability =
+                serde_json::from_value(value).expect("decode reachability");
+            assert_eq!(decoded, *class);
+        }
+    }
+
+    #[test]
+    fn scope_denied_detail_round_trips_snake_case_and_denies_unknown_fields() {
+        let detail = WireScopeDeniedDetail {
+            required: WireControlScope::AdminGrants,
+            presented: vec![WireControlScope::List, WireControlScope::SendCommand],
+        };
+        let value = serde_json::to_value(&detail).expect("serialize detail");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "required": "admin_grants",
+                "presented": ["list", "send_command"],
+            })
+        );
+        let decoded: WireScopeDeniedDetail = serde_json::from_value(value).expect("decode detail");
+        assert_eq!(decoded, detail);
+
+        assert!(
+            serde_json::from_value::<WireScopeDeniedDetail>(serde_json::json!({
+                "required": "admin_grants",
+                "presented": [],
+                "reason": "extra",
+            }))
+            .is_err(),
+            "unknown fields must be rejected (deny_unknown_fields)"
+        );
+    }
+
+    #[test]
+    fn host_status_and_grants_round_trip() {
+        let host = MobHostStatus {
+            host_id: WireHostRef("host-b-peer".to_string()),
+            endpoint: Some("tcp://10.0.0.2:7100".to_string()),
+            bind_phase: WireHostBindPhase::Bound,
+            authority_epoch: Some(4),
+            capabilities: Some(WireHostCapabilityFlags {
+                protocol_min: 2,
+                protocol_max: 4,
+                engine_version: "0.7.22".to_string(),
+                durable_sessions: true,
+                autonomous_members: true,
+                hard_cancel_member: false,
+                tracked_input_cancel: false,
+                memory_store: false,
+                mcp: true,
+                resolvable_providers: std::collections::BTreeSet::from(["anthropic".to_string()]),
+                approval_forwarding: false,
+                live_endpoint: None,
+            }),
+            control_reachability: Some(WireReachability::Reachable),
+            last_seen_ms: Some(250),
+            freshness_reason: None,
+            materialized_member_count: 2,
+        };
+        let result = MobHostsResult { hosts: vec![host] };
+        let value = serde_json::to_value(&result).expect("serialize hosts");
+        assert_eq!(value["hosts"][0]["bind_phase"], serde_json::json!("bound"));
+        let decoded: MobHostsResult = serde_json::from_value(value).expect("decode hosts");
+        assert_eq!(decoded, result);
+
+        // A Requested-phase host commits nothing: the ceremony facts are
+        // typed-absent, never fabricated empties.
+        let requested = MobHostStatus {
+            host_id: WireHostRef("host-c-peer".to_string()),
+            endpoint: None,
+            bind_phase: WireHostBindPhase::Requested,
+            authority_epoch: None,
+            capabilities: None,
+            control_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            materialized_member_count: 0,
+        };
+        let value = serde_json::to_value(&requested).expect("serialize requested host");
+        assert_eq!(value["bind_phase"], serde_json::json!("requested"));
+        assert!(value.get("endpoint").is_none());
+        assert!(value.get("authority_epoch").is_none());
+        assert!(value.get("capabilities").is_none());
+        let decoded: MobHostStatus = serde_json::from_value(value).expect("decode requested host");
+        assert_eq!(decoded, requested);
+
+        let record = WireGrantRecord {
+            principal: "console:luka".to_string(),
+            scopes: vec![WireControlScope::List, WireControlScope::Live],
+            expires_at_ms: None,
+        };
+        let value = serde_json::to_value(&record).expect("serialize grant");
+        assert!(
+            value.get("expires_at_ms").is_none(),
+            "absent expiry must be omitted"
+        );
+        let decoded: WireGrantRecord = serde_json::from_value(value).expect("decode grant");
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn member_history_result_round_trips_with_provenance() {
+        let result = MobMemberHistoryResult {
+            page: WireMemberHistoryPageBody {
+                from_index: 5,
+                messages: Vec::new(),
+                message_count: 12,
+                next_index: Some(10),
+                complete: false,
+            },
+            generation: 2,
+            placement: Some(WireHostRef("host-b-peer".to_string())),
+            provenance: WireProjectionProvenance::HostClaimed,
+        };
+        let value = serde_json::to_value(&result).expect("serialize history result");
+        assert_eq!(value["provenance"], serde_json::json!("host_claimed"));
+        assert_eq!(value["page"]["message_count"], serde_json::json!(12));
+        let decoded: MobMemberHistoryResult =
+            serde_json::from_value(value.clone()).expect("decode history result");
+        let reencoded = serde_json::to_value(&decoded).expect("reserialize history result");
+        assert_eq!(value, reencoded);
+    }
+
+    #[test]
+    fn member_history_projection_rejects_non_advancing_page() {
+        let page = meerkat_core::service::SessionHistoryPage {
+            session_id: meerkat_core::SessionId::new(),
+            message_count: 1,
+            offset: 0,
+            limit: Some(1),
+            has_more: true,
+            messages: Vec::new(),
+        };
+        let error = WireMemberHistoryPageBody::try_from_history_page(&page)
+            .expect_err("a page that claims more rows must advance its cursor");
+        assert!(matches!(
+            error,
+            crate::wire::error::WireConversionError::MemberHistoryPage { debug }
+                if debug.contains("serves none")
+        ));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn member_history_projection_rejects_exhausted_cursor() {
+        let page = meerkat_core::service::SessionHistoryPage {
+            session_id: meerkat_core::SessionId::new(),
+            message_count: usize::MAX,
+            offset: usize::MAX,
+            limit: Some(2),
+            has_more: true,
+            messages: vec![
+                meerkat_core::types::Message::User(meerkat_core::types::UserMessage::text("first")),
+                meerkat_core::types::Message::User(meerkat_core::types::UserMessage::text(
+                    "second",
+                )),
+            ],
+        };
+        let error = WireMemberHistoryPageBody::try_from_history_page(&page)
+            .expect_err("MAX has no representable member-history successor");
+        assert!(matches!(
+            error,
+            crate::wire::error::WireConversionError::MemberHistoryPage { debug }
+                if debug.contains("exhausts the u64 cursor domain")
+        ));
+    }
+
+    /// T-A1 (DEC-P7A-2): the two phase-7 params additions round-trip, fail
+    /// closed on unknown fields, and the live-status discovery read stays
+    /// expressible (`channel_id` absent ⇒ `None`) while close keeps its
+    /// required id.
+    #[test]
+    fn hard_cancel_params_round_trip_and_reject_unknown_fields() {
+        let params = MobHardCancelParams {
+            mob_id: "mob-1".to_string(),
+            agent_identity: "worker".to_string(),
+            reason: "operator interrupt".to_string(),
+        };
+        let value = serde_json::to_value(&params).expect("serialize hard-cancel params");
+        let decoded: MobHardCancelParams =
+            serde_json::from_value(value).expect("decode hard-cancel params");
+        assert_eq!(decoded, params);
+
+        serde_json::from_value::<MobHardCancelParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+            "reason": "x",
+            "force": true,
+        }))
+        .expect_err("unknown field must be rejected");
+
+        // `reason` is required — the handle verb demands one, and a
+        // handler-minted default would be handler-owned meaning.
+        serde_json::from_value::<MobHardCancelParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+        }))
+        .expect_err("missing reason must be rejected");
+
+        let result = MobHardCancelResult { cancelled: true };
+        let value = serde_json::to_value(&result).expect("serialize hard-cancel result");
+        assert_eq!(value, serde_json::json!({ "cancelled": true }));
+    }
+
+    #[test]
+    fn member_live_status_params_keep_the_discovery_read() {
+        // Absent channel_id parses to None — the ADJ-P6B-2 reply-loss
+        // discovery primitive stays expressible on the wire.
+        let discovery: MobMemberLiveStatusParams = serde_json::from_value(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+        }))
+        .expect("discovery status params parse");
+        assert_eq!(discovery.channel_id, None);
+        let value = serde_json::to_value(&discovery).expect("serialize discovery params");
+        assert!(
+            value.get("channel_id").is_none(),
+            "absent channel_id must be omitted"
+        );
+
+        let named: MobMemberLiveStatusParams = serde_json::from_value(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+            "channel_id": "chan-7",
+        }))
+        .expect("named status params parse");
+        assert_eq!(named.channel_id.as_deref(), Some("chan-7"));
+
+        serde_json::from_value::<MobMemberLiveStatusParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+            "chan": "chan-7",
+        }))
+        .expect_err("unknown field must be rejected");
+
+        // Close-what-you-name (ADJ-P6B-15): close still REQUIRES the id.
+        serde_json::from_value::<MobMemberLiveChannelParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+        }))
+        .expect_err("close without channel_id must be rejected");
     }
 }

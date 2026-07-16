@@ -36,6 +36,12 @@ use crate::tokio::sync::oneshot;
 pub enum CompletionWaitError {
     #[error("completion channel closed without an authorized result")]
     ChannelClosed,
+    /// The exact executor attachment that admitted this request was replaced
+    /// before its waiter resolved. The old input is durably cancelled; a retry
+    /// is a new request owned by the successor attachment. Replacement
+    /// execution must never be reported as the old request's success.
+    #[error("executor attachment was replaced before request completion; retry the request")]
+    AttachmentReplaced,
     #[error("{0}")]
     AuthorityUnavailable(String),
 }
@@ -48,15 +54,22 @@ impl CompletionWaitError {
             Self::ChannelClosed => {
                 crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::ChannelClosed
             }
-            Self::AuthorityUnavailable(_) => {
+            Self::AttachmentReplaced | Self::AuthorityUnavailable(_) => {
                 crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::AuthorityUnavailable
             }
         }
     }
+
+    /// Stable typed predicate for retryable attachment replacement. Surfaces
+    /// must not infer this class from an error string.
+    #[must_use]
+    pub const fn is_attachment_replaced(&self) -> bool {
+        matches!(self, Self::AttachmentReplaced)
+    }
 }
 
 /// Outcome delivered to a completion waiter.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CompletionOutcome {
     /// The input was successfully consumed and produced a result.
     Completed(Box<RunResult>),
@@ -91,6 +104,69 @@ pub enum CompletionOutcome {
         reason: String,
         error: TurnErrorMetadata,
     },
+}
+
+/// Project one generated-authority completion onto the canonical
+/// interaction-scoped terminal event. Both the comms live stream and durable
+/// placed-turn observation use this single mapping so result/failure semantics
+/// cannot drift between surfaces.
+pub fn interaction_terminal_event(
+    interaction_id: meerkat_core::interaction::InteractionId,
+    outcome: CompletionOutcome,
+) -> meerkat_core::event::AgentEvent {
+    use meerkat_core::event::{AgentEvent, InteractionFailureReason};
+
+    match outcome {
+        CompletionOutcome::Completed(result) => {
+            if let Some(extraction_error) = result.extraction_error {
+                AgentEvent::InteractionFailed {
+                    interaction_id,
+                    reason: InteractionFailureReason::ExtractionFailed {
+                        last_output: extraction_error.last_output,
+                        attempts: extraction_error.attempts,
+                        reason: extraction_error.reason,
+                    },
+                }
+            } else {
+                AgentEvent::InteractionComplete {
+                    interaction_id,
+                    result: result.text,
+                    structured_output: result.structured_output,
+                }
+            }
+        }
+        CompletionOutcome::CompletedWithoutResult => AgentEvent::InteractionComplete {
+            interaction_id,
+            result: String::new(),
+            structured_output: None,
+        },
+        CompletionOutcome::CallbackPending { tool_name, args } => {
+            AgentEvent::InteractionCallbackPending {
+                interaction_id,
+                tool_name,
+                args,
+            }
+        }
+        CompletionOutcome::Cancelled => AgentEvent::InteractionFailed {
+            interaction_id,
+            reason: InteractionFailureReason::Cancelled,
+        },
+        CompletionOutcome::Abandoned { reason, .. }
+        | CompletionOutcome::AbandonedWithError { reason, .. }
+        | CompletionOutcome::RuntimeTerminated { reason, .. } => AgentEvent::InteractionFailed {
+            interaction_id,
+            reason: InteractionFailureReason::abandoned(reason),
+        },
+        CompletionOutcome::CompletedWithFinalizationFailure { error } => {
+            let detail = error
+                .detail
+                .unwrap_or_else(|| "turn finalization failed".to_string());
+            AgentEvent::InteractionFailed {
+                interaction_id,
+                reason: InteractionFailureReason::finalization_failed(detail),
+            }
+        }
+    }
 }
 
 /// Runtime-minted observation for post-completion cleanup.
@@ -460,6 +536,196 @@ impl CompletionOutcome {
     }
 }
 
+fn authorized_completion_outcome(
+    terminal: Option<&CoreApplyTerminal>,
+    authority: RuntimeCompletionResultAuthority,
+    finalization_error: Option<TurnErrorMetadata>,
+    runtime_termination_reason: Option<&str>,
+) -> Result<(CompletionOutcome, CompletionCleanupObservation), CompletionWaitError> {
+    let attempt = authority.begin_surface_resolution();
+    if runtime_termination_reason.is_some()
+        && attempt.class() != RuntimeCompletionResultClass::RuntimeTerminated
+    {
+        let actual = attempt.class();
+        attempt.fail();
+        return Err(CompletionWaitError::AuthorityUnavailable(format!(
+            "runtime completion authority resolved {actual:?} with a runtime-termination reason"
+        )));
+    }
+    let outcome = match attempt.class() {
+        RuntimeCompletionResultClass::Completed => {
+            let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved Completed without result payload"
+                        .to_string(),
+                ));
+            };
+            CompletionOutcome::Completed(Box::new(result.as_ref().clone()))
+        }
+        RuntimeCompletionResultClass::CompletedWithoutResult => {
+            if !matches!(terminal, Some(CoreApplyTerminal::NoPendingBoundary) | None) {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved CompletedWithoutResult with terminal payload"
+                        .to_string(),
+                ));
+            }
+            CompletionOutcome::CompletedWithoutResult
+        }
+        RuntimeCompletionResultClass::CallbackPending => {
+            let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal else {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved CallbackPending without callback payload"
+                        .to_string(),
+                ));
+            };
+            CompletionOutcome::CallbackPending {
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            }
+        }
+        RuntimeCompletionResultClass::Cancelled => {
+            if terminal.is_some() || finalization_error.is_some() {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved Cancelled with payload".to_string(),
+                ));
+            }
+            CompletionOutcome::Cancelled
+        }
+        RuntimeCompletionResultClass::AbandonedWithError => {
+            if matches!(terminal, Some(CoreApplyTerminal::RunResult(_))) {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved AbandonedWithError with result payload"
+                        .to_string(),
+                ));
+            }
+            let Some(error) = finalization_error else {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved AbandonedWithError without typed error"
+                        .to_string(),
+                ));
+            };
+            let reason = error
+                .detail
+                .clone()
+                .unwrap_or_else(|| "runtime finalization failed".to_string());
+            CompletionOutcome::AbandonedWithError { reason, error }
+        }
+        RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
+            let Some(CoreApplyTerminal::RunResult(_)) = terminal else {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved CompletedWithFinalizationFailure without result payload"
+                        .to_string(),
+                ));
+            };
+            let Some(error) = finalization_error else {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved finalization failure without typed error"
+                        .to_string(),
+                ));
+            };
+            CompletionOutcome::CompletedWithFinalizationFailure { error }
+        }
+        RuntimeCompletionResultClass::RuntimeTerminated => {
+            if terminal.is_some() || finalization_error.is_some() {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved RuntimeTerminated with payload"
+                        .to_string(),
+                ));
+            }
+            let Some(reason) = runtime_termination_reason.filter(|reason| !reason.is_empty())
+            else {
+                attempt.fail();
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved RuntimeTerminated without its exact reason"
+                        .to_string(),
+                ));
+            };
+            CompletionOutcome::runtime_terminated(reason)
+        }
+    };
+    Ok((
+        outcome,
+        CompletionCleanupObservation::from_realized_result(attempt.realize()),
+    ))
+}
+
+/// One generated-authority terminal decision projected onto every public
+/// consumer of a runtime completion. Interaction events and waiter delivery
+/// must come from this same non-cloneable bundle so no caller can preview the
+/// generated result twice and accidentally publish one class while returning
+/// another.
+#[must_use = "authorized runtime terminal bundle must be published and/or delivered"]
+pub(crate) struct AuthorizedRuntimeTerminalBundle {
+    outcome: CompletionOutcome,
+    cleanup_observation: CompletionCleanupObservation,
+    interaction_events: Vec<meerkat_core::event::AgentEvent>,
+}
+
+impl AuthorizedRuntimeTerminalBundle {
+    pub(crate) fn interaction_events(&self) -> &[meerkat_core::event::AgentEvent] {
+        &self.interaction_events
+    }
+
+    #[cfg(test)]
+    fn into_interaction_events(self) -> Vec<meerkat_core::event::AgentEvent> {
+        self.interaction_events
+    }
+}
+
+/// Consume generated completion authority exactly once and create the shared
+/// event/waiter terminal bundle for the whole runtime batch.
+pub(crate) fn authorize_runtime_terminal_bundle(
+    interaction_ids: &[meerkat_core::interaction::InteractionId],
+    terminal: Option<&CoreApplyTerminal>,
+    authority: RuntimeCompletionResultAuthority,
+    finalization_error: Option<TurnErrorMetadata>,
+    runtime_termination_reason: Option<&str>,
+) -> Result<AuthorizedRuntimeTerminalBundle, CompletionWaitError> {
+    let (outcome, cleanup_observation) = authorized_completion_outcome(
+        terminal,
+        authority,
+        finalization_error,
+        runtime_termination_reason,
+    )?;
+    let interaction_events = interaction_ids
+        .iter()
+        .map(|interaction_id| interaction_terminal_event(*interaction_id, outcome.clone()))
+        .collect();
+    Ok(AuthorizedRuntimeTerminalBundle {
+        outcome,
+        cleanup_observation,
+        interaction_events,
+    })
+}
+
+/// Consume one generated completion authority for the exact directed batch
+/// and project the same authorized outcome onto every interaction ID.
+#[cfg(test)]
+pub(crate) fn authorized_interaction_terminal_events(
+    interaction_ids: &[meerkat_core::interaction::InteractionId],
+    terminal: Option<&CoreApplyTerminal>,
+    authority: RuntimeCompletionResultAuthority,
+    finalization_error: Option<TurnErrorMetadata>,
+) -> Result<Vec<meerkat_core::event::AgentEvent>, CompletionWaitError> {
+    authorize_runtime_terminal_bundle(
+        interaction_ids,
+        terminal,
+        authority,
+        finalization_error,
+        None,
+    )
+    .map(AuthorizedRuntimeTerminalBundle::into_interaction_events)
+}
+
 /// Registry of pending completion waiters, keyed by InputId.
 ///
 /// Uses `Vec<Sender>` per InputId to support multiple waiters for the same input
@@ -488,42 +754,7 @@ impl CompletionRegistry {
         cleanup_observation: CompletionCleanupObservation,
     ) {
         for tx in senders {
-            let outcome = match &outcome {
-                CompletionOutcome::Completed(result) => {
-                    CompletionOutcome::Completed(Box::new(result.as_ref().clone()))
-                }
-                CompletionOutcome::CompletedWithoutResult => {
-                    CompletionOutcome::CompletedWithoutResult
-                }
-                CompletionOutcome::CallbackPending { tool_name, args } => {
-                    CompletionOutcome::CallbackPending {
-                        tool_name: tool_name.clone(),
-                        args: args.clone(),
-                    }
-                }
-                CompletionOutcome::Cancelled => CompletionOutcome::Cancelled,
-                CompletionOutcome::Abandoned { reason, error } => CompletionOutcome::Abandoned {
-                    reason: reason.clone(),
-                    error: error.clone(),
-                },
-                CompletionOutcome::AbandonedWithError { reason, error } => {
-                    CompletionOutcome::AbandonedWithError {
-                        reason: reason.clone(),
-                        error: error.clone(),
-                    }
-                }
-                CompletionOutcome::CompletedWithFinalizationFailure { error } => {
-                    CompletionOutcome::CompletedWithFinalizationFailure {
-                        error: error.clone(),
-                    }
-                }
-                CompletionOutcome::RuntimeTerminated { reason, error } => {
-                    CompletionOutcome::RuntimeTerminated {
-                        reason: reason.clone(),
-                        error: error.clone(),
-                    }
-                }
-            };
+            let outcome = outcome.clone();
             let _ = tx.send(Ok(CompletionDelivery {
                 outcome,
                 cleanup_observation: cleanup_observation.clone(),
@@ -577,21 +808,6 @@ impl CompletionRegistry {
         self.fail_inputs(input_ids, error);
     }
 
-    fn fail_inputs_authority_unavailable<I>(
-        &mut self,
-        input_ids: I,
-        authority: RuntimeCompletionResultAttempt,
-        reason: impl Into<String>,
-    ) where
-        I: IntoIterator<Item = InputId>,
-    {
-        authority.fail();
-        self.fail_inputs(
-            input_ids,
-            CompletionWaitError::AuthorityUnavailable(reason.into()),
-        );
-    }
-
     fn cleanup_from_realized_attempt(
         authority: RuntimeCompletionResultAttempt,
     ) -> CompletionCleanupObservation {
@@ -609,6 +825,7 @@ impl CompletionRegistry {
     }
 
     /// Resolve all waiters for a completed input.
+    #[cfg(test)]
     fn resolve_completed(
         &mut self,
         input_id: &InputId,
@@ -644,6 +861,7 @@ impl CompletionRegistry {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_runtime_completion_authorized<I>(
         &mut self,
         input_ids: I,
@@ -654,149 +872,45 @@ impl CompletionRegistry {
         I: IntoIterator<Item = InputId>,
     {
         let input_ids: Vec<InputId> = input_ids.into_iter().collect();
-        let attempt = authority.begin_surface_resolution();
-        match attempt.class() {
-            RuntimeCompletionResultClass::Completed => {
-                let Some(CoreApplyTerminal::RunResult(result)) = terminal else {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved Completed without result payload",
-                    );
+        if !input_ids
+            .iter()
+            .any(|input_id| self.waiters.contains_key(input_id))
+        {
+            let attempt = authority.begin_surface_resolution();
+            attempt.abandon();
+            return;
+        }
+        let (outcome, cleanup_observation) =
+            match authorized_completion_outcome(terminal, authority, finalization_error, None) {
+                Ok(projected) => projected,
+                Err(error) => {
+                    self.fail_inputs(input_ids, error);
                     return;
-                };
-                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-                for input_id in input_ids {
-                    self.resolve_completed(
-                        &input_id,
-                        result.as_ref().clone(),
-                        cleanup_observation.clone(),
-                    );
                 }
+            };
+        for input_id in input_ids {
+            if let Some(senders) = self.take_waiters(&input_id) {
+                Self::send_outcome(senders, outcome.clone(), cleanup_observation.clone());
             }
-            RuntimeCompletionResultClass::CompletedWithoutResult => {
-                if !matches!(terminal, Some(CoreApplyTerminal::NoPendingBoundary) | None) {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved CompletedWithoutResult with terminal payload",
-                    );
-                    return;
-                }
-                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-                for input_id in input_ids {
-                    self.resolve_without_result(&input_id, cleanup_observation.clone());
-                }
-            }
-            RuntimeCompletionResultClass::CallbackPending => {
-                let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal else {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved CallbackPending without callback payload",
-                    );
-                    return;
-                };
-                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-                for input_id in input_ids {
-                    self.resolve_callback_pending(
-                        &input_id,
-                        tool_name.clone(),
-                        args.clone(),
-                        cleanup_observation.clone(),
-                    );
-                }
-            }
-            RuntimeCompletionResultClass::Cancelled => {
-                if terminal.is_some() || finalization_error.is_some() {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved Cancelled with payload",
-                    );
-                    return;
-                }
-                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-                for input_id in input_ids {
-                    self.resolve_cancelled(&input_id, cleanup_observation.clone());
-                }
-            }
-            RuntimeCompletionResultClass::AbandonedWithError => {
-                if matches!(terminal, Some(CoreApplyTerminal::RunResult(_))) {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved AbandonedWithError with result payload",
-                    );
-                    return;
-                }
-                let Some(error) = finalization_error else {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved AbandonedWithError without typed error",
-                    );
-                    return;
-                };
-                let reason = error
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| "runtime finalization failed".to_string());
-                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-                for input_id in input_ids {
-                    self.resolve_abandoned_with_error(
-                        &input_id,
-                        reason.clone(),
-                        error.clone(),
-                        cleanup_observation.clone(),
-                    );
-                }
-            }
-            RuntimeCompletionResultClass::CompletedWithFinalizationFailure => {
-                let Some(CoreApplyTerminal::RunResult(_result)) = terminal else {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved CompletedWithFinalizationFailure without result payload",
-                    );
-                    return;
-                };
-                let Some(error) = finalization_error else {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved finalization failure without typed error",
-                    );
-                    return;
-                };
-                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-                for input_id in input_ids {
-                    self.resolve_completed_with_finalization_failure(
-                        &input_id,
-                        error.clone(),
-                        cleanup_observation.clone(),
-                    );
-                }
-            }
-            RuntimeCompletionResultClass::RuntimeTerminated => {
-                if terminal.is_some() || finalization_error.is_some() {
-                    self.fail_inputs_authority_unavailable(
-                        input_ids,
-                        attempt,
-                        "runtime completion authority resolved RuntimeTerminated with payload",
-                    );
-                    return;
-                }
-                let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-                for input_id in input_ids {
-                    if let Some(senders) = self.take_waiters(&input_id) {
-                        Self::send_outcome(
-                            senders,
-                            CompletionOutcome::runtime_terminated("runtime terminated"),
-                            cleanup_observation.clone(),
-                        );
-                    }
-                }
+        }
+    }
+
+    /// Mechanically deliver a terminal decision that already consumed the
+    /// generated result authority used for durable interaction publication.
+    pub(crate) fn resolve_authorized_runtime_terminal_bundle<I>(
+        &mut self,
+        input_ids: I,
+        bundle: AuthorizedRuntimeTerminalBundle,
+    ) where
+        I: IntoIterator<Item = InputId>,
+    {
+        for input_id in input_ids {
+            if let Some(senders) = self.take_waiters(&input_id) {
+                Self::send_outcome(
+                    senders,
+                    bundle.outcome.clone(),
+                    bundle.cleanup_observation.clone(),
+                );
             }
         }
     }
@@ -831,6 +945,7 @@ impl CompletionRegistry {
     }
 
     /// Resolve all waiters for an input that reached a callback boundary.
+    #[cfg(test)]
     fn resolve_callback_pending(
         &mut self,
         input_id: &InputId,
@@ -870,6 +985,7 @@ impl CompletionRegistry {
     }
 
     /// Resolve all waiters for an input that reached the cancellation terminal.
+    #[cfg(test)]
     fn resolve_cancelled(
         &mut self,
         input_id: &InputId,
@@ -896,6 +1012,7 @@ impl CompletionRegistry {
     }
 
     /// Resolve all waiters for an abandoned input with typed failure metadata.
+    #[cfg(test)]
     fn resolve_abandoned_with_error(
         &mut self,
         input_id: &InputId,
@@ -936,6 +1053,7 @@ impl CompletionRegistry {
 
     /// Resolve all waiters for a turn whose output exists but finalization
     /// failed after output production.
+    #[cfg(test)]
     fn resolve_completed_with_finalization_failure(
         &mut self,
         input_id: &InputId,
@@ -976,6 +1094,7 @@ impl CompletionRegistry {
     /// The public termination result class is supplied by generated
     /// MeerkatMachine authority; this registry method only fans the authorized
     /// class out to waiter channels.
+    #[cfg(test)]
     pub(crate) fn resolve_all_runtime_terminated(
         &mut self,
         reason: &str,
@@ -1044,53 +1163,25 @@ impl CompletionRegistry {
         }
     }
 
-    /// Resolve waiters whose input IDs are no longer pending after a
-    /// lifecycle reconciliation (for example runtime recycle/recovery).
-    pub(crate) fn resolve_not_pending_runtime_terminated<F>(
+    /// Fail waiter plumbing whose input IDs are no longer pending after a
+    /// reconciliation that intentionally preserves/requeues semantic work.
+    /// Recycle/recover must not fabricate a runtime-terminal public outcome:
+    /// any missing waiter recipient is an internal reconciliation fault, not
+    /// a newly authorized input terminal.
+    pub(crate) fn fail_not_pending_waiters<F>(
         &mut self,
         mut is_still_pending: F,
-        reason: &str,
-        authority: RuntimeCompletionResultAuthority,
+        error: CompletionWaitError,
     ) where
         F: FnMut(&InputId) -> bool,
     {
-        let expected = RuntimeCompletionResultClass::RuntimeTerminated;
-        let attempt = authority.begin_surface_resolution();
-        if !attempt.allows(expected) {
-            let error = Self::authority_mismatch_error(&attempt, expected);
-            attempt.fail();
-            self.waiters.retain(|input_id, senders| {
-                if is_still_pending(input_id) {
-                    return true;
-                }
-
-                Self::send_error(std::mem::take(senders), error.clone());
-                false
-            });
-            return;
-        }
-
-        let mut ready = Vec::new();
         self.waiters.retain(|input_id, senders| {
             if is_still_pending(input_id) {
                 return true;
             }
-
-            ready.push(std::mem::take(senders));
+            Self::send_error(std::mem::take(senders), error.clone());
             false
         });
-        if ready.is_empty() {
-            attempt.abandon();
-            return;
-        }
-        let cleanup_observation = Self::cleanup_from_realized_attempt(attempt);
-        for senders in ready {
-            Self::send_outcome(
-                senders,
-                CompletionOutcome::runtime_terminated(reason),
-                cleanup_observation.clone(),
-            );
-        }
     }
 
     /// Snapshot the current waiter carrier without mutating it.
@@ -1258,6 +1349,46 @@ mod tests {
         match h2.wait_authorized().await {
             CompletionOutcome::RuntimeTerminated { reason, .. } => {
                 assert_eq!(reason, "runtime stopped");
+            }
+            other => panic!("Expected RuntimeTerminated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_terminal_bundle_preserves_one_exact_non_default_reason() {
+        let input_id = InputId::new();
+        let interaction_id = meerkat_core::interaction::InteractionId(input_id.0);
+        let reason = "runtime destroyed by operator blue/17";
+        let bundle = authorize_runtime_terminal_bundle(
+            &[interaction_id],
+            None,
+            authority(
+                RuntimeCompletionResultClass::RuntimeTerminated,
+                RuntimeCompletionObservedOutcome::RuntimeTerminated,
+            ),
+            None,
+            Some(reason),
+        )
+        .expect("generated runtime termination should authorize one exact terminal bundle");
+
+        assert!(matches!(
+            bundle.interaction_events(),
+            [meerkat_core::event::AgentEvent::InteractionFailed {
+                interaction_id: emitted_id,
+                reason: meerkat_core::event::InteractionFailureReason::Abandoned { detail },
+            }] if *emitted_id == interaction_id && detail == reason
+        ));
+
+        let mut registry = CompletionRegistry::new();
+        let handle = registry.register(input_id.clone());
+        registry.resolve_authorized_runtime_terminal_bundle([input_id], bundle);
+        match handle.wait_authorized().await {
+            CompletionOutcome::RuntimeTerminated {
+                reason: waiter_reason,
+                error,
+            } => {
+                assert_eq!(waiter_reason, reason);
+                assert_eq!(error.detail.as_deref(), Some(reason));
             }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
@@ -1692,67 +1823,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_not_pending_keeps_pending_waiters() {
+    async fn fail_not_pending_keeps_pending_waiters_without_claiming_a_terminal() {
         let mut registry = CompletionRegistry::new();
         let keep_id = InputId::new();
         let drop_id = InputId::new();
 
         let keep_handle = registry.register(keep_id.clone());
         let drop_handle = registry.register(drop_id.clone());
-        registry.resolve_not_pending_runtime_terminated(
+        registry.fail_not_pending_waiters(
             |input_id| input_id == &keep_id,
-            "runtime recycled",
-            authority(
-                RuntimeCompletionResultClass::RuntimeTerminated,
-                RuntimeCompletionObservedOutcome::RuntimeTerminated,
+            CompletionWaitError::AuthorityUnavailable(
+                "recycled input no longer pending".to_string(),
             ),
         );
         assert_eq!(registry.debug_waiter_count(), 1);
 
-        match drop_handle.wait_authorized().await {
-            CompletionOutcome::RuntimeTerminated { reason, .. } => {
-                assert_eq!(reason, "runtime recycled");
-            }
-            other => panic!("Expected RuntimeTerminated, got {other:?}"),
-        }
-
-        registry.resolve_without_result_authorized(
-            &keep_id,
-            authority(
-                RuntimeCompletionResultClass::CompletedWithoutResult,
-                RuntimeCompletionObservedOutcome::CompletedWithoutResult,
-            ),
-        );
-        match keep_handle.wait_authorized().await {
-            CompletionOutcome::CompletedWithoutResult => {}
-            other => panic!("Expected CompletedWithoutResult, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn mismatched_not_pending_runtime_terminated_authority_fails_selected_waiters_closed() {
-        let mut registry = CompletionRegistry::new();
-        let keep_id = InputId::new();
-        let drop_id = InputId::new();
-
-        let keep_handle = registry.register(keep_id.clone());
-        let drop_handle = registry.register(drop_id);
-        registry.resolve_not_pending_runtime_terminated(
-            |input_id| input_id == &keep_id,
-            "runtime recycled",
-            authority(
-                RuntimeCompletionResultClass::Completed,
-                RuntimeCompletionObservedOutcome::Completed,
-            ),
-        );
-
-        assert_eq!(registry.debug_waiter_count(), 1);
         match drop_handle.try_wait().await {
             Err(CompletionWaitError::AuthorityUnavailable(reason)) => {
-                assert!(reason.contains("Completed"));
-                assert!(reason.contains("RuntimeTerminated"));
+                assert_eq!(reason, "recycled input no longer pending");
             }
-            other => panic!("Expected authority mismatch wait error, got {other:?}"),
+            other => panic!("Expected reconciliation plumbing failure, got {other:?}"),
         }
 
         registry.resolve_without_result_authorized(

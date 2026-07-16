@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use meerkat::{build_ephemeral_service, AgentFactory, FactoryAgentBuilder};
 use meerkat_core::config::Config;
+use meerkat_mob::MobControlPrincipal;
 use meerkat_mob_mcp::MobMcpState;
 use meerkat_session::EphemeralSessionService;
 
@@ -47,7 +48,10 @@ impl ForceState {
         let session_service: Arc<SessionSvc> =
             Arc::new(build_ephemeral_service(factory, config, 64));
 
-        let mob_state = Arc::new(MobMcpState::new(session_service.clone()));
+        let mob_state = Arc::new(MobMcpState::new(
+            session_service.clone(),
+            MobControlPrincipal::Owner,
+        ));
         let mut pack_registry = PackRegistry::new();
         let builtin_names: Vec<String> = pack_registry
             .list_names()

@@ -12,7 +12,7 @@
 
 use indexmap::IndexMap;
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
-use meerkat_core::HandlingMode;
+use meerkat_core::{HandlingMode, Provider};
 use meerkat_mob::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowNodeSpec,
     FlowSpec, FlowStepSpec, FrameSpec, FrameStepSpec, LimitsSpec, OrchestratorConfig,
@@ -20,12 +20,11 @@ use meerkat_mob::definition::{
 };
 use meerkat_mob::{
     AdaptiveLayerPhaseView, AdaptiveRunPhaseView, AdaptiveStopReasonView, AgentIdentity, FlowId,
-    LoopId, MobBackendKind, MobBuilder, MobDefinition, MobHandle, MobId, MobRun, MobRunStatus,
-    MobRuntimeMode, MobSessionService, MobStorage, MobpackCallableConfig, MobpackRunSpec, Profile,
-    ProfileBinding, ProfileName, RuntimeBinding, SpawnMemberSpec, StepId, ToolConfig,
-    run_mobpack_callable,
+    LoopId, MobBackendKind, MobBuilder, MobControlPrincipal, MobDefinition, MobHandle, MobId,
+    MobRun, MobRunStatus, MobRuntimeMode, MobSessionService, MobStorage, MobpackCallableConfig,
+    MobpackRunSpec, Profile, ProfileBinding, ProfileName, RuntimeBinding, SpawnMemberSpec, StepId,
+    ToolConfig, run_mobpack_callable,
 };
-use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
 use serde_json::Value;
@@ -36,6 +35,15 @@ use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, Instant, sleep};
+
+mod support;
+use support::{
+    HostFixtureOptions, REAL_COMMS_TEST_LOCK, create_controlling_mob,
+    create_controlling_mob_with_definition, send_peer_text, spawn_host_daemon_fixture,
+    spawn_production_external_tcp_target, unused_loopback_port, wait_until,
+};
+
+const REMOTE_MOB_LIVE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 fn first_env(vars: &[&str]) -> Option<String> {
     for name in vars {
@@ -48,6 +56,17 @@ fn first_env(vars: &[&str]) -> Option<String> {
 
 fn anthropic_api_key() -> Option<String> {
     first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"])
+}
+
+fn remote_mob_live_client_or_skip(test_name: &str) -> Option<Arc<dyn meerkat_client::LlmClient>> {
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping {test_name}: RKAT_ANTHROPIC_API_KEY/ANTHROPIC_API_KEY is not set");
+        return None;
+    };
+    Some(Arc::new(
+        meerkat_client::AnthropicClient::new(api_key)
+            .expect("build Anthropic client for remote-mob smoke"),
+    ))
 }
 
 fn flow_runtime_smoke_concurrency_from_env(value: Option<&str>) -> usize {
@@ -313,6 +332,77 @@ Return exactly this JSON object and nothing else:\n{}",
 
 fn exact_json_step(role: &str, value: Value) -> FlowStepSpec {
     json_step(role, exact_json_message(value))
+}
+
+fn remote_mob_overlay_probe_flow(expected: Value) -> FlowSpec {
+    let mut step = exact_json_step("worker", expected);
+    step.blocked_tools = Some(vec!["send_message".to_string()]);
+    FlowSpec::new(
+        Some("real provider-backed placed member round trip".to_string()),
+        IndexMap::from([(StepId::from("probe"), step)]),
+        None,
+    )
+}
+
+fn remote_mob_constellation_flow() -> FlowSpec {
+    let east = exact_json_step(
+        "worker",
+        serde_json::json!({
+            "fragment": "MOON-ANCHOR-17",
+            "vector": "east/β→γ",
+            "done": true
+        }),
+    );
+    let west = exact_json_step(
+        "quiet-worker",
+        serde_json::json!({
+            "fragment": "TIDE-CIPHER-29",
+            "vector": "west/δ→ε",
+            "done": true
+        }),
+    );
+    let mut join = json_step(
+        "builtins-worker",
+        r#"You are the final station in a deterministic remote-mob constellation.
+Return raw JSON only. No markdown.
+east_fragment={{steps.east.fragment}}
+west_fragment={{steps.west.fragment}}
+east_vector={{steps.east.vector}}
+west_vector={{steps.west.vector}}
+Return exactly:
+{"constellation":"MOON-ANCHOR-17::TIDE-CIPHER-29","route":"east/β→γ + west/δ→ε => host-b","checksum":46,"done":true}"#,
+    );
+    join.depends_on = vec![StepId::from("east"), StepId::from("west")];
+
+    FlowSpec::new(
+        Some("two remote hosts fan out and a remote joiner folds the constellation".to_string()),
+        IndexMap::from([
+            (StepId::from("east"), east),
+            (StepId::from("west"), west),
+            (StepId::from("join"), join),
+        ]),
+        None,
+    )
+}
+
+fn install_remote_mob_live_flow(
+    definition: &mut MobDefinition,
+    flow_id: &str,
+    flow: FlowSpec,
+    roles: &[&str],
+) {
+    for role in roles {
+        let binding = definition
+            .profiles
+            .get_mut(&ProfileName::from(*role))
+            .unwrap_or_else(|| panic!("remote-mob smoke profile {role} exists"));
+        let ProfileBinding::Inline(profile) = binding else {
+            panic!("remote-mob smoke profile {role} must be inline");
+        };
+        profile.model = REMOTE_MOB_LIVE_MODEL.to_string();
+        profile.provider = Some(Provider::Anthropic);
+    }
+    definition.flows.insert(FlowId::from(flow_id), flow);
 }
 
 fn exact_json_step_with_condition(
@@ -2730,38 +2820,11 @@ async fn setup_flow_mob(
     (handle, mob_service, temp)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-struct ProductionExternalTcpTarget {
-    binding: RuntimeBinding,
-    adapter: Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
-    session_id: meerkat_core::SessionId,
-    runtime: Arc<meerkat_comms::CommsRuntime>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl ProductionExternalTcpTarget {
-    async fn active_input_count(&self) -> usize {
-        self.adapter
-            .list_active_inputs(&self.session_id)
-            .await
-            .expect("target runtime should list active inputs")
-            .len()
-    }
-
-    async fn shutdown(&self) {
-        // Teardown: tolerate already-stopped/unknown drains (typed result).
-        let _aborted: Result<(), _> = self.adapter.abort_comms_drain(&self.session_id).await;
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn unused_loopback_port() -> u16 {
-    std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("reserve loopback port")
-        .local_addr()
-        .expect("reserved listener local addr")
-        .port()
-}
+// `ProductionExternalTcpTarget`, `spawn_production_external_tcp_target`, and
+// `unused_loopback_port` moved to the shared fixture module
+// `tests/support/mod.rs` (multi-host mobs phase 2, Lane W4) so deterministic
+// lanes can compose the production-drain external target too. This file
+// consumes the shared fixture; the composition is byte-for-byte the same.
 
 #[cfg(not(target_arch = "wasm32"))]
 fn external_tcp_smoke_definition(
@@ -2811,91 +2874,6 @@ fn external_tcp_smoke_definition(
         }),
     };
     definition
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn spawn_production_external_tcp_target(peer_name: &str) -> ProductionExternalTcpTarget {
-    let mut runtime =
-        meerkat_comms::CommsRuntime::inproc_only(peer_name).expect("create target comms runtime");
-    runtime
-        .set_listen_tcp_for_unstarted_runtime(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("configure target TCP listener");
-    runtime
-        .start_listeners()
-        .await
-        .expect("start target TCP listener");
-    let address = runtime.advertised_address();
-    let peer_id = runtime.public_key().to_peer_id().to_string();
-    let pubkey = *runtime.public_key().as_bytes();
-    let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
-    let runtime = Arc::new(runtime);
-    let session_id = meerkat_core::SessionId::new();
-
-    // The target runs the PRODUCTION comms_drain on `adapter`, which mints the
-    // supervisor trust-publish obligations during BindMember. The runtime's
-    // peer-comms classification handle AND its generated trust owner must come
-    // from that SAME adapter session — otherwise the inbound BindMember is
-    // dropped (ClassificationRejected → PeerOffline) for lack of a classifier,
-    // and the supervisor trust publish is rejected ("minted by a different
-    // generated owner"). A real session-backed external member gets this wiring
-    // from its SessionRuntimeBindings; this simulation installs it explicitly.
-    let adapter = Arc::new(meerkat_runtime::meerkat_machine::MeerkatMachine::ephemeral());
-    adapter
-        .register_session(session_id.clone())
-        .await
-        .expect("register session");
-    adapter
-        .test_install_session_peer_comms_handle_on_runtime(&session_id, runtime.as_ref())
-        .await
-        .expect("install adapter session peer-comms handle on target runtime");
-
-    // Peer request/response authority records inbound bridge requests on the
-    // runtime so the drain can reply (request_received → response).
-    let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
-    dsl.apply_signal(
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
-        "external_tcp_smoke_target::initialize",
-    )
-    .expect("initialize target peer interaction authority");
-    dsl.apply_input(
-        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
-            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
-                session_id.to_string(),
-            ),
-        },
-        "external_tcp_smoke_target::register",
-    )
-    .expect("register target peer interaction authority");
-    runtime.install_peer_request_response_authority(
-        meerkat_comms::PeerRequestResponseAuthority::new(
-            Arc::new(meerkat_runtime::handles::RuntimePeerInteractionHandle::new(
-                Arc::clone(&dsl),
-            )),
-            Arc::new(meerkat_runtime::handles::RuntimeInteractionStreamHandle::new(dsl)),
-        ),
-    );
-
-    let spawned = adapter
-        .maybe_spawn_comms_drain(
-            &session_id,
-            true,
-            Some(runtime.clone() as Arc<dyn meerkat_core::agent::CommsRuntime>),
-        )
-        .await
-        .expect("update_peer_ingress_context must succeed");
-    assert!(spawned, "target must run production comms_drain");
-
-    ProductionExternalTcpTarget {
-        binding: RuntimeBinding::External {
-            peer_id,
-            address,
-            bootstrap_token: Some(bootstrap_token.into()),
-            pubkey,
-        },
-        adapter,
-        session_id,
-        runtime,
-    }
 }
 
 async fn wait_for_run_terminal(handle: &MobHandle, run_id: &meerkat_mob::RunId) -> MobRun {
@@ -2985,6 +2963,271 @@ fn assert_completed_without_failures(run: &MobRun, label: &str) {
     );
 }
 
+async fn assert_remote_member_materialized(
+    controlling: &support::ControllingMob,
+    fixture: &support::HostDaemonFixture,
+    host_id: &str,
+    member: &str,
+) {
+    let identity = AgentIdentity::from(member);
+    let snapshot = controlling
+        .handle
+        .member_status(&identity)
+        .await
+        .unwrap_or_else(|error| panic!("member status for {member}: {error}"));
+    assert_eq!(
+        snapshot.placement.as_deref(),
+        Some(host_id),
+        "{member} must remain explicitly placed on its remote host"
+    );
+
+    let record = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await;
+    let row = record
+        .materialized
+        .get(member)
+        .unwrap_or_else(|| panic!("owning host must durably materialize {member}: {record:?}"));
+    assert!(
+        fixture.member_session_exists(&row.session_id).await,
+        "owning host must persist {member}'s remote session"
+    );
+
+    let remote_session = meerkat_core::SessionId::parse(&row.session_id)
+        .unwrap_or_else(|error| panic!("remote session id for {member} parses: {error}"));
+    assert!(
+        meerkat_core::service::SessionService::read(controlling.service.as_ref(), &remote_session,)
+            .await
+            .is_err(),
+        "the controlling service must not own {member}'s remote session"
+    );
+}
+
+async fn assert_remote_member_history(
+    controlling: &support::ControllingMob,
+    host_id: &str,
+    member: &str,
+    marker: &str,
+) {
+    let history = controlling
+        .handle
+        .member_history(
+            MobControlPrincipal::Owner,
+            AgentIdentity::from(member),
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("remote history for {member}: {error}"));
+    assert_eq!(
+        history
+            .placement
+            .as_ref()
+            .map(|placement| placement.as_str()),
+        Some(host_id),
+        "history for {member} must be served by the owning remote host"
+    );
+    assert!(
+        history.page.message_count >= 2,
+        "remote turn for {member} must persist user and assistant messages: {history:?}"
+    );
+    let rendered = serde_json::to_string(&history.page)
+        .unwrap_or_else(|error| panic!("serialize remote history for {member}: {error}"));
+    assert!(
+        rendered.contains(marker),
+        "remote history for {member} must contain marker {marker}: {rendered}"
+    );
+}
+
+async fn wait_for_remote_mob_smoke_drain(
+    controlling: &support::ControllingMob,
+    fixtures: &[&support::HostDaemonFixture],
+) {
+    wait_until("remote turn obligations to drain", || async {
+        controlling
+            .handle
+            .remote_turn_obligations_observation()
+            .is_empty()
+    })
+    .await;
+
+    let mob_id = controlling.mob_id.to_string();
+    for fixture in fixtures {
+        wait_until("remote host turn-outcome journal to drain", || async {
+            fixture.turn_outcome_rows(&mob_id).await.is_empty()
+        })
+        .await;
+    }
+}
+
+/// Phase 4 §9/§10.4 — route-install obligations are RETAINED across a
+/// member-host partition and drained by the explicit retry verb once the
+/// host returns at the same identity/address over its durable truth.
+///
+/// Deterministic local-resource row (no live providers): real host-daemon
+/// composition over real loopback TCP; the partition is a full daemon
+/// quiesce with durable truth retained (`HostDaemonFixture::partition`).
+/// The deterministic T-W1..T-W4 rows in `cross_host_wiring.rs` remain the
+/// regression gate; this row pins the §9 partition observable end to end.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "lane:e2e-system"]
+async fn e2e_mob_host_partition_retains_route_install_obligations() {
+    const CONVERGE_WAIT: Duration = Duration::from_secs(60);
+    async fn wait_for<F, Fut>(what: &str, mut predicate: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        tokio::time::timeout(CONVERGE_WAIT, async {
+            loop {
+                if predicate().await {
+                    return;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture = spawn_host_daemon_fixture(
+        HostFixtureOptions::named("partition-route-installs-host-b").with_member_build(),
+    )
+    .await
+    .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("e2e-partition-route-installs").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let mob_id = controlling.mob_id.to_string();
+
+    controlling
+        .handle
+        .spawn_spec(SpawnMemberSpec::new("worker", "a1"))
+        .await
+        .expect("spawn local a1");
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 materializes on host B");
+
+    // Positive control: a live-host wire converges with no obligations.
+    controlling
+        .handle
+        .wire(AgentIdentity::from("a1"), AgentIdentity::from("b2"))
+        .await
+        .expect("live-host wire converges");
+    let installs = controlling
+        .handle
+        .route_installs()
+        .await
+        .expect("route installs projection");
+    assert!(
+        installs.complete && installs.outstanding.is_empty(),
+        "no outstanding obligations against the live host: {installs:?}"
+    );
+    let b2_row = fixture
+        .host_binding_record(&mob_id)
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row");
+
+    // PARTITION: quiesce the daemon, retaining durable truth + address.
+    let partitioned = fixture.partition().await;
+
+    // A cross-host wire during the partition commits the edge (Ok — fail
+    // closed, never fail quiet) and RETAINS the install obligation.
+    controlling
+        .handle
+        .spawn_spec(SpawnMemberSpec::new("worker", "a2"))
+        .await
+        .expect("spawn local a2 while partitioned");
+    controlling
+        .handle
+        .wire(AgentIdentity::from("a2"), AgentIdentity::from("b2"))
+        .await
+        .expect("wire during the partition commits the edge and records the obligation");
+    let installs = controlling
+        .handle
+        .route_installs()
+        .await
+        .expect("route installs projection");
+    assert!(
+        !installs.complete,
+        "the partitioned install must stay outstanding: {installs:?}"
+    );
+    assert!(
+        installs
+            .outstanding
+            .iter()
+            .any(|obligation| obligation.edge_a == "a2" && obligation.edge_b == "b2"),
+        "the obligation names the (a2, b2) edge: {installs:?}"
+    );
+    // Membership and the wiring graph are UNCHANGED by the partition.
+    let a2_entry = controlling
+        .handle
+        .get_member(&AgentIdentity::from("a2"))
+        .await
+        .expect("get a2")
+        .expect("a2 present");
+    assert!(
+        a2_entry.wired_to.contains(&AgentIdentity::from("b2")),
+        "the committed edge survives the partition"
+    );
+
+    // HEAL: the daemon returns at the same identity/address over its durable
+    // truth (boot revival recomposes b2; revived members hold no peer trust
+    // rows until the retry re-installs them).
+    let fixture = partitioned.restore().await;
+    controlling
+        .handle
+        .drive_route_installs()
+        .await
+        .expect("drive drains the retained obligation after the partition heals");
+    wait_for("route-install obligations to drain", || async {
+        let installs = controlling
+            .handle
+            .route_installs()
+            .await
+            .expect("route installs projection");
+        installs.complete && installs.outstanding.is_empty()
+    })
+    .await;
+
+    // The healed edge is usable: REAL delivery, receiver-acked.
+    let a2_session = controlling
+        .member_session_id(&AgentIdentity::from("a2"))
+        .await;
+    let a2_runtime = controlling.member_comms_runtime(&a2_session).await;
+    let b2_runtime = fixture.member_comms_runtime(&b2_row.session_id).await;
+    let b2_peer = b2_runtime.peer_id().expect("b2 peer id");
+    let a2_peer = a2_runtime.peer_id().expect("a2 peer id");
+    wait_for("b2's trust row for a2 to be installed", || async {
+        fixture
+            .member_trusts_peer(&b2_row.session_id, &a2_peer.to_string())
+            .await
+    })
+    .await;
+    let receipt = send_peer_text(&a2_runtime, b2_peer, "post-partition delivery")
+        .await
+        .expect("a2 -> b2 delivers after the partition heals");
+    assert!(
+        matches!(
+            receipt,
+            meerkat_core::SendReceipt::PeerMessageSent {
+                delivery: meerkat_core::comms::PeerDeliveryOutcome::Acked
+                    | meerkat_core::comms::PeerDeliveryOutcome::HandedOff,
+                ..
+            }
+        ),
+        "post-heal delivery must be receiver-acked, got {receipt:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
@@ -3026,7 +3269,9 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
     let target = spawn_production_external_tcp_target(&target_peer_name).await;
     let target_address = match &target.binding {
         RuntimeBinding::External { address, .. } => address.clone(),
-        RuntimeBinding::Session => panic!("target binding must be external"),
+        RuntimeBinding::Session | RuntimeBinding::HostMaterialized { .. } => {
+            panic!("target binding must be external")
+        }
     };
     assert!(
         target_address.starts_with("tcp://127.0.0.1:"),
@@ -3080,6 +3325,218 @@ async fn e2e_external_tcp_production_drain_bind_and_turn_smoke() {
         .shutdown()
         .await
         .expect("shutdown external TCP smoke mob");
+}
+
+/// Turbo S scenario 92: one real provider turn crosses the production
+/// supervisor bridge into an explicitly placed member and returns through
+/// the remote outcome journal. Its overlay-bearing step also exercises the
+/// remote policy-directive path without asking the live model to call a tool.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_s92_remote_mob_live_placed_overlay_roundtrip() {
+    const TEST_NAME: &str = "e2e_smoke_s92_remote_mob_live_placed_overlay_roundtrip";
+    const FLOW_ID: &str = "remote-overlay-probe";
+    const MEMBER: &str = "orbit-worker";
+    const MARKER: &str = "REMOTE-ORBIT-92";
+
+    let Some(client) = remote_mob_live_client_or_skip(TEST_NAME) else {
+        return;
+    };
+    let _permit = acquire_flow_runtime_smoke_permit(TEST_NAME).await;
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+
+    let fixture = spawn_host_daemon_fixture(HostFixtureOptions {
+        resolvable_providers: vec![Provider::Anthropic],
+        member_llm_client: Some(client),
+        ..HostFixtureOptions::named("turbo-s92-remote-orbit-host").with_member_build()
+    })
+    .await
+    .expect("spawn real-client member host for scenario 92");
+    let expected = serde_json::json!({
+        "marker": MARKER,
+        "route": "controller→signed-tcp→remote-member→journal→controller",
+        "oddity": "🦀 carries λ through a keyhole",
+        "done": true
+    });
+    let controlling = create_controlling_mob_with_definition("turbo-s92-remote-orbit", {
+        let expected = expected.clone();
+        move |definition| {
+            install_remote_mob_live_flow(
+                definition,
+                FLOW_ID,
+                remote_mob_overlay_probe_flow(expected),
+                &["worker"],
+            );
+        }
+    })
+    .await;
+    let report = controlling.bind_fixture(&fixture).await;
+
+    controlling
+        .spawn_placed("worker", MEMBER, &report.host_id)
+        .await
+        .expect("scenario 92 worker materializes on its remote host");
+    assert_remote_member_materialized(&controlling, &fixture, &report.host_id, MEMBER).await;
+
+    let run_id = controlling
+        .handle
+        .run_flow(FlowId::from(FLOW_ID), serde_json::json!({}))
+        .await
+        .expect("scenario 92 remote flow starts");
+    let run = wait_for_run_terminal(&controlling.handle, &run_id).await;
+    assert_completed_without_failures(&run, "scenario 92 remote overlay round trip");
+    assert_eq!(
+        completed_root_output(&run, "probe"),
+        &expected,
+        "the exact structured response must return from the remote member"
+    );
+    assert_remote_member_history(&controlling, &report.host_id, MEMBER, MARKER).await;
+    wait_for_remote_mob_smoke_drain(&controlling, &[&fixture]).await;
+
+    controlling
+        .handle
+        .shutdown()
+        .await
+        .expect("shut down scenario 92 controlling mob");
+    fixture.shutdown().await;
+}
+
+/// Turbo S scenario 93: controller A binds hosts B and C, dispatches two
+/// real provider turns in parallel, then sends their structured fragments to
+/// a third placed member for a remote join. This is intentionally a little
+/// theatrical while keeping every assertion structural and deterministic.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_s93_remote_mob_two_host_constellation_join() {
+    const TEST_NAME: &str = "e2e_smoke_s93_remote_mob_two_host_constellation_join";
+    const FLOW_ID: &str = "remote-constellation";
+
+    let Some(client) = remote_mob_live_client_or_skip(TEST_NAME) else {
+        return;
+    };
+    let _permit = acquire_flow_runtime_smoke_permit(TEST_NAME).await;
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+
+    let host_b = spawn_host_daemon_fixture(HostFixtureOptions {
+        resolvable_providers: vec![Provider::Anthropic],
+        member_llm_client: Some(Arc::clone(&client)),
+        ..HostFixtureOptions::named("turbo-s93-constellation-host-b").with_member_build()
+    })
+    .await
+    .expect("spawn real-client host B for scenario 93");
+    let host_c = spawn_host_daemon_fixture(HostFixtureOptions {
+        resolvable_providers: vec![Provider::Anthropic],
+        member_llm_client: Some(client),
+        ..HostFixtureOptions::named("turbo-s93-constellation-host-c").with_member_build()
+    })
+    .await
+    .expect("spawn real-client host C for scenario 93");
+    let controlling =
+        create_controlling_mob_with_definition("turbo-s93-remote-constellation", |definition| {
+            install_remote_mob_live_flow(
+                definition,
+                FLOW_ID,
+                remote_mob_constellation_flow(),
+                &["worker", "quiet-worker", "builtins-worker"],
+            );
+        })
+        .await;
+    let report_b = controlling.bind_fixture(&host_b).await;
+    let report_c = controlling.bind_fixture(&host_c).await;
+    assert_ne!(
+        report_b.host_id, report_c.host_id,
+        "scenario 93 must bind two distinct remote host identities"
+    );
+
+    controlling
+        .spawn_placed("worker", "east-lantern", &report_b.host_id)
+        .await
+        .expect("east lantern materializes on host B");
+    controlling
+        .spawn_placed("quiet-worker", "west-lantern", &report_c.host_id)
+        .await
+        .expect("west lantern materializes on host C");
+    controlling
+        .spawn_placed("builtins-worker", "constellation-joiner", &report_b.host_id)
+        .await
+        .expect("constellation joiner materializes on host B");
+
+    assert_remote_member_materialized(&controlling, &host_b, &report_b.host_id, "east-lantern")
+        .await;
+    assert_remote_member_materialized(&controlling, &host_c, &report_c.host_id, "west-lantern")
+        .await;
+    assert_remote_member_materialized(
+        &controlling,
+        &host_b,
+        &report_b.host_id,
+        "constellation-joiner",
+    )
+    .await;
+
+    let run_id = controlling
+        .handle
+        .run_flow(FlowId::from(FLOW_ID), serde_json::json!({}))
+        .await
+        .expect("scenario 93 constellation flow starts");
+    let run = wait_for_run_terminal(&controlling.handle, &run_id).await;
+    assert_completed_without_failures(&run, "scenario 93 remote constellation");
+    assert_eq!(
+        completed_root_output(&run, "east"),
+        &serde_json::json!({
+            "fragment": "MOON-ANCHOR-17",
+            "vector": "east/β→γ",
+            "done": true
+        })
+    );
+    assert_eq!(
+        completed_root_output(&run, "west"),
+        &serde_json::json!({
+            "fragment": "TIDE-CIPHER-29",
+            "vector": "west/δ→ε",
+            "done": true
+        })
+    );
+    assert_eq!(
+        completed_root_output(&run, "join"),
+        &serde_json::json!({
+            "constellation": "MOON-ANCHOR-17::TIDE-CIPHER-29",
+            "route": "east/β→γ + west/δ→ε => host-b",
+            "checksum": 46,
+            "done": true
+        }),
+        "the third remote member must join both remote fragments"
+    );
+
+    assert_remote_member_history(
+        &controlling,
+        &report_b.host_id,
+        "east-lantern",
+        "MOON-ANCHOR-17",
+    )
+    .await;
+    assert_remote_member_history(
+        &controlling,
+        &report_c.host_id,
+        "west-lantern",
+        "TIDE-CIPHER-29",
+    )
+    .await;
+    assert_remote_member_history(
+        &controlling,
+        &report_b.host_id,
+        "constellation-joiner",
+        "MOON-ANCHOR-17::TIDE-CIPHER-29",
+    )
+    .await;
+    wait_for_remote_mob_smoke_drain(&controlling, &[&host_b, &host_c]).await;
+
+    controlling
+        .handle
+        .shutdown()
+        .await
+        .expect("shut down scenario 93 controlling mob");
+    host_c.shutdown().await;
+    host_b.shutdown().await;
 }
 
 async fn run_smoke_flow_or_skip(test_name: &str, flow_id: &str, params: Value) -> Option<MobRun> {

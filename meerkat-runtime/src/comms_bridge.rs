@@ -124,6 +124,7 @@ fn peer_input_from_ingress_fact(
         .or_else(|| ingress.display_label());
 
     Ok(Input::Peer(PeerInput {
+        directed_interaction_id: None,
         injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
@@ -245,7 +246,8 @@ fn peer_rendered_body(interaction: &InboxInteraction) -> String {
         return interaction.rendered_text.clone();
     }
     match &interaction.content {
-        InteractionContent::Message { body, .. } => body.clone(),
+        InteractionContent::Message { body, .. }
+        | InteractionContent::IncarnationFencedMessage { body, .. } => body.clone(),
         InteractionContent::Request { params, .. } => {
             serde_json::to_string(params).unwrap_or_default()
         }
@@ -257,7 +259,8 @@ fn peer_rendered_body(interaction: &InboxInteraction) -> String {
 
 fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types::ContentBlock>> {
     match &interaction.content {
-        InteractionContent::Message { blocks, .. } => blocks.clone(),
+        InteractionContent::Message { blocks, .. }
+        | InteractionContent::IncarnationFencedMessage { blocks, .. } => blocks.clone(),
         InteractionContent::Request { blocks, .. } => blocks.clone(),
         InteractionContent::Response { blocks, .. } => blocks.clone(),
     }
@@ -265,7 +268,8 @@ fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types
 
 fn peer_payload(interaction: &InboxInteraction) -> Option<serde_json::Value> {
     match &interaction.content {
-        InteractionContent::Message { .. } => None,
+        InteractionContent::Message { .. }
+        | InteractionContent::IncarnationFencedMessage { .. } => None,
         InteractionContent::Request { params, .. } => Some(params.clone()),
         InteractionContent::Response { result, .. } => Some(result.clone()),
     }
@@ -273,7 +277,10 @@ fn peer_payload(interaction: &InboxInteraction) -> Option<serde_json::Value> {
 
 fn external_event_payload(interaction: &InboxInteraction) -> serde_json::Value {
     match &interaction.content {
-        InteractionContent::Message { body, .. } => serde_json::json!({ "body": body }),
+        InteractionContent::Message { body, .. }
+        | InteractionContent::IncarnationFencedMessage { body, .. } => {
+            serde_json::json!({ "body": body })
+        }
         InteractionContent::Request { intent, params, .. } => {
             serde_json::json!({ "intent": intent, "params": params })
         }
@@ -295,7 +302,8 @@ fn external_event_blocks(
     interaction: &InboxInteraction,
 ) -> Option<Vec<meerkat_core::types::ContentBlock>> {
     match &interaction.content {
-        InteractionContent::Message { blocks, .. } => blocks.clone(),
+        InteractionContent::Message { blocks, .. }
+        | InteractionContent::IncarnationFencedMessage { blocks, .. } => blocks.clone(),
         InteractionContent::Request { blocks, .. } => blocks.clone(),
         _ => None,
     }
@@ -709,6 +717,7 @@ mod tests {
                 display_name: meerkat_core::comms::PeerName::new("display-agent".to_string()).ok(),
                 signing_pubkey: None,
                 route: None,
+                declared_reply_endpoint: None,
                 auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
                 convention: PeerIngressConvention::Message,
             },
@@ -1211,6 +1220,7 @@ mod tests {
                 display_name: meerkat_core::comms::PeerName::new("Peer One".to_string()).ok(),
                 signing_pubkey: None,
                 route: None,
+                declared_reply_endpoint: None,
                 auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
                 convention: PeerIngressConvention::Response {
                     in_reply_to,

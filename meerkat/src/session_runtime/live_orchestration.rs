@@ -15,11 +15,24 @@
 //! surface-specific adapters and policy inputs instead of reimplementing the
 //! lifecycle orchestration.
 //!
-//! These free functions only depend on `meerkat-llm-core`, `meerkat-core`,
-//! and the model catalog — they do NOT import `meerkat-live`, so they
-//! compile unconditionally regardless of the `live` feature. The
-//! `live` feature gates the [`crate::session_runtime::live_orchestration::LiveOrchestrator`]
-//! methods that consume `LiveAdapterHost`.
+//! Since phase 6b (DL4, ADJ-P6B-5) [`LiveOrchestrator`] IS the single
+//! live pipeline home: the full open sequencing (S1-S12, including the
+//! fail-closed `close_live_channel_after_open_failure` cleanup), the
+//! channel verbs (close/status/control/send_input), and the session-pin
+//! discipline all live here. `rkat-rpc` drives it through thin
+//! `SessionRuntime` delegates (frozen wire strings); the member host
+//! drives the identical pipeline through
+//! `meerkat::surface::ServiceMemberLiveHost` implementing
+//! `meerkat_runtime::member_live::MemberLiveHost`. Per-call transport
+//! inputs (WS state, advertised base URL, cfg'd webrtc) ride
+//! [`LiveTransportContext`]; the machine admission and token authorities
+//! remain the owning session's `MeerkatMachine` — one pipeline, one
+//! admission path, two surfaces.
+//!
+//! The free functions below only depend on `meerkat-llm-core`,
+//! `meerkat-core`, and the model catalog — they do NOT import
+//! `meerkat-live`, so they compile unconditionally; everything consuming
+//! `LiveAdapterHost` sits behind the `live` feature gate.
 
 use meerkat_core::error::AgentError;
 use meerkat_core::service::SessionError;
@@ -704,7 +717,12 @@ pub fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness 
     feature = "live",
     not(target_arch = "wasm32")
 ))]
-pub use orchestrator::LiveOrchestrator;
+pub use orchestrator::{
+    LiveOrchestrator, LiveSessionIngressReconciler, LiveTransportContext, LiveTruncateCursor,
+    build_live_projection_snapshot, continuity_from_snapshot, live_audio_config_from_capabilities,
+    live_close_result_from_machine_authority, live_refresh_result_from_machine_authority,
+    live_ws_audio_format_param, wire_live_status_from_machine_authority,
+};
 
 #[cfg(all(
     feature = "session-store",
@@ -714,6 +732,19 @@ pub use orchestrator::LiveOrchestrator;
 mod orchestrator {
     use std::sync::Arc;
 
+    use meerkat_contracts::wire::supervisor_bridge::{
+        BridgeLiveControlOutcome, BridgeLiveControlVerb,
+    };
+    use meerkat_contracts::{
+        LiveCloseResult, LiveCommitInputResult, LiveInterruptResult, LiveOpenResult,
+        LiveOpenTransport, LiveRefreshResult, LiveSendInputResult, LiveTruncateResult,
+        RealtimeCapabilities, RealtimeTurningMode, WireLiveAdapterStatus,
+        WireLiveDegradationReason,
+    };
+    use meerkat_core::live_adapter::{
+        LiveAdapterCommand, LiveAudioConfig, LiveContinuityMode, LiveInputChunk,
+        LiveProjectionSnapshot, LiveResponseModality, LiveTransportBootstrap,
+    };
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionError, SessionService,
     };
@@ -722,8 +753,11 @@ mod orchestrator {
         DeferredPromptPolicy, RealtimeOpenProjectionAdmission, SessionLlmIdentity,
         SurfaceSessionRecoveryOverrides,
     };
-    use meerkat_live::LiveAdapterHost;
-    use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
+    use meerkat_live::{
+        LiveAdapterHost, LiveAdapterHostError, LiveChannelCloseObservation, LiveChannelId,
+        LiveWsState,
+    };
+    use meerkat_llm_core::realtime_session::{RealtimeSessionFactory, RealtimeSessionOpenConfig};
     use meerkat_runtime::{MeerkatMachine, SessionLlmReconfigureRequest, SessionServiceRuntimeExt};
     use meerkat_session::PersistentSessionService;
 
@@ -743,12 +777,17 @@ mod orchestrator {
     use crate::session_runtime::admission::{
         StagedCapacityAdmissions, take_staged_capacity_admission,
     };
-    use crate::session_runtime::errors::LiveOpenPrecheckError;
+    use crate::session_runtime::errors::{
+        LiveChannelVerbError, LiveIngressError, LiveOpenError, LiveOpenPrecheckError,
+    };
     use crate::session_runtime::recovery::{RecoveryContext, RecoveryRuntimeBindingMode};
     use crate::session_runtime::runtime_state::ArchiveRuntimeCleanup;
     use crate::session_runtime::staged_promotion::PendingPromotionCleanup;
     use crate::{StagedLifecycleError, StagedSessionRegistry};
     use meerkat_core::error::AgentError;
+    use meerkat_runtime::meerkat_machine::dsl::{
+        LiveChannelRequestPublicKind, LiveCommandPublicKind, LiveOpenAdmissionRejection,
+    };
 
     /// Surface-agnostic live-channel orchestrator.
     ///
@@ -788,6 +827,85 @@ mod orchestrator {
         pub instance_id: Option<&'a str>,
         /// Active backend label.
         pub backend: Option<&'a str>,
+        /// Surface hook for SESSION-OWNED peer-ingress reconciliation on
+        /// `live/open` (DEC-P6B-L5). The pipeline owns the mob-owned skip;
+        /// this hook owns the session-owned branch. `None` fails closed
+        /// when a session-owned reconcile is actually required — callers
+        /// that never open (precheck/config/propagate paths) pass `None`.
+        pub ingress_reconciler: Option<&'a dyn LiveSessionIngressReconciler>,
+    }
+
+    /// Per-call transport-stage inputs for the open/verb pipeline methods
+    /// (DEC-P6B-L1/L8/L12). Surfaces own these per connection (RPC router
+    /// state) or per composition (member host), not per runtime — so they
+    /// ride a borrowing context instead of widening the base struct.
+    #[derive(Clone, Copy)]
+    pub struct LiveTransportContext<'a> {
+        /// Live WebSocket transport state (token mint) when composed.
+        pub ws_state: Option<&'a LiveWsState>,
+        /// Advertised absolute base URL for minted WS bootstraps
+        /// (DEC-P6B-L12: `rkat-rpc` passes its `scheme://local_addr`
+        /// single-host default; the member host passes the operator's
+        /// `--live-ws-advertise` URL — cross-host correctness is
+        /// by-construction, zero member-side special-casing).
+        pub base_url: Option<&'a str>,
+        /// WebRTC transport state when compiled + composed. The member
+        /// host never enables the feature; a `transport=webrtc` request
+        /// degrades typed exactly as the non-compiled arm.
+        #[cfg(feature = "live-webrtc")]
+        pub webrtc: Option<&'a meerkat_live::LiveWebrtcState>,
+    }
+
+    impl<'a> LiveTransportContext<'a> {
+        /// Construct the transport context without assuming that downstream
+        /// crates compiled the same optional transport feature set. Feature-
+        /// gated fields are initialized inside the owning crate, so Cargo
+        /// feature unification cannot make an external struct literal stale.
+        #[must_use]
+        pub const fn new(ws_state: Option<&'a LiveWsState>, base_url: Option<&'a str>) -> Self {
+            Self {
+                ws_state,
+                base_url,
+                #[cfg(feature = "live-webrtc")]
+                webrtc: None,
+            }
+        }
+
+        /// Attach the optional WebRTC transport when the composing surface
+        /// explicitly enables and owns it.
+        #[cfg(feature = "live-webrtc")]
+        #[must_use]
+        pub const fn with_webrtc(
+            mut self,
+            webrtc: Option<&'a meerkat_live::LiveWebrtcState>,
+        ) -> Self {
+            self.webrtc = webrtc;
+            self
+        }
+    }
+
+    /// Caller playback cursor for `live/truncate` (A7): the assistant
+    /// item to truncate and how much of its audio the client actually
+    /// played — one typed carrier for the three cursor facts.
+    pub struct LiveTruncateCursor {
+        pub item_id: String,
+        pub content_index: u32,
+        pub audio_played_ms: u64,
+    }
+
+    /// Surface hook carrying the SESSION-OWNED half of the S10
+    /// peer-ingress reconciliation (DEC-P6B-L5). The RPC surface
+    /// reconciles executor + drain context; the member host installs the
+    /// fail-closed `MobOwnedOnlyIngress` (member sessions are mob-owned by
+    /// construction, so the hook is unreachable there).
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    pub trait LiveSessionIngressReconciler: Send + Sync {
+        /// Ensure the session-owned live controller session can receive
+        /// ordinary peer ingress.
+        async fn ensure_session_owned_live_ingress(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), LiveIngressError>;
     }
 
     impl LiveOrchestrator<'_> {
@@ -928,11 +1046,13 @@ mod orchestrator {
                 Some(adm) => adm,
                 None => self.service.reserve_create_session_admission().await?,
             };
-
-            match self
-                .service
-                .create_session_with_reserved_admission(create_req, admission)
-                .await
+            match crate::session_runtime::staged_promotion::materialize_session_actor_unattached(
+                self.service,
+                self.runtime_adapter,
+                create_req,
+                admission,
+            )
+            .await
             {
                 Ok(_) => {
                     promotion_cleanup.mark_materialized();
@@ -1269,6 +1389,19 @@ mod orchestrator {
                         "failed to signal terminal error on live channel after config rejection"
                     );
                     LiveChannelCloseFailure::SignalFailed(err.to_string())
+                })?;
+            host.prepare_channel_physical_close(&observation)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        target: "meerkat::session_runtime::live_orchestration",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        context,
+                        "physical adapter close failed before config-rejection terminal authority"
+                    );
+                    LiveChannelCloseFailure::HostCommitFailed(err.to_string())
                 })?;
             let authority = self
                 .runtime_adapter
@@ -1725,6 +1858,1236 @@ mod orchestrator {
                 }
             }
             report
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6b (DL4): the ONE open/close/control pipeline shared by the
+        // RPC handlers and the member-host bridge responder. Extraction is
+        // order- and behavior-preserving (S1-S12); every failure arm from S7
+        // on routes through `close_live_channel_after_open_failure`.
+        // -------------------------------------------------------------------
+
+        /// S1 (B17): does the session exist on this host? Staged registry
+        /// first, then the live service map. A store fault surfaces typed
+        /// (row #98) — never collapsed into "not found".
+        pub async fn live_session_present(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<bool, SessionError> {
+            if self
+                .staged_sessions
+                .project_info(session_id)
+                .await
+                .is_some()
+            {
+                return Ok(true);
+            }
+            // `list()` instead of `read()`: non-blocking watch receivers, so
+            // presence never blocks on an in-flight turn.
+            let summaries = self.service.list(Default::default()).await?;
+            if summaries
+                .iter()
+                .any(|summary| summary.session_id == *session_id)
+            {
+                return Ok(true);
+            }
+            Ok(self.staged_sessions.contains(session_id).await)
+        }
+
+        /// S10: peer-ingress reconciliation with the pipeline-owned
+        /// mob-owned skip (DEC-P6B-L5). A mob-owned session's peer ingress
+        /// is MobMachine-owned; a live open must never stamp session-owned
+        /// drain state over it — the skip fact has ONE owner, here, shared
+        /// by both surfaces. Session-owned reconciliation goes through the
+        /// surface hook.
+        #[cfg(feature = "comms")]
+        pub async fn ensure_live_peer_ingress(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), LiveIngressError> {
+            let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+            if owner.is_mob_owned() {
+                tracing::debug!(
+                    %session_id,
+                    ?owner,
+                    "live/open: mob-owned peer ingress already owns the session; skipping session-owned drain reconfigure"
+                );
+                return Ok(());
+            }
+            match self.ingress_reconciler {
+                Some(reconciler) => {
+                    reconciler
+                        .ensure_session_owned_live_ingress(session_id)
+                        .await
+                }
+                // Fail closed: a session-owned reconcile is required but no
+                // hook is composed. Never silently skip (the member host
+                // installs `MobOwnedOnlyIngress` instead of None precisely
+                // so this arm stays a composition error, not a runtime
+                // branch).
+                None => Err(LiveIngressError::Internal(
+                    "no live ingress reconciler composed for session-owned peer ingress"
+                        .to_string(),
+                )),
+            }
+        }
+
+        #[cfg(not(feature = "comms"))]
+        pub async fn ensure_live_peer_ingress(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), LiveIngressError> {
+            Ok(())
+        }
+
+        /// The full `live/open` pipeline, S1-S12 (order-preserving
+        /// extraction of the RPC `handle_live_open` body). Returns the wire
+        /// `LiveOpenResult`; surfaces serialize. This compatibility entry
+        /// point preserves the pre-window full-history behavior for Rust and
+        /// member-host callers.
+        pub async fn open_live_channel(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            session_factory: Option<&dyn RealtimeSessionFactory>,
+            session_id: &SessionId,
+            turning_mode: Option<RealtimeTurningMode>,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<LiveOpenResult, LiveOpenError> {
+            self.open_live_channel_with_seed(
+                host,
+                transport_ctx,
+                session_factory,
+                session_id,
+                turning_mode,
+                None,
+                requested_transport,
+            )
+            .await
+        }
+
+        /// Full `live/open` pipeline with an optional caller-selected
+        /// canonical seed window. Seed selection and completeness projection
+        /// happen before machine admission or channel minting.
+        #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+        pub async fn open_live_channel_with_seed(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            session_factory: Option<&dyn RealtimeSessionFactory>,
+            session_id: &SessionId,
+            turning_mode: Option<RealtimeTurningMode>,
+            seed_window: Option<LiveSeedWindow>,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<LiveOpenResult, LiveOpenError> {
+            // S1 — B17: validate the session exists before minting a
+            // channel; a nonexistent-session open would leave stale infra
+            // handles behind.
+            match self.live_session_present(session_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(LiveOpenError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    });
+                }
+                Err(error) => return Err(LiveOpenError::SessionStateFault(error)),
+            }
+
+            // S2 — #302: refuse up front when no realtime session factory
+            // is wired, BEFORE any admission or host registration.
+            let Some(session_factory) = session_factory else {
+                return Err(LiveOpenError::RealtimeFactoryMissing);
+            };
+
+            // S3 — the pipeline owns the `turning_mode` default
+            // (DEC-P6B-L15): absent = ProviderManaged.
+            let turning_mode = turning_mode.unwrap_or(RealtimeTurningMode::ProviderManaged);
+
+            // S4 — provider-neutral open projection. The optional seed
+            // window is resolved before machine admission or channel minting,
+            // and its completeness fact travels with the selected messages so
+            // public continuity cannot claim a bounded replay was complete.
+            let prepared_projection = self
+                .live_open_projection_for_session(session_id, turning_mode, seed_window)
+                .await
+                .map_err(LiveOpenError::OpenConfig)?;
+            let seed_status = prepared_projection.seed_status;
+            let prepared_open_config = prepared_projection.open_config;
+            let live_open_identity = prepared_open_config.llm_identity.clone();
+
+            // One machine-owned boundary spans every effectful step from
+            // generated admission through provider/transport materialization.
+            // S1-S4 may recover a cold durable session, so the lease is
+            // acquired only after that recovery and before S5's first effect.
+            let _live_lifecycle_lease = self
+                .runtime_adapter
+                .acquire_live_open_lifecycle_lease(session_id)
+                .await
+                .map_err(LiveOpenError::AdmissionAuthority)?;
+
+            // S5 — generated machine open admission with a random candidate
+            // channel id.
+            let candidate_channel_id = LiveChannelId::random_uuid();
+            let open_authority = self
+                .runtime_adapter
+                .resolve_live_open_admission(session_id, &candidate_channel_id, &live_open_identity)
+                .await
+                .map_err(LiveOpenError::AdmissionAuthority)?;
+            if !open_authority.admitted() {
+                return Err(match open_authority.rejection() {
+                    Some(LiveOpenAdmissionRejection::AlreadyBound) => {
+                        LiveOpenError::AdmissionRejectedAlreadyBound {
+                            session_id: session_id.clone(),
+                        }
+                    }
+                    Some(LiveOpenAdmissionRejection::ChannelAlreadyBound) => {
+                        LiveOpenError::AdmissionRejectedChannelCollision {
+                            channel_id: candidate_channel_id.to_string(),
+                        }
+                    }
+                    Some(LiveOpenAdmissionRejection::LifecycleClosed) => {
+                        LiveOpenError::AdmissionRejectedLifecycleClosed
+                    }
+                    None => LiveOpenError::AdmissionRejectedNoReason,
+                });
+            }
+
+            // S6 — host channel open; failure evicts the generated
+            // admission (NOT the graceful close — nothing is attached yet).
+            let Some(channel_open_authority) = open_authority.channel_open_authority() else {
+                self.abandon_live_open_admission(session_id, &candidate_channel_id)
+                    .await;
+                return Err(LiveOpenError::MissingHostHandoff);
+            };
+            let channel_id = match host
+                .open_channel_with_authority(channel_open_authority)
+                .await
+            {
+                Ok(channel_id) => channel_id,
+                Err(LiveAdapterHostError::SessionAlreadyBound(sid)) => {
+                    self.abandon_live_open_admission(session_id, &candidate_channel_id)
+                        .await;
+                    return Err(LiveOpenError::HostOpenSessionAlreadyBound { session_id: sid });
+                }
+                Err(error) => {
+                    self.abandon_live_open_admission(session_id, &candidate_channel_id)
+                        .await;
+                    return Err(LiveOpenError::HostOpen(error));
+                }
+            };
+
+            // A8/#176/P2#3: assigned exactly once on the success path of the
+            // factory block; every failure arm early-returns through the
+            // fail-closed cleanup.
+            let continuity: LiveContinuityMode;
+            let resolved_audio_config: Option<LiveAudioConfig>;
+            let capabilities: meerkat_core::live_adapter::LiveChannelCapabilities;
+
+            {
+                let factory = session_factory;
+                let open_config = &prepared_open_config;
+                // S7 — B19: refuse models that lack realtime capability
+                // before reaching the factory.
+                if let Err(precheck_err) = self.precheck_live_open(session_id).await {
+                    self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                        .await;
+                    return Err(LiveOpenError::Precheck(precheck_err));
+                }
+                // S8 — B18: the adapter-minting seam owns provider support.
+                if !factory.supports_provider(open_config.llm_identity.provider) {
+                    self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                        .await;
+                    return Err(LiveOpenError::ProviderUnsupportedByFactory {
+                        provider: open_config.llm_identity.provider.as_str(),
+                    });
+                }
+
+                // S9 — resolve the typed audio policy, open the provider
+                // adapter, attach it, and compute continuity from the
+                // projection snapshot (factory-time seeding; no duplicate
+                // `LiveAdapterCommand::Open` dispatch — R2).
+                resolved_audio_config =
+                    live_audio_config_from_capabilities(&factory.capabilities());
+                match factory.open_live_adapter(open_config).await {
+                    Ok(adapter) => {
+                        capabilities = adapter.capabilities();
+                        if let Err(error) = host.attach_adapter(&channel_id, adapter).await {
+                            self.close_live_channel_after_open_failure(
+                                host,
+                                session_id,
+                                &channel_id,
+                            )
+                            .await;
+                            return Err(LiveOpenError::AdapterAttach(error));
+                        }
+                        let snapshot = build_live_projection_snapshot(
+                            session_id,
+                            open_config,
+                            resolved_audio_config.clone(),
+                        );
+                        continuity = continuity_from_snapshot(&snapshot, seed_status);
+                    }
+                    Err(error) => {
+                        self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                            .await;
+                        return Err(LiveOpenError::AdapterOpen(error));
+                    }
+                }
+            }
+
+            // S10 — peer-ingress ensure incl. the mob-owned skip.
+            if let Err(error) = self.ensure_live_peer_ingress(session_id).await {
+                self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                    .await;
+                return Err(LiveOpenError::Ingress(error));
+            }
+
+            // S11 — transport select + bootstrap mint.
+            #[cfg(feature = "live-webrtc")]
+            let webrtc_configured = transport_ctx.webrtc.is_some();
+            #[cfg(not(feature = "live-webrtc"))]
+            let webrtc_configured = false;
+
+            let requested_transport = match requested_transport {
+                Some(transport) => transport,
+                None if transport_ctx.ws_state.is_some() => LiveOpenTransport::Websocket,
+                None if webrtc_configured => LiveOpenTransport::Webrtc,
+                None => {
+                    self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                        .await;
+                    return Err(LiveOpenError::NoTransportConfigured);
+                }
+            };
+
+            let transport = match requested_transport {
+                LiveOpenTransport::Websocket => {
+                    // B16 updated: requesting websocket still requires the
+                    // WS state/base URL pair.
+                    let (ws_state, base_url) =
+                        match (transport_ctx.ws_state, transport_ctx.base_url) {
+                            (Some(ws_state), Some(base_url)) => (ws_state, base_url),
+                            _ => {
+                                self.close_live_channel_after_open_failure(
+                                    host,
+                                    session_id,
+                                    &channel_id,
+                                )
+                                .await;
+                                return Err(LiveOpenError::WebsocketNotConfigured);
+                            }
+                        };
+                    let token = match ws_state.mint_token(session_id, channel_id.clone()).await {
+                        Ok(token) => token,
+                        Err(error) => {
+                            self.close_live_channel_after_open_failure(
+                                host,
+                                session_id,
+                                &channel_id,
+                            )
+                            .await;
+                            return Err(LiveOpenError::TokenMint(error));
+                        }
+                    };
+                    let token_str = token.to_string();
+                    // #176: derive the WS `&format=` token from the resolved
+                    // typed audio policy — fail closed when none resolved or
+                    // it maps to no negotiable binary format.
+                    let Some(audio_config) = resolved_audio_config.as_ref() else {
+                        self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                            .await;
+                        return Err(LiveOpenError::AudioPolicyMissing);
+                    };
+                    let Some(format_param) = live_ws_audio_format_param(audio_config) else {
+                        self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                            .await;
+                        return Err(LiveOpenError::AudioFormatUnmappable {
+                            input_sample_rate_hz: audio_config.input_sample_rate_hz,
+                            input_channels: audio_config.input_channels,
+                        });
+                    };
+                    // G38: pin the bearer token to the channel via the
+                    // `channel` query param; #176: `&format=` is the typed
+                    // audio policy projected into the WS negotiation token.
+                    LiveTransportBootstrap::Websocket {
+                        url: format!(
+                            "{base_url}{path}?token={token_str}&channel={channel_id}&format={format_param}",
+                            path = meerkat_live::LIVE_WS_PATH,
+                        ),
+                        token: token_str,
+                    }
+                }
+                LiveOpenTransport::Webrtc => {
+                    #[cfg(feature = "live-webrtc")]
+                    {
+                        let Some(webrtc_state) = transport_ctx.webrtc else {
+                            self.close_live_channel_after_open_failure(
+                                host,
+                                session_id,
+                                &channel_id,
+                            )
+                            .await;
+                            return Err(LiveOpenError::WebrtcNotConfigured);
+                        };
+                        let token = webrtc_state.mint_token(channel_id.clone()).await;
+                        let token_str = token.to_string();
+                        let issued_at_ms = match live_webrtc_now_ms() {
+                            Ok(now) => now,
+                            Err(error) => {
+                                self.close_live_channel_after_open_failure(
+                                    host,
+                                    session_id,
+                                    &channel_id,
+                                )
+                                .await;
+                                return Err(LiveOpenError::WebrtcClock(error));
+                            }
+                        };
+                        let ttl_ms = match live_webrtc_duration_ms(webrtc_state.token_ttl()) {
+                            Ok(ttl) => ttl,
+                            Err(error) => {
+                                self.close_live_channel_after_open_failure(
+                                    host,
+                                    session_id,
+                                    &channel_id,
+                                )
+                                .await;
+                                return Err(LiveOpenError::WebrtcClock(error));
+                            }
+                        };
+                        let token_authority = match self
+                            .runtime_adapter
+                            .record_live_webrtc_token_issued(
+                                session_id,
+                                &channel_id,
+                                &token_str,
+                                issued_at_ms,
+                                ttl_ms,
+                            )
+                            .await
+                        {
+                            Ok(authority) => authority,
+                            Err(error) => {
+                                self.close_live_channel_after_open_failure(
+                                    host,
+                                    session_id,
+                                    &channel_id,
+                                )
+                                .await;
+                                return Err(LiveOpenError::WebrtcTokenMint(error.to_string()));
+                            }
+                        };
+                        LiveTransportBootstrap::Webrtc {
+                            token: token_authority.token,
+                            answer_method: meerkat_live::LIVE_WEBRTC_ANSWER_METHOD.to_string(),
+                            http_url: None,
+                        }
+                    }
+                    #[cfg(not(feature = "live-webrtc"))]
+                    {
+                        self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                            .await;
+                        return Err(LiveOpenError::WebrtcNotCompiled);
+                    }
+                }
+                #[allow(unreachable_patterns)]
+                _ => {
+                    self.close_live_channel_after_open_failure(host, session_id, &channel_id)
+                        .await;
+                    return Err(LiveOpenError::UnsupportedTransport);
+                }
+            };
+
+            // S12 — wire projection: core typed shapes project into the
+            // wire mirrors at the boundary (byte-compatible `From` impls).
+            let transport: meerkat_contracts::WireLiveTransportBootstrap = transport.into();
+            Ok(LiveOpenResult {
+                channel_id: channel_id.to_string(),
+                transport,
+                capabilities: capabilities.into(),
+                continuity: continuity.into(),
+            })
+        }
+
+        /// Generated eviction of a live-open admission (moved verbatim from
+        /// the RPC handler; the harder fail-closed cleanup reserved for the
+        /// failure arms and channels the host never registered).
+        pub async fn abandon_live_open_admission(
+            &self,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+        ) {
+            if let Err(err) = self
+                .runtime_adapter
+                .abandon_live_open_admission(session_id, channel_id)
+                .await
+            {
+                tracing::warn!(
+                    target: "meerkat::session_runtime::live_orchestration",
+                    ?channel_id,
+                    ?session_id,
+                    ?err,
+                    "generated live-open admission abandonment failed"
+                );
+            }
+        }
+
+        /// Open-failure cleanup is fail-closed, not best-effort. Physical
+        /// adapter absence is established before generated close terminality.
+        /// If physical close or the later authority commit fails, the active
+        /// machine binding is deliberately retained as the retry anchor; it
+        /// must never be abandoned while a provider adapter may still live.
+        pub async fn close_live_channel_after_open_failure(
+            &self,
+            host: &LiveAdapterHost,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+        ) {
+            match host.reserve_channel_close_observation(channel_id).await {
+                Ok(observation) => {
+                    let committed = self
+                        .commit_live_close_for_open_failure(
+                            host,
+                            session_id,
+                            channel_id,
+                            &observation,
+                        )
+                        .await;
+                    if !committed {
+                        tracing::warn!(
+                            target: "meerkat::session_runtime::live_orchestration",
+                            ?channel_id,
+                            ?session_id,
+                            "open-failure cleanup remains discoverable for exact retry"
+                        );
+                    }
+                }
+                Err(LiveAdapterHostError::ChannelNotFound(_)) => {
+                    self.abandon_live_open_admission(session_id, channel_id)
+                        .await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "meerkat::session_runtime::live_orchestration",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "failed to reserve open-failure close; retaining admission unless host proves the channel never materialized"
+                    );
+                }
+            }
+        }
+
+        /// Attempt a generated graceful close for an open-failure cleanup.
+        /// Returns `true` only when the host commit succeeded.
+        async fn commit_live_close_for_open_failure(
+            &self,
+            host: &LiveAdapterHost,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            observation: &LiveChannelCloseObservation,
+        ) -> bool {
+            if let Err(err) = host.prepare_channel_physical_close(observation).await {
+                tracing::warn!(
+                    target: "meerkat::session_runtime::live_orchestration",
+                    ?channel_id,
+                    ?session_id,
+                    ?err,
+                    "physical adapter close failed during open-failure cleanup; retaining generated binding for retry"
+                );
+                return false;
+            }
+            let authority = match self
+                .runtime_adapter
+                .resolve_live_close_result(session_id, observation)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "meerkat::session_runtime::live_orchestration",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "generated live-close authority rejected open-failure cleanup; retaining admission for retry"
+                    );
+                    return false;
+                }
+            };
+            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
+                tracing::warn!(
+                    target: "meerkat::session_runtime::live_orchestration",
+                    ?channel_id,
+                    ?session_id,
+                    "generated live-close result omitted host commit authority; retaining admission for retry"
+                );
+                return false;
+            };
+            if let Err(err) = host
+                .commit_channel_close_observation(observation, close_commit_authority)
+                .await
+            {
+                tracing::warn!(
+                    target: "meerkat::session_runtime::live_orchestration",
+                    ?channel_id,
+                    ?session_id,
+                    ?err,
+                    "host live-close commit failed after generated open-failure cleanup; retaining remaining cleanup state for retry"
+                );
+                return false;
+            }
+            true
+        }
+
+        // --- channel-verb helpers (unbound / rejection recording) ---------
+
+        /// Machine-record an unbound CHANNEL-REQUEST (close/status/refresh)
+        /// and produce the typed verb error.
+        async fn record_unbound_channel_request(
+            &self,
+            channel_id: &LiveChannelId,
+            request: LiveChannelRequestPublicKind,
+        ) -> LiveChannelVerbError {
+            match self
+                .runtime_adapter
+                .resolve_unbound_live_channel_request_rejection_result(channel_id, request)
+                .await
+            {
+                Ok(authority) => LiveChannelVerbError::UnboundRequest {
+                    channel_id: channel_id.to_string(),
+                    authority,
+                    expected: request,
+                    detail: Some(
+                        LiveAdapterHostError::ChannelNotFound(channel_id.clone()).to_string(),
+                    ),
+                },
+                Err(error) => LiveChannelVerbError::RejectionAuthorityFailed {
+                    message: format!(
+                        "unbound live channel request rejection authority rejected result: {error}"
+                    ),
+                },
+            }
+        }
+
+        /// Machine-record an unbound COMMAND (send_input/commit/interrupt/
+        /// truncate) and produce the typed verb error.
+        async fn record_unbound_command_request(
+            &self,
+            channel_id: &LiveChannelId,
+            command: LiveCommandPublicKind,
+        ) -> LiveChannelVerbError {
+            match self
+                .runtime_adapter
+                .resolve_unbound_live_command_rejection_result(channel_id, command)
+                .await
+            {
+                Ok(authority) => LiveChannelVerbError::UnboundCommand {
+                    channel_id: channel_id.to_string(),
+                    authority,
+                    expected: command,
+                },
+                Err(error) => LiveChannelVerbError::RejectionAuthorityFailed {
+                    message: format!(
+                        "unbound live command rejection authority rejected result: {error}"
+                    ),
+                },
+            }
+        }
+
+        async fn record_command_rejection(
+            &self,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            command: LiveCommandPublicKind,
+            host_error: &LiveAdapterHostError,
+        ) -> LiveChannelVerbError {
+            match self
+                .runtime_adapter
+                .resolve_live_command_rejection_result(session_id, channel_id, command, host_error)
+                .await
+            {
+                Ok(authority) => LiveChannelVerbError::CommandRejected {
+                    channel_id: channel_id.to_string(),
+                    authority,
+                    expected: command,
+                    detail: host_error.to_string(),
+                    host_error: Box::new(host_error.clone()),
+                },
+                Err(error) => LiveChannelVerbError::RejectionAuthorityFailed {
+                    message: format!("live command rejection authority rejected result: {error}"),
+                },
+            }
+        }
+
+        async fn record_request_rejection(
+            &self,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            request: LiveChannelRequestPublicKind,
+            host_error: &LiveAdapterHostError,
+        ) -> LiveChannelVerbError {
+            match self
+                .runtime_adapter
+                .resolve_live_channel_request_rejection_result(
+                    session_id, channel_id, request, host_error,
+                )
+                .await
+            {
+                Ok(authority) => LiveChannelVerbError::RequestRejected {
+                    channel_id: channel_id.to_string(),
+                    authority,
+                    expected: request,
+                    detail: Some(host_error.to_string()),
+                },
+                Err(error) => LiveChannelVerbError::RejectionAuthorityFailed {
+                    message: format!(
+                        "live channel request rejection authority rejected result: {error}"
+                    ),
+                },
+            }
+        }
+
+        /// DEC-P6B-L6: fail closed BEFORE any side effect when the caller
+        /// pinned an expected owning session and the machine-resolved owner
+        /// differs. RPC passes `None` (channel-addressed, unchanged); the
+        /// bridge arms pass the member session.
+        fn check_session_pin(
+            channel_id: &LiveChannelId,
+            resolved: &SessionId,
+            expected_session: Option<&SessionId>,
+        ) -> Result<(), LiveChannelVerbError> {
+            match expected_session {
+                Some(expected) if expected != resolved => {
+                    Err(LiveChannelVerbError::SessionPinMismatch {
+                        channel_id: channel_id.to_string(),
+                    })
+                }
+                _ => Ok(()),
+            }
+        }
+
+        // --- channel verbs -------------------------------------------------
+
+        /// `live/close`: reserve → generated close authority → host commit.
+        pub async fn close_live_channel(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+        ) -> Result<LiveCloseResult, LiveChannelVerbError> {
+            let request = LiveChannelRequestPublicKind::Close;
+            let Some(session_id) = self
+                .runtime_adapter
+                .live_session_for_active_channel(channel_id)
+                .await
+            else {
+                return Err(self
+                    .record_unbound_channel_request(channel_id, request)
+                    .await);
+            };
+            Self::check_session_pin(channel_id, &session_id, expected_session)?;
+
+            let observation = match host.reserve_channel_close_observation(channel_id).await {
+                Ok(observation) => observation,
+                Err(error) => {
+                    return Err(self
+                        .record_request_rejection(&session_id, channel_id, request, &error)
+                        .await);
+                }
+            };
+            host.prepare_channel_physical_close(&observation)
+                .await
+                .map_err(|error| LiveChannelVerbError::HostCommit {
+                    message: format!(
+                        "physical adapter close failed before generated terminal authority: {error}"
+                    ),
+                })?;
+            let authority = self
+                .runtime_adapter
+                .resolve_live_close_result(&session_id, &observation)
+                .await
+                .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                    message: format!("live close authority rejected result: {error}"),
+                })?;
+            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
+                return Err(LiveChannelVerbError::CommitOmitted);
+            };
+            host.commit_channel_close_observation(&observation, close_commit_authority)
+                .await
+                .map_err(|error| LiveChannelVerbError::HostCommit {
+                    message: error.to_string(),
+                })?;
+            Ok(live_close_result_from_machine_authority(&authority))
+        }
+
+        /// `live/status`: read-only point read over generated status
+        /// authority (active channels AND retained closed channels).
+        pub async fn live_channel_status(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+        ) -> Result<WireLiveAdapterStatus, LiveChannelVerbError> {
+            let request = LiveChannelRequestPublicKind::Status;
+            let Some(session_id) = self
+                .runtime_adapter
+                .live_session_for_status_channel(channel_id)
+                .await
+            else {
+                return Err(self
+                    .record_unbound_channel_request(channel_id, request)
+                    .await);
+            };
+            Self::check_session_pin(channel_id, &session_id, expected_session)?;
+
+            let observation = match host.channel_status_observation(channel_id).await {
+                Ok(observation) => observation,
+                Err(error) => {
+                    return Err(self
+                        .record_request_rejection(&session_id, channel_id, request, &error)
+                        .await);
+                }
+            };
+            let authority = self
+                .runtime_adapter
+                .resolve_live_channel_status_result(&session_id, &observation)
+                .await
+                .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                    message: format!("live status authority rejected result: {error}"),
+                })?;
+            wire_live_status_from_machine_authority(&authority)
+                .map_err(|message| LiveChannelVerbError::ResultProjection { message })
+        }
+
+        /// `live/refresh` (R7/R8): rebuild the open config, stamp the
+        /// host's monotonic snapshot version, enqueue `Refresh`; the public
+        /// `queued` status is generated-authority truth.
+        pub async fn refresh_live_channel(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+        ) -> Result<LiveRefreshResult, LiveChannelVerbError> {
+            let request = LiveChannelRequestPublicKind::Refresh;
+            let Some(session_id) = self
+                .runtime_adapter
+                .live_session_for_active_channel(channel_id)
+                .await
+            else {
+                return Err(self
+                    .record_unbound_channel_request(channel_id, request)
+                    .await);
+            };
+            Self::check_session_pin(channel_id, &session_id, expected_session)?;
+
+            let open_config = self
+                .live_open_config_for_session(&session_id, RealtimeTurningMode::ProviderManaged)
+                .await
+                .map_err(LiveChannelVerbError::RefreshConfig)?;
+            // #176: refresh does not rebuild the WS transport URL and has
+            // no factory in scope; the format negotiated at open time stays
+            // in force.
+            let mut snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
+            match host.next_snapshot_version(channel_id).await {
+                Ok(version) => snapshot.snapshot_version = version,
+                Err(error) => {
+                    return Err(self
+                        .record_request_rejection(&session_id, channel_id, request, &error)
+                        .await);
+                }
+            }
+            match host.enqueue_refresh(channel_id, snapshot).await {
+                Ok(acceptance) => {
+                    let authority = self
+                        .runtime_adapter
+                        .resolve_live_refresh_queued_result(&session_id, &acceptance)
+                        .await
+                        .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                            message: format!(
+                                "live refresh queued authority rejected result: {error}"
+                            ),
+                        })?;
+                    Ok(live_refresh_result_from_machine_authority(&authority))
+                }
+                Err(error) => Err(self
+                    .record_request_rejection(&session_id, channel_id, request, &error)
+                    .await),
+            }
+        }
+
+        /// Shared command lane: resolve owner → pin → host dispatch →
+        /// generated command-result authority → typed mismatch check.
+        async fn dispatch_live_command(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            command_kind: LiveCommandPublicKind,
+            command: LiveAdapterCommand,
+            authority_context: &'static str,
+        ) -> Result<(), LiveChannelVerbError> {
+            let Some(session_id) = self
+                .runtime_adapter
+                .live_session_for_active_channel(channel_id)
+                .await
+            else {
+                return Err(self
+                    .record_unbound_command_request(channel_id, command_kind)
+                    .await);
+            };
+            Self::check_session_pin(channel_id, &session_id, expected_session)?;
+
+            match host.send_command_observed(channel_id, command).await {
+                Ok(acceptance) => {
+                    let authority = self
+                        .runtime_adapter
+                        .resolve_live_command_result(&session_id, &acceptance)
+                        .await
+                        .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                            message: format!("{authority_context}: {error}"),
+                        })?;
+                    if authority.command != command_kind {
+                        return Err(LiveChannelVerbError::ResultProjection {
+                            message: format!(
+                                "LiveCommandResultResolved emitted command {:?} for expected {:?}",
+                                authority.command, command_kind
+                            ),
+                        });
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(self
+                    .record_command_rejection(&session_id, channel_id, command_kind, &error)
+                    .await),
+            }
+        }
+
+        /// `live/send_input`: frame-level input by session-id addressing —
+        /// stays a LOCAL RPC verb (DL10); extracted for shim parity only,
+        /// NO bridge verb consumes it.
+        pub async fn send_live_input(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            chunk: LiveInputChunk,
+        ) -> Result<LiveSendInputResult, LiveChannelVerbError> {
+            let command_kind = LiveCommandPublicKind::SendInput;
+            let Some(session_id) = self
+                .runtime_adapter
+                .live_session_for_active_channel(channel_id)
+                .await
+            else {
+                return Err(self
+                    .record_unbound_command_request(channel_id, command_kind)
+                    .await);
+            };
+            Self::check_session_pin(channel_id, &session_id, expected_session)?;
+
+            match host.send_input_observed(channel_id, chunk).await {
+                Ok(acceptance) => {
+                    let authority = self
+                        .runtime_adapter
+                        .resolve_live_command_result(&session_id, &acceptance)
+                        .await
+                        .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                            message: format!("live send_input authority rejected result: {error}"),
+                        })?;
+                    if authority.command != command_kind {
+                        return Err(LiveChannelVerbError::ResultProjection {
+                            message: format!(
+                                "LiveCommandResultResolved emitted command {:?} for expected {:?}",
+                                authority.command, command_kind
+                            ),
+                        });
+                    }
+                    Ok(LiveSendInputResult::sent())
+                }
+                Err(error) => Err(self
+                    .record_command_rejection(&session_id, channel_id, command_kind, &error)
+                    .await),
+            }
+        }
+
+        /// `live/commit_input` (I50/G9): flush buffered input; optional
+        /// per-commit response modality.
+        pub async fn commit_live_input(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            response_modality: Option<LiveResponseModality>,
+        ) -> Result<LiveCommitInputResult, LiveChannelVerbError> {
+            self.dispatch_live_command(
+                host,
+                channel_id,
+                expected_session,
+                LiveCommandPublicKind::CommitInput,
+                LiveAdapterCommand::CommitInput { response_modality },
+                "live commit_input authority rejected result",
+            )
+            .await?;
+            Ok(LiveCommitInputResult::committed())
+        }
+
+        /// `live/interrupt` (A7): media-plane barge-in via the adapter
+        /// command path (never hard-interrupt authority). On success the
+        /// webrtc output buffer (when composed) drops queued audio.
+        pub async fn interrupt_live_channel(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+        ) -> Result<LiveInterruptResult, LiveChannelVerbError> {
+            self.dispatch_live_command(
+                host,
+                channel_id,
+                expected_session,
+                LiveCommandPublicKind::Interrupt,
+                LiveAdapterCommand::Interrupt,
+                "live interrupt authority rejected result",
+            )
+            .await?;
+            #[cfg(feature = "live-webrtc")]
+            if let Some(state) = transport_ctx.webrtc {
+                state.discard_output_audio(channel_id).await;
+            }
+            #[cfg(not(feature = "live-webrtc"))]
+            let _ = transport_ctx;
+            Ok(LiveInterruptResult::interrupted())
+        }
+
+        /// `live/truncate` (A7): truncate an assistant item at the caller's
+        /// playback cursor.
+        pub async fn truncate_live_output(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            cursor: LiveTruncateCursor,
+        ) -> Result<LiveTruncateResult, LiveChannelVerbError> {
+            self.dispatch_live_command(
+                host,
+                channel_id,
+                expected_session,
+                LiveCommandPublicKind::TruncateAssistantOutput,
+                LiveAdapterCommand::TruncateAssistantOutput {
+                    item_id: cursor.item_id,
+                    content_index: cursor.content_index,
+                    audio_played_ms: cursor.audio_played_ms,
+                },
+                "live truncate authority rejected result",
+            )
+            .await?;
+            #[cfg(feature = "live-webrtc")]
+            if let Some(state) = transport_ctx.webrtc {
+                state.discard_output_audio(channel_id).await;
+            }
+            #[cfg(not(feature = "live-webrtc"))]
+            let _ = transport_ctx;
+            Ok(LiveTruncateResult::truncated())
+        }
+
+        /// Bridge control-verb dispatch (DL10's closed verb set): one
+        /// typed outcome per verb, session-pinned pre-effect.
+        pub async fn control_live_channel(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            verb: BridgeLiveControlVerb,
+        ) -> Result<BridgeLiveControlOutcome, LiveChannelVerbError> {
+            match verb {
+                BridgeLiveControlVerb::CommitInput => self
+                    .commit_live_input(host, channel_id, expected_session, None)
+                    .await
+                    .map(|result| BridgeLiveControlOutcome::CommitInput {
+                        status: result.status,
+                    }),
+                BridgeLiveControlVerb::Interrupt => self
+                    .interrupt_live_channel(host, transport_ctx, channel_id, expected_session)
+                    .await
+                    .map(|result| BridgeLiveControlOutcome::Interrupt {
+                        status: result.status,
+                    }),
+                BridgeLiveControlVerb::Truncate {
+                    item_id,
+                    content_index,
+                    audio_played_ms,
+                } => self
+                    .truncate_live_output(
+                        host,
+                        transport_ctx,
+                        channel_id,
+                        expected_session,
+                        LiveTruncateCursor {
+                            item_id,
+                            content_index,
+                            audio_played_ms,
+                        },
+                    )
+                    .await
+                    .map(|result| BridgeLiveControlOutcome::Truncate {
+                        status: result.status,
+                    }),
+                BridgeLiveControlVerb::Refresh => self
+                    .refresh_live_channel(host, channel_id, expected_session)
+                    .await
+                    .map(|result| BridgeLiveControlOutcome::Refresh {
+                        status: result.status,
+                    }),
+            }
+        }
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    fn live_webrtc_now_ms() -> Result<u64, String> {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| format!("system time is before Unix epoch: {err}"))?;
+        u64::try_from(elapsed.as_millis())
+            .map_err(|_| "system time milliseconds overflow u64".to_string())
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    fn live_webrtc_duration_ms(duration: std::time::Duration) -> Result<u64, String> {
+        u64::try_from(duration.as_millis())
+            .map_err(|_| "WebRTC token TTL milliseconds overflow u64".to_string())
+    }
+
+    /// #176: project the provider's typed realtime audio policy into the
+    /// typed [`LiveAudioConfig`] the snapshot carries. `None` when the
+    /// factory declines to advertise both audio directions — the caller
+    /// fails closed rather than inventing a sample rate.
+    pub fn live_audio_config_from_capabilities(
+        capabilities: &RealtimeCapabilities,
+    ) -> Option<LiveAudioConfig> {
+        let input = capabilities.audio_input_format.as_ref()?;
+        let output = capabilities.audio_output_format.as_ref()?;
+        Some(LiveAudioConfig {
+            input_sample_rate_hz: input.sample_rate_hz,
+            input_channels: u16::from(input.channels),
+            output_sample_rate_hz: output.sample_rate_hz,
+            output_channels: u16::from(output.channels),
+        })
+    }
+
+    /// #176: derive the WS `&format=` query token from the typed audio
+    /// policy; fail closed (`None`) when the resolved policy maps to no
+    /// token the WS server can parse.
+    pub fn live_ws_audio_format_param(audio: &LiveAudioConfig) -> Option<&'static str> {
+        const PCM_24K_MONO_RATE_HZ: u32 = 24_000;
+        const PCM_24K_MONO_CHANNELS: u16 = 1;
+        if audio.input_sample_rate_hz == PCM_24K_MONO_RATE_HZ
+            && audio.input_channels == PCM_24K_MONO_CHANNELS
+        {
+            Some("pcm_24k_mono")
+        } else {
+            None
+        }
+    }
+
+    /// A8: build a `LiveProjectionSnapshot` from the resolved open config
+    /// (open-path flavor carrying the resolved audio policy; the refresh
+    /// path passes `None`).
+    pub fn build_live_projection_snapshot(
+        session_id: &SessionId,
+        open_config: &RealtimeSessionOpenConfig,
+        audio_config: Option<LiveAudioConfig>,
+    ) -> LiveProjectionSnapshot {
+        let mut snapshot = build_live_projection_snapshot_for_runtime(session_id, open_config);
+        snapshot.audio_config = audio_config;
+        snapshot
+    }
+
+    /// A8: derive `LiveContinuityMode` from the projection snapshot and the
+    /// canonical seed-completeness fact. Any omitted history is degraded even
+    /// when the selected suffix happens to be empty.
+    pub fn continuity_from_snapshot(
+        snapshot: &LiveProjectionSnapshot,
+        seed_status: LiveSeedProjectionStatus,
+    ) -> LiveContinuityMode {
+        if seed_status.has_known_gaps() {
+            LiveContinuityMode::Degraded
+        } else if snapshot.seed_messages.is_empty() {
+            LiveContinuityMode::Fresh
+        } else {
+            LiveContinuityMode::TranscriptOnly
+        }
+    }
+
+    /// Exhaustive: generated authority emits only `Closed` today; a future
+    /// variant forces a compile error here.
+    pub fn live_close_result_from_machine_authority(
+        authority: &meerkat_runtime::meerkat_machine::LiveCloseResultAuthority,
+    ) -> LiveCloseResult {
+        match authority.status {
+            meerkat_runtime::meerkat_machine::dsl::LiveClosePublicStatus::Closed => {
+                LiveCloseResult::closed()
+            }
+        }
+    }
+
+    /// Exhaustive: generated authority emits only `Queued` today.
+    pub fn live_refresh_result_from_machine_authority(
+        authority: &meerkat_runtime::meerkat_machine::LiveRefreshResultAuthority,
+    ) -> LiveRefreshResult {
+        match authority.status {
+            meerkat_runtime::meerkat_machine::dsl::LiveRefreshPublicStatus::Queued => {
+                LiveRefreshResult::queued()
+            }
+        }
+    }
+
+    pub fn wire_live_status_from_machine_authority(
+        authority: &meerkat_runtime::meerkat_machine::LiveChannelStatusAuthority,
+    ) -> Result<WireLiveAdapterStatus, String> {
+        use meerkat_runtime::meerkat_machine::dsl::LiveChannelPublicStatus;
+
+        match authority.status {
+            LiveChannelPublicStatus::Idle => Ok(WireLiveAdapterStatus::Idle),
+            LiveChannelPublicStatus::Opening => Ok(WireLiveAdapterStatus::Opening),
+            LiveChannelPublicStatus::Ready => Ok(WireLiveAdapterStatus::Ready),
+            LiveChannelPublicStatus::Closing => Ok(WireLiveAdapterStatus::Closing),
+            LiveChannelPublicStatus::Closed => Ok(WireLiveAdapterStatus::Closed),
+            LiveChannelPublicStatus::Degraded => {
+                let reason = authority.degradation_reason.ok_or_else(|| {
+                    "LiveChannelStatusResolved emitted degraded status without reason".to_string()
+                })?;
+                Ok(WireLiveAdapterStatus::Degraded {
+                    reason: wire_live_degradation_reason_from_machine_authority(
+                        reason,
+                        authority.degradation_detail.as_deref(),
+                    ),
+                })
+            }
+        }
+    }
+
+    fn wire_live_degradation_reason_from_machine_authority(
+        reason: meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason,
+        detail: Option<&str>,
+    ) -> WireLiveDegradationReason {
+        use meerkat_runtime::meerkat_machine::dsl::LiveChannelDegradationReason;
+
+        match reason {
+            LiveChannelDegradationReason::RateLimited => WireLiveDegradationReason::RateLimited,
+            LiveChannelDegradationReason::ProviderThrottled => {
+                WireLiveDegradationReason::ProviderThrottled
+            }
+            LiveChannelDegradationReason::NetworkUnstable => {
+                WireLiveDegradationReason::NetworkUnstable
+            }
+            LiveChannelDegradationReason::Other => WireLiveDegradationReason::Other {
+                detail: detail.unwrap_or_default().to_string(),
+            },
+            LiveChannelDegradationReason::Unknown => WireLiveDegradationReason::Unknown {
+                debug: detail
+                    .unwrap_or("unknown live channel degradation")
+                    .to_string(),
+            },
         }
     }
 

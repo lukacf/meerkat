@@ -68,6 +68,7 @@ fn runtime_state_is_terminal_by_authority(state: RuntimeState) -> bool {
 
 fn make_peer_terminal(body: &str) -> Input {
     Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
@@ -97,6 +98,7 @@ fn make_peer_terminal(body: &str) -> Input {
 
 fn make_peer_progress() -> Input {
     Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
@@ -228,7 +230,7 @@ async fn accept_peer_terminal_running_queues_wake_for_next_idle() {
 }
 
 #[tokio::test]
-async fn accept_progress_policy_no_wake_but_idle_admission_wakes() {
+async fn accept_progress_policy_no_wake_keeps_idle_admission_passive() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = make_peer_progress();
     let result = driver.accept_input(input).await.unwrap();
@@ -237,10 +239,10 @@ async fn accept_progress_policy_no_wake_but_idle_admission_wakes() {
     let signal = driver.take_post_admission_signal();
     assert_eq!(
         signal,
-        PostAdmissionSignal::WakeLoop,
-        "ResponseProgress should stage on the checkpoint lane and use the generated idle admission wake"
+        PostAdmissionSignal::None,
+        "ResponseProgress should stage on the checkpoint lane without waking an idle runtime"
     );
-    assert!(signal.should_wake());
+    assert!(!signal.should_wake());
 }
 
 #[tokio::test]
@@ -479,10 +481,10 @@ async fn progress_peer_staged_boundary() {
     let signal = driver.take_post_admission_signal();
     assert_eq!(
         signal,
-        PostAdmissionSignal::WakeLoop,
-        "ResponseProgress policy remains passive while generated idle admission wakes the loop"
+        PostAdmissionSignal::None,
+        "ResponseProgress policy remains passive while queued for a later run boundary"
     );
-    assert!(signal.should_wake());
+    assert!(!signal.should_wake());
 }
 
 #[tokio::test]
@@ -610,6 +612,7 @@ async fn destroy_with_queued_inputs_abandons_all() {
 async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
@@ -646,6 +649,7 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
 async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
@@ -708,6 +712,7 @@ async fn accept_peer_response_terminal_defers_context_projection_to_machine_batc
 async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
@@ -744,6 +749,7 @@ async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() 
 async fn accept_peer_message_with_steer_handling_mode_returns_accepted() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
@@ -837,6 +843,7 @@ async fn post_admission_signal_steer_is_request_immediate() {
 
     // Accept a steer-mode input (RequestImmediateProcessing signal)
     let steer_input = Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,
@@ -881,6 +888,7 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
 
     // Now admit a default queue-mode peer message while running.
     let peer = Input::Peer(PeerInput {
+        directed_interaction_id: None,
         objective_id: None,
         injected_context: Vec::new(),
         sender_taint: None,

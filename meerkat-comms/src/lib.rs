@@ -18,6 +18,8 @@ pub mod types;
 
 // Network I/O modules — not available on wasm32
 #[cfg(not(target_arch = "wasm32"))]
+pub mod host_acceptor;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod io_task;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plain_listener;
@@ -31,6 +33,12 @@ pub mod router;
 pub mod runtime;
 
 pub use event_injector::CommsEventInjector;
+#[cfg(not(target_arch = "wasm32"))]
+pub use host_acceptor::{
+    HostAcceptorBounds, HostAcceptorConfig, HostAcceptorError, HostAcceptorHandle,
+    HostAcceptorIdentityRegistry, HostAcceptorRegistrationMaterial, HostPairingConfig,
+    PairingRateLimit, spawn_host_acceptor,
+};
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
 pub use inbox::{AdmissionOutcome, DropReason, Inbox, InboxError, InboxSender};
 pub use inproc::{
@@ -41,7 +49,9 @@ pub use io_task::{IoTaskError, handle_connection};
 pub use peer_meta::PeerMeta;
 #[cfg(not(target_arch = "wasm32"))]
 pub use plain_listener::{PlainIngressFault, PlainIngressFaults, handle_plain_connection};
-pub use router::{CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, Router, SendError};
+pub use router::{
+    CommsConfig, DEFAULT_MAX_MESSAGE_BYTES, DeclaredReplyEndpoint, Router, SendError,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use transport::codec::{EnvelopeFrame, TransportCodec};
 pub use transport::{PeerAddr, TransportError};
@@ -59,6 +69,8 @@ pub use runtime::comms_config::ResolvedCommsConfig;
 pub use runtime::comms_runtime::{
     CommsRuntime, CommsRuntimeError, CommsToolMaterial, PeerRequestResponseAuthority,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime::comms_runtime::{constant_time_str_eq, validate_pairing_secret};
 
 pub use agent::dispatcher::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, comms_tool_defs,

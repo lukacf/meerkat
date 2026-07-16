@@ -182,6 +182,9 @@ fn project_counter(field: &'static str, value: u64) -> Result<u32, SnapshotProje
 /// partial snapshot that drops the state while reporting success.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemContextStateError {
+    /// The exact actor/run/boundary coordination failed.
+    #[error("system-context model-boundary coordination failed: {0}")]
+    Boundary(#[source] crate::lifecycle::CoreBoundaryStageError),
     /// Serializing the system-context control state into session metadata failed.
     #[error("failed to serialize system-context state into session: {0}")]
     SystemContext(#[source] serde_json::Error),
@@ -226,6 +229,7 @@ fn runtime_execution_snapshot(
         turn_phase,
         turn_terminal: snapshot.turn_terminal,
         active_run_id: snapshot.active_run_id,
+        terminal_run_id: snapshot.terminal_run_id,
         primitive_kind,
         admitted_content_shape: snapshot.admitted_content_shape,
         vision_enabled: snapshot.vision_enabled,
@@ -246,6 +250,18 @@ fn runtime_execution_snapshot(
         )?,
         applied_cursor,
     })
+}
+
+fn validate_runtime_terminal_run_id(
+    started_run_id: &crate::lifecycle::RunId,
+    terminal_run_id: Option<&crate::lifecycle::RunId>,
+) -> Result<(), AgentError> {
+    if terminal_run_id == Some(started_run_id) {
+        return Ok(());
+    }
+    Err(AgentError::InternalError(format!(
+        "generated runtime terminal belonged to the wrong run: started={started_run_id}, terminal={terminal_run_id:?}"
+    )))
 }
 
 fn runtime_external_tool_surface_snapshot(
@@ -387,6 +403,93 @@ where
     fn clear_runtime_execution_kind(&mut self) {
         self.runtime_execution_kind = None;
         self.active_transcript_identity = None;
+        self.runtime_started_run_id = None;
+    }
+
+    fn reset_runtime_terminal_failure_witness(&mut self) {
+        self.runtime_started_run_id = None;
+        self.runtime_terminal_failure_witness = None;
+    }
+
+    fn record_runtime_terminal_failure_witness(&mut self, error: &AgentError) {
+        use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
+
+        let Some(started_run_id) = self.runtime_started_run_id.as_ref() else {
+            return;
+        };
+        if self.runtime_execution_kind.is_none() {
+            return;
+        }
+        let Some(turn_state_handle) = self.turn_state_handle.as_deref() else {
+            return;
+        };
+        let snapshot = match runtime_execution_snapshot(turn_state_handle, self.applied_cursor) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.runtime_terminal_failure_witness = Some(Err(AgentError::InternalError(
+                    format!("failed to project the exact runtime turn terminal witness: {error}"),
+                )));
+                return;
+            }
+        };
+        if !snapshot.turn_terminal
+            || !matches!(
+                classify_terminal(&snapshot.terminal_outcome, snapshot.terminal_cause_kind),
+                SurfaceResultClass::HardFailure
+            )
+        {
+            return;
+        }
+        if let Err(error) =
+            validate_runtime_terminal_run_id(started_run_id, snapshot.terminal_run_id.as_ref())
+        {
+            self.runtime_terminal_failure_witness = Some(Err(error));
+            return;
+        }
+        let Some(cause_kind) = snapshot
+            .terminal_cause_kind
+            .filter(|cause| cause.is_specific_failure_cause())
+        else {
+            self.runtime_terminal_failure_witness = Some(Err(AgentError::InternalError(
+                "generated hard-failure terminal omitted a specific terminal cause".to_string(),
+            )));
+            return;
+        };
+        let mut metadata = self
+            .terminal_error_metadata
+            .clone()
+            .or_else(|| crate::TurnErrorMetadata::from_agent_error(error))
+            .unwrap_or_else(|| {
+                crate::TurnErrorMetadata::terminal(
+                    cause_kind,
+                    snapshot.terminal_outcome,
+                    error.to_string(),
+                )
+            });
+        if metadata.kind != cause_kind || metadata.outcome != Some(snapshot.terminal_outcome) {
+            self.runtime_terminal_failure_witness = Some(Err(AgentError::InternalError(format!(
+                "runtime terminal error disagreed with generated terminal truth: supplied=({:?}, {:?}), generated=({:?}, {cause_kind:?})",
+                metadata.outcome, metadata.kind, snapshot.terminal_outcome
+            ))));
+            return;
+        }
+        // Preserve concrete diagnostic fidelity (provider/model/retryability)
+        // while pinning every authority field and the durable RunFailed detail
+        // to the exact generated/current terminal.
+        metadata.kind = cause_kind;
+        metadata.terminal = true;
+        metadata.outcome = Some(snapshot.terminal_outcome);
+        metadata.detail = Some(error.to_string());
+        self.runtime_terminal_failure_witness = Some(Ok(metadata));
+    }
+
+    /// Take the exact failed-but-applied runtime-turn witness produced by the
+    /// most recent run call. Direct callers keep their original `AgentError`;
+    /// the session runtime consumes this sidecar immediately after the call.
+    pub fn take_runtime_terminal_failure_witness(
+        &mut self,
+    ) -> Result<Option<crate::TurnErrorMetadata>, AgentError> {
+        self.runtime_terminal_failure_witness.take().transpose()
     }
 
     fn require_runtime_execution_kind(&self) -> Result<(), AgentError> {
@@ -963,9 +1066,7 @@ where
 
     /// Get shared runtime system-context control state.
     pub fn system_context_state(&self) -> crate::session::SystemContextStateHandle {
-        crate::session::SystemContextStateHandle::from_shared_authority_state(Arc::clone(
-            &self.system_context_state,
-        ))
+        self.system_context_state.clone()
     }
 
     /// Clone the current session with the latest shared system-context state merged into metadata.
@@ -1007,37 +1108,42 @@ where
             .map_err(SystemContextStateError::SystemContext)
     }
 
-    /// Consume all pending system-context appends for the next LLM boundary.
-    ///
-    /// The returned appends are intended for transient request composition only;
-    /// they must not be written back into the canonical session prompt.
-    pub(crate) fn take_pending_system_context_boundary(
-        &mut self,
-    ) -> Result<Vec<PendingSystemContextAppend>, SystemContextStateError> {
-        let pending = {
-            let mut state = match self.system_context_state.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    tracing::warn!("system-context state lock poisoned while applying boundary");
-                    poisoned.into_inner()
-                }
-            };
-            if state.pending().is_empty() {
-                return Ok(Vec::new());
-            }
-            let pending = state.pending().to_vec();
-            state.mark_pending_applied();
-            pending
-        };
+    /// Park at the exact next LLM boundary and retain pending context as
+    /// unapplied while fallible request preprocessing runs.
+    pub(crate) async fn prepare_pending_system_context_boundary(
+        &self,
+        run_id: &crate::lifecycle::RunId,
+    ) -> Result<crate::session::ModelBoundarySystemContext, SystemContextStateError> {
+        self.system_context_state
+            .take_pending_at_exact_boundary(run_id)
+            .await
+            .map_err(SystemContextStateError::Boundary)
+    }
 
-        if !pending.is_empty() {
+    /// Consume a preprocessed exact-boundary witness synchronously immediately
+    /// before the LLM future is entered. Session metadata serialization is
+    /// preflighted against the deterministic post-consumption projection, so a
+    /// serialization fault cannot mark canonical state applied first.
+    pub(crate) fn consume_pending_system_context_boundary(
+        &mut self,
+        boundary: crate::session::ModelBoundarySystemContext,
+    ) -> Result<(), SystemContextStateError> {
+        let pending_count = boundary.appends().len();
+        let mut next_session = self.session.clone();
+        next_session
+            .set_system_context_state(boundary.projected_state_after_consume())
+            .map_err(SystemContextStateError::SystemContext)?;
+        boundary
+            .consume()
+            .map_err(SystemContextStateError::Boundary)?;
+        if pending_count > 0 {
             tracing::debug!(
-                pending_count = pending.len(),
+                pending_count,
                 "applying pending runtime system context at model boundary"
             );
         }
-        self.sync_system_context_state_to_session()?;
-        Ok(pending)
+        self.session = next_session;
+        Ok(())
     }
 
     pub(crate) fn llm_messages_with_runtime_system_context(
@@ -1478,6 +1584,7 @@ where
         transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
+        self.reset_runtime_terminal_failure_witness();
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();
             return Err(error);
@@ -1506,6 +1613,7 @@ where
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
         self.terminal_error_detail = None;
+        self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 
@@ -1636,6 +1744,7 @@ where
                 Ok(result)
             }
             Err(err) => {
+                self.record_runtime_terminal_failure_witness(&err);
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
                 let err = self.settle_compaction_after_run_error(err).await;
                 self.clear_runtime_execution_kind();
@@ -1655,6 +1764,7 @@ where
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
+        self.reset_runtime_terminal_failure_witness();
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();
             return Err(error);
@@ -1709,6 +1819,7 @@ where
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
         self.terminal_error_detail = None;
+        self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 
@@ -1769,6 +1880,7 @@ where
                 Ok(result)
             }
             Err(err) => {
+                self.record_runtime_terminal_failure_witness(&err);
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
                 let err = self.settle_compaction_after_run_error(err).await;
                 self.clear_runtime_execution_kind();
@@ -1782,6 +1894,7 @@ where
         use crate::turn_execution_authority::TurnExecutionInput;
 
         self.clear_runtime_execution_kind();
+        self.runtime_terminal_failure_witness = None;
         let snapshot = self
             .turn_state_handle
             .as_deref()
@@ -3149,6 +3262,7 @@ mod snapshot_projection_tests {
     fn base_snapshot() -> TurnStateSnapshot {
         TurnStateSnapshot {
             active_run_id: None,
+            terminal_run_id: None,
             loop_state: LoopState::WaitingForOps,
             turn_phase: crate::TurnPhase::WaitingForOps,
             turn_terminal: false,
@@ -3186,6 +3300,19 @@ mod snapshot_projection_tests {
         assert_eq!(projected.tool_calls_pending, 3);
         assert_eq!(projected.boundary_count, 7);
         assert_eq!(projected.loop_state, LoopState::WaitingForOps);
+    }
+
+    #[test]
+    fn terminal_witness_rejects_a_different_generated_run() {
+        let started = RunId::new();
+        let stale_terminal = RunId::new();
+
+        let error = validate_runtime_terminal_run_id(&started, Some(&stale_terminal))
+            .expect_err("a stale terminal run must not witness the current call");
+        assert!(error.to_string().contains(&started.to_string()));
+        assert!(error.to_string().contains(&stale_terminal.to_string()));
+        validate_runtime_terminal_run_id(&started, Some(&started))
+            .expect("the exact generated terminal run should validate");
     }
 
     #[test]

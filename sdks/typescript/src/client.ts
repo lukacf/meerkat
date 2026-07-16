@@ -40,7 +40,11 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { Buffer } from "node:buffer";
-import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
+import {
+  MeerkatError,
+  CapabilityUnavailableError,
+  meerkatErrorFromJsonRpcCode,
+} from "./generated/errors.js";
 import { isCompatibleWith } from "./generated/version_compat.js";
 import {
   CONTRACT_VERSION,
@@ -91,6 +95,9 @@ import {
   type MobSpawnManyResultEntry,
   type WireMobMemberStatus,
   type WireMemberProgressSnapshot,
+  type WireMemberLifecycleCapabilities,
+  type WireNonPortableResourceKind,
+  type WireReachability,
   type ToolsRegisterParams,
   type ToolsRegisterResult,
   SkillListResponse,
@@ -139,8 +146,37 @@ import type {
   LiveInterruptResult as RpcLiveInterruptResult,
   LiveSendInputResult as RpcLiveSendInputResult,
   LiveTruncateResult as RpcLiveTruncateResult,
+  LiveCloseResult as RpcLiveCloseResult,
+  LiveOpenResult as RpcLiveOpenResult,
+  LiveStatusResult as RpcLiveStatusResult,
+  BridgeLiveControlOutcome as RpcBridgeLiveControlOutcome,
+  BridgeLiveControlVerb as RpcBridgeLiveControlVerb,
   LoginCompleteParams as RpcLoginCompleteParams,
   LoginStartParams as RpcLoginStartParams,
+  MobBindHostParams as RpcMobBindHostParams,
+  MobBindHostResult as RpcMobBindHostResult,
+  MobGrantScopesParams as RpcMobGrantScopesParams,
+  MobGrantScopesResult as RpcMobGrantScopesResult,
+  MobGrantsResult as RpcMobGrantsResult,
+  MobHardCancelParams as RpcMobHardCancelParams,
+  MobHardCancelResult as RpcMobHardCancelResult,
+  MobHostStatus as RpcMobHostStatus,
+  MobHostsResult as RpcMobHostsResult,
+  MobIdParams as RpcMobIdParams,
+  MobMemberHistoryParams as RpcMobMemberHistoryParams,
+  MobMemberHistoryResult as RpcMobMemberHistoryResult,
+  MobMemberLiveChannelParams as RpcMobMemberLiveChannelParams,
+  MobMemberLiveControlParams as RpcMobMemberLiveControlParams,
+  MobMemberLiveOpenParams as RpcMobMemberLiveOpenParams,
+  MobMemberLiveStatusParams as RpcMobMemberLiveStatusParams,
+  MobRevokeHostParams as RpcMobRevokeHostParams,
+  MobRevokeHostResult as RpcMobRevokeHostResult,
+  MobRevokeScopesParams as RpcMobRevokeScopesParams,
+  MobRevokeScopesResult as RpcMobRevokeScopesResult,
+  MobRouteInstallsResult as RpcMobRouteInstallsResult,
+  WireHostBindingDescriptor as RpcWireHostBindingDescriptor,
+  WireHostCapabilityFlags as RpcWireHostCapabilityFlags,
+  WireRouteInstallObligation as RpcWireRouteInstallObligation,
   ProvisionApiKeyParams as RpcProvisionApiKeyParams,
   ReadSessionHistoryParams as RpcReadSessionHistoryParams,
   ReadSessionParams as RpcReadSessionParams,
@@ -200,6 +236,8 @@ import type {
   ModelsCatalog,
   MobEventsOptions,
   MobEventsResult,
+  MobControlScope,
+  MobGrantRecord,
   MobCreateOptions,
   MobFlowStatus,
   MobLifecycleAction,
@@ -228,6 +266,8 @@ import type {
   ScheduleToolsResult,
   SchemaWarning,
   SessionAssistantBlock,
+  SessionContentBlock,
+  SessionContentInput,
   SessionForkResult,
   SessionHistory,
   SessionIngressOptions,
@@ -245,7 +285,7 @@ import type {
   SkillRuntimeDiagnostics,
   SpawnManySpec,
   SpawnSpec,
-  TranscriptEditOptions,
+  TranscriptForkOptions,
   TranscriptReplacement,
   TranscriptRewriteInputMessage,
   TranscriptRewriteMessage,
@@ -294,6 +334,7 @@ const MOB_SPAWN_MANY_FAILURE_CAUSES = new Set<string>([
   "wiring_error",
   "bridge_command_rejected",
   "member_restore_failed",
+  "missing_member_capability",
   "kickoff_wait_timed_out",
   "ready_wait_timed_out",
   "definition_error",
@@ -350,6 +391,12 @@ export interface ConnectOptions {
   liveToolTimeoutMs?: number;
 }
 
+/** Literal-safe options for opening a live channel on a mob member. */
+export interface MobMemberLiveOpenOptions {
+  turningMode?: RpcMobMemberLiveOpenParams["turning_mode"];
+  transport?: RpcMobMemberLiveOpenParams["transport"];
+}
+
 interface WireSkillKey {
   [key: string]: string;
   source_uuid: string;
@@ -385,6 +432,19 @@ function skillRefsToWire(refs: SkillRef[] | undefined): WireSkillRef[] | undefin
   return keys?.map((key) => ({ kind: "structured", ...key }));
 }
 
+const MOB_CONTROL_SCOPES = new Set<MobControlScope>([
+  "list",
+  "read_history",
+  "subscribe_events",
+  "send_command",
+  "cancel",
+  "retire",
+  "wire_topology",
+  "live",
+  "admin_host",
+  "admin_grants",
+]);
+
 function setIfDefined<T extends object, K extends keyof T>(
   payload: T,
   key: K,
@@ -407,12 +467,12 @@ function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown
   setIfDefined(payload, "labels", spec.labels);
   setIfDefined(payload, "context", spec.context);
   setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
+  setIfDefined(payload, "placement", spec.placement);
   setIfDefined(payload, "binding", spec.binding);
   setIfDefined(payload, "shell_env", spec.shellEnv);
   setIfDefined(payload, "auto_wire_parent", spec.autoWireParent);
   setIfDefined(payload, "launch_mode", spec.launchMode);
   setIfDefined(payload, "tool_access_policy", spec.toolAccessPolicy);
-  setIfDefined(payload, "budget_split_policy", spec.budgetSplitPolicy);
   setIfDefined(payload, "inherited_tool_filter", spec.inheritedToolFilter);
   setIfDefined(payload, "override_profile", spec.overrideProfile);
   setIfDefined(payload, "model_override", spec.modelOverride);
@@ -431,6 +491,7 @@ function mobSpawnManySpecPayload(spec: SpawnManySpec): MobSpawnSpecParams {
   setIfDefined(payload, "labels", spec.labels);
   setIfDefined(payload, "context", spec.context);
   setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
+  setIfDefined(payload, "placement", spec.placement);
   setIfDefined(payload, "auth_binding", spec.authBinding);
   setIfDefined(payload, "model_override", spec.modelOverride);
   return payload;
@@ -1123,7 +1184,7 @@ export class MeerkatClient {
   async forkSessionAt(
     sessionId: string,
     messageIndex: number,
-    options?: TranscriptEditOptions,
+    options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
     type _RpcSignature = [RpcForkSessionAtParams, RpcSessionForkResult];
     const params: Record<string, unknown> = {
@@ -1133,6 +1194,9 @@ export class MeerkatClient {
     if (options?.runningBehavior !== undefined) {
       params.running_behavior = options.runningBehavior;
     }
+    if (options?.toolAccessPolicy !== undefined) {
+      params.tool_access_policy = options.toolAccessPolicy;
+    }
     const raw = await this.request("session/fork_at", params);
     return MeerkatClient.parseSessionForkResult(raw);
   }
@@ -1141,7 +1205,7 @@ export class MeerkatClient {
     sessionId: string,
     messageIndex: number,
     replacement: TranscriptReplacement,
-    options?: TranscriptEditOptions,
+    options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
     type _RpcSignature = [RpcForkSessionReplaceParams, RpcSessionForkResult];
     const params: Record<string, unknown> = {
@@ -1151,6 +1215,9 @@ export class MeerkatClient {
     };
     if (options?.runningBehavior !== undefined) {
       params.running_behavior = options.runningBehavior;
+    }
+    if (options?.toolAccessPolicy !== undefined) {
+      params.tool_access_policy = options.toolAccessPolicy;
     }
     const raw = await this.request("session/fork_replace", params);
     return MeerkatClient.parseSessionForkResult(raw);
@@ -1875,6 +1942,406 @@ export class MeerkatClient {
     });
   }
 
+  /**
+   * Record (full-replace) a principal's control-scope grant
+   * (`mob/grant_scopes`).
+   */
+  async grantMobScopes(
+    mobId: string,
+    principal: string,
+    scopes: MobControlScope[],
+    expiresAtMs?: number,
+  ): Promise<MobGrantRecord> {
+    type _RpcSignature = [RpcMobGrantScopesParams, RpcMobGrantScopesResult];
+    const result = await this.request("mob/grant_scopes", {
+      mob_id: mobId,
+      principal,
+      scopes,
+      ...(expiresAtMs !== undefined ? { expires_at_ms: expiresAtMs } : {}),
+    });
+    const context = "Invalid mob/grant_scopes response";
+    const record = MeerkatClient.requireRecord(result.record, "record", context);
+    return MeerkatClient.decodeMobGrantRecord(record, context);
+  }
+
+  /**
+   * Revoke scopes from a principal's grant (`mob/revoke_scopes`); omit
+   * `scopes` to revoke the entire grant. Returns whether the grant record
+   * was removed entirely — revoking never-granted scopes is an idempotent
+   * no-op (`false`).
+   */
+  async revokeMobScopes(
+    mobId: string,
+    principal: string,
+    scopes?: MobControlScope[],
+  ): Promise<boolean> {
+    type _RpcSignature = [RpcMobRevokeScopesParams, RpcMobRevokeScopesResult];
+    const result = await this.request("mob/revoke_scopes", {
+      mob_id: mobId,
+      principal,
+      ...(scopes !== undefined ? { scopes } : {}),
+    });
+    if (typeof result.removed !== "boolean") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/revoke_scopes response: missing removed",
+      );
+    }
+    return result.removed;
+  }
+
+  /**
+   * List raw control-scope grant records (`mob/grants`). Expired rows
+   * preserve the generated `expires_at_ms` wire field verbatim.
+   */
+  async listMobGrants(mobId: string): Promise<MobGrantRecord[]> {
+    type _RpcSignature = [RpcMobIdParams, RpcMobGrantsResult];
+    const result = await this.request("mob/grants", { mob_id: mobId });
+    const context = "Invalid mob/grants response";
+    const grants = result.grants;
+    if (!Array.isArray(grants)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing grants`);
+    }
+    return grants.map((entry) =>
+      MeerkatClient.decodeMobGrantRecord(
+        MeerkatClient.requireObject(entry, context),
+        context,
+      ),
+    );
+  }
+
+  private static requireObject(
+    value: unknown,
+    context: string,
+  ): Record<string, unknown> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: expected an object entry`,
+      );
+    }
+    return value as Record<string, unknown>;
+  }
+
+  private static decodeMobGrantRecord(
+    record: Record<string, unknown>,
+    context: string,
+  ): MobGrantRecord {
+    const principal = MeerkatClient.requireStringField(
+      record,
+      "principal",
+      context,
+    );
+    const scopes = record.scopes;
+    if (
+      !Array.isArray(scopes) ||
+      scopes.some(
+        (scope) =>
+          typeof scope !== "string" ||
+          !MOB_CONTROL_SCOPES.has(scope as MobControlScope),
+      )
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: record scopes must use the closed control-scope vocabulary`,
+      );
+    }
+    let expiresAtMs: number | undefined;
+    if (Object.prototype.hasOwnProperty.call(record, "expires_at_ms")) {
+      expiresAtMs = MeerkatClient.requireNonNegativeIntegerField(
+        record,
+        "expires_at_ms",
+        context,
+      );
+    }
+    return {
+      principal,
+      scopes: scopes as MobControlScope[],
+      ...(expiresAtMs !== undefined ? { expires_at_ms: expiresAtMs } : {}),
+    };
+  }
+
+  // ─── Multi-host console verbs (phase 7, DEC-P7A-9) ────────────────────
+
+  /**
+   * Read a mob member transcript page by identity (`mob/member_history`).
+   * One shape local and remote; the envelope carries typed placement +
+   * provenance facts.
+   */
+  async mobMemberHistory(
+    mobId: string,
+    agentIdentity: string,
+    opts?: { fromIndex?: number; limit?: number },
+  ): Promise<RpcMobMemberHistoryResult> {
+    type _RpcSignature = [RpcMobMemberHistoryParams, RpcMobMemberHistoryResult];
+    const result = await this.request("mob/member_history", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      ...(opts?.fromIndex !== undefined ? { from_index: opts.fromIndex } : {}),
+      ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+    });
+    const context = "Invalid mob/member_history response";
+    const page = MeerkatClient.requireRecord(result.page, "page", context);
+    const messages = MeerkatClient.requireRecordArray(
+      page.messages,
+      `${context}: page.messages`,
+    );
+    messages.forEach((message, index) =>
+      MeerkatClient.validateWireHistoryRow(
+        message,
+        `${context}: page.messages[${index}]`,
+      ),
+    );
+    MeerkatClient.requireBooleanField(page, "complete", `${context}: page`);
+    const fromIndex = MeerkatClient.requireNonNegativeIntegerField(
+      page,
+      "from_index",
+      `${context}: page`,
+    );
+    const messageCount = MeerkatClient.requireNonNegativeIntegerField(
+      page,
+      "message_count",
+      `${context}: page`,
+    );
+    const hasNextIndex = Object.prototype.hasOwnProperty.call(page, "next_index");
+    if (hasNextIndex) {
+      MeerkatClient.requireNonNegativeIntegerField(
+        page,
+        "next_index",
+        `${context}: page`,
+      );
+    }
+    const pageEnd = fromIndex + messages.length;
+    if (pageEnd > messageCount) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: page ends beyond message_count`,
+      );
+    }
+    const complete = page.complete as boolean;
+    if (complete !== (pageEnd === messageCount)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: complete must match whether the page reaches message_count`,
+      );
+    }
+    if (complete && hasNextIndex) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: complete page must not carry next_index`,
+      );
+    }
+    if (!complete) {
+      if (messages.length === 0) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: incomplete page must make progress`,
+        );
+      }
+      if (!hasNextIndex || page.next_index !== pageEnd) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: incomplete page next_index must equal served end`,
+        );
+      }
+    }
+    MeerkatClient.requireNonNegativeIntegerField(result, "generation", context);
+    const provenance = MeerkatClient.requireStringField(result, "provenance", context);
+    if (provenance !== "host_claimed" && provenance !== "controlling_host_verified") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported provenance ${JSON.stringify(provenance)}`,
+      );
+    }
+    const placement = MeerkatClient.optionalStringField(result, "placement", context);
+    if (placement === "") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: placement must be non-empty`,
+      );
+    }
+    return result as unknown as RpcMobMemberHistoryResult;
+  }
+
+  /** List tracked member hosts with bind phase and declared capabilities. */
+  async mobHosts(mobId: string): Promise<RpcMobHostStatus[]> {
+    type _RpcSignature = [RpcMobIdParams, RpcMobHostsResult];
+    const result = await this.request("mob/hosts", { mob_id: mobId });
+    const hosts = result.hosts;
+    if (!Array.isArray(hosts)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/hosts response: missing hosts",
+      );
+    }
+    return hosts.map((row, index) =>
+      MeerkatClient.parseMobHostStatus(
+        row,
+        `Invalid mob/hosts response: hosts[${index}]`,
+      ),
+    );
+  }
+
+  /** Outstanding cross-host route-install obligations. */
+  async mobRouteInstalls(mobId: string): Promise<RpcMobRouteInstallsResult> {
+    type _RpcSignature = [RpcMobIdParams, RpcMobRouteInstallsResult];
+    const result = await this.request("mob/route_installs", { mob_id: mobId });
+    const context = "Invalid mob/route_installs response";
+    const outstanding = MeerkatClient.requireRecordArray(
+      result.outstanding,
+      `${context}: outstanding`,
+    );
+    outstanding.forEach((row, index) =>
+      MeerkatClient.parseRouteInstallObligation(
+        row,
+        `${context}: outstanding[${index}]`,
+      ),
+    );
+    MeerkatClient.requireBooleanField(result, "complete", context);
+    return result as unknown as RpcMobRouteInstallsResult;
+  }
+
+  /** Bind a member-host daemon from its binding descriptor. */
+  async bindMobHost(
+    mobId: string,
+    descriptor: RpcWireHostBindingDescriptor,
+  ): Promise<RpcMobBindHostResult> {
+    type _RpcSignature = [RpcMobBindHostParams, RpcMobBindHostResult];
+    const result = await this.request("mob/bind_host", {
+      mob_id: mobId,
+      descriptor,
+    });
+    const context = "Invalid mob/bind_host response";
+    MeerkatClient.requireStringField(result, "host_id", context);
+    MeerkatClient.requireNonNegativeIntegerField(result, "authority_epoch", context);
+    const capabilities = MeerkatClient.parseMobHostCapabilities(
+      result.capabilities,
+      `${context}: capabilities`,
+    );
+    return { ...result, capabilities } as unknown as RpcMobBindHostResult;
+  }
+
+  /** Revoke a bound (or bind-requested) member host. */
+  async revokeMobHost(
+    mobId: string,
+    hostId: string,
+  ): Promise<RpcMobRevokeHostResult> {
+    type _RpcSignature = [RpcMobRevokeHostParams, RpcMobRevokeHostResult];
+    const result = await this.request("mob/revoke_host", {
+      mob_id: mobId,
+      host_id: hostId,
+    });
+    const context = "Invalid mob/revoke_host response";
+    MeerkatClient.requireStringField(result, "host_id", context);
+    MeerkatClient.requireStringArray(result.released_members, `${context}: released_members`);
+    return result as unknown as RpcMobRevokeHostResult;
+  }
+
+  /** Hard-cancel a mob member; `reason` is required. */
+  async hardCancelMobMember(
+    mobId: string,
+    agentIdentity: string,
+    reason: string,
+  ): Promise<boolean> {
+    type _RpcSignature = [RpcMobHardCancelParams, RpcMobHardCancelResult];
+    const result = await this.request("mob/hard_cancel_member", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      reason,
+    });
+    if (typeof result.cancelled !== "boolean") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/hard_cancel_member response: missing cancelled",
+      );
+    }
+    return result.cancelled;
+  }
+
+  /** Open a live realtime channel on a mob member. */
+  async openMobMemberLive(
+    mobId: string,
+    agentIdentity: string,
+    opts?: MobMemberLiveOpenOptions,
+  ): Promise<RpcLiveOpenResult> {
+    type _RpcSignature = [RpcMobMemberLiveOpenParams, RpcLiveOpenResult];
+    const result = await this.request("mob/member_live_open", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      ...(opts?.turningMode !== undefined ? { turning_mode: opts.turningMode } : {}),
+      ...(opts?.transport !== undefined ? { transport: opts.transport } : {}),
+    });
+    return MeerkatClient.parseLiveOpenResult(
+      result,
+      "Invalid mob/member_live_open response",
+    );
+  }
+
+  /** Close one named live channel on a mob member. */
+  async closeMobMemberLive(
+    mobId: string,
+    agentIdentity: string,
+    channelId: string,
+  ): Promise<RpcLiveCloseResult> {
+    type _RpcSignature = [RpcMobMemberLiveChannelParams, RpcLiveCloseResult];
+    const result = await this.request("mob/member_live_close", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      channel_id: channelId,
+    });
+    return MeerkatClient.parseLiveCloseResult(result);
+  }
+
+  /** Read live channel status for a mob member. */
+  async mobMemberLiveStatus(
+    mobId: string,
+    agentIdentity: string,
+    channelId?: string,
+  ): Promise<RpcLiveStatusResult> {
+    type _RpcSignature = [RpcMobMemberLiveStatusParams, RpcLiveStatusResult];
+    const result = await this.request("mob/member_live_status", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      ...(channelId !== undefined ? { channel_id: channelId } : {}),
+    });
+    return MeerkatClient.parseLiveStatusResult(
+      result,
+      "Invalid mob/member_live_status response",
+    );
+  }
+
+  /** Drive one turn-level live control verb on a member channel. */
+  async controlMobMemberLive(
+    mobId: string,
+    agentIdentity: string,
+    channelId: string,
+    verb: RpcBridgeLiveControlVerb,
+  ): Promise<RpcBridgeLiveControlOutcome> {
+    type _RpcSignature = [RpcMobMemberLiveControlParams, RpcBridgeLiveControlOutcome];
+    const result = await this.request("mob/member_live_control", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      channel_id: channelId,
+      verb,
+    });
+    const context = "Invalid mob/member_live_control response";
+    const resultVerb = MeerkatClient.requireStringField(result, "verb", context);
+    const status = MeerkatClient.requireStringField(result, "status", context);
+    const expectedStatus: Record<string, string> = {
+      commit_input: "committed",
+      interrupt: "interrupted",
+      truncate: "truncated",
+      refresh: "queued",
+    };
+    if (expectedStatus[resultVerb] !== status || resultVerb !== verb.verb) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: mismatched verb/status outcome`,
+      );
+    }
+    return result as unknown as RpcBridgeLiveControlOutcome;
+  }
+
   async respawnMobMember(
     mobId: string,
     agentIdentity: string,
@@ -2020,6 +2487,37 @@ export class MeerkatClient {
         "Invalid mob/member_status response",
       );
     }
+    snapshot.placement = MeerkatClient.optionalStringField(
+      result,
+      "placement",
+      "Invalid mob/member_status response",
+    );
+    snapshot.controlReachability = MeerkatClient.parseWireReachability(
+      result.control_reachability,
+      "control_reachability",
+    );
+    snapshot.commsReachability = MeerkatClient.parseWireReachability(
+      result.comms_reachability,
+      "comms_reachability",
+    );
+    if (result.last_seen_ms != null) {
+      snapshot.lastSeenMs = MeerkatClient.requireNonNegativeIntegerField(
+        result,
+        "last_seen_ms",
+        "Invalid mob/member_status response",
+      );
+    }
+    snapshot.freshnessReason = MeerkatClient.optionalStringField(
+      result,
+      "freshness_reason",
+      "Invalid mob/member_status response",
+    );
+    snapshot.lifecycleCapabilities = MeerkatClient.parseMemberLifecycleCapabilities(
+      result.lifecycle_capabilities,
+    );
+    snapshot.nonPortableDisabled = MeerkatClient.parseNonPortableDisabled(
+      result.non_portable_disabled,
+    );
     return snapshot;
   }
 
@@ -2753,7 +3251,7 @@ export class MeerkatClient {
       "generation",
       context,
     );
-    if (!Number.isInteger(generation) || generation < 0) {
+    if (!Number.isSafeInteger(generation) || generation < 0) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
         `${context}: source generation must be a non-negative integer`,
@@ -3004,7 +3502,7 @@ export class MeerkatClient {
 
   async liveOpen(params: LiveOpenParams): Promise<LiveOpenResult> {
     const result = await this.request("live/open", params as unknown as Record<string, unknown>);
-    return result as unknown as LiveOpenResult;
+    return MeerkatClient.parseLiveOpenResult(result, "Invalid live/open response");
   }
 
   async liveWebrtcAnswer(
@@ -3022,7 +3520,7 @@ export class MeerkatClient {
       "live/status",
       params as unknown as Record<string, unknown>,
     );
-    return result as unknown as LiveStatusResult;
+    return MeerkatClient.parseLiveStatusResult(result, "Invalid live/status response");
   }
 
   async liveClose(params: LiveChannelParams): Promise<LiveCloseResult> {
@@ -3337,9 +3835,24 @@ export class MeerkatClient {
         const error = data.error as Record<string, unknown> | null | undefined;
         if (error) {
           const normalized = MeerkatClient.parseRpcErrorPayload(error);
+          const errorData =
+            typeof error.data === "object" &&
+            error.data !== null &&
+            !Array.isArray(error.data)
+              ? (error.data as Record<string, unknown>)
+              : undefined;
+          const semanticCode =
+            typeof errorData?.code === "string" && errorData.code.length > 0
+              ? errorData.code
+              : undefined;
+          const rpcCode =
+            typeof error.code === "number" || typeof error.code === "string"
+              ? error.code
+              : "UNKNOWN";
           pending.reject(
-            new MeerkatError(
-              normalized.code,
+            meerkatErrorFromJsonRpcCode(
+              rpcCode,
+              semanticCode,
               normalized.message,
               normalized.details,
             ),
@@ -3499,6 +4012,65 @@ export class MeerkatClient {
     return value;
   }
 
+  private static requireOwnField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): unknown {
+    if (!Object.prototype.hasOwnProperty.call(raw, field)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
+    }
+    return raw[field];
+  }
+
+  private static requireClosedStringField(
+    raw: Record<string, unknown>,
+    field: string,
+    allowed: readonly string[],
+    context: string,
+  ): string {
+    const value = MeerkatClient.requirePresentStringField(raw, field, context);
+    if (!allowed.includes(value)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported ${field} ${JSON.stringify(value)}`,
+      );
+    }
+    return value;
+  }
+
+  private static validateOptionalStringField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): void {
+    if (
+      Object.prototype.hasOwnProperty.call(raw, field) &&
+      typeof raw[field] !== "string"
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: ${field} must be string`,
+      );
+    }
+  }
+
+  private static validateOptionalBooleanField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): void {
+    if (
+      Object.prototype.hasOwnProperty.call(raw, field) &&
+      typeof raw[field] !== "boolean"
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: ${field} must be boolean`,
+      );
+    }
+  }
+
   private static requireNumberField(
     raw: Record<string, unknown>,
     field: string,
@@ -3517,10 +4089,11 @@ export class MeerkatClient {
 
   /**
    * Require a wire count/total field (Rust `usize`/`u64`). A present value
-   * that is fractional or negative can never be a valid unsigned integer, so
-   * it is a contract violation and fails closed instead of being accepted as
-   * an any-finite-number. Mirrors the web SDK `requireNonNegativeIntegerField`
-   * and Python `_require_non_negative_integer_field`.
+   * that is fractional, negative, or outside JavaScript's lossless integer
+   * range can never be represented faithfully, so it is a contract violation
+   * and fails closed instead of being accepted as an any-finite-number.
+   * Mirrors the web SDK `requireNonNegativeIntegerField` and Python
+   * `_require_non_negative_integer_field`.
    */
   private static requireNonNegativeIntegerField(
     raw: Record<string, unknown>,
@@ -3529,7 +4102,7 @@ export class MeerkatClient {
     displayField = field,
   ): number {
     const value = MeerkatClient.requireNumberField(raw, field, context, displayField);
-    if (!Number.isInteger(value) || value < 0) {
+    if (!Number.isSafeInteger(value) || value < 0) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
         `${context}: ${displayField} must be a non-negative integer`,
@@ -3562,6 +4135,585 @@ export class MeerkatClient {
       );
     }
     return value;
+  }
+
+  private static validateGeneratedContentBlock(
+    raw: Record<string, unknown>,
+    context: string,
+    systemNoticeContent: boolean,
+  ): void {
+    const allowed = systemNoticeContent
+      ? ["text", "image", "video", "structured", "skill_context"]
+      : ["text", "image", "video", "structured", "unknown"];
+    const type = MeerkatClient.requireClosedStringField(
+      raw,
+      "type",
+      allowed,
+      context,
+    );
+    if (type === "text") {
+      MeerkatClient.requirePresentStringField(raw, "text", context);
+    } else if (type === "image") {
+      MeerkatClient.requirePresentStringField(raw, "media_type", context);
+    } else if (type === "video") {
+      MeerkatClient.requirePresentStringField(raw, "media_type", context);
+      MeerkatClient.requireNonNegativeIntegerField(raw, "duration_ms", context);
+    } else if (type === "structured") {
+      MeerkatClient.requireOwnField(raw, "data", context);
+    } else if (type === "skill_context") {
+      const skillKey = MeerkatClient.requireRecord(raw.skill_key, "skill_key", context);
+      MeerkatClient.requireStringField(skillKey, "source_uuid", `${context}: skill_key`);
+      MeerkatClient.requireStringField(skillKey, "skill_name", `${context}: skill_key`);
+      MeerkatClient.requirePresentStringField(raw, "text", context);
+    }
+  }
+
+  private static validateOptionalMetaRecord(
+    raw: Record<string, unknown>,
+    context: string,
+  ): void {
+    if (Object.prototype.hasOwnProperty.call(raw, "meta")) {
+      MeerkatClient.requireRecord(raw.meta, "meta", context);
+    }
+  }
+
+  private static validateToolConfigStatus(
+    raw: unknown,
+    context: string,
+  ): void {
+    const status = MeerkatClient.requireRecord(raw, "status_info", context);
+    const kind = MeerkatClient.requireClosedStringField(
+      status,
+      "kind",
+      [
+        "boundary_applied",
+        "deferred_catalog_delta",
+        "warning_failed_closed",
+        "external_tool_delta",
+      ],
+      context,
+    );
+    if (kind === "boundary_applied") {
+      MeerkatClient.requireBooleanField(status, "base_changed", context);
+      MeerkatClient.requireNonNegativeIntegerField(status, "revision", context);
+      MeerkatClient.requireBooleanField(status, "visible_changed", context);
+    } else if (kind === "deferred_catalog_delta") {
+      MeerkatClient.requireNonNegativeIntegerField(status, "added_hidden_count", context);
+      MeerkatClient.requireNonNegativeIntegerField(status, "pending_source_count", context);
+      MeerkatClient.requireNonNegativeIntegerField(status, "removed_hidden_count", context);
+    } else if (kind === "warning_failed_closed") {
+      MeerkatClient.requirePresentStringField(status, "error", context);
+    } else {
+      MeerkatClient.requireClosedStringField(
+        status,
+        "phase",
+        ["pending", "applied", "draining", "forced", "failed"],
+        context,
+      );
+      MeerkatClient.validateOptionalStringField(status, "detail", context);
+    }
+  }
+
+  private static validateToolConfigPayload(
+    raw: unknown,
+    context: string,
+  ): void {
+    const payload = MeerkatClient.requireRecord(raw, "payload", context);
+    MeerkatClient.requireClosedStringField(
+      payload,
+      "operation",
+      ["add", "remove", "reload"],
+      context,
+    );
+    MeerkatClient.requireBooleanField(payload, "persisted", context);
+    MeerkatClient.requirePresentStringField(payload, "target", context);
+    MeerkatClient.validateToolConfigStatus(payload.status_info, `${context}: status_info`);
+    if (Object.prototype.hasOwnProperty.call(payload, "applied_at_turn")) {
+      MeerkatClient.requireNonNegativeIntegerField(payload, "applied_at_turn", context);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "domain")) {
+      MeerkatClient.requireClosedStringField(
+        payload,
+        "domain",
+        ["tool_scope", "deferred_catalog"],
+        context,
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "deferred_catalog_delta")) {
+      const delta = MeerkatClient.requireRecord(
+        payload.deferred_catalog_delta,
+        "deferred_catalog_delta",
+        context,
+      );
+      for (const field of [
+        "added_hidden_names",
+        "pending_sources",
+        "removed_hidden_names",
+      ] as const) {
+        if (Object.prototype.hasOwnProperty.call(delta, field)) {
+          MeerkatClient.requireStringArray(delta[field], `${context}: ${field}`);
+        }
+      }
+    }
+  }
+
+  private static validateSystemNoticeBlock(
+    raw: Record<string, unknown>,
+    context: string,
+  ): void {
+    const type = MeerkatClient.requireClosedStringField(
+      raw,
+      "type",
+      [
+        "comms",
+        "external_event",
+        "tool_config",
+        "mcp",
+        "background_job",
+        "auth",
+        "runtime_notice",
+        "unknown",
+      ],
+      context,
+    );
+    const validateContent = (): void => {
+      if (!Object.prototype.hasOwnProperty.call(raw, "content")) return;
+      MeerkatClient.requireRecordArray(raw.content, `${context}: content`).forEach(
+        (block, index) =>
+          MeerkatClient.validateGeneratedContentBlock(
+            block,
+            `${context}: content[${index}]`,
+            true,
+          ),
+      );
+    };
+
+    if (type === "comms") {
+      MeerkatClient.requireClosedStringField(
+        raw,
+        "direction",
+        ["incoming", "outgoing", "internal"],
+        context,
+      );
+      MeerkatClient.requirePresentStringField(raw, "kind", context);
+      for (const field of ["intent", "request_id", "status", "summary"] as const) {
+        MeerkatClient.validateOptionalStringField(raw, field, context);
+      }
+      if (Object.prototype.hasOwnProperty.call(raw, "peer")) {
+        const peer = MeerkatClient.requireRecord(raw.peer, "peer", context);
+        MeerkatClient.requireStringField(peer, "id", `${context}: peer`);
+        MeerkatClient.validateOptionalStringField(peer, "display_name", `${context}: peer`);
+      }
+      if (Object.prototype.hasOwnProperty.call(raw, "sender_taint")) {
+        MeerkatClient.requireClosedStringField(
+          raw,
+          "sender_taint",
+          ["clean", "tainted"],
+          context,
+        );
+      }
+      validateContent();
+    } else if (type === "external_event") {
+      MeerkatClient.requirePresentStringField(raw, "event_type", context);
+      MeerkatClient.requirePresentStringField(raw, "source", context);
+      MeerkatClient.validateOptionalStringField(raw, "body", context);
+      MeerkatClient.validateOptionalStringField(raw, "summary", context);
+      validateContent();
+    } else if (type === "tool_config") {
+      MeerkatClient.validateToolConfigPayload(raw.payload, `${context}: payload`);
+    } else if (type === "mcp") {
+      for (const field of ["detail", "server_id"] as const) {
+        MeerkatClient.validateOptionalStringField(raw, field, context);
+      }
+      if (Object.prototype.hasOwnProperty.call(raw, "operation")) {
+        MeerkatClient.requireClosedStringField(
+          raw,
+          "operation",
+          ["add", "remove", "reload"],
+          context,
+        );
+      }
+      if (Object.prototype.hasOwnProperty.call(raw, "pending_sources")) {
+        MeerkatClient.requireStringArray(raw.pending_sources, `${context}: pending_sources`);
+      }
+      MeerkatClient.validateOptionalBooleanField(raw, "persisted", context);
+      if (Object.prototype.hasOwnProperty.call(raw, "phase")) {
+        MeerkatClient.requireClosedStringField(
+          raw,
+          "phase",
+          ["pending", "applied", "draining", "forced", "failed"],
+          context,
+        );
+      }
+    } else if (type === "background_job") {
+      MeerkatClient.requireStringField(raw, "job_id", context);
+      MeerkatClient.requireClosedStringField(
+        raw,
+        "status",
+        ["completed", "failed", "aborted", "cancelled", "retired", "terminated"],
+        context,
+      );
+      MeerkatClient.validateOptionalStringField(raw, "detail", context);
+      MeerkatClient.validateOptionalStringField(raw, "display_name", context);
+    } else if (type === "auth") {
+      MeerkatClient.requirePresentStringField(raw, "state", context);
+      MeerkatClient.validateOptionalStringField(raw, "binding", context);
+      MeerkatClient.validateOptionalStringField(raw, "detail", context);
+    } else if (type === "runtime_notice") {
+      MeerkatClient.requirePresentStringField(raw, "category", context);
+      MeerkatClient.validateOptionalStringField(raw, "detail", context);
+    } else {
+      MeerkatClient.validateOptionalStringField(raw, "summary", context);
+    }
+  }
+
+  private static validateWireAssistantBlock(
+    raw: Record<string, unknown>,
+    context: string,
+  ): void {
+    const blockType = MeerkatClient.requireClosedStringField(
+      raw,
+      "block_type",
+      [
+        "text",
+        "transcript",
+        "reasoning",
+        "tool_use",
+        "server_tool_content",
+        "image",
+        "unknown",
+      ],
+      context,
+    );
+    if (blockType === "unknown") return;
+
+    const data = MeerkatClient.requireRecord(raw.data, "data", context);
+    MeerkatClient.validateOptionalMetaRecord(data, `${context}: data`);
+    if (blockType === "text") {
+      MeerkatClient.requirePresentStringField(data, "text", `${context}: data`);
+    } else if (blockType === "transcript") {
+      MeerkatClient.requirePresentStringField(data, "text", `${context}: data`);
+      const source = MeerkatClient.requireRecord(data.source, "source", `${context}: data`);
+      const sourceKind = MeerkatClient.requireClosedStringField(
+        source,
+        "kind",
+        ["spoken", "unknown"],
+        `${context}: data.source`,
+      );
+      if (sourceKind === "unknown") {
+        MeerkatClient.requirePresentStringField(
+          source,
+          "debug",
+          `${context}: data.source`,
+        );
+      }
+    } else if (blockType === "reasoning") {
+      MeerkatClient.validateOptionalStringField(data, "text", `${context}: data`);
+    } else if (blockType === "tool_use") {
+      MeerkatClient.requireOwnField(data, "args", `${context}: data`);
+      MeerkatClient.requireStringField(data, "id", `${context}: data`);
+      MeerkatClient.requireStringField(data, "name", `${context}: data`);
+    } else if (blockType === "server_tool_content") {
+      MeerkatClient.requireOwnField(data, "content", `${context}: data`);
+      MeerkatClient.requireRecord(data.kind, "kind", `${context}: data`);
+      MeerkatClient.validateOptionalStringField(data, "id", `${context}: data`);
+    } else {
+      MeerkatClient.requireRecord(data.blob_ref, "blob_ref", `${context}: data`);
+      MeerkatClient.requireNonNegativeIntegerField(data, "height", `${context}: data`);
+      MeerkatClient.requireStringField(data, "image_id", `${context}: data`);
+      MeerkatClient.requirePresentStringField(data, "media_type", `${context}: data`);
+      MeerkatClient.requireRecord(data.meta, "meta", `${context}: data`);
+      MeerkatClient.requireRecord(
+        data.revised_prompt,
+        "revised_prompt",
+        `${context}: data`,
+      );
+      MeerkatClient.requireNonNegativeIntegerField(data, "width", `${context}: data`);
+    }
+  }
+
+  private static validateWireToolResult(
+    raw: Record<string, unknown>,
+    context: string,
+  ): void {
+    MeerkatClient.requireStringField(raw, "tool_use_id", context);
+    const content = MeerkatClient.requireOwnField(raw, "content", context);
+    if (typeof content !== "string" && !Array.isArray(content)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid content`);
+    }
+    if (Array.isArray(content)) {
+      MeerkatClient.requireRecordArray(content, `${context}: content`).forEach(
+        (block, index) =>
+          MeerkatClient.validateGeneratedContentBlock(
+            block,
+            `${context}: content[${index}]`,
+            false,
+          ),
+      );
+    }
+    MeerkatClient.validateOptionalBooleanField(raw, "is_error", context);
+  }
+
+  private static validateWireHistoryRow(
+    raw: Record<string, unknown>,
+    context: string,
+  ): void {
+    const role = MeerkatClient.requireStringField(raw, "role", context);
+    MeerkatClient.requireStringField(raw, "created_at", context);
+    for (const field of ["interaction_id", "run_id"] as const) {
+      if (
+        Object.prototype.hasOwnProperty.call(raw, field) &&
+        (typeof raw[field] !== "string" || raw[field].length === 0)
+      ) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: ${field} must be non-empty string`,
+        );
+      }
+    }
+    if (role === "system") {
+      MeerkatClient.requirePresentStringField(raw, "content", context);
+      return;
+    }
+    if (role === "system_notice") {
+      const kind = MeerkatClient.requireStringField(raw, "kind", context);
+      if (
+        ![
+          "generic",
+          "comms",
+          "external_event",
+          "mcp_pending",
+          "mcp",
+          "background_job",
+          "tool_scope",
+          "tool_scope_warning",
+          "auth_reauth_required",
+        ].includes(kind)
+      ) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: unsupported kind ${JSON.stringify(kind)}`,
+        );
+      }
+      MeerkatClient.validateOptionalStringField(raw, "body", context);
+      if (Object.prototype.hasOwnProperty.call(raw, "blocks")) {
+        MeerkatClient.requireRecordArray(raw.blocks, `${context}: blocks`).forEach(
+          (block, index) =>
+            MeerkatClient.validateSystemNoticeBlock(
+              block,
+              `${context}: blocks[${index}]`,
+            ),
+        );
+      }
+      return;
+    }
+    if (role === "user") {
+      if (raw.content == null || (!Array.isArray(raw.content) && typeof raw.content !== "string")) {
+        throw new MeerkatError("INVALID_RESPONSE", `${context}: missing content`);
+      }
+      if (Array.isArray(raw.content)) {
+        MeerkatClient.requireRecordArray(raw.content, `${context}: content`).forEach(
+          (block, index) =>
+            MeerkatClient.validateGeneratedContentBlock(
+              block,
+              `${context}: content[${index}]`,
+              false,
+            ),
+        );
+      }
+      if (Object.prototype.hasOwnProperty.call(raw, "transcript_role")) {
+        MeerkatClient.requireClosedStringField(
+          raw,
+          "transcript_role",
+          ["conversational", "compaction_summary", "injected_context"],
+          context,
+        );
+      }
+      return;
+    }
+    if (role === "block_assistant") {
+      MeerkatClient.requireRecordArray(raw.blocks, `${context}: blocks`).forEach(
+        (block, index) =>
+          MeerkatClient.validateWireAssistantBlock(
+            block,
+            `${context}: blocks[${index}]`,
+          ),
+      );
+      const stopReason = MeerkatClient.requireStringField(raw, "stop_reason", context);
+      if (
+        ![
+          "end_turn",
+          "tool_use",
+          "max_tokens",
+          "stop_sequence",
+          "content_filter",
+          "cancelled",
+        ].includes(stopReason)
+      ) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: unsupported stop_reason ${JSON.stringify(stopReason)}`,
+        );
+      }
+      return;
+    }
+    if (role === "tool_results") {
+      MeerkatClient.requireRecordArray(raw.results, `${context}: results`).forEach(
+        (result, index) =>
+          MeerkatClient.validateWireToolResult(
+            result,
+            `${context}: results[${index}]`,
+          ),
+      );
+      return;
+    }
+    throw new MeerkatError(
+      "INVALID_RESPONSE",
+      `${context}: unsupported role ${JSON.stringify(role)}`,
+    );
+  }
+
+  private static parseMobHostCapabilities(
+    raw: unknown,
+    context: string,
+  ): RpcWireHostCapabilityFlags {
+    const capabilities = MeerkatClient.requireRecord(raw, "capabilities", context);
+    for (const field of [
+      "approval_forwarding",
+      "autonomous_members",
+      "durable_sessions",
+      "hard_cancel_member",
+      "mcp",
+      "memory_store",
+    ] as const) {
+      MeerkatClient.requireBooleanField(capabilities, field, context);
+    }
+    const trackedInputCancel = Object.prototype.hasOwnProperty.call(
+      capabilities,
+      "tracked_input_cancel",
+    )
+      ? MeerkatClient.requireBooleanField(capabilities, "tracked_input_cancel", context)
+      : false;
+    MeerkatClient.requireStringField(capabilities, "engine_version", context);
+    const protocolMin = MeerkatClient.requireNonNegativeIntegerField(
+      capabilities,
+      "protocol_min",
+      context,
+    );
+    const protocolMax = MeerkatClient.requireNonNegativeIntegerField(
+      capabilities,
+      "protocol_max",
+      context,
+    );
+    if (protocolMin > protocolMax) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: protocol_min exceeds protocol_max`,
+      );
+    }
+    const liveEndpoint = MeerkatClient.optionalStringField(
+      capabilities,
+      "live_endpoint",
+      context,
+    );
+    if (liveEndpoint === "") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: live_endpoint must be non-empty`,
+      );
+    }
+    const resolvableProviders = Object.prototype.hasOwnProperty.call(
+      capabilities,
+      "resolvable_providers",
+    )
+      ? MeerkatClient.requireStringArray(
+          capabilities.resolvable_providers,
+          `${context}: resolvable_providers`,
+        )
+      : undefined;
+    return {
+      ...capabilities,
+      tracked_input_cancel: trackedInputCancel,
+      ...(resolvableProviders !== undefined
+        ? { resolvable_providers: resolvableProviders }
+        : {}),
+    } as unknown as RpcWireHostCapabilityFlags;
+  }
+
+  private static parseMobHostStatus(raw: unknown, context: string): RpcMobHostStatus {
+    const host = MeerkatClient.requireRecord(raw, "host", context);
+    const bindPhase = MeerkatClient.requireStringField(host, "bind_phase", context);
+    if (bindPhase !== "requested" && bindPhase !== "bound") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported bind_phase ${JSON.stringify(bindPhase)}`,
+      );
+    }
+    MeerkatClient.requireStringField(host, "host_id", context);
+    MeerkatClient.requireNonNegativeIntegerField(
+      host,
+      "materialized_member_count",
+      context,
+    );
+    const authorityEpoch =
+      host.authority_epoch == null
+        ? undefined
+        : MeerkatClient.requireNonNegativeIntegerField(host, "authority_epoch", context);
+    const endpoint = MeerkatClient.optionalStringField(host, "endpoint", context);
+    const capabilities =
+      host.capabilities == null
+        ? undefined
+        : MeerkatClient.parseMobHostCapabilities(
+            host.capabilities,
+            `${context}: capabilities`,
+          );
+    if (
+      bindPhase === "bound" &&
+      (authorityEpoch === undefined || !endpoint || capabilities === undefined)
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: bound host missing committed authority facts`,
+      );
+    }
+    if (
+      bindPhase === "requested" &&
+      (authorityEpoch !== undefined || endpoint !== undefined || capabilities !== undefined)
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: requested host must not claim committed authority facts`,
+      );
+    }
+    if (
+      host.control_reachability != null &&
+      !["reachable", "stale", "unreachable", "unknown"].includes(
+        String(host.control_reachability),
+      )
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported control_reachability`,
+      );
+    }
+    if (host.last_seen_ms != null) {
+      MeerkatClient.requireNonNegativeIntegerField(host, "last_seen_ms", context);
+    }
+    MeerkatClient.optionalStringField(host, "freshness_reason", context);
+    return (capabilities === undefined
+      ? host
+      : { ...host, capabilities }) as unknown as RpcMobHostStatus;
+  }
+
+  private static parseRouteInstallObligation(
+    raw: unknown,
+    context: string,
+  ): RpcWireRouteInstallObligation {
+    const obligation = MeerkatClient.requireRecord(raw, "obligation", context);
+    MeerkatClient.requireStringField(obligation, "edge_a", context);
+    MeerkatClient.requireStringField(obligation, "edge_b", context);
+    MeerkatClient.requireStringField(obligation, "host", context);
+    return obligation as unknown as RpcWireRouteInstallObligation;
   }
 
   private static requireBooleanField(
@@ -3609,6 +4761,28 @@ export class MeerkatClient {
       return raw as WireMobMemberStatus;
     }
     throw new MeerkatError("INVALID_RESPONSE", message);
+  }
+
+  private static parseWireReachability(
+    raw: unknown,
+    field: string,
+  ): WireReachability | undefined {
+    if (raw == null) {
+      return undefined;
+    }
+    const values: readonly WireReachability[] = [
+      "reachable",
+      "stale",
+      "unreachable",
+      "unknown",
+    ];
+    if (typeof raw === "string" && values.includes(raw as WireReachability)) {
+      return raw as WireReachability;
+    }
+    throw new MeerkatError(
+      "INVALID_RESPONSE",
+      `Invalid mob/member_status response: ${field} must be a valid reachability`,
+    );
   }
 
   private static parseMobPeerConnectivitySnapshot(
@@ -3752,6 +4926,156 @@ export class MeerkatClient {
       description: MeerkatClient.requireStringField(record, "description", context),
       status: MeerkatClient.parseWireCapabilityStatus(record.status, context),
     };
+  }
+
+  /**
+   * Validate the generated `LiveOpenResult` contract without projecting or
+   * normalizing its transport bootstrap. In particular, single-use tokens are
+   * returned byte-for-byte as received and are never logged.
+   */
+  private static parseLiveOpenResult(
+    raw: unknown,
+    context: string,
+  ): LiveOpenResult {
+    const result = MeerkatClient.requireRecord(raw, "result", context);
+    MeerkatClient.requireStringField(result, "channel_id", context);
+
+    const capabilities = MeerkatClient.requireRecord(
+      result.capabilities,
+      "capabilities",
+      context,
+    );
+    for (const field of [
+      "audio_in",
+      "audio_out",
+      "barge_in_supported",
+      "image_in",
+      "provider_native_resume",
+      "text_in",
+      "text_out",
+      "transcript_supported",
+      "video_in",
+    ] as const) {
+      MeerkatClient.requireBooleanField(capabilities, field, `${context}: capabilities`);
+    }
+
+    const continuity = MeerkatClient.requireRecord(
+      result.continuity,
+      "continuity",
+      context,
+    );
+    const continuityMode = MeerkatClient.requireClosedStringField(
+      continuity,
+      "mode",
+      [
+        "fresh",
+        "transcript_only",
+        "degraded",
+        "provider_native_resume",
+        "unknown",
+      ],
+      `${context}: continuity`,
+    );
+    if (continuityMode === "provider_native_resume") {
+      MeerkatClient.requireStringField(
+        continuity,
+        "provider_session_id",
+        `${context}: continuity`,
+      );
+    } else if (continuityMode === "unknown") {
+      MeerkatClient.requirePresentStringField(
+        continuity,
+        "debug",
+        `${context}: continuity`,
+      );
+    }
+
+    const transport = MeerkatClient.requireRecord(
+      result.transport,
+      "transport",
+      context,
+    );
+    const transportKind = MeerkatClient.requireClosedStringField(
+      transport,
+      "transport",
+      ["websocket", "webrtc", "unknown"],
+      `${context}: transport`,
+    );
+    if (transportKind === "websocket") {
+      MeerkatClient.requireStringField(transport, "url", `${context}: transport`);
+      MeerkatClient.requireStringField(transport, "token", `${context}: transport`);
+    } else if (transportKind === "webrtc") {
+      MeerkatClient.requireStringField(
+        transport,
+        "answer_method",
+        `${context}: transport`,
+      );
+      MeerkatClient.requireStringField(transport, "token", `${context}: transport`);
+      MeerkatClient.validateOptionalStringField(
+        transport,
+        "http_url",
+        `${context}: transport`,
+      );
+    } else {
+      MeerkatClient.requirePresentStringField(
+        transport,
+        "debug",
+        `${context}: transport`,
+      );
+    }
+
+    return result as unknown as LiveOpenResult;
+  }
+
+  /** Validate the generated `LiveStatusResult` closed status vocabulary. */
+  private static parseLiveStatusResult(
+    raw: unknown,
+    context: string,
+  ): LiveStatusResult {
+    const result = MeerkatClient.requireRecord(raw, "result", context);
+    MeerkatClient.requireStringField(result, "channel_id", context);
+    const status = MeerkatClient.requireRecord(result.status, "status", context);
+    const statusKind = MeerkatClient.requireClosedStringField(
+      status,
+      "status",
+      ["idle", "opening", "ready", "degraded", "closing", "closed", "unknown"],
+      `${context}: status`,
+    );
+    if (statusKind === "degraded") {
+      const reason = MeerkatClient.requireRecord(
+        status.reason,
+        "reason",
+        `${context}: status`,
+      );
+      const reasonKind = MeerkatClient.requireClosedStringField(
+        reason,
+        "kind",
+        [
+          "rate_limited",
+          "provider_throttled",
+          "network_unstable",
+          "other",
+          "unknown",
+        ],
+        `${context}: status.reason`,
+      );
+      if (reasonKind === "other") {
+        MeerkatClient.requirePresentStringField(
+          reason,
+          "detail",
+          `${context}: status.reason`,
+        );
+      } else if (reasonKind === "unknown") {
+        MeerkatClient.requirePresentStringField(
+          reason,
+          "debug",
+          `${context}: status.reason`,
+        );
+      }
+    } else if (statusKind === "unknown") {
+      MeerkatClient.requirePresentStringField(status, "debug", `${context}: status`);
+    }
+    return result as unknown as LiveStatusResult;
   }
 
   private static parseLiveRefreshResult(raw: unknown): LiveRefreshResult {
@@ -4175,6 +5499,59 @@ export class MeerkatClient {
     return progress as unknown as WireMemberProgressSnapshot;
   }
 
+  private static parseMemberLifecycleCapabilities(
+    raw: unknown,
+  ): WireMemberLifecycleCapabilities | undefined {
+    if (raw == null) {
+      return undefined;
+    }
+    const context = "Invalid mob/member_status response";
+    const record = MeerkatClient.requireRecord(raw, "lifecycle_capabilities", context);
+    return {
+      transcript_edits: MeerkatClient.requireBooleanField(
+        record,
+        "transcript_edits",
+        context,
+      ),
+      revisions: MeerkatClient.requireBooleanField(record, "revisions", context),
+      resume_after_restart: MeerkatClient.requireBooleanField(
+        record,
+        "resume_after_restart",
+        context,
+      ),
+    };
+  }
+
+  private static parseNonPortableDisabled(
+    raw: unknown,
+  ): WireNonPortableResourceKind[] | undefined {
+    if (raw == null) {
+      return undefined;
+    }
+    const values: readonly WireNonPortableResourceKind[] = [
+      "rust_bundles",
+      "per_spawn_external_tools",
+      "mob_default_external_tools",
+      "default_llm_client_override",
+      "host_surface_mcp_allowlist",
+      "workgraph_tools",
+    ];
+    if (
+      !Array.isArray(raw) ||
+      raw.some(
+        (entry) =>
+          typeof entry !== "string" ||
+          !values.includes(entry as WireNonPortableResourceKind),
+      )
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/member_status response: non_portable_disabled must contain valid resource kinds",
+      );
+    }
+    return raw as WireNonPortableResourceKind[];
+  }
+
   static parseModelsCatalog(data: Record<string, unknown>): ModelsCatalog {
     const context = "Invalid models/catalog response";
     const contractVersion = MeerkatClient.parseContractVersion(
@@ -4329,11 +5706,14 @@ export class MeerkatClient {
     patch: number;
   } {
     const parseComponent = (value: unknown, field: string): number => {
-      if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
-        return value;
-      }
-      if (typeof value === "string" && /^\d+$/.test(value)) {
-        return Number(value);
+      const parsed =
+        typeof value === "number"
+          ? value
+          : typeof value === "string" && /^\d+$/.test(value)
+            ? Number(value)
+            : undefined;
+      if (typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0) {
+        return parsed;
       }
       throw new MeerkatError(
         "INVALID_RESPONSE",
@@ -4746,10 +6126,16 @@ export class MeerkatClient {
 
   static parseSessionHistory(data: Record<string, unknown>): SessionHistory {
     const context = "Invalid session history response";
-    if (!Array.isArray(data.messages)) {
-      throw new MeerkatError("INVALID_RESPONSE", `${context}: messages must be a list`);
-    }
-    const rawMessages = data.messages as Array<Record<string, unknown>>;
+    const rawMessages = MeerkatClient.requireRecordArray(
+      data.messages,
+      `${context}: messages`,
+    );
+    rawMessages.forEach((message, index) =>
+      MeerkatClient.validateWireHistoryRow(
+        message,
+        `${context}: messages[${index}]`,
+      ),
+    );
     return {
       sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
@@ -4765,10 +6151,16 @@ export class MeerkatClient {
     data: Record<string, unknown>,
   ): SessionTranscriptRevision {
     const context = "Invalid session transcript revision response";
-    if (!Array.isArray(data.messages)) {
-      throw new MeerkatError("INVALID_RESPONSE", `${context}: messages must be a list`);
-    }
-    const rawMessages = data.messages as Array<Record<string, unknown>>;
+    const rawMessages = MeerkatClient.requireRecordArray(
+      data.messages,
+      `${context}: messages`,
+    );
+    rawMessages.forEach((message, index) =>
+      MeerkatClient.validateWireHistoryRow(
+        message,
+        `${context}: messages[${index}]`,
+      ),
+    );
     return {
       sessionId: MeerkatClient.requireStringField(data, "session_id", context),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
@@ -4893,7 +6285,13 @@ export class MeerkatClient {
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
       interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
       runId: data.run_id != null ? String(data.run_id) : undefined,
-      blocks: rawBlocks.map((block) => MeerkatClient.parseSessionAssistantBlock(block)),
+      // System-notice blocks have their own generated union and remain
+      // available in `raw`; only block-assistant rows project through the
+      // public assistant-block view.
+      blocks:
+        role === "block_assistant"
+          ? rawBlocks.map((block) => MeerkatClient.parseSessionAssistantBlock(block))
+          : [],
       results: rawResults.map((result): SessionToolResult => {
         if (typeof result !== "object" || result === null) {
           throw new MeerkatError(
@@ -5000,64 +6398,40 @@ export class MeerkatClient {
     };
   }
 
-  static parseContentInput(value: unknown): ContentInput {
+  static parseContentInput(value: unknown): SessionContentInput {
     if (Array.isArray(value)) {
-      return value
-        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-        .map((block) => MeerkatClient.parseContentBlock(block));
+      return value.map((item, index) =>
+        MeerkatClient.parseContentBlock(
+          MeerkatClient.requireRecord(
+            item,
+            `content[${index}]`,
+            "Invalid session content",
+          ),
+        ),
+      );
     }
-    return String(value ?? "");
+    if (typeof value === "string") return value;
+    throw new MeerkatError(
+      "INVALID_RESPONSE",
+      "Invalid session content: expected string or content-block array",
+    );
   }
 
-  static parseContentBlock(data: Record<string, unknown>): ContentBlock {
-    const type = String(data.type ?? "");
-    if (type === "text") {
-      return { type: "text", text: String(data.text ?? "") };
-    }
-    if (type === "image") {
-        const source = String(data.source ?? "inline");
-        if (source === "blob") {
-        return {
-          type: "image",
-          media_type: String(data.media_type ?? ""),
-          source: "blob",
-          blob_id: String(data.blob_id ?? ""),
-        };
-      }
-      return {
-        type: "image",
-        media_type: String(data.media_type ?? ""),
-        source: "inline",
-        data: String(data.data ?? ""),
-      };
-    }
-    if (type === "video") {
-      const source = String(data.source ?? "inline");
-      if (source === "uri") {
-        return {
-          type: "video",
-          media_type: String(data.media_type ?? ""),
-          duration_ms: Number(data.duration_ms ?? 0),
-          source: "uri",
-          uri: String(data.uri ?? ""),
-        };
-      }
-      return {
-        type: "video",
-        media_type: String(data.media_type ?? ""),
-        duration_ms: Number(data.duration_ms ?? 0),
-        source: "inline",
-        data: String(data.data ?? ""),
-      };
-    }
-    return { type: "text", text: "" };
+  static parseContentBlock(data: Record<string, unknown>): SessionContentBlock {
+    MeerkatClient.validateGeneratedContentBlock(
+      data,
+      "Invalid session content block",
+      false,
+    );
+    // Preserve the validated wire object exactly. In particular, do not
+    // invent inline bytes for history-only image/video projections or collapse
+    // structured/unknown variants into empty text.
+    return { ...data } as unknown as SessionContentBlock;
   }
 
   static parseSessionAssistantBlock(data: Record<string, unknown>): SessionAssistantBlock {
     const context = "Invalid session assistant block";
-    if (data.data != null && (typeof data.data !== "object" || Array.isArray(data.data))) {
-      throw new MeerkatError("INVALID_RESPONSE", `${context}: data must be an object`);
-    }
+    MeerkatClient.validateWireAssistantBlock(data, context);
     const blockData = (data.data as Record<string, unknown> | undefined) ?? {};
     const blobRef = blockData.blob_ref as Record<string, unknown> | undefined;
     const revisedPrompt =
@@ -5077,9 +6451,11 @@ export class MeerkatClient {
       height: blockData.height != null ? Number(blockData.height) : undefined,
       revisedPrompt,
       meta: blockData.meta as Record<string, unknown> | undefined,
-      // Lane provenance for transcript blocks (typed enum on the wire,
-      // serialized as a snake_case string — currently only "spoken").
-      source: typeof blockData.source === "string" ? blockData.source : undefined,
+      source:
+        data.block_type === "transcript"
+          ? ({ ...(blockData.source as Record<string, unknown>) } as unknown as
+              SessionAssistantBlock["source"])
+          : undefined,
       raw: { ...data },
     };
   }

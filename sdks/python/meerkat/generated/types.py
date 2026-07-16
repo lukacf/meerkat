@@ -44,32 +44,11 @@ class WireRunResult:
 
 
 @dataclass
-class WireProviderMeta:
-    """Provider continuity metadata."""
-    provider: str = ''
-
-
-@dataclass
 class WireToolResult:
     """Tool result transcript item."""
     tool_use_id: str = ''
     content: Optional[WireToolResultContent] = None
     is_error: Optional[bool] = None
-
-
-@dataclass
-class WireSessionMessage:
-    """Canonical transcript message."""
-    role: str = ''
-    created_at: str = ''
-    kind: Optional[str] = None
-    body: Optional[str] = None
-    content: Optional[WireContentInput] = None
-    stop_reason: Optional[WireStopReason] = None
-    interaction_id: Optional[str] = None
-    run_id: Optional[str] = None
-    blocks: Optional[list[WireAssistantBlock]] = None
-    results: Optional[list[WireToolResult]] = None
 
 
 @dataclass
@@ -523,13 +502,13 @@ ConfigSetParams = dict[str, Any]
 # caller-supplied JSON that never gets pattern-matched at this layer.
 # Allow-listed per `dogma-blind-spots` §7.
 class SessionExternalEventEnvelopeGenericJson(TypedDict, total=False):
-    blocks: NotRequired[list[WireContentBlock]]
+    blocks: NotRequired[Optional[list[WireContentBlock]]]
     event_type: Required[str]
     kind: Required[Literal['generic_json']]
     payload: Required[Any]
 
 class SessionExternalEventEnvelopePeerResponseTerminal(TypedDict, total=False):
-    display_name: NotRequired[PeerName]
+    display_name: NotRequired[Optional[PeerName]]
     kind: Required[Literal['peer_response_terminal']]
     peer_id: Required[PeerId]
     request_id: Required[str]
@@ -554,7 +533,7 @@ class WireDeviceCompleteResultExpired(TypedDict, total=False):
 class WireDeviceCompleteResultReady(TypedDict, total=False):
     auth_binding: Required[WireAuthBindingRef]
     binding_id: Required[str]
-    expires_at: NotRequired[str]
+    expires_at: NotRequired[Optional[str]]
     has_refresh_token: Required[bool]
     profile_id: Required[str]
     provider: Required[str]
@@ -671,7 +650,7 @@ class ArtifactRecord:
     """Stable artifact record."""
     artifact_id: str
     artifact_type: Literal['text', 'log', 'command_output', 'diff', 'patch', 'generated_file', 'test_report', 'screenshot', 'image', 'json', 'binary'] | dict[str, str]
-    content_handle: dict[str, Any]
+    content_handle: BlobRef | dict[str, Any]
     created_at: str
     handle: dict[str, Any]
     media_type: str
@@ -766,7 +745,7 @@ class EventsLatestCursorParams:
 @dataclass
 class EventsLatestCursorResult:
     """Result for `events/latest_cursor`."""
-    contract_version: dict[str, Any]
+    contract_version: ContractVersion
     cursor: dict[str, Any]
 
 
@@ -781,7 +760,7 @@ class EventsListSinceParams:
 @dataclass
 class EventsListSinceResult:
     """Result for `events/list_since`."""
-    contract_version: dict[str, Any]
+    contract_version: ContractVersion
     from_cursor: dict[str, Any]
     has_more: bool
     latest_cursor: dict[str, Any]
@@ -798,7 +777,7 @@ class EventsSnapshotParams:
 @dataclass
 class EventsSnapshotResult:
     """Result for `events/snapshot`."""
-    contract_version: dict[str, Any]
+    contract_version: ContractVersion
     cursor: dict[str, Any]
     scope: dict[str, Any]
     snapshot: dict[str, Any]
@@ -810,7 +789,7 @@ class ForkSessionAtParams:
     message_index: int
     session_id: str
     running_behavior: Optional[Literal['reject']] = None
-    tool_access_policy: Optional[dict[str, Any]] = None
+    tool_access_policy: Optional[WireToolAccessPolicy] = None
 
 
 @dataclass
@@ -822,10 +801,10 @@ the emitted JSON schema is the closed replacement enum rather than a bare
 `serde_json::Value`. The consuming surface lowers it into the core
 [`TranscriptReplacement`] via [`WireTranscriptReplacement::into_core`]."""
     message_index: int
-    replacement: dict[str, Any]
+    replacement: WireTranscriptReplacement
     session_id: str
     running_behavior: Optional[Literal['reject']] = None
-    tool_access_policy: Optional[dict[str, Any]] = None
+    tool_access_policy: Optional[WireToolAccessPolicy] = None
 
 
 @dataclass
@@ -985,7 +964,7 @@ class RealmIdParams:
 @dataclass
 class RestoreSessionTranscriptRevisionParams:
     """Request payload for `session/restore_transcript_revision`."""
-    reason: dict[str, Any]
+    reason: TranscriptRewriteReason
     revision: str
     session_id: str
     actor: Optional[str] = None
@@ -996,9 +975,9 @@ class RestoreSessionTranscriptRevisionParams:
 @dataclass
 class RewriteSessionTranscriptParams:
     """Request payload for `session/rewrite_transcript`."""
-    reason: dict[str, Any]
-    replacement: list[dict[str, Any]]
-    selection: dict[str, Any]
+    reason: TranscriptRewriteReason
+    replacement: list[TranscriptRewriteMessage]
+    selection: TranscriptRewriteSelection
     session_id: str
     actor: Optional[str] = None
     expected_parent_revision: Optional[str] = None
@@ -1008,14 +987,34 @@ class RewriteSessionTranscriptParams:
 @dataclass
 class RuntimeHostCapabilities:
     """Runtime capability surface for a host."""
-    contract_version: dict[str, Any]
-    features: dict[str, Any]
+    contract_version: ContractVersion
+    features: RuntimeHostFeatureFlags
+
+
+@dataclass
+class RuntimeHostFeatureFlags:
+    """Existing host capability facts exposed as typed booleans."""
+    approvals: bool
+    artifacts: bool
+    blobs: bool
+    comms: bool
+    event_replay: bool
+    external_members: bool
+    mcp_live: bool
+    mobs: bool
+    runtime_backed_sessions: bool
+    schedules: bool
+    secure_remote_rpc: bool
+    session_events: bool
+    session_streams: bool
+    skills: bool
+    multi_host_mobs: Optional[bool] = None
 
 
 @dataclass
 class RuntimeHostHealth:
     """Runtime health projection for a host."""
-    contract_version: dict[str, Any]
+    contract_version: ContractVersion
     status: Literal['ok', 'degraded', 'unhealthy']
     checks: Optional[dict[str, Literal['ok', 'degraded', 'unhealthy']]] = None
 
@@ -1024,7 +1023,7 @@ class RuntimeHostHealth:
 class RuntimeHostInfo:
     """Read-only host information. This is a projection, not a registry entry."""
     capabilities: RuntimeHostCapabilities
-    contract_version: dict[str, Any]
+    contract_version: ContractVersion
     endpoints: dict[str, Any]
     health: RuntimeHostHealth
     host_id: str
@@ -1231,7 +1230,6 @@ class MobSpawnParams:
     auto_wire_parent: Optional[bool] = None
     backend: Optional[WireMobBackendKind] = None
     binding: Optional[WireRuntimeBinding] = None
-    budget_split_policy: Optional[WireBudgetSplitPolicy] = None
     context: Optional[Any] = None
     inherited_tool_filter: Optional[WireToolFilter] = None
     initial_message: Optional[WireContentInput] = None
@@ -1239,6 +1237,7 @@ class MobSpawnParams:
     launch_mode: Optional[WireMemberLaunchMode] = None
     model_override: Optional[str] = None
     override_profile: Optional[WireMobProfile] = None
+    placement: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
     shell_env: Optional[dict[str, str]] = None
     tool_access_policy: Optional[WireToolAccessPolicy] = None
@@ -1264,6 +1263,7 @@ class MobSpawnSpecParams:
     initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, str]] = None
     model_override: Optional[str] = None
+    placement: Optional[WireHostRef] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
 
 
@@ -1381,7 +1381,7 @@ shape so consumers never re-derive run identity or lifecycle from a free
     flow_id: str
     mob_id: str
     run_id: str
-    status: Literal['pending', 'running', 'completed', 'failed', 'canceled']
+    status: WireMobRunStatus
 
 
 @dataclass
@@ -1390,28 +1390,9 @@ class WireMobRunResultEnvelope:
     flow_id: str
     mob_id: str
     run_id: str
-    status: Literal['pending', 'running', 'completed', 'failed', 'canceled']
+    status: WireMobRunStatus
     outputs: Optional[dict[str, Any]] = None
     result: Optional[Any] = None
-
-
-@dataclass
-class WireMobRunStatus:
-    """Lifecycle status of a flow run on the wire. Mirrors
-`meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
-re-deriving meaning from a free-form status string."""
-
-
-@dataclass
-class WirePeerConnectivity:
-    """Tri-state peer-connectivity projection for `mob/member_status`.
-
-Distinguishes "connectivity is not applicable to this member" (no bridge
-session backs the member) from "the live probe timed out" (the answer is
-transiently unknown) from a resolved connectivity snapshot. The legacy
-`Option<MobPeerConnectivitySnapshot>` projection collapsed both the
-not-applicable and timed-out cases into `None`, laundering a transient
-probe fault into the same shape as a structurally-absent binding."""
 
 
 @dataclass
@@ -1420,7 +1401,7 @@ class WirePeerConnectivitySnapshot:
 `meerkat_mob::MobPeerConnectivitySnapshot`."""
     reachable_peer_count: int
     unknown_peer_count: int
-    unreachable_peers: Optional[list[dict[str, Any]]] = None
+    unreachable_peers: Optional[list[WireUnreachablePeer]] = None
 
 
 @dataclass
@@ -1775,12 +1756,19 @@ class MobMemberStatusResult:
     member_ref: WireMemberRef
     status: WireMobMemberStatus
     tokens_used: int
+    comms_reachability: Optional[WireReachability] = None
+    control_reachability: Optional[WireReachability] = None
     current_session_id: Optional[str] = None
     error: Optional[str] = None
     external_member: Optional[Any] = None
+    freshness_reason: Optional[str] = None
     kickoff: Optional[Any] = None
+    last_seen_ms: Optional[int] = None
+    lifecycle_capabilities: Optional[WireMemberLifecycleCapabilities] = None
+    non_portable_disabled: Optional[list[WireNonPortableResourceKind]] = None
     output_preview: Optional[str] = None
     peer_connectivity: Optional[WirePeerConnectivity] = None
+    placement: Optional[WireHostRef] = None
     progress: Optional[WireMemberProgressSnapshot] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
@@ -1976,6 +1964,234 @@ class MobStreamCloseResult:
     already_closed: bool
     closed: bool
     stream_id: str
+
+
+@dataclass
+class MobGrantScopesParams:
+    """Request payload for `mob/grant_scopes`."""
+    mob_id: str
+    principal: str
+    scopes: list[WireControlScope]
+    expires_at_ms: Optional[int] = None
+
+
+@dataclass
+class MobGrantScopesResult:
+    """Response payload for `mob/grant_scopes`."""
+    record: WireGrantRecord
+
+
+@dataclass
+class MobRevokeScopesParams:
+    """Request payload for `mob/revoke_scopes`. `scopes: None` revokes the
+principal's entire grant."""
+    mob_id: str
+    principal: str
+    scopes: Optional[list[WireControlScope]] = None
+
+
+@dataclass
+class MobRevokeScopesResult:
+    """Response payload for `mob/revoke_scopes`."""
+    removed: bool
+
+
+@dataclass
+class MobGrantsResult:
+    """Response payload for `mob/grants`."""
+    grants: list[WireGrantRecord]
+
+
+@dataclass
+class MobMemberHistoryParams:
+    """Request payload for `mob/member_history`."""
+    agent_identity: str
+    mob_id: str
+    from_index: Optional[int] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class MobMemberHistoryResult:
+    """Response payload for `mob/member_history`. Pagination facts live inside
+`page` (one owner); this envelope adds the placement/provenance facts
+only the controlling host knows."""
+    generation: int
+    page: WireMemberHistoryPageBody
+    provenance: WireProjectionProvenance
+    placement: Optional[WireHostRef] = None
+
+
+@dataclass
+class WireMemberHistoryPageBody:
+    """Shared transcript page body used by both the bridge
+`MemberHistoryPage` reply and the console `mob/member_history` result —
+same page shape for local and remote members."""
+    complete: bool
+    from_index: int
+    message_count: int
+    messages: list[WireHistoryRow]
+    next_index: Optional[int] = None
+
+
+@dataclass
+class MobHostsResult:
+    """Response payload for `mob/hosts`."""
+    hosts: list[MobHostStatus]
+
+
+@dataclass
+class MobHostStatus:
+    """One tracked host row for `mob/hosts` (A13).
+
+`endpoint`, `authority_epoch`, and `capabilities` are the CommitHostBind
+facts — present for `Bound` hosts, typed-absent for a `Requested`-phase
+host (an open or failed bind window commits nothing; fabricating empty
+values would launder ceremony state into committed facts).
+
+`control_reachability`/`last_seen_ms`/`freshness_reason` are fed by the
+observer-local periodic `HostStatus` driver shared with orphan
+reconciliation. They remain typed-absent until the first observation and
+never become durable membership facts."""
+    bind_phase: WireHostBindPhase
+    host_id: WireHostRef
+    materialized_member_count: int
+    authority_epoch: Optional[int] = None
+    capabilities: Optional[WireHostCapabilityFlags] = None
+    control_reachability: Optional[WireReachability] = None
+    endpoint: Optional[str] = None
+    freshness_reason: Optional[str] = None
+    last_seen_ms: Optional[int] = None
+
+
+@dataclass
+class WireHostCapabilityFlags:
+    """Wire mirror of the DSL `HostCapabilityFlags` single enumeration (§6.1) —
+the machine owns the fact; this is its console projection.
+
+Field vocabulary matches the machine maps and the domain
+`HostCapabilityReport` exactly (ADJ-P7-1, FLAG-A2): `u64` protocol bounds
+and an OPEN `BTreeSet<String>` provider vocabulary — a newer member host
+advertising a provider this build's enum lacks must stay representable
+(no silent caps)."""
+    approval_forwarding: bool
+    autonomous_members: bool
+    durable_sessions: bool
+    engine_version: str
+    hard_cancel_member: bool
+    mcp: bool
+    memory_store: bool
+    protocol_max: int
+    protocol_min: int
+    live_endpoint: Optional[str] = None
+    resolvable_providers: Optional[list[str]] = None
+    tracked_input_cancel: Optional[bool] = None
+
+
+@dataclass
+class MobRouteInstallsResult:
+    """Response payload for the route-install status projection."""
+    complete: bool
+    outstanding: list[WireRouteInstallObligation]
+
+
+@dataclass
+class WireRouteInstallObligation:
+    """One outstanding cross-host route-install obligation."""
+    edge_a: str
+    edge_b: str
+    host: WireHostRef
+
+
+@dataclass
+class MobBindHostParams:
+    """Request payload for `mob/bind_host`."""
+    descriptor: WireHostBindingDescriptor
+    mob_id: str
+
+
+@dataclass
+class MobBindHostResult:
+    """Response payload for `mob/bind_host`."""
+    authority_epoch: int
+    capabilities: WireHostCapabilityFlags
+    host_id: WireHostRef
+
+
+@dataclass
+class MobRevokeHostParams:
+    """Request payload for `mob/revoke_host`."""
+    host_id: WireHostRef
+    mob_id: str
+
+
+@dataclass
+class MobRevokeHostResult:
+    """Response payload for `mob/revoke_host`."""
+    host_id: WireHostRef
+    released_members: list[str]
+
+
+@dataclass
+class MobHardCancelParams:
+    """Request payload for `mob/hard_cancel_member` (DEC-P6E-8). `reason` is
+REQUIRED: the handle verb demands one, and a handler-minted default
+string would be handler-owned meaning (DEC-P7A-2)."""
+    agent_identity: str
+    mob_id: str
+    reason: str
+
+
+@dataclass
+class MobHardCancelResult:
+    """Response payload for `mob/hard_cancel_member`. A dedicated type (not
+[`MobForceCancelResult`] reuse) so the hard/force distinction stays
+legible in SDK type names (DEC-P7A-2)."""
+    cancelled: bool
+
+
+@dataclass
+class MobMemberLiveOpenParams:
+    """Request payload for `mob/member_live_open` (§16.4). Result reuses
+`LiveOpenResult` verbatim."""
+    agent_identity: str
+    mob_id: str
+    transport: Optional[LiveOpenTransport] = None
+    turning_mode: Optional[RealtimeTurningMode] = None
+
+
+@dataclass
+class MobMemberLiveChannelParams:
+    """Request payload for `mob/member_live_close`. Close-what-you-name
+(ADJ-P6B-15): `channel_id` is REQUIRED — a reconciling console can never
+race-kill a channel a concurrent legitimate open just minted. The status
+read has its own params type ([`MobMemberLiveStatusParams`]) because its
+`channel_id` is optional by contract."""
+    agent_identity: str
+    channel_id: str
+    mob_id: str
+
+
+@dataclass
+class MobMemberLiveStatusParams:
+    """Request payload for `mob/member_live_status` (§16.9, ADJ-P6B-2).
+`channel_id: None` IS the reply-loss discovery primitive — it resolves
+"the member's active channel" on the owning host, so an orphaned open's
+id can be discovered and closed. A dedicated type (not
+[`MobMemberLiveChannelParams`]) so the wire cannot amputate the
+discovery read (DEC-P7A-2)."""
+    agent_identity: str
+    mob_id: str
+    channel_id: Optional[str] = None
+
+
+@dataclass
+class MobMemberLiveControlParams:
+    """Request payload for `mob/member_live_control`."""
+    agent_identity: str
+    channel_id: str
+    mob_id: str
+    verb: BridgeLiveControlVerb
 
 
 @dataclass
@@ -2193,6 +2409,7 @@ wire surface — callers that need that parity should use the non-declarative
     context: Optional[Any] = None
     initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, str]] = None
+    placement: Optional[WireHostRef] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
 
 
@@ -2218,6 +2435,35 @@ class MobReconcileFailureWire:
     agent_identity: str
     error: WireMobError
     stage: WireMobReconcileStage
+
+
+@dataclass
+class WireHostBindingDescriptor:
+    """Host flavor of the `--comms-binding-out` descriptor: what `rkat mob host`
+writes for the operator to hand to the controlling mob. Mirrors the
+member descriptor's shape (typed Ed25519 identity, never a raw peer id)
+with `kind: "host"` and the optional advertised live endpoint (DL5/DL6)."""
+    address: str
+    bootstrap_token: BridgeBootstrapToken
+    identity: WireTrustedPeerIdentity
+    kind: WireHostBindingDescriptorKind
+    live_endpoint: Optional[str] = None
+
+
+@dataclass
+class WireGrantRecord:
+    """One control-plane grant record (A9)."""
+    principal: str
+    scopes: list[WireControlScope]
+    expires_at_ms: Optional[int] = None
+
+
+@dataclass
+class WireMemberLifecycleCapabilities:
+    """Lifecycle capabilities available for a member at its placement (§19.L7)."""
+    resume_after_restart: bool
+    revisions: bool
+    transcript_edits: bool
 
 
 @dataclass
@@ -2713,15 +2959,23 @@ class BridgeBindResponse:
 @dataclass
 class BridgeCapabilities:
     """Capabilities advertised by a member runtime on bind."""
+    approval_forwarding: Optional[bool] = None
+    autonomous_members: Optional[bool] = None
     current_protocol_version: Optional[BridgeProtocolVersion] = None
     default_protocol_version: Optional[BridgeProtocolVersion] = None
     deliver_member_input: Optional[bool] = None
     destroy_member: Optional[bool] = None
+    durable_sessions: Optional[bool] = None
+    engine_version: Optional[str] = None
     hard_cancel_member: Optional[bool] = None
     interrupt_member: Optional[bool] = None
+    mcp: Optional[bool] = None
+    memory_store: Optional[bool] = None
     observe_member: Optional[bool] = None
+    resolvable_providers: Optional[list[Provider]] = None
     retire_member: Optional[bool] = None
     supported_protocol_versions: Optional[list[BridgeProtocolVersion]] = None
+    tracked_input_cancel: Optional[bool] = None
     unwire_member: Optional[bool] = None
     wire_member: Optional[bool] = None
 
@@ -2735,8 +2989,12 @@ class BridgeDeliveryPayload:
     input_id: str
     protocol_version: BridgeProtocolVersion
     supervisor: BridgePeerSpec
+    expected_member: Optional[BridgeMemberIncarnation] = None
     injected_context: Optional[list[ContentInput]] = None
     objective_id: Optional[str] = None
+    outcome_tracking: Optional[Literal['interaction']] = None
+    transcript_interaction_id: Optional[str] = None
+    turn: Optional[BridgeTurnDirective] = None
 
 
 @dataclass
@@ -2770,8 +3028,14 @@ class BridgeHardCancelPayload:
 `InterruptMember` is the cooperative boundary-break path. This payload is
 intentionally separate so supervisors cannot accidentally collapse boundary
 cancellation and immediate user/session interrupt authority onto one wire
-command."""
+command. `operation_id` remains stable across transport retries, while
+`expected_run_id` fences the level-triggered request to one exact run: a
+delayed retry can observe that run already terminal, but must never cancel a
+newer run that subsequently became current."""
     epoch: int
+    expected_member: BridgeMemberIncarnation
+    expected_run_id: RunId
+    operation_id: OperationId
     protocol_version: BridgeProtocolVersion
     reason: str
     supervisor: BridgePeerSpec
@@ -2820,7 +3084,7 @@ receiver with a typed `UnsupportedProtocolVersion` cause."""
     peer_spec: BridgePeerSpec
     protocol_version: BridgeProtocolVersion
     supervisor: BridgePeerSpec
-    mob_peer_overlay: Optional[dict[str, Any]] = None
+    mob_peer_overlay: Optional[BridgeMobPeerOverlayHandoff] = None
 
 
 @dataclass
@@ -2939,6 +3203,279 @@ class SessionStreamCloseResult:
     already_closed: bool
     closed: bool
     stream_id: str
+
+
+@dataclass
+class BridgeHostCapabilityRequirements:
+    """Capabilities the controller requires the host to preserve before a bind
+or rebind may become durable. The clause is computed from existing placed
+residency/custody and validated host-side before authority mutation, so an
+accepted remote ceremony can never be rejected only afterward by the
+controller's machine."""
+    autonomous_members: bool
+    durable_sessions: bool
+    protocol_v4: bool
+    tracked_input_cancel: bool
+
+
+@dataclass
+class BridgeMemberIncarnation:
+    """Exact cross-host member residency addressed by one directed delivery."""
+    agent_identity: str
+    binding_generation: int
+    fence_token: int
+    generation: int
+    host_id: str
+    member_session_id: str
+    mob_id: str
+
+
+@dataclass
+class BridgeTurnCorrelation:
+    """Flow-step correlation for a directed turn."""
+    run_id: str
+    step_id: str
+
+
+@dataclass
+class BridgeTurnDirective:
+    """Flow-turn directive attached to a delivery (absent-omitted; fails closed
+on pre-V4 receivers via their `deny_unknown_fields` boundary)."""
+    correlation: BridgeTurnCorrelation
+    tool_overlay: Optional[PublicTurnToolOverlay] = None
+
+
+@dataclass
+class BridgeTurnOutcomeAck:
+    """Exact acknowledgement key for one consumed directed-turn terminal.
+
+Agent identity and mob id are implied by the addressed member session;
+generation + fence keep a reused input id from pruning a later residency."""
+    fence_token: int
+    generation: int
+    input_id: str
+
+
+@dataclass
+class WireFlowFailureDetail:
+    """Presentation detail for a failed directed turn.
+
+`original_utf8_bytes` always names the byte length of the complete source
+string. When `truncated` is true, `text` is the largest UTF-8 prefix the
+member host could retain while keeping the complete
+[`BridgeTurnOutcomeRecord`] within the durable protocol bound."""
+    original_utf8_bytes: int
+    text: str
+    truncated: bool
+
+
+@dataclass
+class BridgeTurnOutcomeRecord:
+    """Terminal outcome record for a directed turn, delivered as a sidecar on
+`MemberEventsPage` (the event envelope rows themselves stay unchanged —
+§7 envelope freeze)."""
+    fence_token: int
+    generation: int
+    input_id: str
+    outcome: WireFlowTurnOutcome
+    terminal_seq: int
+
+
+@dataclass
+class BridgeMobPeerOverlayHandoff:
+    """Generated MobMachine peer overlay handoff carried with peer wiring commands."""
+    peer_specs: list[BridgePeerSpec]
+    recipient_peer_id: str
+    topology_epoch: int
+
+
+# Unique identifier for a run (a single execution of the agent loop).
+#
+# Core emits this in `RunEvent` and tracks it across the run lifecycle.
+RunId = str
+
+# Unique identifier for an operation
+OperationId = str
+
+# Cursor into a member's event stream.
+#
+# `seq` is the owning host's durable `StoredEvent.seq` for the session
+# bound at `generation` — NEVER a session-task or per-stream counter. A
+# fresh-session respawn starts a new seq domain, while same-session Resume
+# continues that session's seqs behind a host-recorded generation floor;
+# page replies always carry the current generation so consumers restart at
+# the owning host's resolved floor.
+class BridgeEventCursorTail(TypedDict, total=False):
+    cursor: Required[Literal['tail']]
+
+class BridgeEventCursorAt(TypedDict, total=False):
+    cursor: Required[Literal['at']]
+    generation: Required[int]
+    seq: Required[int]
+
+BridgeEventCursor = BridgeEventCursorTail | BridgeEventCursorAt
+
+# Supervisor bridge nested type BridgeOutboundTaintTarget.
+class BridgeOutboundTaintTargetPlaced(TypedDict, total=False):
+    placed: Required[BridgeMemberIncarnation]
+
+BridgeOutboundTaintTarget = Literal['peer_only'] | BridgeOutboundTaintTargetPlaced
+
+# Stable terminal class for an exact tracked-input cancellation.
+class BridgeTrackedInputCancelOutcomeNoEffect(TypedDict, total=False):
+    outcome: Required[Literal['no_effect']]
+
+class BridgeTrackedInputCancelOutcomeCancelled(TypedDict, total=False):
+    outcome: Required[Literal['cancelled']]
+
+class BridgeTrackedInputCancelOutcomeTerminal(TypedDict, total=False):
+    outcome: Required[Literal['terminal']]
+    record: Required[BridgeTurnOutcomeRecord]
+
+BridgeTrackedInputCancelOutcome = BridgeTrackedInputCancelOutcomeNoEffect | BridgeTrackedInputCancelOutcomeCancelled | BridgeTrackedInputCancelOutcomeTerminal
+
+# Transport requested by `live/open`.
+#
+# Missing means "server default": prefer WebSocket when configured, otherwise
+# WebRTC when that is the only configured live transport. This preserves the
+# pre-WebRTC `live/open` shape while keeping the new branch typed.
+LiveOpenTransport = Literal['websocket', 'webrtc']
+
+# The seven flow-turn terminals plus channel-close (§18.1/§18.11). Closed.
+#
+# Failure details are structured because the member host may have to retain
+# a UTF-8-safe prefix to keep one durable journal row within its protocol
+# bound. Consumers can distinguish that representation compaction from the
+# original failure itself without parsing prose.
+class WireFlowTurnOutcomeExtractionFailedPayload(TypedDict, total=False):
+    detail: Required[WireFlowFailureDetail]
+
+class WireFlowTurnOutcomeExtractionFailed(TypedDict, total=False):
+    extraction_failed: Required[WireFlowTurnOutcomeExtractionFailedPayload]
+
+class WireFlowTurnOutcomeRunFailedPayload(TypedDict, total=False):
+    detail: Required[WireFlowFailureDetail]
+
+class WireFlowTurnOutcomeRunFailed(TypedDict, total=False):
+    run_failed: Required[WireFlowTurnOutcomeRunFailedPayload]
+
+class WireFlowTurnOutcomeInteractionFailedPayload(TypedDict, total=False):
+    detail: Required[WireFlowFailureDetail]
+
+class WireFlowTurnOutcomeInteractionFailed(TypedDict, total=False):
+    interaction_failed: Required[WireFlowTurnOutcomeInteractionFailedPayload]
+
+WireFlowTurnOutcome = Literal['run_completed'] | Literal['extraction_succeeded'] | Literal['interaction_complete'] | Literal['interaction_callback_pending'] | Literal['channel_closed'] | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed
+
+# Stable discriminant for [`AuthError`]. Used in serialized error summaries
+# and for SDK-facing wire codes.
+AuthErrorKind = Literal['missing_secret', 'unsupported_combination', 'missing_required_metadata', 'workspace_mismatch', 'stale_credential', 'refresh_required', 'lease_absent', 'user_reauth_required', 'expired', 'refresh_failed', 'resolve_required', 'interactive_login_required', 'host_owned_unavailable', 'io', 'other']
+
+# Wire projection of `meerkat_core::connection::ConnectionTargetError`'s
+# variant set (closed; kinds only — the parameters stay in the diagnostic
+# `reason` string).
+ConnectionTargetErrorKind = Literal['missing_realm', 'unknown_realm', 'missing_default_binding', 'invalid_realm_id', 'invalid_binding_id', 'realm_config_invalid', 'binding_invalid', 'provider_mismatch', 'realm_chain']
+
+# Closed control-plane scope vocabulary (A9). Grants and bridge scope
+# denials speak exactly this set.
+WireControlScope = Literal['list', 'read_history', 'subscribe_events', 'send_command', 'cancel', 'retire', 'wire_topology', 'live', 'admin_host', 'admin_grants']
+
+# Typed "host cannot build the member" taxonomy (§14.4). Closed — every
+# owning-host build failure maps onto one of these, never a generic
+# failure. Externally tagged (like the parent cause enum) so the
+# `kind`-named detail fields don't collide with a tag key.
+class MemberBuildRejectionUnknownProviderForModelPayload(TypedDict, total=False):
+    model: Required[str]
+
+class MemberBuildRejectionUnknownProviderForModel(TypedDict, total=False):
+    unknown_provider_for_model: Required[MemberBuildRejectionUnknownProviderForModelPayload]
+
+class MemberBuildRejectionBindingUnresolvablePayload(TypedDict, total=False):
+    kind: Required[ConnectionTargetErrorKind]
+
+class MemberBuildRejectionBindingUnresolvable(TypedDict, total=False):
+    binding_unresolvable: Required[MemberBuildRejectionBindingUnresolvablePayload]
+
+class MemberBuildRejectionProviderAuthPayload(TypedDict, total=False):
+    kind: Required[AuthErrorKind]
+
+class MemberBuildRejectionProviderAuth(TypedDict, total=False):
+    provider_auth: Required[MemberBuildRejectionProviderAuthPayload]
+
+class MemberBuildRejectionSelfHostedServerMissingPayload(TypedDict, total=False):
+    server_id: Required[str]
+
+class MemberBuildRejectionSelfHostedServerMissing(TypedDict, total=False):
+    self_hosted_server_missing: Required[MemberBuildRejectionSelfHostedServerMissingPayload]
+
+MemberBuildRejection = MemberBuildRejectionUnknownProviderForModel | MemberBuildRejectionBindingUnresolvable | MemberBuildRejectionProviderAuth | MemberBuildRejectionSelfHostedServerMissing
+
+# Optional typed domain for tool-configuration change payloads.
+ToolConfigChangeDomain = Literal['tool_scope', 'deferred_catalog']
+
+# Operation kind for live tool configuration changes.
+ToolConfigChangeOperation = Literal['add', 'remove', 'reload']
+
+# Canonical lifecycle phase for external-tool boundary deltas.
+ExternalToolDeltaPhase = Literal['pending', 'applied', 'draining', 'forced', 'failed']
+
+# Structured status data for live tool configuration change notifications.
+class ToolConfigChangeStatusBoundaryApplied(TypedDict, total=False):
+    base_changed: Required[bool]
+    kind: Required[Literal['boundary_applied']]
+    revision: Required[int]
+    visible_changed: Required[bool]
+
+class ToolConfigChangeStatusDeferredCatalogDelta(TypedDict, total=False):
+    added_hidden_count: Required[int]
+    kind: Required[Literal['deferred_catalog_delta']]
+    pending_source_count: Required[int]
+    removed_hidden_count: Required[int]
+
+class ToolConfigChangeStatusWarningFailedClosed(TypedDict, total=False):
+    error: Required[str]
+    kind: Required[Literal['warning_failed_closed']]
+
+class ToolConfigChangeStatusExternalToolDelta(TypedDict, total=False):
+    detail: NotRequired[Optional[str]]
+    kind: Required[Literal['external_tool_delta']]
+    phase: Required[ExternalToolDeltaPhase]
+
+ToolConfigChangeStatus = ToolConfigChangeStatusBoundaryApplied | ToolConfigChangeStatusDeferredCatalogDelta | ToolConfigChangeStatusWarningFailedClosed | ToolConfigChangeStatusExternalToolDelta
+
+@dataclass
+class SystemNoticePeer:
+    """Peer identity carried in a typed comms transcript block.
+
+`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized
+as a hyphenated UUID string on the wire; `display_name` is the presentation
+label. Keeping `id` typed lets the projection logic consume the identity
+directly instead of re-parsing a `String` back into a `PeerId`."""
+    id: PeerId
+    display_name: Optional[str] = None
+
+
+@dataclass
+class DeferredCatalogDelta:
+    """Additive hidden-catalog delta metadata for runtime notices."""
+    added_hidden_names: Optional[list[ToolName]] = None
+    pending_sources: Optional[list[str]] = None
+    removed_hidden_names: Optional[list[ToolName]] = None
+
+
+@dataclass
+class ToolConfigChangedPayload:
+    """Payload for tool configuration change notifications.
+
+The typed `status_info` is the sole owner of the change status; display
+text is derived at read time via [`ToolConfigChangedPayload::status_text`]."""
+    operation: ToolConfigChangeOperation
+    persisted: bool
+    status_info: ToolConfigChangeStatus
+    target: str
+    applied_at_turn: Optional[int] = None
+    deferred_catalog_delta: Optional[DeferredCatalogDelta] = None
+    domain: Optional[ToolConfigChangeDomain] = None
 
 
 @dataclass
@@ -3093,7 +3630,7 @@ Default (`None`) preserves the prior wire shape: callers that omit the
 field get `ProviderManaged`, matching the legacy behavior."""
     session_id: str
     seed_max_chars: Optional[int] = None
-    transport: Optional[Literal['websocket', 'webrtc']] = None
+    transport: Optional[LiveOpenTransport] = None
     turning_mode: Optional[RealtimeTurningMode] = None
 
 
@@ -3172,7 +3709,7 @@ class WireLiveTransportBootstrapWebsocket(TypedDict, total=False):
 
 class WireLiveTransportBootstrapWebrtc(TypedDict, total=False):
     answer_method: Required[str]
-    http_url: NotRequired[str]
+    http_url: NotRequired[Optional[str]]
     token: Required[str]
     transport: Required[Literal['webrtc']]
 
@@ -3191,7 +3728,10 @@ of the core `LiveChannelCapabilities` / `LiveContinuityMode` /
 `LiveTransportBootstrap` so SDK codegen sees the real shape (typed
 booleans, internally-tagged variant payloads, discriminated transport
 union) instead of an opaque JSON blob. CC5/CC6 (PR #650 verifier
-follow-up); G8 (P2): `transport` typed-mirror."""
+follow-up); G8 (P2): `transport` typed-mirror.
+
+`Eq`: all fields are strings/enums/bools, and the bridge reply chain
+(`BridgeReply::MemberLiveChannelOpened`) requires it."""
     capabilities: WireLiveChannelCapabilities
     channel_id: str
     continuity: WireLiveContinuityMode
@@ -3433,20 +3973,20 @@ Clients route on the typed `status` discriminator."""
 # surface gains a distinct, safe type.
 class RealtimeTranscriptEventItemObserved(TypedDict, total=False):
     item_id: Required[str]
-    previous_item_id: NotRequired[str]
-    response_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
+    response_id: NotRequired[Optional[str]]
     role: Required[RealtimeTranscriptRole]
     type: Required[Literal['item_observed']]
 
 class RealtimeTranscriptEventItemSkipped(TypedDict, total=False):
     item_id: Required[str]
-    previous_item_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
     type: Required[Literal['item_skipped']]
 
 class RealtimeTranscriptEventUserTranscriptFinal(TypedDict, total=False):
     content_index: Required[int]
     item_id: Required[str]
-    previous_item_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
     text: Required[str]
     type: Required[Literal['user_transcript_final']]
 
@@ -3455,7 +3995,7 @@ class RealtimeTranscriptEventAssistantTextDelta(TypedDict, total=False):
     delta: Required[str]
     delta_id: Required[str]
     item_id: Required[str]
-    previous_item_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
     response_id: Required[str]
     type: Required[Literal['assistant_text_delta']]
 
@@ -3464,7 +4004,7 @@ class RealtimeTranscriptEventAssistantTranscriptDelta(TypedDict, total=False):
     delta: Required[str]
     delta_id: Required[str]
     item_id: Required[str]
-    previous_item_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
     response_id: Required[str]
     type: Required[Literal['assistant_transcript_delta']]
 
@@ -3725,56 +4265,56 @@ class WireLiveAdapterObservationReady(TypedDict, total=False):
     observation: Required[Literal['ready']]
 
 class WireLiveAdapterObservationUserTranscriptFinal(TypedDict, total=False):
-    content_index: NotRequired[int]
+    content_index: NotRequired[Optional[int]]
     observation: Required[Literal['user_transcript_final']]
-    previous_item_id: NotRequired[str]
-    provider_item_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
+    provider_item_id: NotRequired[Optional[str]]
     text: Required[str]
 
 class WireLiveAdapterObservationAssistantTextDelta(TypedDict, total=False):
-    content_index: NotRequired[int]
+    content_index: NotRequired[Optional[int]]
     delta: Required[str]
-    delta_id: NotRequired[str]
+    delta_id: NotRequired[Optional[str]]
     observation: Required[Literal['assistant_text_delta']]
-    previous_item_id: NotRequired[str]
-    provider_item_id: NotRequired[str]
-    response_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
+    provider_item_id: NotRequired[Optional[str]]
+    response_id: NotRequired[Optional[str]]
 
 class WireLiveAdapterObservationAssistantTranscriptDelta(TypedDict, total=False):
-    content_index: NotRequired[int]
+    content_index: NotRequired[Optional[int]]
     delta: Required[str]
-    delta_id: NotRequired[str]
+    delta_id: NotRequired[Optional[str]]
     observation: Required[Literal['assistant_transcript_delta']]
-    previous_item_id: NotRequired[str]
-    provider_item_id: NotRequired[str]
-    response_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
+    provider_item_id: NotRequired[Optional[str]]
+    response_id: NotRequired[Optional[str]]
 
 class WireLiveAdapterObservationAssistantAudioChunk(TypedDict, total=False):
     channels: Required[int]
-    content_index: NotRequired[int]
+    content_index: NotRequired[Optional[int]]
     data: Required[str]
-    item_id: NotRequired[str]
+    item_id: NotRequired[Optional[str]]
     observation: Required[Literal['assistant_audio_chunk']]
-    response_id: NotRequired[str]
+    response_id: NotRequired[Optional[str]]
     sample_rate_hz: Required[int]
 
 class WireLiveAdapterObservationAssistantTranscriptFinal(TypedDict, total=False):
-    content_index: NotRequired[int]
+    content_index: NotRequired[Optional[int]]
     observation: Required[Literal['assistant_transcript_final']]
-    previous_item_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
     provider_item_id: Required[str]
-    response_id: NotRequired[str]
+    response_id: NotRequired[Optional[str]]
     stop_reason: Required[Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']]
     text: Required[str]
     usage: Required[dict[str, Any]]
 
 class WireLiveAdapterObservationAssistantTranscriptTruncated(TypedDict, total=False):
-    content_index: NotRequired[int]
+    content_index: NotRequired[Optional[int]]
     observation: Required[Literal['assistant_transcript_truncated']]
-    previous_item_id: NotRequired[str]
-    provider_item_id: NotRequired[str]
-    response_id: NotRequired[str]
-    text: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
+    provider_item_id: NotRequired[Optional[str]]
+    response_id: NotRequired[Optional[str]]
+    text: NotRequired[Optional[str]]
 
 class WireLiveAdapterObservationRealtimeTranscript(TypedDict, total=False):
     event: Required[RealtimeTranscriptEvent]
@@ -3786,7 +4326,7 @@ class WireLiveAdapterObservationUserContentCommitted(TypedDict, total=False):
     item_id: Required[str]
     media_type: Required[str]
     observation: Required[Literal['user_content_committed']]
-    previous_item_id: NotRequired[str]
+    previous_item_id: NotRequired[Optional[str]]
 
 class WireLiveAdapterObservationToolCallRequested(TypedDict, total=False):
     arguments: Required[Any]
@@ -3796,11 +4336,11 @@ class WireLiveAdapterObservationToolCallRequested(TypedDict, total=False):
 
 class WireLiveAdapterObservationTurnInterrupted(TypedDict, total=False):
     observation: Required[Literal['turn_interrupted']]
-    response_id: NotRequired[str]
+    response_id: NotRequired[Optional[str]]
 
 class WireLiveAdapterObservationTurnCompleted(TypedDict, total=False):
     observation: Required[Literal['turn_completed']]
-    response_id: NotRequired[str]
+    response_id: NotRequired[Optional[str]]
     stop_reason: Required[Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']]
     usage: Required[dict[str, Any]]
 
@@ -3927,7 +4467,14 @@ class WireSessionSummary:
 
 @dataclass
 class ContractVersion:
-    """Semantic contract version triple."""
+    """Semantic version for the Meerkat wire contract.
+
+Start at 0.1.0 — allow breaking changes during Phase 1-3 development.
+Bump to 1.0.0 when the SDK Builder ships (Phase 5) and external
+consumers exist. Before 1.0.0, minor bumps can be breaking."""
+    major: int
+    minor: int
+    patch: int
 
 
 @dataclass
@@ -3991,9 +4538,9 @@ class WireModelProfile:
 @dataclass
 class WireAssistantImageRef:
     """Generated assistant image reference."""
-    blob_ref: dict[str, Any]
+    blob_ref: BlobRef
     height: int
-    image_id: str
+    image_id: AssistantImageId
     media_type: str
     width: int
 
@@ -4024,10 +4571,10 @@ class WireGenerateImageExecutionPlan:
 @dataclass
 class WireImageGenerationToolResult:
     """Canonical generate_image tool result payload."""
-    native_metadata: dict[str, Any]
+    native_metadata: ProviderImageMetadata
     operation_id: str
     provider_text: dict[str, Any]
-    revised_prompt: dict[str, Any]
+    revised_prompt: RevisedPromptDisposition
     terminal: dict[str, Any]
     images: Optional[list[dict[str, Any]]] = None
     warnings: Optional[list[dict[str, Any]]] = None
@@ -4296,14 +4843,31 @@ class WireContentBlockText(TypedDict, total=False):
     text: Required[str]
     type: Required[Literal['text']]
 
-class WireContentBlockImage(TypedDict, total=False):
+class WireContentBlockImageInline(TypedDict, total=False):
     media_type: Required[str]
     type: Required[Literal['image']]
+    data: Required[str]
+    source: Required[Literal['inline']]
 
-class WireContentBlockVideo(TypedDict, total=False):
+class WireContentBlockImageBlob(TypedDict, total=False):
+    media_type: Required[str]
+    type: Required[Literal['image']]
+    blob_id: Required[str]
+    source: Required[Literal['blob']]
+
+class WireContentBlockVideoInline(TypedDict, total=False):
     duration_ms: Required[int]
     media_type: Required[str]
     type: Required[Literal['video']]
+    data: Required[str]
+    source: Required[Literal['inline']]
+
+class WireContentBlockVideoUri(TypedDict, total=False):
+    duration_ms: Required[int]
+    media_type: Required[str]
+    type: Required[Literal['video']]
+    source: Required[Literal['uri']]
+    uri: Required[str]
 
 class WireContentBlockStructured(TypedDict, total=False):
     data: Required[Any]
@@ -4312,7 +4876,7 @@ class WireContentBlockStructured(TypedDict, total=False):
 class WireContentBlockUnknown(TypedDict, total=False):
     type: Required[Literal['unknown']]
 
-WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockStructured | WireContentBlockUnknown
+WireContentBlock = WireContentBlockText | WireContentBlockImageInline | WireContentBlockImageBlob | WireContentBlockVideoInline | WireContentBlockVideoUri | WireContentBlockStructured | WireContentBlockUnknown
 
 # Wire-safe content input (mirrors `ContentInput`).
 WireContentInput = str | list[WireContentBlock]
@@ -4357,7 +4921,7 @@ class WireRuntimeBindingSession(TypedDict, total=False):
 
 class WireRuntimeBindingExternal(TypedDict, total=False):
     address: Required[str]
-    bootstrap_token: NotRequired[BridgeBootstrapToken]
+    bootstrap_token: NotRequired[Optional[BridgeBootstrapToken]]
     identity: Required[WireTrustedPeerIdentity]
     kind: Required[Literal['external']]
 
@@ -4388,7 +4952,7 @@ class WireForkContextLastMessages(TypedDict, total=False):
 
 WireForkContext = WireForkContextFullHistory | WireForkContextLastMessages
 
-# Tool access policy for a spawned mob member.
+# Public tool access policy for a spawned member or delegated session fork.
 class WireToolAccessPolicyInherit(TypedDict, total=False):
     type: Required[Literal['inherit']]
 
@@ -4401,22 +4965,6 @@ class WireToolAccessPolicyDenyList(TypedDict, total=False):
     value: Required[list[str]]
 
 WireToolAccessPolicy = WireToolAccessPolicyInherit | WireToolAccessPolicyAllowList | WireToolAccessPolicyDenyList
-
-# Budget split policy for a spawned mob member.
-class WireBudgetSplitPolicyEqual(TypedDict, total=False):
-    type: Required[Literal['equal']]
-
-class WireBudgetSplitPolicyProportional(TypedDict, total=False):
-    type: Required[Literal['proportional']]
-
-class WireBudgetSplitPolicyRemaining(TypedDict, total=False):
-    type: Required[Literal['remaining']]
-
-class WireBudgetSplitPolicyFixed(TypedDict, total=False):
-    type: Required[Literal['fixed']]
-    value: Required[int]
-
-WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplitPolicyProportional | WireBudgetSplitPolicyRemaining | WireBudgetSplitPolicyFixed
 
 # Pre-resolved tool filter inherited by a spawned mob member.
 WireToolFilter = Literal['All'] | dict[str, list[str]]
@@ -4495,7 +5043,7 @@ MobDispatchModeInput = Literal['fan_out', 'one_to_one', 'fan_in']
 
 # Mob RPC helper wire type for MobFlowNodeInput.
 class MobFlowNodeInputStep(TypedDict, total=False):
-    branch: NotRequired[str]
+    branch: NotRequired[Optional[str]]
     depends_on: NotRequired[list[str]]
     depends_on_mode: NotRequired[MobDependencyModeInput]
     kind: Required[Literal['step']]
@@ -4552,6 +5100,96 @@ MobStepOutputFormatInput = Literal['json', 'text']
 # Closed wire stage for a per-identity `mob/reconcile` failure.
 WireMobReconcileStage = Literal['spawn', 'retire']
 
+# Opaque host reference: the host's canonical comms `PeerId` string.
+WireHostRef = str
+
+# Host bind lifecycle phase as recorded by the controlling machine.
+WireHostBindPhase = Literal['requested', 'bound']
+
+# Who attests a remotely-served projection (§7/§20): `HostClaimed` facts
+# are only what the owning host reports; `ControllingHostVerified` facts
+# were checked against controlling-machine records.
+WireProjectionProvenance = Literal['host_claimed', 'controlling_host_verified']
+
+# Observer-computed reachability class (§7.5). A projection from typed
+# bridge/pump outcomes — never a membership fact, and a DIFFERENT fact
+# from the bridge's own `BridgePeerConnectivity`.
+WireReachability = Literal['reachable', 'stale', 'unreachable', 'unknown']
+
+# Merged vocabulary of resources that cannot cross hosts (A4).
+#
+# No `ScheduleTools` kind (DEC-6): A3-final permits schedule tools on
+# remote members, so no producer for that kind can exist — the wire and
+# machine vocabularies agree on these six.
+WireNonPortableResourceKind = Literal['rust_bundles', 'per_spawn_external_tools', 'mob_default_external_tools', 'default_llm_client_override', 'host_surface_mcp_allowlist', 'workgraph_tools']
+
+# Lifecycle status of a flow run on the wire. Mirrors
+# `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than
+# re-deriving meaning from a free-form status string.
+WireMobRunStatus = Literal['pending', 'running', 'completed', 'failed', 'canceled']
+
+# Tri-state peer-connectivity projection for `mob/member_status`.
+#
+# Distinguishes "connectivity is not applicable to this member" (no bridge
+# session backs the member) from "the live probe timed out" (the answer is
+# transiently unknown) from a resolved connectivity snapshot. The legacy
+# `Option<MobPeerConnectivitySnapshot>` projection collapsed both the
+# not-applicable and timed-out cases into `None`, laundering a transient
+# probe fault into the same shape as a structurally-absent binding.
+class WirePeerConnectivityNotApplicable(TypedDict, total=False):
+    status: Required[Literal['not_applicable']]
+
+class WirePeerConnectivityProbeTimedOut(TypedDict, total=False):
+    status: Required[Literal['probe_timed_out']]
+
+class WirePeerConnectivityKnown(TypedDict, total=False):
+    snapshot: Required[WirePeerConnectivitySnapshot]
+    status: Required[Literal['known']]
+
+WirePeerConnectivity = WirePeerConnectivityNotApplicable | WirePeerConnectivityProbeTimedOut | WirePeerConnectivityKnown
+
+# Marker discriminant for the host binding descriptor file.
+WireHostBindingDescriptorKind = Literal['host']
+
+# Live-channel control verbs. `Truncate` mirrors `LiveTruncateParams`
+# minus `channel_id` (carried by the payload).
+class BridgeLiveControlVerbCommitInput(TypedDict, total=False):
+    verb: Required[Literal['commit_input']]
+
+class BridgeLiveControlVerbInterrupt(TypedDict, total=False):
+    verb: Required[Literal['interrupt']]
+
+class BridgeLiveControlVerbTruncate(TypedDict, total=False):
+    audio_played_ms: Required[int]
+    content_index: Required[int]
+    item_id: Required[str]
+    verb: Required[Literal['truncate']]
+
+class BridgeLiveControlVerbRefresh(TypedDict, total=False):
+    verb: Required[Literal['refresh']]
+
+BridgeLiveControlVerb = BridgeLiveControlVerbCommitInput | BridgeLiveControlVerbInterrupt | BridgeLiveControlVerbTruncate | BridgeLiveControlVerbRefresh
+
+# Per-verb result of `ControlMemberLiveChannel` — mirrors the typed
+# statuses the local live command results carry.
+class BridgeLiveControlOutcomeCommitInput(TypedDict, total=False):
+    status: Required[LiveCommitInputStatus]
+    verb: Required[Literal['commit_input']]
+
+class BridgeLiveControlOutcomeInterrupt(TypedDict, total=False):
+    status: Required[LiveInterruptStatus]
+    verb: Required[Literal['interrupt']]
+
+class BridgeLiveControlOutcomeTruncate(TypedDict, total=False):
+    status: Required[LiveTruncateStatus]
+    verb: Required[Literal['truncate']]
+
+class BridgeLiveControlOutcomeRefresh(TypedDict, total=False):
+    status: Required[LiveRefreshStatus]
+    verb: Required[Literal['refresh']]
+
+BridgeLiveControlOutcome = BridgeLiveControlOutcomeCommitInput | BridgeLiveControlOutcomeInterrupt | BridgeLiveControlOutcomeTruncate | BridgeLiveControlOutcomeRefresh
+
 # WorkGraph RPC helper wire type for AttentionDelegatedAuthority.
 AttentionDelegatedAuthority = Literal['add_evidence', 'close_own_review_item', 'request_closure', 'close_if_policy_allows']
 
@@ -4575,7 +5213,7 @@ class WorkAttentionStatusActive(TypedDict, total=False):
 
 class WorkAttentionStatusPaused(TypedDict, total=False):
     state: Required[Literal['paused']]
-    until: NotRequired[str]
+    until: NotRequired[Optional[str]]
 
 class WorkAttentionStatusSuperseded(TypedDict, total=False):
     state: Required[Literal['superseded']]
@@ -4759,6 +5397,39 @@ WireToolResultContent = str | list[WireContentBlock]
 # throughout this module.
 WireProvider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other'] | Literal['unknown']
 
+# Provider continuity metadata for transcript blocks.
+class WireProviderMetaAnthropic(TypedDict, total=False):
+    provider: Required[Literal['anthropic']]
+    signature: Required[str]
+
+class WireProviderMetaAnthropicRedacted(TypedDict, total=False):
+    data: Required[str]
+    provider: Required[Literal['anthropic_redacted']]
+
+class WireProviderMetaAnthropicCompaction(TypedDict, total=False):
+    content: Required[str]
+    provider: Required[Literal['anthropic_compaction']]
+
+class WireProviderMetaGemini(TypedDict, total=False):
+    provider: Required[Literal['gemini']]
+    thoughtSignature: Required[str]
+
+class WireProviderMetaOpenAi(TypedDict, total=False):
+    encrypted_content: NotRequired[Optional[str]]
+    id: Required[str]
+    phase: NotRequired[Optional[str]]
+    provider: Required[Literal['open_ai']]
+    response_id: NotRequired[Optional[str]]
+
+class WireProviderMetaOpenAiResponse(TypedDict, total=False):
+    provider: Required[Literal['open_ai_response']]
+    response_id: Required[str]
+
+class WireProviderMetaUnknown(TypedDict, total=False):
+    provider: Required[Literal['unknown']]
+
+WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaUnknown
+
 # Wire projection of `meerkat_core::TranscriptSource`. Lane provenance
 # for spoken-transcript blocks.
 #
@@ -4786,7 +5457,7 @@ WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown
 # `RawValue` does not derive equality. Equivalence checks should
 # round-trip through serialization and compare the serialized bytes.
 class WireAssistantBlockTextData(TypedDict, total=False):
-    meta: NotRequired[dict[str, Any]]
+    meta: NotRequired[Optional[WireProviderMeta]]
     text: Required[str]
 
 class WireAssistantBlockText(TypedDict, total=False):
@@ -4794,7 +5465,7 @@ class WireAssistantBlockText(TypedDict, total=False):
     data: Required[WireAssistantBlockTextData]
 
 class WireAssistantBlockTranscriptData(TypedDict, total=False):
-    meta: NotRequired[dict[str, Any]]
+    meta: NotRequired[Optional[WireProviderMeta]]
     source: Required[WireTranscriptSource]
     text: Required[str]
 
@@ -4803,7 +5474,7 @@ class WireAssistantBlockTranscript(TypedDict, total=False):
     data: Required[WireAssistantBlockTranscriptData]
 
 class WireAssistantBlockReasoningData(TypedDict, total=False):
-    meta: NotRequired[dict[str, Any]]
+    meta: NotRequired[Optional[WireProviderMeta]]
     text: NotRequired[str]
 
 class WireAssistantBlockReasoning(TypedDict, total=False):
@@ -4813,7 +5484,7 @@ class WireAssistantBlockReasoning(TypedDict, total=False):
 class WireAssistantBlockToolUseData(TypedDict, total=False):
     args: Required[Any]
     id: Required[str]
-    meta: NotRequired[dict[str, Any]]
+    meta: NotRequired[Optional[WireProviderMeta]]
     name: Required[str]
 
 class WireAssistantBlockToolUse(TypedDict, total=False):
@@ -4822,21 +5493,21 @@ class WireAssistantBlockToolUse(TypedDict, total=False):
 
 class WireAssistantBlockServerToolContentData(TypedDict, total=False):
     content: Required[Any]
-    id: NotRequired[str]
-    kind: Required[dict[str, Any]]
-    meta: NotRequired[dict[str, Any]]
+    id: NotRequired[Optional[str]]
+    kind: Required[WireServerToolKind]
+    meta: NotRequired[Optional[WireProviderMeta]]
 
 class WireAssistantBlockServerToolContent(TypedDict, total=False):
     block_type: Required[Literal['server_tool_content']]
     data: Required[WireAssistantBlockServerToolContentData]
 
 class WireAssistantBlockImageData(TypedDict, total=False):
-    blob_ref: Required[dict[str, Any]]
+    blob_ref: Required[BlobRef]
     height: Required[int]
-    image_id: Required[str]
+    image_id: Required[AssistantImageId]
     media_type: Required[str]
-    meta: Required[dict[str, Any]]
-    revised_prompt: Required[dict[str, Any]]
+    meta: Required[ProviderImageMetadata]
+    revised_prompt: Required[RevisedPromptDisposition]
     width: Required[int]
 
 class WireAssistantBlockImage(TypedDict, total=False):
@@ -4847,6 +5518,382 @@ class WireAssistantBlockUnknown(TypedDict, total=False):
     block_type: Required[Literal['unknown']]
 
 WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockTranscript | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown
+
+@dataclass
+class TranscriptRewriteReason:
+    """Audit annotation carried with a transcript rewrite commit.
+
+The free-form kind is for review, debugging, and provenance only. It never
+classifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that
+semantic through its opaque typed compaction range."""
+    kind: str
+    note: Optional[str] = None
+
+
+@dataclass
+class CompactionRewriteRange:
+    """Opaque range carried by the typed compaction rewrite semantic."""
+    end: int
+    start: int
+
+
+@dataclass
+class TranscriptEditRewriteRange:
+    """Opaque current-format range carried by an ordinary transcript edit."""
+    end: int
+    start: int
+
+
+# A concrete transcript span selected for same-session rewrite.
+class TranscriptRewriteSelectionMessageRange(TypedDict, total=False):
+    end: Required[int]
+    start: Required[int]
+    type: Required[Literal['message_range']]
+
+class TranscriptRewriteSelectionEditMessageRange(TypedDict, total=False):
+    range: Required[TranscriptEditRewriteRange]
+    type: Required[Literal['edit_message_range']]
+
+class TranscriptRewriteSelectionCompactionMessageRange(TypedDict, total=False):
+    range: Required[CompactionRewriteRange]
+    type: Required[Literal['compaction_message_range']]
+
+TranscriptRewriteSelection = TranscriptRewriteSelectionMessageRange | TranscriptRewriteSelectionEditMessageRange | TranscriptRewriteSelectionCompactionMessageRange
+
+# Fork transcript replacement helper type for BackgroundJobTerminalStatus.
+BackgroundJobTerminalStatus = Literal['completed', 'failed', 'aborted', 'cancelled', 'retired', 'terminated']
+
+# Fork transcript replacement helper type for CommsNoticeKind.
+CommsNoticeKind = str
+
+# Canonical realm-local blob identifier.
+#
+# The identifier is content-addressed, but storage and GC semantics remain
+# realm-scoped.
+BlobId = str
+
+# Fork transcript replacement helper type for ContentBlock.
+class ContentBlockText(TypedDict, total=False):
+    text: Required[str]
+    type: Required[Literal['text']]
+
+class ContentBlockImageInline(TypedDict, total=False):
+    media_type: Required[str]
+    type: Required[Literal['image']]
+    data: Required[str]
+    source: Required[Literal['inline']]
+
+class ContentBlockImageBlob(TypedDict, total=False):
+    media_type: Required[str]
+    type: Required[Literal['image']]
+    blob_id: Required[BlobId]
+    source: Required[Literal['blob']]
+
+class ContentBlockVideoInline(TypedDict, total=False):
+    duration_ms: Required[int]
+    media_type: Required[str]
+    type: Required[Literal['video']]
+    data: Required[str]
+    source: Required[Literal['inline']]
+
+class ContentBlockVideoUri(TypedDict, total=False):
+    duration_ms: Required[int]
+    media_type: Required[str]
+    type: Required[Literal['video']]
+    source: Required[Literal['uri']]
+    uri: Required[str]
+
+class ContentBlockStructured(TypedDict, total=False):
+    data: Required[Any]
+    type: Required[Literal['structured']]
+
+class ContentBlockSkillContext(TypedDict, total=False):
+    skill_key: Required[SkillKey]
+    text: Required[str]
+    type: Required[Literal['skill_context']]
+
+ContentBlock = ContentBlockText | ContentBlockImageInline | ContentBlockImageBlob | ContentBlockVideoInline | ContentBlockVideoUri | ContentBlockStructured | ContentBlockSkillContext
+
+# Sender-declared content-taint classification for peer content.
+#
+# This is the typed vocabulary for the optional taint declaration a sender
+# stamps onto content-bearing comms envelopes (`Message` / `Request` /
+# `Response`). `Clean` and `Tainted` are the two DECLARED states.
+#
+# `None` at the carriers (`MessageKind::*.content_taint`,
+# `SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)
+# means "the sender made no declaration" — a REAL third state. Receivers
+# must never coalesce `None` into `Clean`: an absent declaration carries no
+# trust information, while `Clean` is an affirmative sender claim.
+SenderContentTaint = Literal['clean', 'tainted']
+
+# Direction for runtime-authored communication metadata.
+SystemNoticeDirection = Literal['incoming', 'outgoing', 'internal']
+
+# Canonical runtime identity for a peer.
+#
+# `PeerId` is the routing key: the router and trust store key by `PeerId`,
+# never by `PeerName`. Two peers may legitimately share a display `PeerName`
+# (per the Wave-B V5 dogma note), but their `PeerId`s never collide — the
+# underlying UUID is globally unique.
+#
+# Constructed freshly (`PeerId::new`) for a peer minted locally, parsed
+# from a hyphenated UUID (`PeerId::parse`) when we've been given an identity
+# over the wire, or derived from a 32-byte Ed25519 public key when a transport
+# still authenticates by raw signing key.
+PeerId = str
+
+# Typed runtime-authored transcript metadata.
+#
+# These blocks are the durable contract for comms, tool/MCP state, auth,
+# background work, and other runtime facts. They are never user-authored text.
+class SystemNoticeBlockComms(TypedDict, total=False):
+    content: NotRequired[list[ContentBlock]]
+    direction: Required[SystemNoticeDirection]
+    intent: NotRequired[Optional[str]]
+    kind: Required[CommsNoticeKind]
+    payload: NotRequired[Any]
+    peer: NotRequired[Optional[SystemNoticePeer]]
+    request_id: NotRequired[Optional[str]]
+    sender_taint: NotRequired[Optional[SenderContentTaint]]
+    status: NotRequired[Optional[str]]
+    summary: NotRequired[Optional[str]]
+    type: Required[Literal['comms']]
+
+class SystemNoticeBlockExternalEvent(TypedDict, total=False):
+    body: NotRequired[Optional[str]]
+    content: NotRequired[list[ContentBlock]]
+    event_type: Required[str]
+    payload: NotRequired[Any]
+    source: Required[str]
+    summary: NotRequired[Optional[str]]
+    type: Required[Literal['external_event']]
+
+class SystemNoticeBlockToolConfig(TypedDict, total=False):
+    payload: Required[ToolConfigChangedPayload]
+    type: Required[Literal['tool_config']]
+
+class SystemNoticeBlockMcp(TypedDict, total=False):
+    detail: NotRequired[Optional[str]]
+    operation: NotRequired[Optional[ToolConfigChangeOperation]]
+    pending_sources: NotRequired[list[str]]
+    persisted: NotRequired[bool]
+    phase: NotRequired[Optional[ExternalToolDeltaPhase]]
+    server_id: NotRequired[Optional[str]]
+    type: Required[Literal['mcp']]
+
+class SystemNoticeBlockBackgroundJob(TypedDict, total=False):
+    detail: NotRequired[Optional[str]]
+    display_name: NotRequired[Optional[str]]
+    job_id: Required[str]
+    status: Required[BackgroundJobTerminalStatus]
+    type: Required[Literal['background_job']]
+
+class SystemNoticeBlockAuth(TypedDict, total=False):
+    binding: NotRequired[Optional[str]]
+    detail: NotRequired[Optional[str]]
+    state: Required[str]
+    type: Required[Literal['auth']]
+
+class SystemNoticeBlockRuntimeNotice(TypedDict, total=False):
+    category: Required[str]
+    detail: NotRequired[Optional[str]]
+    payload: NotRequired[Any]
+    type: Required[Literal['runtime_notice']]
+
+class SystemNoticeBlockUnknown(TypedDict, total=False):
+    payload: NotRequired[Any]
+    summary: NotRequired[Optional[str]]
+    type: Required[Literal['unknown']]
+
+SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockUnknown
+
+# Typed system notice content carried in the transcript.
+SystemNoticeKind = Literal['generic', 'comms', 'external_event', 'mcp_pending', 'mcp', 'background_job', 'tool_scope', 'tool_scope_warning'] | Literal['auth_reauth_required']
+
+# Typed transcript role for a user-channel message.
+#
+# This is the canonical replacement for `[Context compacted]` string-prefix
+# folklore in the transcript-continuity save-guard. A user message produced as
+# a runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];
+# everything else stays [`TranscriptUserRole::Conversational`]. The producer of
+# the compaction summary sets this typed marker; the save-guard reads the typed
+# field instead of classifying the rendered message body by content.
+TranscriptUserRole = Literal['conversational', 'compaction_summary', 'injected_context']
+
+# Fork transcript replacement helper type for AssistantImageId.
+AssistantImageId = str
+
+@dataclass
+class BlobRef:
+    """Durable image reference owned by transcript/runtime state."""
+    blob_id: BlobId
+    media_type: str
+
+
+@dataclass
+class GeminiImageMetadata:
+    """Fork transcript replacement helper type for GeminiImageMetadata."""
+    target_model: str
+    continuity_ref: Optional[str] = None
+    response_id: Optional[str] = None
+
+
+@dataclass
+class OpenAiImageMetadata:
+    """Fork transcript replacement helper type for OpenAiImageMetadata."""
+    target_model: str
+    image_generation_call_id: Optional[str] = None
+    response_id: Optional[str] = None
+
+
+# Fork transcript replacement helper type for ProviderImageMetadata.
+class ProviderImageMetadataNotEmitted(TypedDict, total=False):
+    provider: Required[Literal['not_emitted']]
+
+class ProviderImageMetadataOpenai(TypedDict, total=False):
+    image_generation_call_id: NotRequired[Optional[str]]
+    response_id: NotRequired[Optional[str]]
+    target_model: Required[str]
+    provider: Required[Literal['openai']]
+
+class ProviderImageMetadataGemini(TypedDict, total=False):
+    continuity_ref: NotRequired[Optional[str]]
+    response_id: NotRequired[Optional[str]]
+    target_model: Required[str]
+    provider: Required[Literal['gemini']]
+
+ProviderImageMetadata = ProviderImageMetadataNotEmitted | ProviderImageMetadataOpenai | ProviderImageMetadataGemini
+
+@dataclass
+class PromptText:
+    """Fork transcript replacement helper type for PromptText."""
+    content: str
+
+
+# Fork transcript replacement helper type for RevisedPromptSource.
+RevisedPromptSource = Literal['provider', 'meerkat_projection']
+
+# Fork transcript replacement helper type for RevisedPromptDisposition.
+class RevisedPromptDispositionNotRequested(TypedDict, total=False):
+    disposition: Required[Literal['not_requested']]
+
+class RevisedPromptDispositionUnsupportedByBackend(TypedDict, total=False):
+    disposition: Required[Literal['unsupported_by_backend']]
+
+class RevisedPromptDispositionUnchanged(TypedDict, total=False):
+    disposition: Required[Literal['unchanged']]
+
+class RevisedPromptDispositionRevised(TypedDict, total=False):
+    disposition: Required[Literal['revised']]
+    source: Required[RevisedPromptSource]
+    text: Required[PromptText]
+
+RevisedPromptDisposition = RevisedPromptDispositionNotRequested | RevisedPromptDispositionUnsupportedByBackend | RevisedPromptDispositionUnchanged | RevisedPromptDispositionRevised
+
+# Wire projection of `meerkat_core::ServerToolKind`.
+#
+# Mirrors the typed semantic owner of a provider-executed tool. The core enum
+# is `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in
+# the forward `From` surfaces as `Unknown { debug }` rather than silently
+# collapsing into a plausible-but-wrong kind. SDK consumers route on the
+# `kind` discriminator and treat `unknown` as unrecognized.
+#
+# **When a new core variant is added, add an explicit arm in the forward
+# `From` impl above the wildcard — `Unknown` is the floor, not the
+# destination.**
+class WireServerToolKindWebSearch(TypedDict, total=False):
+    kind: Required[Literal['web_search']]
+
+class WireServerToolKindGoogleSearch(TypedDict, total=False):
+    kind: Required[Literal['google_search']]
+
+class WireServerToolKindProviderNative(TypedDict, total=False):
+    kind: Required[Literal['provider_native']]
+    name: Required[str]
+
+class WireServerToolKindUnknown(TypedDict, total=False):
+    debug: Required[str]
+    kind: Required[Literal['unknown']]
+
+WireServerToolKind = WireServerToolKindWebSearch | WireServerToolKindGoogleSearch | WireServerToolKindProviderNative | WireServerToolKindUnknown
+
+# Public transcript message accepted by same-session rewrite APIs.
+class TranscriptRewriteMessageSystem(TypedDict, total=False):
+    content: Required[str]
+    created_at: NotRequired[Optional[str]]
+    role: Required[Literal['system']]
+
+class TranscriptRewriteMessageSystemNotice(TypedDict, total=False):
+    blocks: NotRequired[list[SystemNoticeBlock]]
+    body: NotRequired[Optional[str]]
+    created_at: NotRequired[Optional[str]]
+    kind: Required[SystemNoticeKind]
+    role: Required[Literal['system_notice']]
+
+class TranscriptRewriteMessageUser(TypedDict, total=False):
+    content: Required[WireContentInput]
+    created_at: NotRequired[Optional[str]]
+    role: Required[Literal['user']]
+    transcript_role: NotRequired[TranscriptUserRole]
+
+class TranscriptRewriteMessageBlockAssistant(TypedDict, total=False):
+    blocks: Required[list[WireAssistantBlock]]
+    created_at: NotRequired[Optional[str]]
+    role: Required[Literal['block_assistant']]
+    stop_reason: NotRequired[WireStopReason]
+
+class TranscriptRewriteMessageToolResults(TypedDict, total=False):
+    created_at: NotRequired[Optional[str]]
+    results: Required[list[WireToolResult]]
+    role: Required[Literal['tool_results']]
+
+TranscriptRewriteMessage = TranscriptRewriteMessageSystem | TranscriptRewriteMessageSystemNotice | TranscriptRewriteMessageUser | TranscriptRewriteMessageBlockAssistant | TranscriptRewriteMessageToolResults
+
+# Typed wire mirror of [`meerkat_core::TranscriptReplacement`].
+#
+# R-#87 (P3 dogma): `ForkSessionReplaceParams.replacement` previously carried
+# the core `TranscriptReplacement` directly with a
+# `#[schemars(with = "serde_json::Value")]` override, so the emitted JSON
+# schema collapsed to a bare `Value` (artifacts/schemas/params.json) and the
+# SDK codegen saw an untyped bag. The core enum cannot derive `JsonSchema`
+# directly: it embeds `Message` and `AssistantBlock`, neither of which has a
+# `JsonSchema` impl in `meerkat-core` (and `Message::BlockAssistant` carries
+# `Box<RawValue>` tool-call args).
+#
+# This wire mirror is schema-emittable because it is built entirely from
+# types that already carry `JsonSchema` derives in this module:
+# [`TranscriptRewriteMessage`] (the public message shape, with its own
+# `into_core`), [`WireContentBlock`], and [`WireAssistantBlock`]. Conversion
+# into the core enum is fallible — every inner conversion already returns a
+# typed [`WireConversionError`](crate::wire::error::WireConversionError), so
+# malformed payloads surface a typed parse fault at the boundary rather than
+# being smuggled through as an opaque `Value`.
+#
+# The serde tag/rename mirror the core enum (`#[serde(tag = "type",
+# rename_all = "snake_case")]`) so the wire bytes are unchanged: the only
+# observable delta is that the schema is now the closed enum.
+class WireTranscriptReplacementMessage(TypedDict, total=False):
+    message: Required[TranscriptRewriteMessage]
+    type: Required[Literal['message']]
+
+class WireTranscriptReplacementUserContentBlock(TypedDict, total=False):
+    block: Required[WireContentBlock]
+    block_index: Required[int]
+    type: Required[Literal['user_content_block']]
+
+class WireTranscriptReplacementAssistantBlock(TypedDict, total=False):
+    block: Required[WireAssistantBlock]
+    block_index: Required[int]
+    type: Required[Literal['assistant_block']]
+
+class WireTranscriptReplacementToolResultContentBlock(TypedDict, total=False):
+    block: Required[WireContentBlock]
+    block_index: Required[int]
+    result_index: Required[int]
+    type: Required[Literal['tool_result_content_block']]
+
+WireTranscriptReplacement = WireTranscriptReplacementMessage | WireTranscriptReplacementUserContentBlock | WireTranscriptReplacementAssistantBlock | WireTranscriptReplacementToolResultContentBlock
 
 # Machine-owned image operation phase.
 class WireImageOperationPhaseRequested(TypedDict, total=False):
@@ -4894,19 +5941,19 @@ WireModelTier = Literal['recommended', 'supported']
 
 # Request command carried inside public `comms/send` surfaces.
 class CommsCommandInput(TypedDict, total=False):
-    allow_self_session: NotRequired[bool]
-    blocks: NotRequired[list[ContentBlock]]
+    allow_self_session: NotRequired[Optional[bool]]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
     body: Required[str]
-    handling_mode: NotRequired[HandlingMode]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     kind: Required[Literal['input']]
-    source: NotRequired[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]
-    stream: NotRequired[Literal['none', 'reserve_interaction']]
+    source: NotRequired[Optional[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]]
+    stream: NotRequired[Optional[Literal['none', 'reserve_interaction']]]
 
 class CommsCommandPeerMessage(TypedDict, total=False):
-    blocks: NotRequired[list[ContentBlock]]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
     body: Required[str]
-    content_taint: NotRequired[SendTaintOverride]
-    handling_mode: NotRequired[HandlingMode]
+    content_taint: NotRequired[Optional[SendTaintOverride]]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     kind: Required[Literal['peer_message']]
     to: Required[PeerId]
 
@@ -4917,32 +5964,26 @@ class CommsCommandPeerLifecycle(TypedDict, total=False):
     to: Required[PeerId]
 
 class CommsCommandPeerRequest(TypedDict, total=False):
-    blocks: NotRequired[list[ContentBlock]]
-    content_taint: NotRequired[SendTaintOverride]
-    handling_mode: NotRequired[HandlingMode]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
+    content_taint: NotRequired[Optional[SendTaintOverride]]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
     params: Required[CommsPeerRequestParams]
-    stream: NotRequired[Literal['none', 'reserve_interaction']]
+    stream: NotRequired[Optional[Literal['none', 'reserve_interaction']]]
     to: Required[PeerId]
 
 class CommsCommandPeerResponse(TypedDict, total=False):
-    blocks: NotRequired[list[ContentBlock]]
-    content_taint: NotRequired[SendTaintOverride]
-    handling_mode: NotRequired[HandlingMode]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
+    content_taint: NotRequired[Optional[SendTaintOverride]]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
-    result: NotRequired[CommsPeerResponseResult]
+    result: NotRequired[Optional[CommsPeerResponseResult]]
     status: Required[Literal['accepted', 'completed', 'failed']]
     to: Required[PeerId]
 
 CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse
-
-# Canonical realm-local blob identifier.
-#
-# The identifier is content-addressed, but storage and GC semantics remain
-# realm-scoped.
-BlobId = str
 
 # One-time bootstrap proof exchanged between a mob supervisor and a
 # member runtime on initial bind.
@@ -4953,7 +5994,14 @@ BlobId = str
 # like an API key: read `as_str()` only at the comms/transport boundary.
 BridgeBootstrapToken = str
 
-# A typed command sent from a supervisor to a member runtime.
+# A typed command sent from a supervisor to a member runtime, a mob host
+# daemon (host-addressed family), or — for exactly one family
+# (`MemberOperatorRequest`) — from a member host to the controlling host.
+#
+# The full `PartialEq + Eq` chain is load-bearing: the comms envelope
+# enums (`CommsPeerRequestParams` et al.) derive `Eq` over this type.
+# Opaque JSON in payloads therefore rides [`WireOpaqueJson`], never a
+# bare `serde_json::Value`.
 class BridgeCommandBindMember(TypedDict, total=False):
     bootstrap_token: Required[BridgeBootstrapToken]
     command: Required[Literal['bind_member']]
@@ -4979,12 +6027,16 @@ class BridgeCommandDeliverMemberInput(TypedDict, total=False):
     command: Required[Literal['deliver_member_input']]
     content: Required[ContentInput]
     epoch: Required[int]
+    expected_member: NotRequired[Optional[BridgeMemberIncarnation]]
     handling_mode: Required[HandlingMode]
     injected_context: NotRequired[list[ContentInput]]
     input_id: Required[str]
-    objective_id: NotRequired[Any]
+    objective_id: NotRequired[Optional[str]]
+    outcome_tracking: NotRequired[Optional[Literal['interaction']]]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
+    transcript_interaction_id: NotRequired[Optional[str]]
+    turn: NotRequired[Optional[BridgeTurnDirective]]
 
 class BridgeCommandObserveMember(TypedDict, total=False):
     command: Required[Literal['observe_member']]
@@ -4995,14 +6047,26 @@ class BridgeCommandObserveMember(TypedDict, total=False):
 class BridgeCommandInterruptMember(TypedDict, total=False):
     command: Required[Literal['interrupt_member']]
     epoch: Required[int]
+    expected_member: NotRequired[Optional[BridgeMemberIncarnation]]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
 class BridgeCommandHardCancelMember(TypedDict, total=False):
     command: Required[Literal['hard_cancel_member']]
     epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    expected_run_id: Required[RunId]
+    operation_id: Required[OperationId]
     protocol_version: Required[BridgeProtocolVersion]
     reason: Required[str]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandCancelTrackedMemberInput(TypedDict, total=False):
+    command: Required[Literal['cancel_tracked_member_input']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    input_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
 class BridgeCommandRetireMember(TypedDict, total=False):
@@ -5020,7 +6084,7 @@ class BridgeCommandDestroyMember(TypedDict, total=False):
 class BridgeCommandWireMember(TypedDict, total=False):
     command: Required[Literal['wire_member']]
     epoch: Required[int]
-    mob_peer_overlay: NotRequired[Any]
+    mob_peer_overlay: NotRequired[Optional[BridgeMobPeerOverlayHandoff]]
     peer_spec: Required[BridgePeerSpec]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
@@ -5028,7 +6092,7 @@ class BridgeCommandWireMember(TypedDict, total=False):
 class BridgeCommandUnwireMember(TypedDict, total=False):
     command: Required[Literal['unwire_member']]
     epoch: Required[int]
-    mob_peer_overlay: NotRequired[Any]
+    mob_peer_overlay: NotRequired[Optional[BridgeMobPeerOverlayHandoff]]
     peer_spec: Required[BridgePeerSpec]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
@@ -5038,16 +6102,164 @@ class BridgeCommandDeclareMemberOutboundTaint(TypedDict, total=False):
     epoch: Required[int]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
-    taint: NotRequired[SenderContentTaint]
+    taint: NotRequired[Optional[SenderContentTaint]]
+    target: NotRequired[Optional[BridgeOutboundTaintTarget]]
+
+class BridgeCommandReadMemberHistory(TypedDict, total=False):
+    command: Required[Literal['read_member_history']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    from_index: NotRequired[Optional[int]]
+    limit: NotRequired[Optional[int]]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandPollMemberEvents(TypedDict, total=False):
+    command: Required[Literal['poll_member_events']]
+    cursor: Required[BridgeEventCursor]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    max: NotRequired[Optional[int]]
+    max_outcomes: NotRequired[Optional[int]]
+    outcome_acks: NotRequired[list[BridgeTurnOutcomeAck]]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+    wait_ms: NotRequired[Optional[int]]
+
+class BridgeCommandOpenMemberLiveChannel(TypedDict, total=False):
+    command: Required[Literal['open_member_live_channel']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+    transport: NotRequired[Optional[LiveOpenTransport]]
+    turning_mode: NotRequired[Optional[RealtimeTurningMode]]
+
+class BridgeCommandCloseMemberLiveChannel(TypedDict, total=False):
+    channel_id: Required[str]
+    command: Required[Literal['close_member_live_channel']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandMemberLiveChannelStatus(TypedDict, total=False):
+    channel_id: NotRequired[Optional[str]]
+    command: Required[Literal['member_live_channel_status']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandControlMemberLiveChannel(TypedDict, total=False):
+    channel_id: Required[str]
+    command: Required[Literal['control_member_live_channel']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+    verb: Required[BridgeLiveControlVerb]
+
+class BridgeCommandBindHost(TypedDict, total=False):
+    binding_generation: Required[int]
+    bootstrap_proof: Required[str]
+    command: Required[Literal['bind_host']]
+    epoch: Required[int]
+    expected_address: Required[str]
+    expected_host_peer_id: Required[str]
+    mob_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    required_capabilities: Required[BridgeHostCapabilityRequirements]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandRebindHost(TypedDict, total=False):
+    binding_generation: Required[int]
+    command: Required[Literal['rebind_host']]
+    epoch: Required[int]
+    mob_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    required_capabilities: Required[BridgeHostCapabilityRequirements]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandRevokeHost(TypedDict, total=False):
+    binding_generation: Required[int]
+    command: Required[Literal['revoke_host']]
+    epoch: Required[int]
+    mob_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandMaterializeMember(TypedDict, total=False):
+    binding_generation: Required[int]
+    command: Required[Literal['materialize_member']]
+    epoch: Required[int]
+    fence_token: Required[int]
+    generation: Required[int]
+    launch: Required[dict[str, Literal['fresh']] | dict[str, Any]]
+    protocol_version: Required[BridgeProtocolVersion]
+    spec: Required[dict[str, Any]]
+    spec_digest: Required[str]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandReleaseMember(TypedDict, total=False):
+    agent_identity: Required[str]
+    binding_generation: Required[int]
+    command: Required[Literal['release_member']]
+    epoch: Required[int]
+    fence_token: Required[int]
+    generation: Required[int]
+    mob_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandInstallPeerTrust(TypedDict, total=False):
+    agent_identity: Required[str]
+    binding_generation: Required[int]
+    command: Required[Literal['install_peer_trust']]
+    epoch: Required[int]
+    mob_id: Required[str]
+    peer: Required[BridgePeerSpec]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandRemovePeerTrust(TypedDict, total=False):
+    agent_identity: Required[str]
+    binding_generation: Required[int]
+    command: Required[Literal['remove_peer_trust']]
+    epoch: Required[int]
+    mob_id: Required[str]
+    peer: Required[BridgePeerSpec]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandHostStatus(TypedDict, total=False):
+    binding_generation: Required[int]
+    command: Required[Literal['host_status']]
+    epoch: Required[int]
+    mob_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+class BridgeCommandMemberOperatorRequest(TypedDict, total=False):
+    agent_identity: Required[str]
+    command: Required[Literal['member_operator_request']]
+    op: Required[dict[str, Any] | dict[str, Literal['list_members']] | dict[str, Literal['mob_list_flows']]]
+    protocol_version: Required[BridgeProtocolVersion]
+    request_id: Required[str]
+    requester_fence_token: Required[int]
+    requester_generation: Required[int]
+    requester_host_binding_generation: Required[int]
+    requester_host_id: Required[str]
+    requester_member_session_id: Required[str]
 
 class BridgeCommandObserveSupervisorRotation(TypedDict, total=False):
     command: Required[Literal['observe_supervisor_rotation']]
     observer: Required[BridgePeerSpec]
     observer_epoch: Required[int]
-    operation_id: Required[Any]
+    operation_id: Required[str]
     protocol_version: Required[BridgeProtocolVersion]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandObserveSupervisorRotation
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -5086,7 +6298,25 @@ class BridgeDeliveryRejectionCauseInternal(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['internal']]
 
-BridgeDeliveryRejectionCause = BridgeDeliveryRejectionCauseNotReady | BridgeDeliveryRejectionCauseDurabilityViolation | BridgeDeliveryRejectionCausePeerHandlingModeInvalid | BridgeDeliveryRejectionCauseInternal
+class BridgeDeliveryRejectionCauseTurnDirectiveUnsupported(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['turn_directive_unsupported']]
+
+class BridgeDeliveryRejectionCauseOutcomeJournalFull(TypedDict, total=False):
+    kind: Required[Literal['outcome_journal_full']]
+    limit: Required[int]
+    retained: Required[int]
+
+class BridgeDeliveryRejectionCauseStaleMemberIncarnation(TypedDict, total=False):
+    current: Required[BridgeMemberIncarnation]
+    kind: Required[Literal['stale_member_incarnation']]
+
+class BridgeDeliveryRejectionCauseStaleMemberResidency(TypedDict, total=False):
+    current: NotRequired[Optional[BridgeMemberIncarnation]]
+    expected: Required[BridgeMemberIncarnation]
+    kind: Required[Literal['stale_member_residency']]
+
+BridgeDeliveryRejectionCause = BridgeDeliveryRejectionCauseNotReady | BridgeDeliveryRejectionCauseDurabilityViolation | BridgeDeliveryRejectionCausePeerHandlingModeInvalid | BridgeDeliveryRejectionCauseInternal | BridgeDeliveryRejectionCauseTurnDirectiveUnsupported | BridgeDeliveryRejectionCauseOutcomeJournalFull | BridgeDeliveryRejectionCauseStaleMemberIncarnation | BridgeDeliveryRejectionCauseStaleMemberResidency
 
 # Wire projection of a member's runtime state.
 BridgeMemberRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
@@ -5108,9 +6338,119 @@ BridgeProtocolVersion = int
 # accompanying `reason` string is for operator diagnostics only and must
 # not be pattern-matched. Reserve `Internal` for true invariant
 # violations — ordinary validation failures get a specific cause.
-BridgeRejectionCause = Literal['not_bound', 'stale_supervisor', 'sender_mismatch', 'already_bound', 'invalid_bootstrap_token', 'unsupported_protocol_version', 'invalid_supervisor_spec', 'invalid_peer_spec', 'address_mismatch', 'unsupported', 'internal']
+#
+# Not `Copy` since V4: several causes carry typed detail payloads.
+class BridgeRejectionCauseStaleCursorPayload(TypedDict, total=False):
+    generation: Required[int]
+    watermark: Required[int]
 
-# A typed reply from a member runtime back to the supervisor.
+class BridgeRejectionCauseStaleCursor(TypedDict, total=False):
+    stale_cursor: Required[BridgeRejectionCauseStaleCursorPayload]
+
+class BridgeRejectionCauseOversizedEventPayload(TypedDict, total=False):
+    durable_seq: Required[int]
+    encoded_bytes: Required[int]
+    generation: Required[int]
+    max_bytes: Required[int]
+    next_seq: Required[int]
+
+class BridgeRejectionCauseOversizedEvent(TypedDict, total=False):
+    oversized_event: Required[BridgeRejectionCauseOversizedEventPayload]
+
+class BridgeRejectionCauseHistoryRowTooLargePayload(TypedDict, total=False):
+    encoded_bytes: Required[int]
+    index: Required[int]
+    max_bytes: Required[int]
+
+class BridgeRejectionCauseHistoryRowTooLarge(TypedDict, total=False):
+    history_row_too_large: Required[BridgeRejectionCauseHistoryRowTooLargePayload]
+
+class BridgeRejectionCauseScopeDeniedPayload(TypedDict, total=False):
+    presented: Required[list[WireControlScope]]
+    required: Required[WireControlScope]
+
+class BridgeRejectionCauseScopeDenied(TypedDict, total=False):
+    scope_denied: Required[BridgeRejectionCauseScopeDeniedPayload]
+
+class BridgeRejectionCauseMaterializeBuildRejectedPayload(TypedDict, total=False):
+    cause: Required[MemberBuildRejection]
+
+class BridgeRejectionCauseMaterializeBuildRejected(TypedDict, total=False):
+    materialize_build_rejected: Required[BridgeRejectionCauseMaterializeBuildRejectedPayload]
+
+class BridgeRejectionCauseModelUnresolvablePayload(TypedDict, total=False):
+    model: Required[str]
+
+class BridgeRejectionCauseModelUnresolvable(TypedDict, total=False):
+    model_unresolvable: Required[BridgeRejectionCauseModelUnresolvablePayload]
+
+class BridgeRejectionCauseAuthBindingUnresolvablePayload(TypedDict, total=False):
+    binding: Required[str]
+    realm: Required[str]
+
+class BridgeRejectionCauseAuthBindingUnresolvable(TypedDict, total=False):
+    auth_binding_unresolvable: Required[BridgeRejectionCauseAuthBindingUnresolvablePayload]
+
+class BridgeRejectionCauseMcpCommandMissingPayload(TypedDict, total=False):
+    server: Required[str]
+
+class BridgeRejectionCauseMcpCommandMissing(TypedDict, total=False):
+    mcp_command_missing: Required[BridgeRejectionCauseMcpCommandMissingPayload]
+
+class BridgeRejectionCauseEnvKeyMissingPayload(TypedDict, total=False):
+    key: Required[str]
+
+class BridgeRejectionCauseEnvKeyMissing(TypedDict, total=False):
+    env_key_missing: Required[BridgeRejectionCauseEnvKeyMissingPayload]
+
+class BridgeRejectionCauseHostEngineVersionChangedPayload(TypedDict, total=False):
+    bound: Required[str]
+    reported: Required[str]
+
+class BridgeRejectionCauseHostEngineVersionChanged(TypedDict, total=False):
+    host_engine_version_changed: Required[BridgeRejectionCauseHostEngineVersionChangedPayload]
+
+class BridgeRejectionCauseModelNotRealtimePayload(TypedDict, total=False):
+    model: Required[str]
+    provider: Required[str]
+
+class BridgeRejectionCauseModelNotRealtime(TypedDict, total=False):
+    model_not_realtime: Required[BridgeRejectionCauseModelNotRealtimePayload]
+
+class BridgeRejectionCauseLiveAdapterUnavailablePayload(TypedDict, total=False):
+    provider: Required[str]
+
+class BridgeRejectionCauseLiveAdapterUnavailable(TypedDict, total=False):
+    live_adapter_unavailable: Required[BridgeRejectionCauseLiveAdapterUnavailablePayload]
+
+class BridgeRejectionCauseLiveTransportUnsupportedPayload(TypedDict, total=False):
+    requested: Required[str]
+
+class BridgeRejectionCauseLiveTransportUnsupported(TypedDict, total=False):
+    live_transport_unsupported: Required[BridgeRejectionCauseLiveTransportUnsupportedPayload]
+
+class BridgeRejectionCauseCapabilityMissingPayload(TypedDict, total=False):
+    capability: Required[str]
+
+class BridgeRejectionCauseCapabilityMissing(TypedDict, total=False):
+    capability_missing: Required[BridgeRejectionCauseCapabilityMissingPayload]
+
+class BridgeRejectionCauseSessionOwnershipConflictPayload(TypedDict, total=False):
+    session_id: Required[str]
+
+class BridgeRejectionCauseSessionOwnershipConflict(TypedDict, total=False):
+    session_ownership_conflict: Required[BridgeRejectionCauseSessionOwnershipConflictPayload]
+
+BridgeRejectionCause = Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict
+
+# A typed reply from a member runtime (or mob host daemon) back to the
+# supervisor, and — for `MemberOperatorReply` — from the controlling host
+# back to a member's host.
+#
+# Not `PartialEq`/`Eq`: `MemberHistoryPage` carries `WireSessionMessage`
+# rows and `MemberEventsPage` carries `AgentEvent` envelopes; both ride
+# serialized-form equality adapters (`WireHistoryRow` / `WireEventRow`) so
+# the reply chain keeps the `Eq` the comms envelope enums derive over it.
 class BridgeReplyBindMember(TypedDict, total=False):
     address: Required[str]
     capabilities: Required[BridgeCapabilities]
@@ -5122,19 +6462,25 @@ class BridgeReplyAck(TypedDict, total=False):
     result: Required[Literal['ack']]
 
 class BridgeReplyObservation(TypedDict, total=False):
-    accepting_inputs: NotRequired[bool]
-    current_run_id: NotRequired[str]
-    last_error: NotRequired[str]
+    accepting_inputs: NotRequired[Optional[bool]]
+    current_run_id: NotRequired[Optional[str]]
+    last_error: NotRequired[Optional[str]]
     observed_at: Required[str]
-    peer_connectivity: NotRequired[BridgePeerConnectivity]
+    peer_connectivity: NotRequired[Optional[BridgePeerConnectivity]]
     result: Required[Literal['observation']]
     state: Required[BridgeMemberRuntimeState]
 
 class BridgeReplyDelivery(TypedDict, total=False):
-    canonical_input_id: NotRequired[str]
+    canonical_input_id: NotRequired[Optional[str]]
     input_id: Required[str]
     outcome: Required[BridgeDeliveryOutcome]
     result: Required[Literal['delivery']]
+
+class BridgeReplyTrackedInputCancelled(TypedDict, total=False):
+    expected_member: Required[BridgeMemberIncarnation]
+    input_id: Required[str]
+    outcome: Required[BridgeTrackedInputCancelOutcome]
+    result: Required[Literal['tracked_input_cancelled']]
 
 class BridgeReplyRetire(TypedDict, total=False):
     inputs_abandoned: Required[int]
@@ -5145,40 +6491,103 @@ class BridgeReplyDestroy(TypedDict, total=False):
     inputs_abandoned: Required[int]
     result: Required[Literal['destroy']]
 
-class BridgeReplySupervisorRotation(TypedDict, total=False):
+class BridgeReplySupervisorRotationFound(TypedDict, total=False):
     result: Required[Literal['supervisor_rotation']]
+    outcome: Required[Literal['found']]
+    state: Required[dict[str, Any]]
+
+class BridgeReplySupervisorRotationNotFound(TypedDict, total=False):
+    result: Required[Literal['supervisor_rotation']]
+    operation_id: Required[str]
+    outcome: Required[Literal['not_found']]
 
 class BridgeReplyRejected(TypedDict, total=False):
     cause: Required[BridgeRejectionCause]
     reason: Required[str]
     result: Required[Literal['rejected']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotation | BridgeReplyRejected
+class BridgeReplyBindHost(TypedDict, total=False):
+    address: Required[str]
+    binding_generation: Required[int]
+    capabilities: Required[BridgeCapabilities]
+    host_peer_id: Required[str]
+    live_endpoint: NotRequired[Optional[str]]
+    result: Required[Literal['bind_host']]
 
-# Comms/session-stream RPC contract for ContentBlock.
-class ContentBlockText(TypedDict, total=False):
-    text: Required[str]
-    type: Required[Literal['text']]
+class BridgeReplyHostRebound(TypedDict, total=False):
+    binding_generation: Required[int]
+    capabilities: Required[BridgeCapabilities]
+    host_peer_id: Required[str]
+    live_endpoint: NotRequired[Optional[str]]
+    result: Required[Literal['host_rebound']]
 
-class ContentBlockImage(TypedDict, total=False):
-    media_type: Required[str]
-    type: Required[Literal['image']]
+class BridgeReplyHostRevoked(TypedDict, total=False):
+    binding_generation: Required[int]
+    epoch: Required[int]
+    host_peer_id: Required[str]
+    mob_id: Required[str]
+    released_members: Required[list[str]]
+    result: Required[Literal['host_revoked']]
 
-class ContentBlockVideo(TypedDict, total=False):
-    duration_ms: Required[int]
-    media_type: Required[str]
-    type: Required[Literal['video']]
+class BridgeReplyMemberHistoryPage(TypedDict, total=False):
+    generation: Required[int]
+    page: Required[WireMemberHistoryPageBody]
+    result: Required[Literal['member_history_page']]
 
-class ContentBlockStructured(TypedDict, total=False):
-    data: Required[Any]
-    type: Required[Literal['structured']]
+class BridgeReplyMemberEventsPage(TypedDict, total=False):
+    events: Required[list[dict[str, Any]]]
+    fence_token: Required[int]
+    from_seq: Required[int]
+    generation: Required[int]
+    next_seq: Required[int]
+    outcomes_complete: Required[bool]
+    result: Required[Literal['member_events_page']]
+    turn_outcomes: NotRequired[list[BridgeTurnOutcomeRecord]]
+    watermark: Required[int]
 
-class ContentBlockSkillContext(TypedDict, total=False):
-    skill_key: Required[SkillKey]
-    text: Required[str]
-    type: Required[Literal['skill_context']]
+class BridgeReplyMemberMaterialized(TypedDict, total=False):
+    advertised_address: Required[str]
+    engine_version: Required[str]
+    launch_outcome: Required[Literal['fresh', 'resumed_live', 'resumed_from_snapshot']]
+    member_peer_id: Required[str]
+    member_pubkey: Required[str]
+    resolved_auth_binding: NotRequired[Optional[WireAuthBindingRef]]
+    result: Required[Literal['member_materialized']]
+    session_id: Required[str]
+    spec_digest: Required[str]
 
-ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockStructured | ContentBlockSkillContext
+class BridgeReplyMemberReleased(TypedDict, total=False):
+    disposal: Required[dict[str, Any]]
+    result: Required[Literal['member_released']]
+
+class BridgeReplyHostStatus(TypedDict, total=False):
+    capabilities: Required[BridgeCapabilities]
+    members: Required[list[dict[str, Any]]]
+    result: Required[Literal['host_status']]
+
+class BridgeReplyMemberLiveChannelOpened(TypedDict, total=False):
+    open: Required[LiveOpenResult]
+    result: Required[Literal['member_live_channel_opened']]
+
+class BridgeReplyMemberLiveChannelClosed(TypedDict, total=False):
+    result: Required[Literal['member_live_channel_closed']]
+    status: Required[LiveCloseStatus]
+
+class BridgeReplyMemberLiveChannelStatusReport(TypedDict, total=False):
+    channel_id: Required[str]
+    result: Required[Literal['member_live_channel_status_report']]
+    status: Required[WireLiveAdapterStatus]
+
+class BridgeReplyMemberLiveChannelControlled(TypedDict, total=False):
+    outcome: Required[BridgeLiveControlOutcome]
+    result: Required[Literal['member_live_channel_controlled']]
+
+class BridgeReplyMemberOperatorReply(TypedDict, total=False):
+    outcome: Required[dict[str, Any]]
+    request_id: Required[str]
+    result: Required[Literal['member_operator_reply']]
+
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #
@@ -5188,20 +6597,20 @@ ContentInput = str | list[ContentBlock]
 
 # Request payload for `comms/send`.
 class CommsSendParamsInput(TypedDict, total=False):
-    allow_self_session: NotRequired[bool]
-    blocks: NotRequired[list[ContentBlock]]
+    allow_self_session: NotRequired[Optional[bool]]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
     body: Required[str]
-    handling_mode: NotRequired[HandlingMode]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     kind: Required[Literal['input']]
     session_id: Required[str]
-    source: NotRequired[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]
-    stream: NotRequired[Literal['none', 'reserve_interaction']]
+    source: NotRequired[Optional[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]]
+    stream: NotRequired[Optional[Literal['none', 'reserve_interaction']]]
 
 class CommsSendParamsPeerMessage(TypedDict, total=False):
-    blocks: NotRequired[list[ContentBlock]]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
     body: Required[str]
-    content_taint: NotRequired[SendTaintOverride]
-    handling_mode: NotRequired[HandlingMode]
+    content_taint: NotRequired[Optional[SendTaintOverride]]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     kind: Required[Literal['peer_message']]
     session_id: Required[str]
     to: Required[PeerId]
@@ -5214,23 +6623,23 @@ class CommsSendParamsPeerLifecycle(TypedDict, total=False):
     to: Required[PeerId]
 
 class CommsSendParamsPeerRequest(TypedDict, total=False):
-    blocks: NotRequired[list[ContentBlock]]
-    content_taint: NotRequired[SendTaintOverride]
-    handling_mode: NotRequired[HandlingMode]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
+    content_taint: NotRequired[Optional[SendTaintOverride]]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
     params: Required[CommsPeerRequestParams]
     session_id: Required[str]
-    stream: NotRequired[Literal['none', 'reserve_interaction']]
+    stream: NotRequired[Optional[Literal['none', 'reserve_interaction']]]
     to: Required[PeerId]
 
 class CommsSendParamsPeerResponse(TypedDict, total=False):
-    blocks: NotRequired[list[ContentBlock]]
-    content_taint: NotRequired[SendTaintOverride]
-    handling_mode: NotRequired[HandlingMode]
+    blocks: NotRequired[Optional[list[ContentBlock]]]
+    content_taint: NotRequired[Optional[SendTaintOverride]]
+    handling_mode: NotRequired[Optional[HandlingMode]]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
-    result: NotRequired[CommsPeerResponseResult]
+    result: NotRequired[Optional[CommsPeerResponseResult]]
     session_id: Required[str]
     status: Required[Literal['accepted', 'completed', 'failed']]
     to: Required[PeerId]
@@ -5301,19 +6710,6 @@ CommsPeerResponseResult = BridgeReply | CommsChecksumTokenResult
 # an out-of-band control-plane command.
 HandlingMode = Literal['queue', 'steer']
 
-# Canonical runtime identity for a peer.
-#
-# `PeerId` is the routing key: the router and trust store key by `PeerId`,
-# never by `PeerName`. Two peers may legitimately share a display `PeerName`
-# (per the Wave-B V5 dogma note), but their `PeerId`s never collide — the
-# underlying UUID is globally unique.
-#
-# Constructed freshly (`PeerId::new`) for a peer minted locally, parsed
-# from a hyphenated UUID (`PeerId::parse`) when we've been given an identity
-# over the wire, or derived from a 32-byte Ed25519 public key when a transport
-# still authenticates by raw signing key.
-PeerId = str
-
 # Display-only slug for a peer.
 #
 # `PeerName` is **not** a routing key after Wave-B V5: the router resolves
@@ -5335,19 +6731,6 @@ PeerDirectorySource = Literal['trusted', 'inproc', 'trusted_and_inproc', 'unknow
 # Comms/session-stream RPC contract for PeerSendability.
 PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
 
-# Sender-declared content-taint classification for peer content.
-#
-# This is the typed vocabulary for the optional taint declaration a sender
-# stamps onto content-bearing comms envelopes (`Message` / `Request` /
-# `Response`). `Clean` and `Tainted` are the two DECLARED states.
-#
-# `None` at the carriers (`MessageKind::*.content_taint`,
-# `SystemNoticeBlock::Comms.sender_taint`, runtime `PeerInput.sender_taint`)
-# means "the sender made no declaration" — a REAL third state. Receivers
-# must never coalesce `None` into `Clean`: an absent declaration carries no
-# trust information, while `Clean` is an affirmative sender claim.
-SenderContentTaint = Literal['clean', 'tainted']
-
 # Per-send tri-state override for the outbound content-taint declaration.
 #
 # Carried as `Option<SendTaintOverride>` on the comms send surfaces: an
@@ -5357,6 +6740,56 @@ SenderContentTaint = Literal['clean', 'tainted']
 # exactly `taint`. Inherit, disable, and set are three different facts — a
 # two-state override would collapse them.
 SendTaintOverride = dict[str, SenderContentTaint] | Literal['undeclared']
+
+# Canonical transcript message for public wire surfaces.
+#
+# Not `PartialEq`: the `BlockAssistant.blocks` variant carries
+# `WireAssistantBlock`s which hold opaque tool-call args as
+# `Box<RawValue>`. See `WireAssistantBlock` doc.
+class WireSessionMessageSystem(TypedDict, total=False):
+    content: Required[str]
+    created_at: Required[str]
+    role: Required[Literal['system']]
+
+class WireSessionMessageSystemNotice(TypedDict, total=False):
+    blocks: NotRequired[list[SystemNoticeBlock]]
+    body: NotRequired[Optional[str]]
+    created_at: Required[str]
+    kind: Required[SystemNoticeKind]
+    role: Required[Literal['system_notice']]
+
+class WireSessionMessageUser(TypedDict, total=False):
+    content: Required[WireContentInput]
+    created_at: Required[str]
+    interaction_id: NotRequired[Optional[str]]
+    role: Required[Literal['user']]
+    run_id: NotRequired[Optional[RunId]]
+    transcript_role: NotRequired[TranscriptUserRole]
+
+class WireSessionMessageBlockAssistant(TypedDict, total=False):
+    blocks: Required[list[WireAssistantBlock]]
+    created_at: Required[str]
+    interaction_id: NotRequired[Optional[str]]
+    role: Required[Literal['block_assistant']]
+    run_id: NotRequired[Optional[RunId]]
+    stop_reason: Required[WireStopReason]
+
+class WireSessionMessageToolResults(TypedDict, total=False):
+    created_at: Required[str]
+    results: Required[list[WireToolResult]]
+    role: Required[Literal['tool_results']]
+
+WireSessionMessage = WireSessionMessageSystem | WireSessionMessageSystemNotice | WireSessionMessageUser | WireSessionMessageBlockAssistant | WireSessionMessageToolResults
+
+# Equality adapter over a canonical wire transcript row.
+#
+# `WireSessionMessage` deliberately derives no `PartialEq` (opaque
+# tool-call args ride `RawValue`), but the bridge reply chain that
+# carries history pages must be `Eq` (the comms envelope enums derive
+# it). Equality here is semantic-JSON equality of the serialized wire
+# form — exactly the fact reply comparison needs. Transparent: the wire
+# shape stays the raw row object.
+WireHistoryRow = WireSessionMessage
 
 
 def parse_work_completion_policy(value: Any) -> "WorkCompletionPolicy":

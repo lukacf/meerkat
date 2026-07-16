@@ -344,6 +344,38 @@ mod ops {
             result
         }
 
+        /// Recovery-gate-ordered service cleanup for the exact machine-owned
+        /// post-stop unregister window.
+        pub async fn discard_live_session_after_runtime_stop_terminalized(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            let result = self
+                .service
+                .discard_live_session_after_runtime_stop_terminalized(session_id)
+                .await;
+            if result.is_ok() && !self.staged_sessions.contains(session_id).await {
+                discard_staged_capacity_admission(self.staged_capacity_admissions, session_id);
+            }
+            result
+        }
+
+        pub async fn discard_live_session_after_runtime_stop_terminalized_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            let result = self
+                .service
+                .discard_live_session_after_runtime_stop_terminalized_under_runtime_turn_boundary(
+                    session_id,
+                )
+                .await;
+            if result.is_ok() && !self.staged_sessions.contains(session_id).await {
+                discard_staged_capacity_admission(self.staged_capacity_admissions, session_id);
+            }
+            result
+        }
+
         /// Discard a stale live session and unregister it from the
         /// runtime adapter.
         pub async fn discard_stale_live_session(
@@ -371,6 +403,28 @@ mod ops {
                     )),
                 )),
             }
+        }
+
+        /// Discard a stale live projection while the runtime loop already
+        /// owns the non-reentrant turn-finalization boundary. This path keeps
+        /// the runtime registration and its current executor intact so the
+        /// same apply can rematerialize the actor without self-unregistering.
+        pub async fn discard_stale_live_session_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            let result = match self
+                .service
+                .discard_live_session_under_runtime_turn_boundary(session_id)
+                .await
+            {
+                Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+                Err(error) => Err(error),
+            };
+            if result.is_ok() && !self.staged_sessions.contains(session_id).await {
+                discard_staged_capacity_admission(self.staged_capacity_admissions, session_id);
+            }
+            result
         }
 
         /// Determine whether the live projection for `session_id` has

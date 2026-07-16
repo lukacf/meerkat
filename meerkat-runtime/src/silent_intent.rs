@@ -40,6 +40,7 @@ mod tests {
 
     fn make_peer_request(intent_str: &str) -> Input {
         Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -65,6 +66,7 @@ mod tests {
 
     fn make_peer_message() -> Input {
         Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,

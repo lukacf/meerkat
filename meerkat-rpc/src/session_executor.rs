@@ -13,7 +13,8 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreApplyOutput, CoreExecutor,
     CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
-    CoreExecutorTeardownReason,
+    CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
+    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
 };
 #[cfg(test)]
 use meerkat_core::lifecycle::run_primitive::CoreRenderable;
@@ -86,9 +87,13 @@ struct SessionRuntimeBoundaryHandle {
 
 #[async_trait::async_trait]
 impl CoreExecutorBoundaryHandle for SessionRuntimeBoundaryHandle {
-    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
         self.runtime
-            .cancel_after_boundary_live_with_machine_authority(&self.session_id)
+            .cancel_after_boundary_live_with_machine_authority(&self.session_id, expected_run_id)
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -101,6 +106,40 @@ impl CoreExecutorBoundaryHandle for SessionRuntimeBoundaryHandle {
 struct SessionRuntimeInterruptHandle {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,
+}
+
+struct SessionRuntimePostStopCleanupHandle {
+    runtime: Arc<SessionRuntime>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorPostStopCleanupHandle for SessionRuntimePostStopCleanupHandle {
+    async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .discard_live_session_after_runtime_stop_terminalized(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotFound { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+    ) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .discard_live_session_after_runtime_stop_terminalized_under_runtime_turn_boundary(
+                &self.session_id,
+            )
+            .await
+            .or_else(|err| match err {
+                SessionError::NotFound { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
 }
 
 #[async_trait::async_trait]
@@ -127,10 +166,17 @@ struct MobRpcRuntimeBoundaryHandle {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl CoreExecutorBoundaryHandle for MobRpcRuntimeBoundaryHandle {
-    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
         if let Some(runtime) = self.runtime.as_ref() {
             return runtime
-                .cancel_after_boundary_live_with_machine_authority(&self.session_id)
+                .cancel_after_boundary_live_with_machine_authority(
+                    &self.session_id,
+                    expected_run_id,
+                )
                 .await
                 .or_else(|err| match err {
                     SessionError::NotRunning { .. } => Ok(()),
@@ -143,6 +189,7 @@ impl CoreExecutorBoundaryHandle for MobRpcRuntimeBoundaryHandle {
                 .session_service
                 .cancel_after_boundary_with_machine_authority(
                     &self.session_id,
+                    expected_run_id,
                     adapter.session_control_authority(),
                 )
                 .await
@@ -164,6 +211,84 @@ struct MobRpcRuntimeInterruptHandle {
     session_service: Arc<dyn MobSessionService>,
     runtime: Option<Arc<SessionRuntime>>,
     session_id: SessionId,
+}
+
+#[cfg(feature = "mob")]
+struct MobRpcRuntimePublicationHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(feature = "mob")]
+struct MobRpcRuntimePostStopCleanupHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(feature = "mob")]
+struct MobRpcRuntimeTurnFinalizationBoundaryHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl CoreExecutorTurnFinalizationBoundaryHandle for MobRpcRuntimeTurnFinalizationBoundaryHandle {
+    async fn acquire(
+        &self,
+    ) -> Result<Box<dyn CoreExecutorTurnFinalizationGuard>, CoreExecutorError> {
+        self.session_service
+            .acquire_runtime_turn_finalization_guard(&self.session_id)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl CoreExecutorPostStopCleanupHandle for MobRpcRuntimePostStopCleanupHandle {
+    async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .discard_live_session_after_runtime_stop_terminalized(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotFound { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+        &self,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .discard_live_session_after_runtime_stop_terminalized_under_turn_finalization_boundary(
+                &self.session_id,
+            )
+            .await
+            .or_else(|err| match err {
+                SessionError::NotFound { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl CoreExecutorPublicationHandle for MobRpcRuntimePublicationHandle {
+    async fn publish_interaction_terminals(
+        &self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        self.session_service
+            .publish_interaction_terminals(&self.session_id, events)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
 }
 
 #[cfg(feature = "mob")]
@@ -339,6 +464,9 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         .or((err.code == error::HOOK_DENIED).then_some(CoreApplyFailureCauseKind::HookDenied));
     let message = err.message;
     let cause = match kind {
+        Some(CoreApplyFailureCauseKind::ExecutorStopped) => {
+            return CoreExecutorError::Stopped;
+        }
         Some(CoreApplyFailureCauseKind::HookDenied) => CoreApplyFailureCause::hook_denied(message),
         Some(CoreApplyFailureCauseKind::HookRuntimeFailure) => {
             CoreApplyFailureCause::hook_runtime_failure(message)
@@ -363,6 +491,35 @@ impl CoreExecutor for SessionRuntimeExecutor {
             runtime: Arc::clone(&self.runtime),
             session_id: self.session_id.clone(),
         }))
+    }
+
+    fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+        Some(meerkat::surface::persistent_runtime_publication_handle(
+            self.runtime.persistent_service(),
+            self.session_id.clone(),
+        ))
+    }
+
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        true
+    }
+
+    fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+        Some(Arc::new(SessionRuntimePostStopCleanupHandle {
+            runtime: Arc::clone(&self.runtime),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationBoundaryHandle>> {
+        Some(
+            meerkat::surface::persistent_runtime_turn_finalization_boundary_handle(
+                self.runtime.persistent_service(),
+                self.session_id.clone(),
+            ),
+        )
     }
 
     async fn apply(
@@ -407,7 +564,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
         // apply intent that requires a requester reaction turn.
         if primitive.is_context_only_apply_without_turn() {
             let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("context-only apply without turn only matches staged primitives");
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    "context-only apply without turn was not carried by a staged primitive",
+                ));
             };
             let pre_admission = self
                 .runtime
@@ -462,6 +621,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .and_then(|meta| meta.turn_tool_overlay.clone()),
                 turn_overrides,
                 pre_admission,
+                crate::session_runtime::LlmReconfigureBoundaryOwnership::AlreadyHeld,
             ),
         )
         .await;
@@ -494,9 +654,37 @@ impl CoreExecutor for SessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .persistent_service()
+            .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
+                &self.session_id,
+                session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        self.runtime
+            .persistent_service()
+            .publish_interaction_terminals_exact_batch(&self.session_id, events)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.runtime
-            .cancel_after_boundary_live_with_machine_authority(&self.session_id)
+            .cancel_current_after_boundary_live_with_machine_authority(&self.session_id)
             .await
             .or_else(|err| match err {
                 SessionError::NotRunning { .. } => Ok(()),
@@ -510,10 +698,12 @@ impl CoreExecutor for SessionRuntimeExecutor {
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        match self.runtime.discard_live_session(&self.session_id).await {
-            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
+        SessionRuntimePostStopCleanupHandle {
+            runtime: Arc::clone(&self.runtime),
+            session_id: self.session_id.clone(),
         }
+        .cleanup_after_runtime_stop_terminalized()
+        .await
     }
 }
 
@@ -532,6 +722,33 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         Some(Arc::new(MobRpcRuntimeInterruptHandle {
             session_service: Arc::clone(&self.session_service),
             runtime: self.runtime.clone(),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn publication_handle(&self) -> Option<Arc<dyn CoreExecutorPublicationHandle>> {
+        Some(Arc::new(MobRpcRuntimePublicationHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn machine_managed_post_stop_unregister(&self) -> bool {
+        true
+    }
+
+    fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+        Some(Arc::new(MobRpcRuntimePostStopCleanupHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn turn_finalization_boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn CoreExecutorTurnFinalizationBoundaryHandle>> {
+        Some(Arc::new(MobRpcRuntimeTurnFinalizationBoundaryHandle {
+            session_service: Arc::clone(&self.session_service),
             session_id: self.session_id.clone(),
         }))
     }
@@ -562,7 +779,9 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
         if primitive.is_context_only_apply_without_turn() {
             let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("context-only apply without turn only matches staged primitives");
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    "context-only apply without turn was not carried by a staged primitive",
+                ));
             };
             let pre_admission = self.runtime.as_ref().and_then(|runtime| {
                 runtime.take_runtime_pre_admission(&self.session_id, &staged.contributing_input_ids)
@@ -617,6 +836,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         turn_tool_overlay,
                         turn_overrides,
                         pre_admission,
+                        crate::session_runtime::LlmReconfigureBoundaryOwnership::AlreadyHeld,
                     )
                     .await
                     .map_err(core_executor_error_from_rpc)
@@ -652,10 +872,36 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn checkpoint_committed_session_snapshot(
+        &mut self,
+        session_snapshot: &[u8],
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
+                &self.session_id,
+                session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        self.session_service
+            .publish_interaction_terminals(&self.session_id, events)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         if let Some(runtime) = self.runtime.as_ref() {
             return runtime
-                .cancel_after_boundary_live_with_machine_authority(&self.session_id)
+                .cancel_current_after_boundary_live_with_machine_authority(&self.session_id)
                 .await
                 .or_else(|err| match err {
                     SessionError::NotRunning { .. } => Ok(()),
@@ -666,7 +912,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         if let Some(adapter) = self.session_service.runtime_adapter() {
             return self
                 .session_service
-                .cancel_after_boundary_with_machine_authority(
+                .cancel_current_after_boundary_with_machine_authority(
                     &self.session_id,
                     adapter.session_control_authority(),
                 )
@@ -688,14 +934,12 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        match self
-            .session_service
-            .discard_live_session(&self.session_id)
-            .await
-        {
-            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
+        MobRpcRuntimePostStopCleanupHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.session_id.clone(),
         }
+        .cleanup_after_runtime_stop_terminalized()
+        .await
     }
 }
 
@@ -834,7 +1078,28 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    impl MobSessionService for BoundaryCancelSessionService {}
+    impl MobSessionService for BoundaryCancelSessionService {
+        async fn create_session_under_runtime_turn_boundary(
+            &self,
+            req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            <Self as SessionService>::create_session(self, req).await
+        }
+
+        async fn archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.archive_with_mob_lifecycle_authority(session_id).await
+        }
+
+        async fn discard_live_session_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.discard_live_session(session_id).await
+        }
+    }
 
     #[tokio::test]
     async fn mob_rpc_executor_forwards_both_compaction_lifecycle_paths() {
@@ -868,8 +1133,9 @@ mod tests {
             session_id,
         };
 
+        let expected_run_id = meerkat_core::lifecycle::RunId::new();
         let error = handle
-            .cancel_after_boundary("test boundary cancel".to_string())
+            .cancel_after_boundary(&expected_run_id, "test boundary cancel".to_string())
             .await
             .expect_err("unsupported boundary cancel must not be masked as success");
 
@@ -892,8 +1158,9 @@ mod tests {
             session_id,
         };
 
+        let expected_run_id = meerkat_core::lifecycle::RunId::new();
         let error = handle
-            .cancel_after_boundary("test boundary cancel".to_string())
+            .cancel_after_boundary(&expected_run_id, "test boundary cancel".to_string())
             .await
             .expect_err("not-running fallback must not bypass MeerkatMachine authority");
         assert!(

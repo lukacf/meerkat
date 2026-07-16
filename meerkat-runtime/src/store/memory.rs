@@ -15,8 +15,9 @@ use tokio::sync::Mutex;
 use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
-    AuthOAuthFlowSnapshotUpdate, MachineLifecycleCommit, MachineLifecycleSnapshot,
-    MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError, SessionDelta,
+    AuthOAuthFlowSnapshotUpdate, InputStateBatchCasOutcome, MachineLifecycleCommit,
+    MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
+    SessionDelta, prepare_input_state_batch_cas,
 };
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
@@ -35,6 +36,12 @@ struct CompactionOutboxEntry {
     intent: meerkat_core::CompactionProjectionIntent,
     finalized: bool,
 }
+
+#[cfg(test)]
+type InputStateBatchCasTestBlock = (
+    Arc<crate::tokio::sync::Notify>,
+    Arc<crate::tokio::sync::Notify>,
+);
 
 /// Inner state protected by the mutex.
 #[derive(Debug, Default)]
@@ -69,6 +76,10 @@ struct Inner {
 pub struct InMemoryRuntimeStore {
     inner: Arc<Mutex<Inner>>,
     auth_oauth_flow_snapshot: Arc<StdMutex<Option<Vec<u8>>>>,
+    #[cfg(test)]
+    input_state_batch_cas_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
+    #[cfg(test)]
+    input_state_batch_cas_after_commit: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
 }
 
 impl InMemoryRuntimeStore {
@@ -76,7 +87,35 @@ impl InMemoryRuntimeStore {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
             auth_oauth_flow_snapshot: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            input_state_batch_cas_before: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            input_state_batch_cas_after_commit: Arc::new(StdMutex::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_next_input_state_batch_cas_before_mutation(
+        &self,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) {
+        *self
+            .input_state_batch_cas_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_next_input_state_batch_cas_after_commit(
+        &self,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) {
+        *self
+            .input_state_batch_cas_after_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
     }
 }
 
@@ -269,6 +308,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         // retained session truth.
         let mut session_snapshot_superseded = false;
         let mut compaction_intents = Vec::new();
+        let mut session_snapshot_to_persist = None;
         if let Some(delta) = session_delta {
             let incoming_session =
                 serde_json::from_slice::<meerkat_core::Session>(&delta.session_snapshot);
@@ -306,7 +346,8 @@ impl RuntimeStore for InMemoryRuntimeStore {
                     let previous_session = inner
                         .sessions
                         .get(&rid)
-                        .and_then(|snapshot| deserialize_persisted_session(snapshot).ok());
+                        .map(|snapshot| deserialize_persisted_session(snapshot))
+                        .transpose()?;
                     if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
                         &incoming_session,
                         previous_session.as_ref(),
@@ -342,8 +383,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 }
             }
             if persist_session_snapshot {
-                inner.sessions.insert(rid.clone(), delta.session_snapshot);
-                inner.projection_quarantine.remove(&rid);
+                session_snapshot_to_persist = Some(delta.session_snapshot);
             }
         }
 
@@ -352,7 +392,23 @@ impl RuntimeStore for InMemoryRuntimeStore {
         // skipped: advancing them against a retained (older) session snapshot
         // would split receipt/input ordering identity from session truth.
         if session_snapshot_superseded {
-            return Ok(());
+            return Err(RuntimeStoreError::SessionSnapshotSuperseded { runtime_id: rid });
+        }
+
+        // Receipt immutability is validated before any mutation so a stale or
+        // duplicate writer cannot partially advance the session snapshot and
+        // then overwrite a prior boundary identity. This mirrors SQLite's
+        // primary-key INSERT behavior.
+        let key = ReceiptKey {
+            runtime_id: rid.clone(),
+            run_id: receipt.run_id.clone(),
+            sequence: receipt.sequence,
+        };
+        if inner.receipts.contains_key(&key) {
+            return Err(RuntimeStoreError::WriteFailed(format!(
+                "boundary receipt already exists for runtime '{}' run {} sequence {}",
+                runtime_id, receipt.run_id, receipt.sequence
+            )));
         }
 
         let outbox = inner
@@ -368,12 +424,10 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 });
         }
 
-        // Receipt
-        let key = ReceiptKey {
-            runtime_id: rid.clone(),
-            run_id: receipt.run_id.clone(),
-            sequence: receipt.sequence,
-        };
+        if let Some(session_snapshot) = session_snapshot_to_persist {
+            inner.sessions.insert(rid.clone(), session_snapshot);
+            inner.projection_quarantine.remove(&rid);
+        }
         inner.receipts.insert(key, receipt);
 
         // Input states
@@ -462,6 +516,113 @@ impl RuntimeStore for InMemoryRuntimeStore {
             inner
                 .sessions
                 .insert(runtime_id.0.clone(), cleaned_snapshot);
+        }
+        Ok(())
+    }
+
+    async fn atomic_apply_with_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let rid = runtime_id.0.clone();
+        let incoming_session =
+            serde_json::from_slice::<meerkat_core::Session>(&session_delta.session_snapshot)
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let compaction_intents = super::validated_compaction_projection_intents(&incoming_session)?;
+        if let Some(existing) = inner.compaction_projection_outbox.get(&rid) {
+            for intent in &compaction_intents {
+                if let Some(entry) = existing.get(&intent.projection) {
+                    if entry.finalized {
+                        return Err(RuntimeStoreError::WriteFailed(format!(
+                            "atomic session snapshot replays finalized compaction intent {}",
+                            intent.projection.revision()
+                        )));
+                    }
+                    if entry.intent != *intent {
+                        return Err(RuntimeStoreError::WriteFailed(format!(
+                            "conflicting compaction outbox intent for rewrite {}",
+                            intent.projection.revision()
+                        )));
+                    }
+                }
+            }
+        }
+        if incoming_session.id() != &session_store_key {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: session_store_key,
+                actual: incoming_session.id().clone(),
+            });
+        }
+        let previous_session = inner
+            .sessions
+            .get(&rid)
+            .map(|snapshot| deserialize_persisted_session(snapshot))
+            .transpose()?;
+        if let Err(err) = meerkat_core::session_store::run_boundary_snapshot_save_guard(
+            &incoming_session,
+            previous_session.as_ref(),
+        ) {
+            if previous_session
+                .as_ref()
+                .is_some_and(is_runtime_placeholder_session)
+            {
+                // The first generated transcript replaces its runtime
+                // placeholder atomically with all machine-terminal state.
+            } else if previous_session.as_ref().is_some_and(|previous_session| {
+                meerkat_core::session_store::run_boundary_snapshot_save_guard(
+                    previous_session,
+                    Some(&incoming_session),
+                )
+                .is_ok()
+            }) {
+                return Err(RuntimeStoreError::SessionSnapshotSuperseded { runtime_id: rid });
+            } else {
+                return Err(RuntimeStoreError::WriteFailed(err.to_string()));
+            }
+        }
+
+        let key = ReceiptKey {
+            runtime_id: rid.clone(),
+            run_id: receipt.run_id.clone(),
+            sequence: receipt.sequence,
+        };
+        if inner.receipts.contains_key(&key) {
+            return Err(RuntimeStoreError::WriteFailed(format!(
+                "boundary receipt already exists for runtime '{}' run {} sequence {}",
+                runtime_id, receipt.run_id, receipt.sequence
+            )));
+        }
+
+        let outbox = inner
+            .compaction_projection_outbox
+            .entry(rid.clone())
+            .or_default();
+        for intent in compaction_intents {
+            outbox
+                .entry(intent.projection.clone())
+                .or_insert(CompactionOutboxEntry {
+                    intent,
+                    finalized: false,
+                });
+        }
+        inner
+            .sessions
+            .insert(rid.clone(), session_delta.session_snapshot);
+        inner.projection_quarantine.remove(&rid);
+        inner
+            .runtime_lifecycle
+            .insert(rid.clone(), machine_lifecycle.into_snapshot());
+        inner.receipts.insert(key, receipt);
+        let states = inner.input_states.entry(rid).or_default();
+        for record in input_updates {
+            let bundle = record.into_stored();
+            states.insert(bundle.state.input_id.clone(), bundle);
         }
         Ok(())
     }
@@ -571,6 +732,91 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(())
     }
 
+    async fn persist_input_states_atomically(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        records: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let states = inner.input_states.entry(runtime_id.0.clone()).or_default();
+        for record in records {
+            let bundle = record.as_stored();
+            states.insert(bundle.state.input_id.clone(), bundle.clone());
+        }
+        Ok(())
+    }
+
+    async fn compare_and_swap_input_states_atomically(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &[StoredInputState],
+        replacements: &[InputStatePersistenceRecord],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+        // Serialize and validate the full request before taking the mutation
+        // lock, so no fallible request preparation can occur after writes.
+        let prepared = prepare_input_state_batch_cas(expected, replacements)?;
+        if prepared.is_empty() {
+            return Ok(InputStateBatchCasOutcome::Swapped);
+        }
+
+        #[cfg(test)]
+        let before_block = {
+            self.input_state_batch_cas_before
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        };
+        #[cfg(test)]
+        if let Some((entered, release)) = before_block {
+            entered.notify_one();
+            release.notified().await;
+        }
+
+        let mut inner = self.inner.lock().await;
+        let Some(states) = inner.input_states.get_mut(&runtime_id.0) else {
+            return Ok(InputStateBatchCasOutcome::Stale);
+        };
+        let mut all_expected = true;
+        let mut all_replacements = true;
+        for row in &prepared {
+            let Some(current) = states.get(&row.input_id) else {
+                return Ok(InputStateBatchCasOutcome::Stale);
+            };
+            let current_json = serde_json::to_vec(current)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if current_json != row.expected_json {
+                all_expected = false;
+            }
+            if current_json != row.replacement_json {
+                all_replacements = false;
+            }
+        }
+        if all_replacements {
+            return Ok(InputStateBatchCasOutcome::Swapped);
+        }
+        if !all_expected {
+            return Ok(InputStateBatchCasOutcome::Stale);
+        }
+        for row in prepared {
+            states.insert(row.input_id, row.replacement);
+        }
+        drop(inner);
+
+        #[cfg(test)]
+        let after_commit_block = {
+            self.input_state_batch_cas_after_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        };
+        #[cfg(test)]
+        if let Some((entered, release)) = after_commit_block {
+            entered.notify_one();
+            release.notified().await;
+        }
+        Ok(InputStateBatchCasOutcome::Swapped)
+    }
+
     async fn load_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -621,27 +867,20 @@ impl RuntimeStore for InMemoryRuntimeStore {
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &LogicalRuntimeId,
-        commit: MachineLifecycleCommit,
-        input_states: &[InputStatePersistenceRecord],
+        finalization: crate::store::UnregisterFinalizationCommit,
     ) -> Result<(), RuntimeStoreError> {
+        let (snapshot, input_states, retired_ops_epoch) = finalization.into_parts();
         let mut inner = self.inner.lock().await;
         let rid = runtime_id.0.clone();
-        let retired_ops_epoch = commit.retired_ops_epoch().cloned().ok_or_else(|| {
-            RuntimeStoreError::WriteFailed(
-                "unregister finalization missing exact retired ops epoch".into(),
-            )
-        })?;
 
-        // One critical section publishes the terminal lifecycle and removes
-        // the old ops epoch while recording a deletion-wins tombstone. No
-        // observer can acquire the store between them.
-        inner
-            .runtime_lifecycle
-            .insert(rid.clone(), commit.into_snapshot());
+        // One lock acquisition is the in-memory transaction boundary. The
+        // finalization token prepared every owned value before this method, so
+        // no fallible request preparation remains after the first mutation.
+        inner.runtime_lifecycle.insert(rid.clone(), snapshot);
         let states = inner.input_states.entry(rid.clone()).or_default();
         for record in input_states {
-            let bundle = record.as_stored();
-            states.insert(bundle.state.input_id.clone(), bundle.clone());
+            let bundle = record.clone_stored();
+            states.insert(bundle.state.input_id.clone(), bundle);
         }
         if inner
             .ops_lifecycle_snapshots
@@ -673,6 +912,39 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .ops_lifecycle_snapshots
             .insert(runtime_id.0.clone(), snapshot.clone());
         Ok(())
+    }
+
+    async fn initialize_ops_lifecycle_if_absent(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        candidate: &PersistedOpsSnapshot,
+    ) -> Result<PersistedOpsSnapshot, RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        let key = runtime_id.0.clone();
+        if inner
+            .retired_ops_epochs
+            .contains(&(key.clone(), candidate.epoch_id.clone()))
+        {
+            return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
+                runtime_id: key,
+                epoch_id: candidate.epoch_id.clone(),
+            });
+        }
+        let canonical = inner
+            .ops_lifecycle_snapshots
+            .entry(key)
+            .or_insert_with(|| candidate.clone())
+            .clone();
+        if inner
+            .retired_ops_epochs
+            .contains(&(runtime_id.0.clone(), canonical.epoch_id.clone()))
+        {
+            return Err(RuntimeStoreError::OpsLifecycleEpochRetired {
+                runtime_id: runtime_id.0.clone(),
+                epoch_id: canonical.epoch_id,
+            });
+        }
+        Ok(canonical)
     }
 
     async fn load_ops_lifecycle(
@@ -1016,7 +1288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn superseded_snapshot_does_not_advance_compaction_outbox() {
+    async fn superseded_snapshot_rejects_without_advancing_compaction_outbox() {
         let store = InMemoryRuntimeStore::new();
         let rid = LogicalRuntimeId::new("runtime-superseded-compaction-outbox");
         let (incoming, intent) = session_with_compaction_intent();
@@ -1037,7 +1309,7 @@ mod tests {
             )
             .await
             .unwrap();
-        store
+        let error = store
             .atomic_apply(
                 &rid,
                 Some(SessionDelta {
@@ -1048,7 +1320,11 @@ mod tests {
                 Some(incoming.id().clone()),
             )
             .await
-            .unwrap();
+            .expect_err("superseded compaction boundary must be explicitly rejected");
+        assert!(matches!(
+            error,
+            RuntimeStoreError::SessionSnapshotSuperseded { .. }
+        ));
         assert_eq!(
             store.load_session_snapshot(&rid).await.unwrap(),
             Some(current_snapshot)
@@ -1216,6 +1492,268 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machine_terminal_atomic_apply_rolls_back_all_maps_on_receipt_conflict() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("terminal-receipt-conflict");
+        let receipt = make_receipt(RunId::new(), 0);
+        let seeded_input = StoredInputState::new_accepted(InputId::new());
+        store
+            .atomic_apply(
+                &rid,
+                None,
+                receipt.clone(),
+                vec![persistable(seeded_input.clone())],
+                None,
+            )
+            .await
+            .unwrap();
+
+        let session = session_with_user("must roll back");
+        let replacement_input = StoredInputState::new_accepted(InputId::new());
+        let error = store
+            .atomic_apply_with_machine_lifecycle(
+                &rid,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session).unwrap(),
+                },
+                receipt,
+                MachineLifecycleCommit::new_with_binding(
+                    crate::RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                vec![persistable(replacement_input)],
+                session.id().clone(),
+            )
+            .await
+            .expect_err("duplicate receipt must reject the entire terminal transaction");
+        assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
+        assert!(store.load_session_snapshot(&rid).await.unwrap().is_none());
+        assert_eq!(
+            crate::store::load_runtime_state(&store, &rid)
+                .await
+                .unwrap(),
+            None
+        );
+        let inputs = store.load_input_states(&rid).await.unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].state.input_id, seeded_input.state.input_id);
+    }
+
+    #[tokio::test]
+    async fn machine_terminal_atomic_apply_tracks_and_tombstones_compaction_intents() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("terminal-compaction-outbox");
+        let (session, intent) = session_with_compaction_intent();
+        let encoded = serde_json::to_vec(&session).unwrap();
+
+        store
+            .atomic_apply_with_machine_lifecycle(
+                &rid,
+                SessionDelta {
+                    session_snapshot: encoded.clone(),
+                },
+                make_receipt(RunId::new(), 0),
+                MachineLifecycleCommit::new_with_binding(
+                    crate::RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                Vec::new(),
+                session.id().clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_pending_compaction_projections(&rid)
+                .await
+                .unwrap(),
+            vec![intent.clone()]
+        );
+
+        store
+            .mark_compaction_projection_finalized(&rid, &intent.projection)
+            .await
+            .unwrap();
+        let error = store
+            .atomic_apply_with_machine_lifecycle(
+                &rid,
+                SessionDelta {
+                    session_snapshot: encoded,
+                },
+                make_receipt(RunId::new(), 1),
+                MachineLifecycleCommit::new_with_binding(
+                    crate::RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                Vec::new(),
+                session.id().clone(),
+            )
+            .await
+            .expect_err("a finalized compaction tombstone must reject stale terminal replay");
+        assert!(
+            error
+                .to_string()
+                .contains("replays finalized compaction intent")
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_terminal_atomic_apply_rejects_corrupt_previous_snapshot_before_mutation() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("terminal-corrupt-head");
+        let corrupt = b"{not-a-session".to_vec();
+        store
+            .inner
+            .lock()
+            .await
+            .sessions
+            .insert(rid.0.clone(), corrupt.clone());
+        let session = session_with_user("incoming terminal transcript");
+        let receipt = make_receipt(RunId::new(), 0);
+        let error = store
+            .atomic_apply_with_machine_lifecycle(
+                &rid,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session).unwrap(),
+                },
+                receipt.clone(),
+                MachineLifecycleCommit::new_with_binding(
+                    crate::RuntimeState::Idle,
+                    crate::store::MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                vec![persistable(StoredInputState::new_accepted(InputId::new()))],
+                session.id().clone(),
+            )
+            .await
+            .expect_err("corrupt durable head must fail before every terminal mutation");
+        assert!(matches!(error, RuntimeStoreError::ReadFailed(_)));
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(corrupt)
+        );
+        assert_eq!(
+            crate::store::load_runtime_state(&store, &rid)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store.load_input_states(&rid).await.unwrap().is_empty());
+        assert!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_terminal_atomic_apply_rejects_superseded_snapshot_without_publication() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("terminal-superseded-head");
+        let incoming = session_with_user("failed turn input");
+        let mut durable_head = incoming.clone();
+        durable_head.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("already advanced"),
+        ));
+        let durable_snapshot = serde_json::to_vec(&durable_head).unwrap();
+        store
+            .commit_session_snapshot(
+                &rid,
+                SessionDelta {
+                    session_snapshot: durable_snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let receipt = make_receipt(RunId::new(), 0);
+        let error = store
+            .atomic_apply_with_machine_lifecycle(
+                &rid,
+                SessionDelta {
+                    session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                },
+                receipt.clone(),
+                MachineLifecycleCommit::new_with_binding(
+                    crate::RuntimeState::Idle,
+                    MachineLifecycleBindingFacts::default(),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                vec![persistable(StoredInputState::new_accepted(InputId::new()))],
+                incoming.id().clone(),
+            )
+            .await
+            .expect_err("superseded terminal snapshot must reject the entire transaction");
+        assert!(matches!(
+            error,
+            RuntimeStoreError::SessionSnapshotSuperseded { .. }
+        ));
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(durable_snapshot)
+        );
+        assert_eq!(
+            crate::store::load_runtime_state(&store, &rid)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store.load_input_states(&rid).await.unwrap().is_empty());
+        assert!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_atomic_apply_rejects_corrupt_previous_snapshot_before_mutation() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("legacy-corrupt-head");
+        let corrupt = b"{not-a-session".to_vec();
+        store
+            .inner
+            .lock()
+            .await
+            .sessions
+            .insert(rid.0.clone(), corrupt.clone());
+        let session = session_with_user("incoming transcript");
+        let receipt = make_receipt(RunId::new(), 0);
+        let error = store
+            .atomic_apply(
+                &rid,
+                Some(SessionDelta {
+                    session_snapshot: serde_json::to_vec(&session).unwrap(),
+                }),
+                receipt.clone(),
+                vec![persistable(StoredInputState::new_accepted(InputId::new()))],
+                Some(session.id().clone()),
+            )
+            .await
+            .expect_err("corrupt durable head must fail before every boundary mutation");
+        assert!(matches!(error, RuntimeStoreError::ReadFailed(_)));
+        assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(corrupt)
+        );
+        assert!(store.load_input_states(&rid).await.unwrap().is_empty());
+        assert!(
+            store
+                .load_boundary_receipt(&rid, &receipt.run_id, receipt.sequence)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn atomic_apply_rejects_non_session_snapshot_without_owner_context() {
         let store = InMemoryRuntimeStore::new();
         let rid = LogicalRuntimeId::new("test-runtime");
@@ -1266,6 +1804,119 @@ mod tests {
         let loaded = store.load_input_state(&rid, &input_id).await.unwrap();
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().state.input_id, input_id);
+    }
+
+    fn replacement_records(
+        expected: &[StoredInputState],
+        recovery_count: u32,
+    ) -> Vec<InputStatePersistenceRecord> {
+        expected
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row.state.recovery_count = recovery_count;
+                persistable(row)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn input_state_batch_cas_memory_swaps_once_and_stale_is_noop() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("input-cas-memory");
+        let expected: Vec<_> = (0..3)
+            .map(|_| StoredInputState::new_accepted(InputId::new()))
+            .collect();
+        let initial: Vec<_> = expected.iter().cloned().map(persistable).collect();
+        store
+            .persist_input_states_atomically(&rid, &initial)
+            .await
+            .unwrap();
+
+        let winner = replacement_records(&expected, 1);
+        let stale_candidate = replacement_records(&expected, 2);
+        assert_eq!(
+            store
+                .compare_and_swap_input_states_atomically(&rid, &expected, &winner)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Swapped
+        );
+        assert_eq!(
+            store
+                .compare_and_swap_input_states_atomically(&rid, &expected, &winner)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Swapped,
+            "retry after a lost CAS acknowledgement must observe the exact replacement as success"
+        );
+        assert_eq!(
+            store
+                .compare_and_swap_input_states_atomically(&rid, &expected, &stale_candidate)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Stale
+        );
+        let rows = store.load_input_states(&rid).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.state.recovery_count == 1));
+    }
+
+    #[tokio::test]
+    async fn input_state_batch_cas_memory_rejects_missing_extra_and_key_mismatch() {
+        let store = InMemoryRuntimeStore::new();
+        let rid = LogicalRuntimeId::new("input-cas-shape");
+        let expected: Vec<_> = (0..2)
+            .map(|_| StoredInputState::new_accepted(InputId::new()))
+            .collect();
+        store
+            .persist_input_state(&rid, &persistable(expected[0].clone()))
+            .await
+            .unwrap();
+        let replacements = replacement_records(&expected, 1);
+
+        assert_eq!(
+            store
+                .compare_and_swap_input_states_atomically(&rid, &expected, &replacements)
+                .await
+                .unwrap(),
+            InputStateBatchCasOutcome::Stale,
+            "one missing durable row must stale the entire batch"
+        );
+        assert_eq!(
+            store
+                .load_input_state(&rid, &expected[0].state.input_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state
+                .recovery_count,
+            0,
+            "stale comparison must not update the matching prefix row"
+        );
+
+        let extra = vec![
+            replacements[0].clone(),
+            replacements[1].clone(),
+            persistable(StoredInputState::new_accepted(InputId::new())),
+        ];
+        assert!(matches!(
+            store
+                .compare_and_swap_input_states_atomically(&rid, &expected, &extra)
+                .await,
+            Err(RuntimeStoreError::InvalidInputStateBatchCas { .. })
+        ));
+
+        let wrong_key = vec![
+            replacements[0].clone(),
+            persistable(StoredInputState::new_accepted(InputId::new())),
+        ];
+        assert!(matches!(
+            store
+                .compare_and_swap_input_states_atomically(&rid, &expected, &wrong_key)
+                .await,
+            Err(RuntimeStoreError::InvalidInputStateBatchCas { .. })
+        ));
     }
 
     #[tokio::test]
@@ -1555,7 +2206,7 @@ mod tests {
             .await
             .unwrap();
 
-        store
+        let error = store
             .atomic_apply(
                 &rid,
                 Some(SessionDelta {
@@ -1566,7 +2217,11 @@ mod tests {
                 Some(incoming.id().clone()),
             )
             .await
-            .unwrap();
+            .expect_err("superseded atomic commit must be explicitly rejected");
+        assert!(matches!(
+            error,
+            RuntimeStoreError::SessionSnapshotSuperseded { .. }
+        ));
 
         assert_eq!(
             store.load_session_snapshot(&rid).await.unwrap(),
@@ -1616,7 +2271,7 @@ mod tests {
             .await
             .unwrap();
 
-        store
+        let error = store
             .atomic_apply(
                 &rid,
                 Some(SessionDelta {
@@ -1627,7 +2282,11 @@ mod tests {
                 Some(incoming.id().clone()),
             )
             .await
-            .unwrap();
+            .expect_err("superseded atomic commit must be explicitly rejected");
+        assert!(matches!(
+            error,
+            RuntimeStoreError::SessionSnapshotSuperseded { .. }
+        ));
 
         // Snapshot retained, receipt + input-state writes skipped as a unit.
         assert_eq!(
@@ -1844,6 +2503,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_ops_initializers_return_one_canonical_snapshot() {
+        let store = InMemoryRuntimeStore::new();
+        let runtime_id = LogicalRuntimeId::new("runtime-concurrent-ops-initialize");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let first_candidate = registry
+            .capture_persistence_snapshot(
+                meerkat_core::RuntimeEpochId::new(),
+                &meerkat_core::EpochCursorState::new(),
+            )
+            .unwrap();
+        let second_candidate = registry
+            .capture_persistence_snapshot(
+                meerkat_core::RuntimeEpochId::new(),
+                &meerkat_core::EpochCursorState::new(),
+            )
+            .unwrap();
+        assert_ne!(first_candidate.epoch_id, second_candidate.epoch_id);
+
+        let (first, second) = tokio::join!(
+            store.initialize_ops_lifecycle_if_absent(&runtime_id, &first_candidate),
+            store.initialize_ops_lifecycle_if_absent(&runtime_id, &second_candidate),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert_eq!(first.epoch_id, second.epoch_id);
+        assert_eq!(
+            store
+                .load_ops_lifecycle(&runtime_id)
+                .await
+                .unwrap()
+                .expect("canonical snapshot")
+                .epoch_id,
+            first.epoch_id
+        );
+    }
+
+    #[tokio::test]
     async fn unregister_finalization_atomically_retires_ops_epoch_and_is_idempotent() {
         let store = InMemoryRuntimeStore::new();
         let reopened = store.clone();
@@ -1864,13 +2561,16 @@ mod tests {
             store
                 .commit_unregister_finalization(
                     &runtime_id,
-                    MachineLifecycleCommit::new_with_binding(
-                        RuntimeState::Stopped,
-                        MachineLifecycleBindingFacts::new(None, None, None, None),
-                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                    )
-                    .for_unregister_finalization(retired_ops_epoch.clone()),
-                    &[],
+                    crate::store::UnregisterFinalizationCommit::new(
+                        MachineLifecycleCommit::new_with_binding(
+                            RuntimeState::Stopped,
+                            MachineLifecycleBindingFacts::new(None, None, None, None),
+                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                        ),
+                        vec![],
+                        retired_ops_epoch.clone(),
+                        crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
+                    ),
                 )
                 .await
                 .unwrap();
@@ -1896,6 +2596,14 @@ mod tests {
             .expect_err("a detached callback must not resurrect its retired ops epoch");
         assert!(matches!(
             late_error,
+            RuntimeStoreError::OpsLifecycleEpochRetired { epoch_id, .. }
+                if epoch_id == retired_ops_epoch
+        ));
+        assert!(matches!(
+            reopened
+                .initialize_ops_lifecycle_if_absent(&runtime_id, &stale_ops)
+                .await
+                .expect_err("initialization must honor the same retired-epoch fence"),
             RuntimeStoreError::OpsLifecycleEpochRetired { epoch_id, .. }
                 if epoch_id == retired_ops_epoch
         ));
@@ -1937,13 +2645,16 @@ mod tests {
         store
             .commit_unregister_finalization(
                 &runtime_id,
-                MachineLifecycleCommit::new_with_binding(
-                    RuntimeState::Stopped,
-                    MachineLifecycleBindingFacts::new(None, None, None, None),
-                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                )
-                .for_unregister_finalization(old_ops.epoch_id.clone()),
-                &[],
+                crate::store::UnregisterFinalizationCommit::new(
+                    MachineLifecycleCommit::new_with_binding(
+                        RuntimeState::Stopped,
+                        MachineLifecycleBindingFacts::new(None, None, None, None),
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                    ),
+                    vec![],
+                    old_ops.epoch_id.clone(),
+                    crate::meerkat_machine::DeleteOpsFinalizationAuthority::for_store_test(),
+                ),
             )
             .await
             .unwrap();

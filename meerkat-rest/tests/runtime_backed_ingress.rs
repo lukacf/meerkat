@@ -116,6 +116,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         session_service.clone(),
         Some(runtime_adapter.clone()),
         None,
+        meerkat_mob::MobControlPrincipal::Owner,
     );
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(

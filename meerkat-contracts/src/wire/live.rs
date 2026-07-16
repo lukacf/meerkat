@@ -168,7 +168,10 @@ pub enum LiveOpenTransport {
 /// booleans, internally-tagged variant payloads, discriminated transport
 /// union) instead of an opaque JSON blob. CC5/CC6 (PR #650 verifier
 /// follow-up); G8 (P2): `transport` typed-mirror.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Eq`: all fields are strings/enums/bools, and the bridge reply chain
+/// (`BridgeReply::MemberLiveChannelOpened`) requires it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveOpenResult {
     pub channel_id: String,

@@ -1,0 +1,12 @@
+{
+  "stored_input_state_version": 3,
+  "input_id": "018f0000-0000-7000-8000-000000000123",
+  "current_state": "queued",
+  "attempt_count": 2,
+  "recovery_count": 1,
+  "history": [],
+  "admission_sequence": 17,
+  "recovery_lane": "queue",
+  "created_at": "2026-01-02T03:04:05Z",
+  "updated_at": "2026-01-02T03:05:06Z"
+}

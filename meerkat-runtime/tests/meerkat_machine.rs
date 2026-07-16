@@ -27,6 +27,7 @@ use meerkat_runtime::{
     SessionDelta, SessionServiceRuntimeExt,
 };
 use meerkat_store::MemoryBlobStore;
+use sha2::{Digest, Sha256};
 
 fn memory_blob_store() -> Arc<dyn BlobStore> {
     Arc::new(MemoryBlobStore::new())
@@ -259,6 +260,36 @@ impl RuntimeStore for HarnessRuntimeStore {
             .await
     }
 
+    async fn atomic_apply_with_machine_lifecycle(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: SessionDelta,
+        receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+        machine_lifecycle: meerkat_runtime::store::MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<(), RuntimeStoreError> {
+        if self.fail_atomic_apply
+            || self
+                .fail_commit_machine_lifecycle_now
+                .load(Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic atomic service-turn commit failure".to_string(),
+            ));
+        }
+        self.inner
+            .atomic_apply_with_machine_lifecycle(
+                runtime_id,
+                session_delta,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+            )
+            .await
+    }
+
     async fn load_input_states(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -413,8 +444,7 @@ impl RuntimeStore for HarnessRuntimeStore {
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[InputStatePersistenceRecord],
+        finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .commit_machine_lifecycle_calls
@@ -443,7 +473,7 @@ impl RuntimeStore for HarnessRuntimeStore {
             tokio::time::sleep(self.commit_machine_lifecycle_delay).await;
         }
         self.inner
-            .commit_unregister_finalization(runtime_id, commit, input_states)
+            .commit_unregister_finalization(runtime_id, finalization)
             .await
     }
 
@@ -453,6 +483,16 @@ impl RuntimeStore for HarnessRuntimeStore {
         snapshot: &meerkat_runtime::PersistedOpsSnapshot,
     ) -> Result<(), RuntimeStoreError> {
         self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+    }
+
+    async fn initialize_ops_lifecycle_if_absent(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        candidate: &meerkat_runtime::PersistedOpsSnapshot,
+    ) -> Result<meerkat_runtime::PersistedOpsSnapshot, RuntimeStoreError> {
+        self.inner
+            .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+            .await
     }
 
     async fn load_ops_lifecycle(
@@ -528,7 +568,7 @@ async fn persistent_adapter_accept() {
 }
 
 #[tokio::test]
-async fn lifecycle_commit_failure_preserves_generated_retire_authority() {
+async fn lifecycle_commit_failure_restores_pre_retire_authority() {
     let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
     let adapter = Arc::new(MeerkatMachine::persistent(
         store.clone() as Arc<dyn RuntimeStore>,
@@ -558,8 +598,8 @@ async fn lifecycle_commit_failure_preserves_generated_retire_authority() {
     );
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Retired,
-        "failed retire must preserve the generated Retire transition",
+        RuntimeState::Idle,
+        "failed retire persistence must restore the pre-retire generated authority",
     );
     assert_eq!(
         adapter.list_active_inputs(&sid).await.unwrap(),
@@ -632,13 +672,14 @@ async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
 }
 
 #[tokio::test]
-async fn service_turn_terminal_lifecycle_commit_failure_rolls_back_turn_completion() {
+async fn service_turn_terminal_atomic_commit_failure_rolls_back_lifecycle_publication() {
     let store = Arc::new(HarnessRuntimeStore::new());
     let adapter = Arc::new(MeerkatMachine::persistent(
         store.clone() as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     ));
     let sid = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
     let bindings = adapter
         .prepare_bindings(sid.clone())
         .await
@@ -648,38 +689,199 @@ async fn service_turn_terminal_lifecycle_commit_failure_rolls_back_turn_completi
         .turn_state()
         .start_immediate_append(run_id.clone())
         .expect("start service turn through runtime handle");
+    bindings
+        .turn_state()
+        .primitive_applied(run_id.clone())
+        .expect("service turn must reach a generated terminal before commit");
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Running,
         "service turn should put the machine in a running lifecycle before terminal commit"
     );
+    let snapshot_before = store.load_session_snapshot(&runtime_id).await.unwrap();
 
     store.set_fail_commit_machine_lifecycle_now(true);
+    let session_snapshot =
+        serde_json::to_vec(&meerkat_core::Session::with_id(sid.clone())).unwrap();
     let err = adapter
-        .commit_service_turn_terminal_receipt(&sid)
+        .commit_service_turn_terminal_receipt(&sid, session_snapshot)
         .await
-        .expect_err("terminal lifecycle commit failure should surface");
+        .expect_err("atomic terminal commit failure should surface");
     assert!(
         err.to_string()
-            .contains("synthetic commit_machine_lifecycle failure"),
+            .contains("synthetic atomic service-turn commit failure"),
         "unexpected error: {err}",
     );
 
     let snapshot = bindings.turn_state().snapshot();
-    assert_eq!(snapshot.active_run_id, Some(run_id));
+    assert_eq!(
+        snapshot.active_run_id, None,
+        "terminal turn snapshots hide the live binding behind terminal_run_id"
+    );
     assert_eq!(
         snapshot.turn_phase,
-        meerkat_core::turn_execution_authority::TurnPhase::ApplyingPrimitive,
-        "failed durable service-turn receipt must roll back visible terminal turn state"
+        meerkat_core::turn_execution_authority::TurnPhase::Completed,
+        "failed durable commit must preserve the generated terminal that predated it"
     );
     assert_eq!(
-        snapshot.terminal_outcome, None,
-        "failed durable service-turn receipt must not leave a terminal outcome projection"
+        snapshot.terminal_outcome,
+        Some(meerkat_core::TurnTerminalOutcome::Completed)
     );
+    assert_eq!(snapshot.terminal_run_id.as_ref(), Some(&run_id));
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Running,
         "failed durable service-turn receipt must preserve the running lifecycle"
+    );
+    assert!(
+        store
+            .load_boundary_receipt(&runtime_id, &run_id, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.load_session_snapshot(&runtime_id).await.unwrap(),
+        snapshot_before
+    );
+}
+
+#[tokio::test]
+async fn service_turn_commit_rejects_nonterminal_generated_state_before_publication() {
+    let store = Arc::new(HarnessRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
+    let bindings = adapter
+        .prepare_bindings(sid.clone())
+        .await
+        .expect("prepare runtime bindings");
+    let run_id = RunId::new();
+    bindings
+        .turn_state()
+        .start_immediate_append(run_id.clone())
+        .expect("start nonterminal direct service turn");
+    let snapshot_before = store.load_session_snapshot(&runtime_id).await.unwrap();
+
+    let error = adapter
+        .commit_service_turn_terminal_receipt(
+            &sid,
+            serde_json::to_vec(&meerkat_core::Session::with_id(sid.clone())).unwrap(),
+        )
+        .await
+        .expect_err("service commit must not manufacture completion");
+    assert!(
+        error.to_string().contains("generated terminal"),
+        "unexpected nonterminal rejection: {error}"
+    );
+    let turn = bindings.turn_state().snapshot();
+    assert_eq!(turn.active_run_id.as_ref(), Some(&run_id));
+    assert_eq!(turn.terminal_run_id, None);
+    assert_eq!(
+        turn.turn_phase,
+        meerkat_core::turn_execution_authority::TurnPhase::ApplyingPrimitive
+    );
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Running
+    );
+    assert!(
+        store
+            .load_boundary_receipt(&runtime_id, &run_id, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.load_session_snapshot(&runtime_id).await.unwrap(),
+        snapshot_before
+    );
+}
+
+#[tokio::test]
+async fn failed_service_turn_atomically_commits_snapshot_receipt_and_lifecycle() {
+    let store = Arc::new(HarnessRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
+    let bindings = adapter
+        .prepare_bindings(sid.clone())
+        .await
+        .expect("prepare runtime bindings");
+    let run_id = RunId::new();
+    bindings
+        .turn_state()
+        .start_immediate_append(run_id.clone())
+        .expect("start direct failed service turn");
+    bindings
+        .turn_state()
+        .fatal_failure(
+            run_id.clone(),
+            meerkat_core::turn_execution_authority::TurnFailureSource::new(
+                meerkat_core::turn_execution_authority::TurnFailureSourceKind::ToolError,
+                "direct service tool failure",
+            ),
+        )
+        .expect("terminalize direct service turn through generated authority");
+
+    let mut session = meerkat_core::Session::with_id(sid.clone());
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("failed service transcript"),
+    ));
+    let session_snapshot = serde_json::to_vec(&session).unwrap();
+    adapter
+        .commit_service_turn_terminal_receipt(&sid, session_snapshot.clone())
+        .await
+        .expect("failed service turn should commit through one atomic runtime transaction");
+
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Attached,
+        "failed service turn must return to its generated pre-run lifecycle"
+    );
+    let terminal = bindings.turn_state().snapshot();
+    assert_eq!(
+        terminal.turn_phase,
+        meerkat_core::turn_execution_authority::TurnPhase::Failed
+    );
+    assert_eq!(terminal.active_run_id, None);
+    assert_eq!(terminal.terminal_run_id, Some(run_id.clone()));
+    assert_eq!(
+        store.load_session_snapshot(&runtime_id).await.unwrap(),
+        Some(session_snapshot)
+    );
+    let receipt = store
+        .load_boundary_receipt(&runtime_id, &run_id, 0)
+        .await
+        .unwrap()
+        .expect("failed service turn receipt must be durable");
+    assert_eq!(receipt.boundary, RunApplyBoundary::Immediate);
+    assert!(receipt.contributing_input_ids.is_empty());
+    assert_eq!(receipt.message_count, session.messages().len());
+    let encoded_messages = serde_json::to_vec(session.messages()).unwrap();
+    assert_eq!(
+        receipt.conversation_digest,
+        Some(format!("{:x}", Sha256::digest(encoded_messages)))
+    );
+    assert!(
+        store
+            .load_input_states(&runtime_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Idle),
+        "live Attached is machine-classified as durable Idle"
     );
 }
 
@@ -1399,6 +1601,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
 
     fn make_progress_input(label: &str) -> Input {
         Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -1618,11 +1821,15 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     use tokio::sync::Notify;
     use uuid::Uuid;
 
+    // Wall-clock ceiling only: the assertions below poll explicit recorder
+    // and ledger state, so loaded-runner scheduling is not mistaken for a
+    // two-second product liveness contract.
+    const LOADED_CI_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
+
     struct BlockingRecordingExecutor {
         calls: Arc<AtomicUsize>,
         first_apply_started: Arc<Notify>,
         release_first_apply: Arc<Notify>,
-        terminal_applied: Arc<Notify>,
         terminal_context_keys: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
@@ -1635,7 +1842,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call == 1 {
-                self.first_apply_started.notify_waiters();
+                self.first_apply_started.notify_one();
                 self.release_first_apply.notified().await;
             }
 
@@ -1647,7 +1854,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                                 .lock()
                                 .expect("terminal_context_keys mutex")
                                 .push(append.key.clone());
-                            self.terminal_applied.notify_waiters();
                         }
                     }
                     staged.boundary
@@ -1778,7 +1984,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(Notify::new());
     let release_first_apply = Arc::new(Notify::new());
-    let terminal_applied = Arc::new(Notify::new());
     let terminal_context_keys = Arc::new(std::sync::Mutex::new(Vec::new()));
     adapter
         .register_session_with_executor(
@@ -1787,7 +1992,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                 calls: Arc::clone(&calls),
                 first_apply_started: Arc::clone(&first_apply_started),
                 release_first_apply: Arc::clone(&release_first_apply),
-                terminal_applied: Arc::clone(&terminal_applied),
                 terminal_context_keys: Arc::clone(&terminal_context_keys),
             }),
         )
@@ -1894,10 +2098,24 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     .await
     .expect("terminal response should queue while requester is running");
 
-    release_first_apply.notify_waiters();
-    tokio::time::timeout(Duration::from_secs(2), terminal_applied.notified())
-        .await
-        .expect("WakeLoop should drain queued peer_response_terminal");
+    // Point-to-point test handshake: `notify_one` stores a permit if the
+    // executor was preempted between announcing start and awaiting release.
+    release_first_apply.notify_one();
+    let terminal_context_keys_for_wait = Arc::clone(&terminal_context_keys);
+    tokio::time::timeout(LOADED_CI_CONVERGENCE_TIMEOUT, async move {
+        loop {
+            let terminal_was_applied = !terminal_context_keys_for_wait
+                .lock()
+                .expect("terminal_context_keys mutex")
+                .is_empty();
+            if terminal_was_applied {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("WakeLoop should drain queued peer_response_terminal");
 
     let keys = terminal_context_keys
         .lock()
@@ -1911,27 +2129,42 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         )],
         "terminal response should render through typed context append"
     );
-    let active_ids = adapter
-        .list_active_inputs(&sid)
-        .await
-        .expect("active inputs after drain");
-    for input_id in active_ids {
-        let state = adapter
-            .input_state(&sid, &input_id)
-            .await
-            .expect("input state")
-            .expect("active input state");
-        assert!(
-            !matches!(
-                state.state.persisted_input.as_ref(),
-                Some(Input::Peer(meerkat_runtime::PeerInput {
-                    convention: Some(PeerConvention::ResponseTerminal { .. }),
-                    ..
-                }))
-            ),
-            "queued peer_response_terminal must not remain stuck after WakeLoop: {state:?}"
-        );
-    }
+    // `terminal_context_keys` is recorded from inside `CoreExecutor::apply`,
+    // before the runtime loop commits the returned receipt and consumes the
+    // staged input. Observe the authoritative input ledger instead of racing
+    // that post-apply commit under a loaded test runner.
+    tokio::time::timeout(LOADED_CI_CONVERGENCE_TIMEOUT, async {
+        loop {
+            let active_ids = adapter
+                .list_active_inputs(&sid)
+                .await
+                .expect("active inputs after drain");
+            let mut terminal_still_active = false;
+            for input_id in active_ids {
+                if let Some(state) = adapter
+                    .input_state(&sid, &input_id)
+                    .await
+                    .expect("input state")
+                    && matches!(
+                        state.state.persisted_input.as_ref(),
+                        Some(Input::Peer(meerkat_runtime::PeerInput {
+                            convention: Some(PeerConvention::ResponseTerminal { .. }),
+                            ..
+                        }))
+                    )
+                {
+                    terminal_still_active = true;
+                    break;
+                }
+            }
+            if !terminal_still_active {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("queued peer_response_terminal must leave the active ledger after WakeLoop");
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
         "requester executor should run once for prompt and once for terminal response"
@@ -1946,7 +2179,9 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     };
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_runtime::input_state::InputLifecycleState;
-    struct FailingExecutor;
+    struct FailingExecutor {
+        calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait::async_trait]
     impl CoreExecutor for FailingExecutor {
@@ -1955,6 +2190,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
             _run_id: RunId,
             _primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Err(CoreExecutorError::apply_failed_runtime_turn("LLM error"))
         }
 
@@ -1975,8 +2211,14 @@ async fn failed_executor_does_not_strand_input_in_apc() {
 
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
+    let calls = Arc::new(AtomicUsize::new(0));
     adapter
-        .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(FailingExecutor {
+                calls: Arc::clone(&calls),
+            }),
+        )
         .await
         .expect("runtime executor registration should succeed");
 
@@ -1998,8 +2240,21 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     )
     .await;
 
-    // Runtime should be back to Attached (executor still connected, not stuck in Running)
-    let state = adapter.runtime_state(&sid).await.unwrap();
+    wait_for_atomic_usize_at_least(
+        &calls,
+        1,
+        "failing executor should receive at least one apply attempt",
+    )
+    .await;
+    // Observe the post-failure state, rather than the initial queued state or
+    // a subsequent retry's transient Running phase.
+    let state = wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Attached,
+        "failed executor should return to Attached",
+    )
+    .await;
     assert_eq!(state, RuntimeState::Attached);
 
     // Input should roll back or abandon after retry exhaustion, but never
@@ -2809,10 +3064,13 @@ async fn completed_boundary_commit_failure_unwinds_runtime_loop_state() {
         "boundary commit failures should stop the dead executor path",
     )
     .await;
-    assert_eq!(
-        adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Stopped
-    );
+    wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Stopped,
+        "boundary commit failure should terminalize runtime after the stop hook",
+    )
+    .await;
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(state.seed.phase, InputLifecycleState::Abandoned);
 }

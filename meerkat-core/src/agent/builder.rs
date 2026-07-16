@@ -525,7 +525,7 @@ impl AgentBuilder {
                 "discarded transient runtime steer context while building agent"
             );
         }
-        let system_context_state = Arc::new(std::sync::Mutex::new(
+        let system_context_state = crate::session::SystemContextStateHandle::new(
             session
                 .try_system_context_state()
                 .map_err(|err| AgentBuildPolicyError::SystemContextRestore {
@@ -535,7 +535,13 @@ impl AgentBuilder {
                     ),
                 })?
                 .unwrap_or_default(),
-        ));
+        )
+        .map_err(|err| AgentBuildPolicyError::SystemContextRestore {
+            message: format!(
+                "failed to initialize canonical session metadata `{}`: {err}",
+                crate::SESSION_SYSTEM_CONTEXT_STATE_KEY
+            ),
+        })?;
 
         // Apply system prompt: use the builder's explicit prompt if set;
         // otherwise compose the built-in default ONLY when a caller opts in via
@@ -714,6 +720,7 @@ impl AgentBuilder {
             skill_engine: self.skill_engine,
             pending_skill_references: None,
             terminal_error_detail: None,
+            terminal_error_metadata: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
             silent_comms_intents: self.silent_comms_intents,
@@ -732,6 +739,8 @@ impl AgentBuilder {
             mob_authority_handle: None,
             runtime_execution_kind_required: self.runtime_execution_kind_required,
             runtime_execution_kind: self.runtime_execution_kind,
+            runtime_started_run_id: None,
+            runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             turn_state_handle: self.turn_state_handle,
             model_routing_handle: self.model_routing_handle,

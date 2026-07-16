@@ -58,6 +58,11 @@ pub enum RuntimeDriverError {
     #[error("Runtime stop cleanup is still in progress for runtime {runtime_id}")]
     RuntimeStopInProgress { runtime_id: LogicalRuntimeId },
 
+    /// The caller's exact durable ownership witness was superseded by another
+    /// runtime owner. Retrying from the same in-memory state is forbidden.
+    #[error("Stale runtime authority: {reason}")]
+    StaleAuthority { reason: String },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -195,7 +200,13 @@ pub trait RuntimeControlPlane: Send + Sync {
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeControlPlaneError>;
 
-    /// Publish a runtime event.
+    /// Publish an event to the logical runtime's current incarnation.
+    ///
+    /// This command is session-scoped rather than attachment-originated: the
+    /// current session mutation gate is its linearization point, and the DSL
+    /// transition plus driver callback target that same guarded entry. An
+    /// attachment-originated producer that requires stale-incarnation fencing
+    /// needs an exact-identity API rather than inferring it from this envelope.
     async fn publish_event(
         &self,
         event: RuntimeEventEnvelope,

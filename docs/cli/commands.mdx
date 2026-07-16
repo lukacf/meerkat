@@ -367,13 +367,55 @@ rkat mob runs <MOB_ID> [--flow <FLOW_ID>] [--json]
 rkat mob status <MOB_ID> <RUN_ID> [--json]
 rkat mob logs <MOB_ID> [--after-cursor <CURSOR>] [--limit <N>] [--json]
 rkat mob attach <MOB_ID> <RUN_ID> [--json]
-rkat mob spawn-helper <MOB_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--json]
-rkat mob fork-helper <MOB_ID> <SOURCE_MEMBER_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--fork-context <full-history|last-messages>] [--last-messages <N>] [--json]
+rkat mob spawn-helper <MOB_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--model <MODEL>] [--auth-binding <REALM:BINDING[:PROFILE]>] [--json]
+rkat mob fork-helper <MOB_ID> <SOURCE_MEMBER_ID> <PROMPT> --agent-identity <ID> [--profile <PROFILE>] [--model <MODEL>] [--auth-binding <REALM:BINDING[:PROFILE]>] [--fork-context <full-history|last-messages>] [--last-messages <N>] [--json]
 rkat mob member-status <MOB_ID> <AGENT_IDENTITY> [--json]
 rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>
+rkat mob grant <MOB_ID> <PRINCIPAL> --scope <SCOPE>... [--expires-at-ms <MS>|--expires-in <DURATION>]
+rkat mob revoke-grant <MOB_ID> <PRINCIPAL> [--scope <SCOPE>...]
+rkat mob grants <MOB_ID> [--json]
 rkat mob respawn <MOB_ID> <AGENT_IDENTITY> [--initial-message <MESSAGE>]
 rkat mob wait-kickoff <MOB_ID> [--member <AGENT_IDENTITY>...] [--timeout-ms <MS>] [--json]
+rkat mob host [--listen-tcp <ADDR>] [--advertise-tcp <ADDR>] [--live-ws <ADDR> --live-ws-advertise <URL>] [--identity-dir <DIR>] [--descriptor-out <FILE>] [--allow-remote] [--pairing-password-env <ENV>|--pairing-password-file <PATH>|--pairing-password <PASSWORD>]
+rkat mob bind-host <MOB_ID> --descriptor <DESCRIPTOR.json>
+rkat mob revoke-host <MOB_ID> <HOST_ID>
+rkat mob hosts <MOB_ID> [--json]
+rkat mob member-history <MOB_ID> <AGENT_IDENTITY> [--from-index <N>] [--limit <N>]
+rkat mob route-installs <MOB_ID>
+rkat mob live open <MOB_ID> <AGENT_IDENTITY> [--turning-mode <provider-managed|explicit-commit>] [--transport <websocket|webrtc>]
+rkat mob live close <MOB_ID> <AGENT_IDENTITY> <CHANNEL_ID>
+rkat mob live status <MOB_ID> <AGENT_IDENTITY> [--channel-id <ID>]
+rkat mob live control <MOB_ID> <AGENT_IDENTITY> <CHANNEL_ID> <commit-input|interrupt|truncate|refresh> [--item-id <ID> --content-index <N> --audio-played-ms <MS>]
 ```
+
+Multi-host notes:
+
+- `rkat mob host` starts only the signed member-host and optional live
+  listeners. It uses the workspace-derived realm (or explicit `--realm`) and
+  rejects `--isolated`; it does not expose an RPC, REST, or MCP console.
+- When enabling the host pairing branch, prefer `--pairing-password-env` or
+  `--pairing-password-file` so the secret does not appear in process arguments.
+  The three pairing-secret options are mutually exclusive;
+  `--pairing-password` remains available for compatibility. Pairing secrets
+  must be at least 32 bytes and are validated before host startup effects.
+  Pairing is accepted only on an IP loopback listener because it returns the
+  one-time binding descriptor over the plaintext comms transport. Use the 0600
+  descriptor out-of-band for remote hosts, or tunnel a loopback listener.
+- `rkat mob bind-host` consumes the descriptor JSON written by
+  `rkat mob host --descriptor-out`; the 0600 descriptor carries a single-use
+  bootstrap token, and the bind report (host id, authority epoch, capability
+  record) prints as JSON.
+- `grant`, `revoke-grant`, and `grants` manage the closed control-scope set:
+  `list`, `read_history`, `subscribe_events`, `send_command`, `cancel`,
+  `retire`, `wire_topology`, `live`, `admin_host`, and `admin_grants`.
+- `rkat mob live open` prints the wire `LiveOpenResult` JSON — including the
+  live URL and single-use token — to **stdout only**; stderr carries a
+  token-free note. The socket it names is the input plane: there is no
+  `live send` verb.
+- Mob verbs exit with typed codes for the four multi-host error classes:
+  scope denied `45`, host unavailable `46`, stale cursor `47`, stale fence
+  `48`, each with a one-line `detail: {...}` JSON rendering on stderr.
+  Everything else keeps the generic exit `1`.
 
 Examples:
 

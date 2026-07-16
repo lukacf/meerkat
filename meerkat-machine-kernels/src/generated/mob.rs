@@ -707,6 +707,88 @@ impl std::fmt::Display for CollectionPolicyKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ControlScope {
+    #[default]
+    #[serde(rename = "List")]
+    List,
+    #[serde(rename = "ReadHistory")]
+    ReadHistory,
+    #[serde(rename = "SubscribeEvents")]
+    SubscribeEvents,
+    #[serde(rename = "SendCommand")]
+    SendCommand,
+    #[serde(rename = "Cancel")]
+    Cancel,
+    #[serde(rename = "Retire")]
+    Retire,
+    #[serde(rename = "WireTopology")]
+    WireTopology,
+    #[serde(rename = "Live")]
+    Live,
+    #[serde(rename = "AdminHost")]
+    AdminHost,
+    #[serde(rename = "AdminGrants")]
+    AdminGrants,
+}
+impl ControlScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::List => "List",
+            Self::ReadHistory => "ReadHistory",
+            Self::SubscribeEvents => "SubscribeEvents",
+            Self::SendCommand => "SendCommand",
+            Self::Cancel => "Cancel",
+            Self::Retire => "Retire",
+            Self::WireTopology => "WireTopology",
+            Self::Live => "Live",
+            Self::AdminHost => "AdminHost",
+            Self::AdminGrants => "AdminGrants",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ControlScope {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "List" => Ok(Self::List),
+            "ReadHistory" => Ok(Self::ReadHistory),
+            "SubscribeEvents" => Ok(Self::SubscribeEvents),
+            "SendCommand" => Ok(Self::SendCommand),
+            "Cancel" => Ok(Self::Cancel),
+            "Retire" => Ok(Self::Retire),
+            "WireTopology" => Ok(Self::WireTopology),
+            "Live" => Ok(Self::Live),
+            "AdminHost" => Ok(Self::AdminHost),
+            "AdminGrants" => Ok(Self::AdminGrants),
+            other => Err(format!("invalid ControlScope value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ControlScope {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ControlScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -1333,6 +1415,64 @@ impl std::fmt::Display for FlowRunStatus {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum FlowStepDispatchKind {
+    #[default]
+    #[serde(rename = "Local")]
+    Local,
+    #[serde(rename = "RemoteTurnDirective")]
+    RemoteTurnDirective,
+    #[serde(rename = "RejectedOverlayAutonomous")]
+    RejectedOverlayAutonomous,
+    #[serde(rename = "RejectedHostIncapable")]
+    RejectedHostIncapable,
+}
+impl FlowStepDispatchKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::RemoteTurnDirective => "RemoteTurnDirective",
+            Self::RejectedOverlayAutonomous => "RejectedOverlayAutonomous",
+            Self::RejectedHostIncapable => "RejectedHostIncapable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for FlowStepDispatchKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Local" => Ok(Self::Local),
+            "RemoteTurnDirective" => Ok(Self::RemoteTurnDirective),
+            "RejectedOverlayAutonomous" => Ok(Self::RejectedOverlayAutonomous),
+            "RejectedHostIncapable" => Ok(Self::RejectedHostIncapable),
+            other => Err(format!("invalid FlowStepDispatchKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for FlowStepDispatchKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for FlowStepDispatchKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -1507,6 +1647,87 @@ impl std::fmt::Display for Generation {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum HostBindPhase {
+    #[default]
+    #[serde(rename = "Requested")]
+    Requested,
+    #[serde(rename = "Bound")]
+    Bound,
+}
+impl HostBindPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Requested => "Requested",
+            Self::Bound => "Bound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for HostBindPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Requested" => Ok(Self::Requested),
+            "Bound" => Ok(Self::Bound),
+            other => Err(format!("invalid HostBindPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for HostBindPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for HostBindPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type HostBindingGenerationTombstone =
+    meerkat_machine_schema::catalog::dsl::mob_machine::HostBindingGenerationTombstone;
+pub type HostId = meerkat_machine_schema::catalog::dsl::mob_machine::HostId;
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct InputId(pub String);
+impl From<String> for InputId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for InputId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for InputId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum KickoffIntent {
     #[default]
     #[serde(rename = "Pending")]
@@ -1625,6 +1846,7 @@ impl std::fmt::Display for KickoffPhase {
         f.write_str(self.as_str())
     }
 }
+pub type LiveWsEndpointUrl = meerkat_machine_schema::catalog::dsl::mob_machine::LiveWsEndpointUrl;
 #[derive(
     Debug,
     Clone,
@@ -2105,6 +2327,84 @@ impl std::fmt::Display for MemberLiveMaterializationObservationKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberOperatorRejectKind {
+    #[default]
+    #[serde(rename = "UnknownIdentity")]
+    UnknownIdentity,
+    #[serde(rename = "SenderKeyMismatch")]
+    SenderKeyMismatch,
+    #[serde(rename = "StaleGeneration")]
+    StaleGeneration,
+    #[serde(rename = "StaleFence")]
+    StaleFence,
+    #[serde(rename = "StaleSession")]
+    StaleSession,
+    #[serde(rename = "StaleHost")]
+    StaleHost,
+    #[serde(rename = "StaleHostBindingGeneration")]
+    StaleHostBindingGeneration,
+    #[serde(rename = "HostRevoked")]
+    HostRevoked,
+    #[serde(rename = "NoPlacement")]
+    NoPlacement,
+}
+impl MemberOperatorRejectKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnknownIdentity => "UnknownIdentity",
+            Self::SenderKeyMismatch => "SenderKeyMismatch",
+            Self::StaleGeneration => "StaleGeneration",
+            Self::StaleFence => "StaleFence",
+            Self::StaleSession => "StaleSession",
+            Self::StaleHost => "StaleHost",
+            Self::StaleHostBindingGeneration => "StaleHostBindingGeneration",
+            Self::HostRevoked => "HostRevoked",
+            Self::NoPlacement => "NoPlacement",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberOperatorRejectKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "UnknownIdentity" => Ok(Self::UnknownIdentity),
+            "SenderKeyMismatch" => Ok(Self::SenderKeyMismatch),
+            "StaleGeneration" => Ok(Self::StaleGeneration),
+            "StaleFence" => Ok(Self::StaleFence),
+            "StaleSession" => Ok(Self::StaleSession),
+            "StaleHost" => Ok(Self::StaleHost),
+            "StaleHostBindingGeneration" => Ok(Self::StaleHostBindingGeneration),
+            "HostRevoked" => Ok(Self::HostRevoked),
+            "NoPlacement" => Ok(Self::NoPlacement),
+            other => Err(format!("invalid MemberOperatorRejectKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberOperatorRejectKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberOperatorRejectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type MemberPeerEndpoint = meerkat_machine_schema::catalog::dsl::mob_machine::MemberPeerEndpoint;
 #[allow(non_camel_case_types)]
 #[derive(
@@ -2206,6 +2506,62 @@ impl std::convert::TryFrom<String> for MemberRevivalVerdictKind {
     }
 }
 impl std::fmt::Display for MemberRevivalVerdictKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberSessionDisposal {
+    #[default]
+    #[serde(rename = "Archived")]
+    Archived,
+    #[serde(rename = "RuntimeReleasedOnlyHostOwned")]
+    RuntimeReleasedOnlyHostOwned,
+    #[serde(rename = "RuntimeReleasedOnlyNoDurableSessions")]
+    RuntimeReleasedOnlyNoDurableSessions,
+}
+impl MemberSessionDisposal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Archived => "Archived",
+            Self::RuntimeReleasedOnlyHostOwned => "RuntimeReleasedOnlyHostOwned",
+            Self::RuntimeReleasedOnlyNoDurableSessions => "RuntimeReleasedOnlyNoDurableSessions",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberSessionDisposal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Archived" => Ok(Self::Archived),
+            "RuntimeReleasedOnlyHostOwned" => Ok(Self::RuntimeReleasedOnlyHostOwned),
+            "RuntimeReleasedOnlyNoDurableSessions" => {
+                Ok(Self::RuntimeReleasedOnlyNoDurableSessions)
+            }
+            other => Err(format!("invalid MemberSessionDisposal value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberSessionDisposal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberSessionDisposal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3000,6 +3356,10 @@ pub enum MobLifecycleJournalKind {
     #[default]
     #[serde(rename = "Completed")]
     Completed,
+    #[serde(rename = "Stopped")]
+    Stopped,
+    #[serde(rename = "Resumed")]
+    Resumed,
     #[serde(rename = "Destroying")]
     Destroying,
     #[serde(rename = "DestroyStorageFinalizing")]
@@ -3018,13 +3378,19 @@ pub enum MobLifecycleJournalKind {
     RemoteMemberSupervisorRevoked,
     #[serde(rename = "MemberRetired")]
     MemberRetired,
+    #[serde(rename = "RespawnTopologyAbandoned")]
+    RespawnTopologyAbandoned,
     #[serde(rename = "Reset")]
     Reset,
+    #[serde(rename = "MemberRetirementStarted")]
+    MemberRetirementStarted,
 }
 impl MobLifecycleJournalKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Completed => "Completed",
+            Self::Stopped => "Stopped",
+            Self::Resumed => "Resumed",
             Self::Destroying => "Destroying",
             Self::DestroyStorageFinalizing => "DestroyStorageFinalizing",
             Self::MemberSpawned => "MemberSpawned",
@@ -3036,7 +3402,9 @@ impl MobLifecycleJournalKind {
             Self::RemoteMemberRuntimeRetired => "RemoteMemberRuntimeRetired",
             Self::RemoteMemberSupervisorRevoked => "RemoteMemberSupervisorRevoked",
             Self::MemberRetired => "MemberRetired",
+            Self::RespawnTopologyAbandoned => "RespawnTopologyAbandoned",
             Self::Reset => "Reset",
+            Self::MemberRetirementStarted => "MemberRetirementStarted",
         }
     }
 }
@@ -3045,6 +3413,8 @@ impl std::convert::TryFrom<&str> for MobLifecycleJournalKind {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Completed" => Ok(Self::Completed),
+            "Stopped" => Ok(Self::Stopped),
+            "Resumed" => Ok(Self::Resumed),
             "Destroying" => Ok(Self::Destroying),
             "DestroyStorageFinalizing" => Ok(Self::DestroyStorageFinalizing),
             "MemberSpawned" => Ok(Self::MemberSpawned),
@@ -3056,7 +3426,9 @@ impl std::convert::TryFrom<&str> for MobLifecycleJournalKind {
             "RemoteMemberRuntimeRetired" => Ok(Self::RemoteMemberRuntimeRetired),
             "RemoteMemberSupervisorRevoked" => Ok(Self::RemoteMemberSupervisorRevoked),
             "MemberRetired" => Ok(Self::MemberRetired),
+            "RespawnTopologyAbandoned" => Ok(Self::RespawnTopologyAbandoned),
             "Reset" => Ok(Self::Reset),
+            "MemberRetirementStarted" => Ok(Self::MemberRetirementStarted),
             other => Err(format!("invalid MobLifecycleJournalKind value `{other}`")),
         }
     }
@@ -3798,12 +4170,76 @@ pub enum MobSpawnMemberAdmissionKind {
     Denied,
     #[serde(rename = "Allowed")]
     Allowed,
+    #[serde(rename = "NonPortableRustBundles")]
+    NonPortableRustBundles,
+    #[serde(rename = "NonPortablePerSpawnExternalTools")]
+    NonPortablePerSpawnExternalTools,
+    #[serde(rename = "NonPortableMobDefaultExternalTools")]
+    NonPortableMobDefaultExternalTools,
+    #[serde(rename = "NonPortableDefaultLlmClientOverride")]
+    NonPortableDefaultLlmClientOverride,
+    #[serde(rename = "NonPortableHostSurfaceMcpAllowlist")]
+    NonPortableHostSurfaceMcpAllowlist,
+    #[serde(rename = "NonPortableInheritedToolFilter")]
+    NonPortableInheritedToolFilter,
+    #[serde(rename = "NonPortableWorkgraphTools")]
+    NonPortableWorkgraphTools,
+    #[serde(rename = "SecretBearingShellEnv")]
+    SecretBearingShellEnv,
+    #[serde(rename = "SecretBearingMcpStdioEnv")]
+    SecretBearingMcpStdioEnv,
+    #[serde(rename = "SecretBearingMcpHttpHeaders")]
+    SecretBearingMcpHttpHeaders,
+    #[serde(rename = "MissingHostCapabilityAutonomousMembers")]
+    MissingHostCapabilityAutonomousMembers,
+    #[serde(rename = "MissingHostCapabilityDurableSessions")]
+    MissingHostCapabilityDurableSessions,
+    #[serde(rename = "MissingHostCapabilityTrackedInputCancel")]
+    MissingHostCapabilityTrackedInputCancel,
+    #[serde(rename = "MissingHostCapabilityProtocolV4")]
+    MissingHostCapabilityProtocolV4,
+    #[serde(rename = "MissingHostCapabilityMemoryStore")]
+    MissingHostCapabilityMemoryStore,
+    #[serde(rename = "MissingHostCapabilityMcp")]
+    MissingHostCapabilityMcp,
+    #[serde(rename = "HostNotBound")]
+    HostNotBound,
+    #[serde(rename = "OwnerBridgeSessionAbsent")]
+    OwnerBridgeSessionAbsent,
+    #[serde(rename = "LaunchModePlacementMismatch")]
+    LaunchModePlacementMismatch,
+    #[serde(rename = "ResolvedSpecDigestAbsent")]
+    ResolvedSpecDigestAbsent,
 }
 impl MobSpawnMemberAdmissionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Denied => "Denied",
             Self::Allowed => "Allowed",
+            Self::NonPortableRustBundles => "NonPortableRustBundles",
+            Self::NonPortablePerSpawnExternalTools => "NonPortablePerSpawnExternalTools",
+            Self::NonPortableMobDefaultExternalTools => "NonPortableMobDefaultExternalTools",
+            Self::NonPortableDefaultLlmClientOverride => "NonPortableDefaultLlmClientOverride",
+            Self::NonPortableHostSurfaceMcpAllowlist => "NonPortableHostSurfaceMcpAllowlist",
+            Self::NonPortableInheritedToolFilter => "NonPortableInheritedToolFilter",
+            Self::NonPortableWorkgraphTools => "NonPortableWorkgraphTools",
+            Self::SecretBearingShellEnv => "SecretBearingShellEnv",
+            Self::SecretBearingMcpStdioEnv => "SecretBearingMcpStdioEnv",
+            Self::SecretBearingMcpHttpHeaders => "SecretBearingMcpHttpHeaders",
+            Self::MissingHostCapabilityAutonomousMembers => {
+                "MissingHostCapabilityAutonomousMembers"
+            }
+            Self::MissingHostCapabilityDurableSessions => "MissingHostCapabilityDurableSessions",
+            Self::MissingHostCapabilityTrackedInputCancel => {
+                "MissingHostCapabilityTrackedInputCancel"
+            }
+            Self::MissingHostCapabilityProtocolV4 => "MissingHostCapabilityProtocolV4",
+            Self::MissingHostCapabilityMemoryStore => "MissingHostCapabilityMemoryStore",
+            Self::MissingHostCapabilityMcp => "MissingHostCapabilityMcp",
+            Self::HostNotBound => "HostNotBound",
+            Self::OwnerBridgeSessionAbsent => "OwnerBridgeSessionAbsent",
+            Self::LaunchModePlacementMismatch => "LaunchModePlacementMismatch",
+            Self::ResolvedSpecDigestAbsent => "ResolvedSpecDigestAbsent",
         }
     }
 }
@@ -3813,6 +4249,32 @@ impl std::convert::TryFrom<&str> for MobSpawnMemberAdmissionKind {
         match value {
             "Denied" => Ok(Self::Denied),
             "Allowed" => Ok(Self::Allowed),
+            "NonPortableRustBundles" => Ok(Self::NonPortableRustBundles),
+            "NonPortablePerSpawnExternalTools" => Ok(Self::NonPortablePerSpawnExternalTools),
+            "NonPortableMobDefaultExternalTools" => Ok(Self::NonPortableMobDefaultExternalTools),
+            "NonPortableDefaultLlmClientOverride" => Ok(Self::NonPortableDefaultLlmClientOverride),
+            "NonPortableHostSurfaceMcpAllowlist" => Ok(Self::NonPortableHostSurfaceMcpAllowlist),
+            "NonPortableInheritedToolFilter" => Ok(Self::NonPortableInheritedToolFilter),
+            "NonPortableWorkgraphTools" => Ok(Self::NonPortableWorkgraphTools),
+            "SecretBearingShellEnv" => Ok(Self::SecretBearingShellEnv),
+            "SecretBearingMcpStdioEnv" => Ok(Self::SecretBearingMcpStdioEnv),
+            "SecretBearingMcpHttpHeaders" => Ok(Self::SecretBearingMcpHttpHeaders),
+            "MissingHostCapabilityAutonomousMembers" => {
+                Ok(Self::MissingHostCapabilityAutonomousMembers)
+            }
+            "MissingHostCapabilityDurableSessions" => {
+                Ok(Self::MissingHostCapabilityDurableSessions)
+            }
+            "MissingHostCapabilityTrackedInputCancel" => {
+                Ok(Self::MissingHostCapabilityTrackedInputCancel)
+            }
+            "MissingHostCapabilityProtocolV4" => Ok(Self::MissingHostCapabilityProtocolV4),
+            "MissingHostCapabilityMemoryStore" => Ok(Self::MissingHostCapabilityMemoryStore),
+            "MissingHostCapabilityMcp" => Ok(Self::MissingHostCapabilityMcp),
+            "HostNotBound" => Ok(Self::HostNotBound),
+            "OwnerBridgeSessionAbsent" => Ok(Self::OwnerBridgeSessionAbsent),
+            "LaunchModePlacementMismatch" => Ok(Self::LaunchModePlacementMismatch),
+            "ResolvedSpecDigestAbsent" => Ok(Self::ResolvedSpecDigestAbsent),
             other => Err(format!(
                 "invalid MobSpawnMemberAdmissionKind value `{other}`"
             )),
@@ -3952,8 +4414,227 @@ impl std::fmt::Display for NodeRunStatus {
     }
 }
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
+pub type PeerAddress = meerkat_machine_schema::catalog::dsl::mob_machine::PeerAddress;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
 pub type PeerSigningKey = meerkat_machine_schema::catalog::dsl::mob_machine::PeerSigningKey;
+pub type PlacedCarrierCleanupObligation =
+    meerkat_machine_schema::catalog::dsl::mob_machine::PlacedCarrierCleanupObligation;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PlacedCompletionLifecycleIntentKind {
+    #[default]
+    #[serde(rename = "Stop")]
+    Stop,
+    #[serde(rename = "Reset")]
+    Reset,
+    #[serde(rename = "Complete")]
+    Complete,
+    #[serde(rename = "RetireAll")]
+    RetireAll,
+    #[serde(rename = "Destroy")]
+    Destroy,
+}
+impl PlacedCompletionLifecycleIntentKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop => "Stop",
+            Self::Reset => "Reset",
+            Self::Complete => "Complete",
+            Self::RetireAll => "RetireAll",
+            Self::Destroy => "Destroy",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PlacedCompletionLifecycleIntentKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Stop" => Ok(Self::Stop),
+            "Reset" => Ok(Self::Reset),
+            "Complete" => Ok(Self::Complete),
+            "RetireAll" => Ok(Self::RetireAll),
+            "Destroy" => Ok(Self::Destroy),
+            other => Err(format!(
+                "invalid PlacedCompletionLifecycleIntentKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PlacedCompletionLifecycleIntentKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PlacedCompletionLifecycleIntentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type PlacedCompletionObligation =
+    meerkat_machine_schema::catalog::dsl::mob_machine::PlacedCompletionObligation;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PlacedKickoffClosureKind {
+    #[default]
+    #[serde(rename = "Acknowledged")]
+    Acknowledged,
+    #[serde(rename = "Disposed")]
+    Disposed,
+    #[serde(rename = "RejectedNoEffect")]
+    RejectedNoEffect,
+}
+impl PlacedKickoffClosureKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Acknowledged => "Acknowledged",
+            Self::Disposed => "Disposed",
+            Self::RejectedNoEffect => "RejectedNoEffect",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PlacedKickoffClosureKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Acknowledged" => Ok(Self::Acknowledged),
+            "Disposed" => Ok(Self::Disposed),
+            "RejectedNoEffect" => Ok(Self::RejectedNoEffect),
+            other => Err(format!("invalid PlacedKickoffClosureKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PlacedKickoffClosureKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PlacedKickoffClosureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+pub type PlacedKickoffObligation =
+    meerkat_machine_schema::catalog::dsl::mob_machine::PlacedKickoffObligation;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PlacedKickoffOutcomeKind {
+    #[default]
+    #[serde(rename = "Started")]
+    Started,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "RejectedNoEffect")]
+    RejectedNoEffect,
+    #[serde(rename = "Disposed")]
+    Disposed,
+}
+impl PlacedKickoffOutcomeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Started => "Started",
+            Self::CallbackPending => "CallbackPending",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+            Self::RejectedNoEffect => "RejectedNoEffect",
+            Self::Disposed => "Disposed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PlacedKickoffOutcomeKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Started" => Ok(Self::Started),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            "RejectedNoEffect" => Ok(Self::RejectedNoEffect),
+            "Disposed" => Ok(Self::Disposed),
+            other => Err(format!("invalid PlacedKickoffOutcomeKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PlacedKickoffOutcomeKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PlacedKickoffOutcomeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct PlacedSpawnId(pub String);
+impl From<String> for PlacedSpawnId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for PlacedSpawnId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for PlacedSpawnId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -4004,6 +4685,9 @@ impl std::fmt::Display for PolicyDecision {
         f.write_str(self.as_str())
     }
 }
+pub type PrincipalId = meerkat_machine_schema::catalog::dsl::mob_machine::PrincipalId;
+pub type RemoteTurnObligation =
+    meerkat_machine_schema::catalog::dsl::mob_machine::RemoteTurnObligation;
 #[derive(
     Debug,
     Clone,
@@ -4112,6 +4796,8 @@ impl std::fmt::Display for RespawnTopologyRestoreResultKind {
         f.write_str(self.as_str())
     }
 }
+pub type RouteInstallObligation =
+    meerkat_machine_schema::catalog::dsl::mob_machine::RouteInstallObligation;
 #[derive(
     Debug,
     Clone,
@@ -4186,6 +4872,8 @@ pub enum SpawnExecPhase {
     #[default]
     #[serde(rename = "Opened")]
     Opened,
+    #[serde(rename = "MaterializePending")]
+    MaterializePending,
     #[serde(rename = "MembershipCommitted")]
     MembershipCommitted,
     #[serde(rename = "Activated")]
@@ -4195,6 +4883,7 @@ impl SpawnExecPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Opened => "Opened",
+            Self::MaterializePending => "MaterializePending",
             Self::MembershipCommitted => "MembershipCommitted",
             Self::Activated => "Activated",
         }
@@ -4205,6 +4894,7 @@ impl std::convert::TryFrom<&str> for SpawnExecPhase {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Opened" => Ok(Self::Opened),
+            "MaterializePending" => Ok(Self::MaterializePending),
             "MembershipCommitted" => Ok(Self::MembershipCommitted),
             "Activated" => Ok(Self::Activated),
             other => Err(format!("invalid SpawnExecPhase value `{other}`")),
@@ -4945,6 +5635,16 @@ pub struct State {
     pub member_kickoff_cancelled: std::collections::BTreeSet<AgentIdentity>,
     pub member_kickoff_error: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_kickoff_objective_ids: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_kickoff_input_ids: std::collections::BTreeMap<AgentIdentity, InputId>,
+    pub retained_placed_kickoff_obligations:
+        std::collections::BTreeMap<AgentIdentity, PlacedKickoffObligation>,
+    pub member_placed_kickoff_outcome_kinds:
+        std::collections::BTreeMap<AgentIdentity, PlacedKickoffOutcomeKind>,
+    pub member_placed_kickoff_outcome_errors: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_placed_kickoff_closure_kinds:
+        std::collections::BTreeMap<AgentIdentity, PlacedKickoffClosureKind>,
+    pub pending_placed_kickoff_outcomes: std::collections::BTreeSet<PlacedKickoffObligation>,
+    pub resolved_placed_kickoff_outcomes: std::collections::BTreeSet<PlacedKickoffObligation>,
     pub objective_owner_ids: std::collections::BTreeMap<String, AgentIdentity>,
     pub objective_outcomes: std::collections::BTreeMap<String, String>,
     pub concluded_objective_ids: std::collections::BTreeSet<String>,
@@ -4967,6 +5667,8 @@ pub struct State {
     pub spawn_exec_phase: std::collections::BTreeMap<AgentIdentity, SpawnExecPhase>,
     pub member_state_markers: std::collections::BTreeMap<AgentRuntimeId, MobMemberState>,
     pub wiring_edges: std::collections::BTreeSet<WiringEdge>,
+    pub pending_respawn_topology: std::collections::BTreeSet<AgentIdentity>,
+    pub abandoned_respawn_topology: std::collections::BTreeMap<AgentIdentity, Generation>,
     pub external_peer_edges: std::collections::BTreeSet<ExternalPeerEdge>,
     pub external_peer_edges_by_key: std::collections::BTreeMap<ExternalPeerKey, ExternalPeerEdge>,
     pub supervisor_authority_peer_id: Option<PeerId>,
@@ -5094,6 +5796,69 @@ pub struct State {
     pub adaptive_layer_disposition:
         std::collections::BTreeMap<AdaptiveLayerId, AdaptiveLayerDispositionKind>,
     pub adaptive_missing_body_digest: std::collections::BTreeMap<AdaptiveRunId, String>,
+    pub mob_hosts: std::collections::BTreeSet<HostId>,
+    pub host_public_keys: std::collections::BTreeMap<HostId, PeerSigningKey>,
+    pub host_endpoints: std::collections::BTreeMap<HostId, PeerAddress>,
+    pub host_authority_epochs: std::collections::BTreeMap<HostId, u64>,
+    pub host_binding_generations: std::collections::BTreeMap<HostId, u64>,
+    pub host_binding_generation_highwater: std::collections::BTreeMap<HostId, u64>,
+    pub confirmed_host_binding_revocations:
+        std::collections::BTreeSet<HostBindingGenerationTombstone>,
+    pub replacement_host_bind_endpoints: std::collections::BTreeMap<HostId, PeerAddress>,
+    pub replacement_host_binding_generations: std::collections::BTreeMap<HostId, u64>,
+    pub host_bind_phase: std::collections::BTreeMap<HostId, HostBindPhase>,
+    pub host_protocol_min: std::collections::BTreeMap<HostId, u64>,
+    pub host_protocol_max: std::collections::BTreeMap<HostId, u64>,
+    pub host_engine_versions: std::collections::BTreeMap<HostId, String>,
+    pub host_durable_sessions: std::collections::BTreeMap<HostId, bool>,
+    pub host_autonomous_members: std::collections::BTreeMap<HostId, bool>,
+    pub host_hard_cancel_member: std::collections::BTreeMap<HostId, bool>,
+    pub host_tracked_input_cancel: std::collections::BTreeMap<HostId, bool>,
+    pub host_memory_store: std::collections::BTreeMap<HostId, bool>,
+    pub host_mcp: std::collections::BTreeMap<HostId, bool>,
+    pub host_resolvable_providers:
+        std::collections::BTreeMap<HostId, std::collections::BTreeSet<String>>,
+    pub host_approval_forwarding: std::collections::BTreeMap<HostId, bool>,
+    pub host_live_endpoints: std::collections::BTreeMap<HostId, LiveWsEndpointUrl>,
+    pub member_placement: std::collections::BTreeMap<AgentIdentity, HostId>,
+    pub pending_placed_spawn_ids: std::collections::BTreeMap<AgentIdentity, PlacedSpawnId>,
+    pub pending_placed_spawn_generations: std::collections::BTreeMap<AgentIdentity, Generation>,
+    pub pending_placed_spawn_fence_tokens: std::collections::BTreeMap<AgentIdentity, FenceToken>,
+    pub pending_placed_spawn_hosts: std::collections::BTreeMap<AgentIdentity, HostId>,
+    pub pending_autonomous_placed_spawns: std::collections::BTreeSet<AgentIdentity>,
+    pub pending_placed_spawn_host_binding_generations:
+        std::collections::BTreeMap<AgentIdentity, u64>,
+    pub pending_placed_spawn_spec_digests: std::collections::BTreeMap<AgentIdentity, String>,
+    pub pending_placed_spawn_provision_operation_ids:
+        std::collections::BTreeMap<AgentIdentity, String>,
+    pub pending_placed_spawn_operation_owner_session_ids:
+        std::collections::BTreeMap<AgentIdentity, SessionId>,
+    pub current_placed_spawn_ids: std::collections::BTreeMap<AgentIdentity, PlacedSpawnId>,
+    pub current_placed_spawn_host_binding_generations:
+        std::collections::BTreeMap<AgentIdentity, u64>,
+    pub current_placed_spawn_provision_operation_ids:
+        std::collections::BTreeMap<AgentIdentity, String>,
+    pub current_placed_spawn_operation_owner_session_ids:
+        std::collections::BTreeMap<AgentIdentity, SessionId>,
+    pub pending_placed_carrier_cleanup: std::collections::BTreeSet<PlacedCarrierCleanupObligation>,
+    pub member_materialization_failures: std::collections::BTreeMap<AgentIdentity, String>,
+    pub remote_turn_dispatch_sequence: u64,
+    pub pending_remote_turn_outcomes: std::collections::BTreeSet<RemoteTurnObligation>,
+    pub committed_remote_turn_outcomes: std::collections::BTreeSet<RemoteTurnObligation>,
+    pub resolved_remote_turn_outcomes: std::collections::BTreeSet<RemoteTurnObligation>,
+    pub placed_completion_dispatch_sequence: u64,
+    pub placed_completion_lifecycle_quiescing: bool,
+    pub placed_completion_lifecycle_intent: Option<PlacedCompletionLifecycleIntentKind>,
+    pub pending_placed_completion_outcomes: std::collections::BTreeSet<PlacedCompletionObligation>,
+    pub cancel_requested_placed_completion_outcomes:
+        std::collections::BTreeSet<PlacedCompletionObligation>,
+    pub resolved_placed_completion_outcomes: std::collections::BTreeSet<PlacedCompletionObligation>,
+    pub pending_route_installs: std::collections::BTreeSet<RouteInstallObligation>,
+    pub operator_grant_scopes:
+        std::collections::BTreeMap<PrincipalId, std::collections::BTreeSet<ControlScope>>,
+    pub operator_grant_expiries: std::collections::BTreeMap<PrincipalId, Option<u64>>,
+    pub spawn_profile_authority_resolved_spec_digests:
+        std::collections::BTreeMap<AgentIdentity, String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -5259,6 +6024,25 @@ pub mod inputs {
         pub runtime_mode: SpawnPolicyRuntimeMode,
         pub bridge_session_id: Option<SessionId>,
         pub replacing: Option<SessionId>,
+        pub placement: Option<HostId>,
+        pub workgraph_required: bool,
+        pub rust_bundles_present: bool,
+        pub per_spawn_external_tools_present: bool,
+        pub mob_default_external_tools_present: bool,
+        pub default_llm_client_override_present: bool,
+        pub host_surface_mcp_allowlist_present: bool,
+        pub inherited_tool_filter_present: bool,
+        pub shell_env_present: bool,
+        pub mcp_stdio_env_present: bool,
+        pub mcp_http_headers_present: bool,
+        pub memory_required: bool,
+        pub mcp_required: bool,
+        pub resume_session_id: Option<SessionId>,
+        pub placed_spawn_id: Option<PlacedSpawnId>,
+        pub placed_provision_operation_id: Option<String>,
+        pub placed_operation_owner_session_id: Option<SessionId>,
+        pub effective_profile_override_present: bool,
+        pub effective_model_override_present: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitSpawnMembership {
@@ -5271,6 +6055,11 @@ pub mod inputs {
         pub runtime_mode: SpawnPolicyRuntimeMode,
         pub bridge_session_id: Option<SessionId>,
         pub replacing: Option<SessionId>,
+        pub member_peer_endpoint: Option<MemberPeerEndpoint>,
+        pub spec_digest_echo: Option<String>,
+        pub ack_engine_version: Option<String>,
+        pub placed_spawn_id: Option<PlacedSpawnId>,
+        pub provision_operation_id: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitSpawnActivation {
@@ -5279,6 +6068,14 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbortSpawnExec {
         pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizePlacedCarrierCleanup {
+        pub obligation: PlacedCarrierCleanupObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePlacedCarrierCleanup {
+        pub obligation: PlacedCarrierCleanupObligation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeSpawnProfile {
@@ -5291,6 +6088,7 @@ pub mod inputs {
         pub provider_params_digest: Option<String>,
         pub output_schema_digest: Option<String>,
         pub external_addressable: bool,
+        pub resolved_spec_digest: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifySpawnManyFailure {
@@ -5329,7 +6127,6 @@ pub mod inputs {
         pub privileged_runtime_mode_present: bool,
         pub privileged_launch_mode_present: bool,
         pub privileged_tool_access_policy_present: bool,
-        pub privileged_budget_split_policy_present: bool,
         pub privileged_tooling_present: bool,
         pub privileged_auth_binding_present: bool,
     }
@@ -5445,6 +6242,9 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterMemberPeer {
         pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
         pub peer_endpoint: MemberPeerEndpoint,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5463,6 +6263,15 @@ pub mod inputs {
     pub struct AuthorizeMemberPeerOverlay {
         pub agent_identity: AgentIdentity,
         pub expected_peer_endpoint: MemberPeerEndpoint,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeRetiringMemberPeerOverlayCleanup {
+        pub recipient_identity: AgentIdentity,
+        pub expected_recipient_endpoint: MemberPeerEndpoint,
+        pub retiring_identity: AgentIdentity,
+        pub retiring_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeMemberTrustWiring {
@@ -5618,6 +6427,190 @@ pub mod inputs {
         pub peer_id: PeerId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginHostBind {
+        pub host_id: HostId,
+        pub expected_endpoint: PeerAddress,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitHostBind {
+        pub host_id: HostId,
+        pub pubkey: PeerSigningKey,
+        pub endpoint: PeerAddress,
+        pub epoch: u64,
+        pub binding_generation: u64,
+        pub protocol_min: u64,
+        pub protocol_max: u64,
+        pub engine_version: String,
+        pub durable_sessions: bool,
+        pub autonomous_members: bool,
+        pub hard_cancel_member: bool,
+        pub tracked_input_cancel: bool,
+        pub memory_store: bool,
+        pub mcp: bool,
+        pub resolvable_providers: std::collections::BTreeSet<String>,
+        pub approval_forwarding: bool,
+        pub live_endpoint: Option<LiveWsEndpointUrl>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HostRebound {
+        pub host_id: HostId,
+        pub epoch: u64,
+        pub binding_generation: u64,
+        pub protocol_min: u64,
+        pub protocol_max: u64,
+        pub engine_version: String,
+        pub durable_sessions: bool,
+        pub autonomous_members: bool,
+        pub hard_cancel_member: bool,
+        pub tracked_input_cancel: bool,
+        pub memory_store: bool,
+        pub mcp: bool,
+        pub resolvable_providers: std::collections::BTreeSet<String>,
+        pub approval_forwarding: bool,
+        pub live_endpoint: Option<LiveWsEndpointUrl>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RefreshHostCapabilities {
+        pub host_id: HostId,
+        pub epoch: u64,
+        pub binding_generation: u64,
+        pub protocol_min: u64,
+        pub protocol_max: u64,
+        pub engine_version: String,
+        pub durable_sessions: bool,
+        pub autonomous_members: bool,
+        pub hard_cancel_member: bool,
+        pub tracked_input_cancel: bool,
+        pub memory_store: bool,
+        pub mcp: bool,
+        pub resolvable_providers: std::collections::BTreeSet<String>,
+        pub approval_forwarding: bool,
+        pub live_endpoint: Option<LiveWsEndpointUrl>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RevokeHost {
+        pub host_id: HostId,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PromoteCommittedPlacedSpawnCarrierBinding {
+        pub spawn_id: PlacedSpawnId,
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub host_id: HostId,
+        pub expected_host_binding_generation: u64,
+        pub host_binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMemberMaterializationFailure {
+        pub agent_identity: AgentIdentity,
+        pub kind: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordRouteInstall {
+        pub obligation: RouteInstallObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeRouteRemovalBeforeUnwire {
+        pub obligation: RouteInstallObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRouteInstall {
+        pub obligation: RouteInstallObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RollbackRouteInstall {
+        pub obligation: RouteInstallObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordRemoteTurnObligation {
+        pub obligation: RemoteTurnObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortRemoteTurnObligation {
+        pub obligation: RemoteTurnObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitRemoteTurnOutcome {
+        pub obligation: RemoteTurnObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRemoteTurnObligation {
+        pub obligation: RemoteTurnObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AcknowledgeRemoteTurnOutcome {
+        pub obligation: RemoteTurnObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DisposeRemoteTurnObligation {
+        pub obligation: RemoteTurnObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordPlacedCompletionObligation {
+        pub obligation: PlacedCompletionObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestPlacedCompletionCancellation {
+        pub obligation: PlacedCompletionObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePlacedCompletionOutcome {
+        pub obligation: PlacedCompletionObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClosePlacedCompletionOutcome {
+        pub obligation: PlacedCompletionObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AcknowledgePlacedCompletionOutcome {
+        pub obligation: PlacedCompletionObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DisposePlacedCompletionOutcome {
+        pub obligation: PlacedCompletionObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginPlacedCompletionLifecycleQuiesce {
+        pub intent: PlacedCompletionLifecycleIntentKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndPlacedCompletionLifecycleQuiesce {
+        pub intent: PlacedCompletionLifecycleIntentKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct GrantOperatorScopes {
+        pub principal: PrincipalId,
+        pub scopes: std::collections::BTreeSet<ControlScope>,
+        pub expires_at_ms: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RevokeOperatorScopes {
+        pub principal: PrincipalId,
+        pub revoked: std::collections::BTreeSet<ControlScope>,
+        pub remaining: std::collections::BTreeSet<ControlScope>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberOperatorAdmission {
+        pub agent_identity: AgentIdentity,
+        pub requester_generation: Generation,
+        pub requester_fence_token: FenceToken,
+        pub requester_host_id: HostId,
+        pub requester_host_binding_generation: u64,
+        pub requester_member_session_id: SessionId,
+        pub sender_peer_id: PeerId,
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyFlowStepDispatch {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub target: AgentIdentity,
+        pub overlay_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionIngressDetachedForMobDestroy {
         pub mob_id: MobId,
         pub agent_runtime_id: AgentRuntimeId,
@@ -5731,6 +6724,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SubscribeAllAgentEvents {
         pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+        pub external_members: std::collections::BTreeSet<AgentIdentity>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SubscribeMobEvents {
@@ -5738,6 +6732,7 @@ pub mod inputs {
         pub channel_capacity: u64,
         pub poll_interval_ms: u64,
         pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+        pub external_members: std::collections::BTreeSet<AgentIdentity>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SubscribeStructuralEvents {
@@ -5812,6 +6807,40 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct KickoffMarkStarting {
         pub member_id: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StartPlacedKickoff {
+        pub obligation: PlacedKickoffObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePlacedKickoffStarted {
+        pub obligation: PlacedKickoffObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePlacedKickoffCallbackPending {
+        pub obligation: PlacedKickoffObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePlacedKickoffFailed {
+        pub obligation: PlacedKickoffObligation,
+        pub error: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolvePlacedKickoffCancelled {
+        pub obligation: PlacedKickoffObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RejectPlacedKickoffBeforeAdmission {
+        pub obligation: PlacedKickoffObligation,
+        pub error: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AcknowledgePlacedKickoffOutcome {
+        pub obligation: PlacedKickoffObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DisposePlacedKickoffObligation {
+        pub obligation: PlacedKickoffObligation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartupMarkReady {
@@ -6090,6 +7119,8 @@ pub enum Input {
     CommitSpawnMembership(inputs::CommitSpawnMembership),
     CommitSpawnActivation(inputs::CommitSpawnActivation),
     AbortSpawnExec(inputs::AbortSpawnExec),
+    AuthorizePlacedCarrierCleanup(inputs::AuthorizePlacedCarrierCleanup),
+    ResolvePlacedCarrierCleanup(inputs::ResolvePlacedCarrierCleanup),
     AuthorizeSpawnProfile(inputs::AuthorizeSpawnProfile),
     ClassifySpawnManyFailure(inputs::ClassifySpawnManyFailure),
     ClassifyMemberWait(inputs::ClassifyMemberWait),
@@ -6127,6 +7158,7 @@ pub enum Input {
     ),
     AuthorizeMemberPeerRebind(inputs::AuthorizeMemberPeerRebind),
     AuthorizeMemberPeerOverlay(inputs::AuthorizeMemberPeerOverlay),
+    AuthorizeRetiringMemberPeerOverlayCleanup(inputs::AuthorizeRetiringMemberPeerOverlayCleanup),
     AuthorizeMemberTrustWiring(inputs::AuthorizeMemberTrustWiring),
     AuthorizeMemberTrustUnwiring(inputs::AuthorizeMemberTrustUnwiring),
     AuthorizeMemberTrustCleanup(inputs::AuthorizeMemberTrustCleanup),
@@ -6151,6 +7183,35 @@ pub enum Input {
     RecordPendingRecipientTrust(inputs::RecordPendingRecipientTrust),
     ResolvePendingRecipientTrust(inputs::ResolvePendingRecipientTrust),
     RollbackPendingRecipientTrust(inputs::RollbackPendingRecipientTrust),
+    BeginHostBind(inputs::BeginHostBind),
+    CommitHostBind(inputs::CommitHostBind),
+    HostRebound(inputs::HostRebound),
+    RefreshHostCapabilities(inputs::RefreshHostCapabilities),
+    RevokeHost(inputs::RevokeHost),
+    PromoteCommittedPlacedSpawnCarrierBinding(inputs::PromoteCommittedPlacedSpawnCarrierBinding),
+    RecordMemberMaterializationFailure(inputs::RecordMemberMaterializationFailure),
+    RecordRouteInstall(inputs::RecordRouteInstall),
+    AuthorizeRouteRemovalBeforeUnwire(inputs::AuthorizeRouteRemovalBeforeUnwire),
+    ResolveRouteInstall(inputs::ResolveRouteInstall),
+    RollbackRouteInstall(inputs::RollbackRouteInstall),
+    RecordRemoteTurnObligation(inputs::RecordRemoteTurnObligation),
+    AbortRemoteTurnObligation(inputs::AbortRemoteTurnObligation),
+    CommitRemoteTurnOutcome(inputs::CommitRemoteTurnOutcome),
+    ResolveRemoteTurnObligation(inputs::ResolveRemoteTurnObligation),
+    AcknowledgeRemoteTurnOutcome(inputs::AcknowledgeRemoteTurnOutcome),
+    DisposeRemoteTurnObligation(inputs::DisposeRemoteTurnObligation),
+    RecordPlacedCompletionObligation(inputs::RecordPlacedCompletionObligation),
+    RequestPlacedCompletionCancellation(inputs::RequestPlacedCompletionCancellation),
+    ResolvePlacedCompletionOutcome(inputs::ResolvePlacedCompletionOutcome),
+    ClosePlacedCompletionOutcome(inputs::ClosePlacedCompletionOutcome),
+    AcknowledgePlacedCompletionOutcome(inputs::AcknowledgePlacedCompletionOutcome),
+    DisposePlacedCompletionOutcome(inputs::DisposePlacedCompletionOutcome),
+    BeginPlacedCompletionLifecycleQuiesce(inputs::BeginPlacedCompletionLifecycleQuiesce),
+    EndPlacedCompletionLifecycleQuiesce(inputs::EndPlacedCompletionLifecycleQuiesce),
+    GrantOperatorScopes(inputs::GrantOperatorScopes),
+    RevokeOperatorScopes(inputs::RevokeOperatorScopes),
+    ResolveMemberOperatorAdmission(inputs::ResolveMemberOperatorAdmission),
+    ClassifyFlowStepDispatch(inputs::ClassifyFlowStepDispatch),
     SessionIngressDetachedForMobDestroy(inputs::SessionIngressDetachedForMobDestroy),
     SessionIngressDetachFailedForMobDestroy(inputs::SessionIngressDetachFailedForMobDestroy),
     SubmitWork(inputs::SubmitWork),
@@ -6193,6 +7254,14 @@ pub enum Input {
     BindObjectiveOwner(inputs::BindObjectiveOwner),
     ConcludeObjective(inputs::ConcludeObjective),
     KickoffMarkStarting(inputs::KickoffMarkStarting),
+    StartPlacedKickoff(inputs::StartPlacedKickoff),
+    ResolvePlacedKickoffStarted(inputs::ResolvePlacedKickoffStarted),
+    ResolvePlacedKickoffCallbackPending(inputs::ResolvePlacedKickoffCallbackPending),
+    ResolvePlacedKickoffFailed(inputs::ResolvePlacedKickoffFailed),
+    ResolvePlacedKickoffCancelled(inputs::ResolvePlacedKickoffCancelled),
+    RejectPlacedKickoffBeforeAdmission(inputs::RejectPlacedKickoffBeforeAdmission),
+    AcknowledgePlacedKickoffOutcome(inputs::AcknowledgePlacedKickoffOutcome),
+    DisposePlacedKickoffObligation(inputs::DisposePlacedKickoffObligation),
     StartupMarkReady(inputs::StartupMarkReady),
     KickoffResolveStarted(inputs::KickoffResolveStarted),
     KickoffResolveCallbackPending(inputs::KickoffResolveCallbackPending),
@@ -6260,6 +7329,8 @@ impl Input {
             Self::CommitSpawnMembership(_) => InputKind::CommitSpawnMembership,
             Self::CommitSpawnActivation(_) => InputKind::CommitSpawnActivation,
             Self::AbortSpawnExec(_) => InputKind::AbortSpawnExec,
+            Self::AuthorizePlacedCarrierCleanup(_) => InputKind::AuthorizePlacedCarrierCleanup,
+            Self::ResolvePlacedCarrierCleanup(_) => InputKind::ResolvePlacedCarrierCleanup,
             Self::AuthorizeSpawnProfile(_) => InputKind::AuthorizeSpawnProfile,
             Self::ClassifySpawnManyFailure(_) => InputKind::ClassifySpawnManyFailure,
             Self::ClassifyMemberWait(_) => InputKind::ClassifyMemberWait,
@@ -6307,6 +7378,9 @@ impl Input {
             }
             Self::AuthorizeMemberPeerRebind(_) => InputKind::AuthorizeMemberPeerRebind,
             Self::AuthorizeMemberPeerOverlay(_) => InputKind::AuthorizeMemberPeerOverlay,
+            Self::AuthorizeRetiringMemberPeerOverlayCleanup(_) => {
+                InputKind::AuthorizeRetiringMemberPeerOverlayCleanup
+            }
             Self::AuthorizeMemberTrustWiring(_) => InputKind::AuthorizeMemberTrustWiring,
             Self::AuthorizeMemberTrustUnwiring(_) => InputKind::AuthorizeMemberTrustUnwiring,
             Self::AuthorizeMemberTrustCleanup(_) => InputKind::AuthorizeMemberTrustCleanup,
@@ -6341,6 +7415,51 @@ impl Input {
             Self::RecordPendingRecipientTrust(_) => InputKind::RecordPendingRecipientTrust,
             Self::ResolvePendingRecipientTrust(_) => InputKind::ResolvePendingRecipientTrust,
             Self::RollbackPendingRecipientTrust(_) => InputKind::RollbackPendingRecipientTrust,
+            Self::BeginHostBind(_) => InputKind::BeginHostBind,
+            Self::CommitHostBind(_) => InputKind::CommitHostBind,
+            Self::HostRebound(_) => InputKind::HostRebound,
+            Self::RefreshHostCapabilities(_) => InputKind::RefreshHostCapabilities,
+            Self::RevokeHost(_) => InputKind::RevokeHost,
+            Self::PromoteCommittedPlacedSpawnCarrierBinding(_) => {
+                InputKind::PromoteCommittedPlacedSpawnCarrierBinding
+            }
+            Self::RecordMemberMaterializationFailure(_) => {
+                InputKind::RecordMemberMaterializationFailure
+            }
+            Self::RecordRouteInstall(_) => InputKind::RecordRouteInstall,
+            Self::AuthorizeRouteRemovalBeforeUnwire(_) => {
+                InputKind::AuthorizeRouteRemovalBeforeUnwire
+            }
+            Self::ResolveRouteInstall(_) => InputKind::ResolveRouteInstall,
+            Self::RollbackRouteInstall(_) => InputKind::RollbackRouteInstall,
+            Self::RecordRemoteTurnObligation(_) => InputKind::RecordRemoteTurnObligation,
+            Self::AbortRemoteTurnObligation(_) => InputKind::AbortRemoteTurnObligation,
+            Self::CommitRemoteTurnOutcome(_) => InputKind::CommitRemoteTurnOutcome,
+            Self::ResolveRemoteTurnObligation(_) => InputKind::ResolveRemoteTurnObligation,
+            Self::AcknowledgeRemoteTurnOutcome(_) => InputKind::AcknowledgeRemoteTurnOutcome,
+            Self::DisposeRemoteTurnObligation(_) => InputKind::DisposeRemoteTurnObligation,
+            Self::RecordPlacedCompletionObligation(_) => {
+                InputKind::RecordPlacedCompletionObligation
+            }
+            Self::RequestPlacedCompletionCancellation(_) => {
+                InputKind::RequestPlacedCompletionCancellation
+            }
+            Self::ResolvePlacedCompletionOutcome(_) => InputKind::ResolvePlacedCompletionOutcome,
+            Self::ClosePlacedCompletionOutcome(_) => InputKind::ClosePlacedCompletionOutcome,
+            Self::AcknowledgePlacedCompletionOutcome(_) => {
+                InputKind::AcknowledgePlacedCompletionOutcome
+            }
+            Self::DisposePlacedCompletionOutcome(_) => InputKind::DisposePlacedCompletionOutcome,
+            Self::BeginPlacedCompletionLifecycleQuiesce(_) => {
+                InputKind::BeginPlacedCompletionLifecycleQuiesce
+            }
+            Self::EndPlacedCompletionLifecycleQuiesce(_) => {
+                InputKind::EndPlacedCompletionLifecycleQuiesce
+            }
+            Self::GrantOperatorScopes(_) => InputKind::GrantOperatorScopes,
+            Self::RevokeOperatorScopes(_) => InputKind::RevokeOperatorScopes,
+            Self::ResolveMemberOperatorAdmission(_) => InputKind::ResolveMemberOperatorAdmission,
+            Self::ClassifyFlowStepDispatch(_) => InputKind::ClassifyFlowStepDispatch,
             Self::SessionIngressDetachedForMobDestroy(_) => {
                 InputKind::SessionIngressDetachedForMobDestroy
             }
@@ -6395,6 +7514,18 @@ impl Input {
             Self::BindObjectiveOwner(_) => InputKind::BindObjectiveOwner,
             Self::ConcludeObjective(_) => InputKind::ConcludeObjective,
             Self::KickoffMarkStarting(_) => InputKind::KickoffMarkStarting,
+            Self::StartPlacedKickoff(_) => InputKind::StartPlacedKickoff,
+            Self::ResolvePlacedKickoffStarted(_) => InputKind::ResolvePlacedKickoffStarted,
+            Self::ResolvePlacedKickoffCallbackPending(_) => {
+                InputKind::ResolvePlacedKickoffCallbackPending
+            }
+            Self::ResolvePlacedKickoffFailed(_) => InputKind::ResolvePlacedKickoffFailed,
+            Self::ResolvePlacedKickoffCancelled(_) => InputKind::ResolvePlacedKickoffCancelled,
+            Self::RejectPlacedKickoffBeforeAdmission(_) => {
+                InputKind::RejectPlacedKickoffBeforeAdmission
+            }
+            Self::AcknowledgePlacedKickoffOutcome(_) => InputKind::AcknowledgePlacedKickoffOutcome,
+            Self::DisposePlacedKickoffObligation(_) => InputKind::DisposePlacedKickoffObligation,
             Self::StartupMarkReady(_) => InputKind::StartupMarkReady,
             Self::KickoffResolveStarted(_) => InputKind::KickoffResolveStarted,
             Self::KickoffResolveCallbackPending(_) => InputKind::KickoffResolveCallbackPending,
@@ -6469,6 +7600,8 @@ pub enum InputKind {
     CommitSpawnMembership,
     CommitSpawnActivation,
     AbortSpawnExec,
+    AuthorizePlacedCarrierCleanup,
+    ResolvePlacedCarrierCleanup,
     AuthorizeSpawnProfile,
     ClassifySpawnManyFailure,
     ClassifyMemberWait,
@@ -6502,6 +7635,7 @@ pub enum InputKind {
     AuthorizeMemberEndpointMigrationTrustCleanup,
     AuthorizeMemberPeerRebind,
     AuthorizeMemberPeerOverlay,
+    AuthorizeRetiringMemberPeerOverlayCleanup,
     AuthorizeMemberTrustWiring,
     AuthorizeMemberTrustUnwiring,
     AuthorizeMemberTrustCleanup,
@@ -6522,6 +7656,35 @@ pub enum InputKind {
     RecordPendingRecipientTrust,
     ResolvePendingRecipientTrust,
     RollbackPendingRecipientTrust,
+    BeginHostBind,
+    CommitHostBind,
+    HostRebound,
+    RefreshHostCapabilities,
+    RevokeHost,
+    PromoteCommittedPlacedSpawnCarrierBinding,
+    RecordMemberMaterializationFailure,
+    RecordRouteInstall,
+    AuthorizeRouteRemovalBeforeUnwire,
+    ResolveRouteInstall,
+    RollbackRouteInstall,
+    RecordRemoteTurnObligation,
+    AbortRemoteTurnObligation,
+    CommitRemoteTurnOutcome,
+    ResolveRemoteTurnObligation,
+    AcknowledgeRemoteTurnOutcome,
+    DisposeRemoteTurnObligation,
+    RecordPlacedCompletionObligation,
+    RequestPlacedCompletionCancellation,
+    ResolvePlacedCompletionOutcome,
+    ClosePlacedCompletionOutcome,
+    AcknowledgePlacedCompletionOutcome,
+    DisposePlacedCompletionOutcome,
+    BeginPlacedCompletionLifecycleQuiesce,
+    EndPlacedCompletionLifecycleQuiesce,
+    GrantOperatorScopes,
+    RevokeOperatorScopes,
+    ResolveMemberOperatorAdmission,
+    ClassifyFlowStepDispatch,
     SessionIngressDetachedForMobDestroy,
     SessionIngressDetachFailedForMobDestroy,
     SubmitWork,
@@ -6564,6 +7727,14 @@ pub enum InputKind {
     BindObjectiveOwner,
     ConcludeObjective,
     KickoffMarkStarting,
+    StartPlacedKickoff,
+    ResolvePlacedKickoffStarted,
+    ResolvePlacedKickoffCallbackPending,
+    ResolvePlacedKickoffFailed,
+    ResolvePlacedKickoffCancelled,
+    RejectPlacedKickoffBeforeAdmission,
+    AcknowledgePlacedKickoffOutcome,
+    DisposePlacedKickoffObligation,
     StartupMarkReady,
     KickoffResolveStarted,
     KickoffResolveCallbackPending,
@@ -6614,6 +7785,13 @@ pub mod signals {
         pub fence_token: FenceToken,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetireMember {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitDestroyMemberRetire {
         pub mob_id: MobId,
         pub agent_identity: AgentIdentity,
@@ -6634,6 +7812,8 @@ pub mod signals {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub session_id: Option<SessionId>,
+        pub disposal: MemberSessionDisposal,
+        pub preserve_machine_topology: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked {
@@ -6641,6 +7821,7 @@ pub mod signals {
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
+        pub preserve_machine_topology: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveDestroyMemberRetirementArchived {
@@ -6649,28 +7830,7 @@ pub mod signals {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub session_id: Option<SessionId>,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResetMember {
-        pub agent_identity: AgentIdentity,
-        pub agent_runtime_id: AgentRuntimeId,
-        pub fence_token: FenceToken,
-        pub generation: Generation,
-        pub profile_name: String,
-        pub runtime_mode: SpawnPolicyRuntimeMode,
-        pub external_addressable: bool,
-        pub session_id: SessionId,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RespawnMember {
-        pub agent_identity: AgentIdentity,
-        pub agent_runtime_id: AgentRuntimeId,
-        pub fence_token: FenceToken,
-        pub generation: Generation,
-        pub profile_name: String,
-        pub runtime_mode: SpawnPolicyRuntimeMode,
-        pub external_addressable: bool,
-        pub session_id: SessionId,
+        pub disposal: MemberSessionDisposal,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRespawnTopologyRestore {
@@ -6722,9 +7882,19 @@ pub mod signals {
     pub struct RecoverRosterMemberReset {
         pub agent_identity: AgentIdentity,
         pub previous_agent_runtime_id: AgentRuntimeId,
+        pub previous_generation: Generation,
         pub agent_runtime_id: AgentRuntimeId,
         pub fence_token: FenceToken,
         pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterMemberRetiring {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub session_id: Option<SessionId>,
+        pub host_id: Option<HostId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRosterMemberRetirementStarted {
@@ -6734,6 +7904,21 @@ pub mod signals {
         pub releasing: Option<SessionId>,
         pub session_id: Option<SessionId>,
         pub retiring_peer_endpoint: Option<MemberPeerEndpoint>,
+        pub preserve_machine_topology: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveRespawnTopologyPreservationStarted {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveRespawnTopologyAbandoned {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverRemoteMemberRuntimeRetired {
@@ -6753,12 +7938,19 @@ pub mod signals {
     pub struct RecoverRosterMemberRetired {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
+        pub generation: Generation,
+        pub preserve_machine_topology: bool,
+        pub preservation_started: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ConvergeRecoveredRosterTopology {
         pub edge: WiringEdge,
         pub a_identity: AgentIdentity,
         pub b_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConvergeRecoveredRespawnTopology {
+        pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverMemberKickoff {
@@ -6770,6 +7962,13 @@ pub mod signals {
     pub struct RecoverObjectiveBinding {
         pub member_id: AgentIdentity,
         pub objective_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverFinalizedPlacedKickoff {
+        pub obligation: PlacedKickoffObligation,
+        pub outcome_kind: PlacedKickoffOutcomeKind,
+        pub outcome_error: Option<String>,
+        pub closure_kind: PlacedKickoffClosureKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverObjectiveConclusion {
@@ -6810,6 +8009,62 @@ pub mod signals {
         pub pending_member_target_addresses: std::collections::BTreeMap<PeerId, String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverHostBindRequest {
+        pub host_id: HostId,
+        pub expected_endpoint: PeerAddress,
+        pub binding_generation: u64,
+        pub replacement: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverHostBinding {
+        pub host_id: HostId,
+        pub pubkey: PeerSigningKey,
+        pub endpoint: PeerAddress,
+        pub epoch: u64,
+        pub binding_generation: u64,
+        pub protocol_min: u64,
+        pub protocol_max: u64,
+        pub engine_version: String,
+        pub durable_sessions: bool,
+        pub autonomous_members: bool,
+        pub hard_cancel_member: bool,
+        pub tracked_input_cancel: bool,
+        pub memory_store: bool,
+        pub mcp: bool,
+        pub resolvable_providers: std::collections::BTreeSet<String>,
+        pub approval_forwarding: bool,
+        pub live_endpoint: Option<LiveWsEndpointUrl>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverHostBindingGenerationHighwater {
+        pub host_id: HostId,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverConfirmedHostBindingRevocation {
+        pub host_id: HostId,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRemoteTurnDispatchSequence {
+        pub dispatch_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverPlacedCompletionDispatchSequence {
+        pub dispatch_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverPendingPlacedCompletion {
+        pub obligation: PlacedCompletionObligation,
+        pub cancellation_requested: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverResolvedPlacedCompletion {
+        pub obligation: PlacedCompletionObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverCompletedWithCleanupCustody {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverOwnerBridgeSession {
         pub bridge_session_id: SessionId,
         pub destroy_on_owner_archive: bool,
@@ -6819,6 +8074,40 @@ pub mod signals {
     pub struct RecoverMemberRestoreFailure {
         pub agent_identity: AgentIdentity,
         pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverPendingPlacedSpawn {
+        pub spawn_id: PlacedSpawnId,
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub host_id: HostId,
+        pub host_binding_generation: u64,
+        pub spec_digest: String,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub provision_operation_id: String,
+        pub operation_owner_session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverCommittedPlacedSpawn {
+        pub spawn_id: PlacedSpawnId,
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub host_id: HostId,
+        pub host_binding_generation: u64,
+        pub member_session_id: SessionId,
+        pub member_peer_endpoint: MemberPeerEndpoint,
+        pub profile_name: String,
+        pub runtime_mode: SpawnPolicyRuntimeMode,
+        pub external_addressable: bool,
+        pub provision_operation_id: String,
+        pub operation_owner_session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverPlacedCarrierCleanup {
+        pub obligation: PlacedCarrierCleanupObligation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyMemberLiveMaterialization {
@@ -6891,6 +8180,7 @@ pub mod signals {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Signal {
     ObserveRuntimeReady(signals::ObserveRuntimeReady),
+    RetireMember(signals::RetireMember),
     AdmitDestroyMemberRetire(signals::AdmitDestroyMemberRetire),
     ObserveRuntimeRetired(signals::ObserveRuntimeRetired),
     ObserveMemberRetirementArchived(signals::ObserveMemberRetirementArchived),
@@ -6898,8 +8188,6 @@ pub enum Signal {
         signals::ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked,
     ),
     ObserveDestroyMemberRetirementArchived(signals::ObserveDestroyMemberRetirementArchived),
-    ResetMember(signals::ResetMember),
-    RespawnMember(signals::RespawnMember),
     ResolveRespawnTopologyRestore(signals::ResolveRespawnTopologyRestore),
     DestroyMob(signals::DestroyMob),
     ObserveRuntimeDestroyed(signals::ObserveRuntimeDestroyed),
@@ -6908,21 +8196,38 @@ pub enum Signal {
     RecoverSpawnedMemberPeerEndpoint(signals::RecoverSpawnedMemberPeerEndpoint),
     RecoverMemberPeerEndpoint(signals::RecoverMemberPeerEndpoint),
     RecoverRosterMemberReset(signals::RecoverRosterMemberReset),
+    RecoverRosterMemberRetiring(signals::RecoverRosterMemberRetiring),
     RecoverRosterMemberRetirementStarted(signals::RecoverRosterMemberRetirementStarted),
+    ObserveRespawnTopologyPreservationStarted(signals::ObserveRespawnTopologyPreservationStarted),
+    ObserveRespawnTopologyAbandoned(signals::ObserveRespawnTopologyAbandoned),
     RecoverRemoteMemberRuntimeRetired(signals::RecoverRemoteMemberRuntimeRetired),
     RecoverRemoteMemberSupervisorRevoked(signals::RecoverRemoteMemberSupervisorRevoked),
     RecoverRosterMemberRetired(signals::RecoverRosterMemberRetired),
     ConvergeRecoveredRosterTopology(signals::ConvergeRecoveredRosterTopology),
+    ConvergeRecoveredRespawnTopology(signals::ConvergeRecoveredRespawnTopology),
     RecoverMemberKickoff(signals::RecoverMemberKickoff),
     RecoverObjectiveBinding(signals::RecoverObjectiveBinding),
+    RecoverFinalizedPlacedKickoff(signals::RecoverFinalizedPlacedKickoff),
     RecoverObjectiveConclusion(signals::RecoverObjectiveConclusion),
     RecoverRosterWiring(signals::RecoverRosterWiring),
     RecoverRosterUnwire(signals::RecoverRosterUnwire),
     RecoverExternalPeerWiring(signals::RecoverExternalPeerWiring),
     RecoverExternalPeerUnwire(signals::RecoverExternalPeerUnwire),
     RecoverSupervisorAuthority(signals::RecoverSupervisorAuthority),
+    RecoverHostBindRequest(signals::RecoverHostBindRequest),
+    RecoverHostBinding(signals::RecoverHostBinding),
+    RecoverHostBindingGenerationHighwater(signals::RecoverHostBindingGenerationHighwater),
+    RecoverConfirmedHostBindingRevocation(signals::RecoverConfirmedHostBindingRevocation),
+    RecoverRemoteTurnDispatchSequence(signals::RecoverRemoteTurnDispatchSequence),
+    RecoverPlacedCompletionDispatchSequence(signals::RecoverPlacedCompletionDispatchSequence),
+    RecoverPendingPlacedCompletion(signals::RecoverPendingPlacedCompletion),
+    RecoverResolvedPlacedCompletion(signals::RecoverResolvedPlacedCompletion),
+    RecoverCompletedWithCleanupCustody(signals::RecoverCompletedWithCleanupCustody),
     RecoverOwnerBridgeSession(signals::RecoverOwnerBridgeSession),
     RecoverMemberRestoreFailure(signals::RecoverMemberRestoreFailure),
+    RecoverPendingPlacedSpawn(signals::RecoverPendingPlacedSpawn),
+    RecoverCommittedPlacedSpawn(signals::RecoverCommittedPlacedSpawn),
+    RecoverPlacedCarrierCleanup(signals::RecoverPlacedCarrierCleanup),
     ClassifyMemberLiveMaterialization(signals::ClassifyMemberLiveMaterialization),
     ResolveMemberRevivalSucceeded(signals::ResolveMemberRevivalSucceeded),
     ResolveMemberRevivalFailed(signals::ResolveMemberRevivalFailed),
@@ -6954,6 +8259,7 @@ impl Signal {
     pub fn kind(&self) -> SignalKind {
         match self {
             Self::ObserveRuntimeReady(_) => SignalKind::ObserveRuntimeReady,
+            Self::RetireMember(_) => SignalKind::RetireMember,
             Self::AdmitDestroyMemberRetire(_) => SignalKind::AdmitDestroyMemberRetire,
             Self::ObserveRuntimeRetired(_) => SignalKind::ObserveRuntimeRetired,
             Self::ObserveMemberRetirementArchived(_) => SignalKind::ObserveMemberRetirementArchived,
@@ -6963,8 +8269,6 @@ impl Signal {
             Self::ObserveDestroyMemberRetirementArchived(_) => {
                 SignalKind::ObserveDestroyMemberRetirementArchived
             }
-            Self::ResetMember(_) => SignalKind::ResetMember,
-            Self::RespawnMember(_) => SignalKind::RespawnMember,
             Self::ResolveRespawnTopologyRestore(_) => SignalKind::ResolveRespawnTopologyRestore,
             Self::DestroyMob(_) => SignalKind::DestroyMob,
             Self::ObserveRuntimeDestroyed(_) => SignalKind::ObserveRuntimeDestroyed,
@@ -6975,9 +8279,14 @@ impl Signal {
             }
             Self::RecoverMemberPeerEndpoint(_) => SignalKind::RecoverMemberPeerEndpoint,
             Self::RecoverRosterMemberReset(_) => SignalKind::RecoverRosterMemberReset,
+            Self::RecoverRosterMemberRetiring(_) => SignalKind::RecoverRosterMemberRetiring,
             Self::RecoverRosterMemberRetirementStarted(_) => {
                 SignalKind::RecoverRosterMemberRetirementStarted
             }
+            Self::ObserveRespawnTopologyPreservationStarted(_) => {
+                SignalKind::ObserveRespawnTopologyPreservationStarted
+            }
+            Self::ObserveRespawnTopologyAbandoned(_) => SignalKind::ObserveRespawnTopologyAbandoned,
             Self::RecoverRemoteMemberRuntimeRetired(_) => {
                 SignalKind::RecoverRemoteMemberRuntimeRetired
             }
@@ -6986,16 +8295,42 @@ impl Signal {
             }
             Self::RecoverRosterMemberRetired(_) => SignalKind::RecoverRosterMemberRetired,
             Self::ConvergeRecoveredRosterTopology(_) => SignalKind::ConvergeRecoveredRosterTopology,
+            Self::ConvergeRecoveredRespawnTopology(_) => {
+                SignalKind::ConvergeRecoveredRespawnTopology
+            }
             Self::RecoverMemberKickoff(_) => SignalKind::RecoverMemberKickoff,
             Self::RecoverObjectiveBinding(_) => SignalKind::RecoverObjectiveBinding,
+            Self::RecoverFinalizedPlacedKickoff(_) => SignalKind::RecoverFinalizedPlacedKickoff,
             Self::RecoverObjectiveConclusion(_) => SignalKind::RecoverObjectiveConclusion,
             Self::RecoverRosterWiring(_) => SignalKind::RecoverRosterWiring,
             Self::RecoverRosterUnwire(_) => SignalKind::RecoverRosterUnwire,
             Self::RecoverExternalPeerWiring(_) => SignalKind::RecoverExternalPeerWiring,
             Self::RecoverExternalPeerUnwire(_) => SignalKind::RecoverExternalPeerUnwire,
             Self::RecoverSupervisorAuthority(_) => SignalKind::RecoverSupervisorAuthority,
+            Self::RecoverHostBindRequest(_) => SignalKind::RecoverHostBindRequest,
+            Self::RecoverHostBinding(_) => SignalKind::RecoverHostBinding,
+            Self::RecoverHostBindingGenerationHighwater(_) => {
+                SignalKind::RecoverHostBindingGenerationHighwater
+            }
+            Self::RecoverConfirmedHostBindingRevocation(_) => {
+                SignalKind::RecoverConfirmedHostBindingRevocation
+            }
+            Self::RecoverRemoteTurnDispatchSequence(_) => {
+                SignalKind::RecoverRemoteTurnDispatchSequence
+            }
+            Self::RecoverPlacedCompletionDispatchSequence(_) => {
+                SignalKind::RecoverPlacedCompletionDispatchSequence
+            }
+            Self::RecoverPendingPlacedCompletion(_) => SignalKind::RecoverPendingPlacedCompletion,
+            Self::RecoverResolvedPlacedCompletion(_) => SignalKind::RecoverResolvedPlacedCompletion,
+            Self::RecoverCompletedWithCleanupCustody(_) => {
+                SignalKind::RecoverCompletedWithCleanupCustody
+            }
             Self::RecoverOwnerBridgeSession(_) => SignalKind::RecoverOwnerBridgeSession,
             Self::RecoverMemberRestoreFailure(_) => SignalKind::RecoverMemberRestoreFailure,
+            Self::RecoverPendingPlacedSpawn(_) => SignalKind::RecoverPendingPlacedSpawn,
+            Self::RecoverCommittedPlacedSpawn(_) => SignalKind::RecoverCommittedPlacedSpawn,
+            Self::RecoverPlacedCarrierCleanup(_) => SignalKind::RecoverPlacedCarrierCleanup,
             Self::ClassifyMemberLiveMaterialization(_) => {
                 SignalKind::ClassifyMemberLiveMaterialization
             }
@@ -7030,13 +8365,12 @@ impl Signal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignalKind {
     ObserveRuntimeReady,
+    RetireMember,
     AdmitDestroyMemberRetire,
     ObserveRuntimeRetired,
     ObserveMemberRetirementArchived,
     ObserveRemoteMemberRetirementArchivedAndSupervisorRevoked,
     ObserveDestroyMemberRetirementArchived,
-    ResetMember,
-    RespawnMember,
     ResolveRespawnTopologyRestore,
     DestroyMob,
     ObserveRuntimeDestroyed,
@@ -7045,21 +8379,38 @@ pub enum SignalKind {
     RecoverSpawnedMemberPeerEndpoint,
     RecoverMemberPeerEndpoint,
     RecoverRosterMemberReset,
+    RecoverRosterMemberRetiring,
     RecoverRosterMemberRetirementStarted,
+    ObserveRespawnTopologyPreservationStarted,
+    ObserveRespawnTopologyAbandoned,
     RecoverRemoteMemberRuntimeRetired,
     RecoverRemoteMemberSupervisorRevoked,
     RecoverRosterMemberRetired,
     ConvergeRecoveredRosterTopology,
+    ConvergeRecoveredRespawnTopology,
     RecoverMemberKickoff,
     RecoverObjectiveBinding,
+    RecoverFinalizedPlacedKickoff,
     RecoverObjectiveConclusion,
     RecoverRosterWiring,
     RecoverRosterUnwire,
     RecoverExternalPeerWiring,
     RecoverExternalPeerUnwire,
     RecoverSupervisorAuthority,
+    RecoverHostBindRequest,
+    RecoverHostBinding,
+    RecoverHostBindingGenerationHighwater,
+    RecoverConfirmedHostBindingRevocation,
+    RecoverRemoteTurnDispatchSequence,
+    RecoverPlacedCompletionDispatchSequence,
+    RecoverPendingPlacedCompletion,
+    RecoverResolvedPlacedCompletion,
+    RecoverCompletedWithCleanupCustody,
     RecoverOwnerBridgeSession,
     RecoverMemberRestoreFailure,
+    RecoverPendingPlacedSpawn,
+    RecoverCommittedPlacedSpawn,
+    RecoverPlacedCarrierCleanup,
     ClassifyMemberLiveMaterialization,
     ResolveMemberRevivalSucceeded,
     ResolveMemberRevivalFailed,
@@ -7110,6 +8461,7 @@ pub mod effects {
         pub provider_params_digest: Option<String>,
         pub output_schema_digest: Option<String>,
         pub external_addressable: bool,
+        pub resolved_spec_digest: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestRuntimeIngress {
@@ -7196,6 +8548,11 @@ pub mod effects {
         pub fence_token: Option<FenceToken>,
         pub generation: Option<Generation>,
         pub session_id: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PersistPlacedCompletionLifecycleIntent {
+        pub intent: PlacedCompletionLifecycleIntentKind,
+        pub active: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AppendOperatorActionProvenance {
@@ -7578,6 +8935,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeAllAgentEventSubscription {
         pub session_bound_runtimes: std::collections::BTreeSet<AgentRuntimeId>,
+        pub external_members: std::collections::BTreeSet<AgentIdentity>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RejectAllAgentEventSubscription {
@@ -7743,6 +9101,144 @@ pub mod effects {
         pub adaptive_run_id: AdaptiveRunId,
         pub reason: AdaptiveStopReason,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestHostBind {
+        pub host_id: HostId,
+        pub endpoint: PeerAddress,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HostRegistered {
+        pub host_id: HostId,
+        pub epoch: u64,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HostReboundRecorded {
+        pub host_id: HostId,
+        pub epoch: u64,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HostCapabilitiesRefreshed {
+        pub host_id: HostId,
+        pub epoch: u64,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HostRevoked {
+        pub host_id: HostId,
+        pub binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PersistPendingPlacedSpawn {
+        pub spawn_id: PlacedSpawnId,
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub host: HostId,
+        pub host_binding_generation: u64,
+        pub spec_digest: String,
+        pub effective_profile_override_present: bool,
+        pub effective_model_override_present: bool,
+        pub provision_operation_id: String,
+        pub operation_owner_session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestMemberMaterialization {
+        pub spawn_id: PlacedSpawnId,
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub spec_digest: String,
+        pub host: HostId,
+        pub host_binding_generation: u64,
+        pub provision_operation_id: String,
+        pub operation_owner_session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CommitPlacedSpawnCarrier {
+        pub spawn_id: PlacedSpawnId,
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub host: HostId,
+        pub host_binding_generation: u64,
+        pub spec_digest: String,
+        pub member_session_id: SessionId,
+        pub member_peer_endpoint: MemberPeerEndpoint,
+        pub ack_engine_version: String,
+        pub provision_operation_id: String,
+        pub operation_owner_session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PromoteCommittedPlacedSpawnCarrierBinding {
+        pub spawn_id: PlacedSpawnId,
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub host: HostId,
+        pub expected_host_binding_generation: u64,
+        pub host_binding_generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PlacedCarrierCleanupRequested {
+        pub obligation: PlacedCarrierCleanupObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PlacedCarrierCleanupAuthorized {
+        pub obligation: PlacedCarrierCleanupObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PlacedCarrierCleanupResolved {
+        pub obligation: PlacedCarrierCleanupObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestMemberRelease {
+        pub agent_identity: AgentIdentity,
+        pub generation: Generation,
+        pub fence_token: FenceToken,
+        pub host: HostId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RouteInstallRequested {
+        pub obligation: RouteInstallObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberOperatorAdmitted {
+        pub agent_identity: AgentIdentity,
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberOperatorRejected {
+        pub agent_identity: AgentIdentity,
+        pub request_id: String,
+        pub cause: MemberOperatorRejectKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowStepDispatchClassified {
+        pub run_id: RunId,
+        pub step_id: StepId,
+        pub target: AgentIdentity,
+        pub dispatch: FlowStepDispatchKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeExternalAgentEventSubscription {
+        pub agent_identity: AgentIdentity,
+        pub host: HostId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct GrantRecorded {
+        pub principal: PrincipalId,
+        pub scopes: std::collections::BTreeSet<ControlScope>,
+        pub expires_at_ms: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct GrantRevoked {
+        pub principal: PrincipalId,
+        pub revoked: std::collections::BTreeSet<ControlScope>,
+        pub remaining: std::collections::BTreeSet<ControlScope>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7761,6 +9257,7 @@ pub enum Effect {
     PendingSpawnOperationOwnerAuthorized(effects::PendingSpawnOperationOwnerAuthorized),
     RequestSessionIngressDetachForMobDestroy(effects::RequestSessionIngressDetachForMobDestroy),
     AppendLifecycleJournal(effects::AppendLifecycleJournal),
+    PersistPlacedCompletionLifecycleIntent(effects::PersistPlacedCompletionLifecycleIntent),
     AppendOperatorActionProvenance(effects::AppendOperatorActionProvenance),
     EmitMemberLifecycleNotice(effects::EmitMemberLifecycleNotice),
     EmitRunLifecycleNotice(effects::EmitRunLifecycleNotice),
@@ -7868,6 +9365,26 @@ pub enum Effect {
     AdaptiveCleanupResolved(effects::AdaptiveCleanupResolved),
     AdaptiveBodyEvidenceMissing(effects::AdaptiveBodyEvidenceMissing),
     AdaptiveRunTerminalized(effects::AdaptiveRunTerminalized),
+    RequestHostBind(effects::RequestHostBind),
+    HostRegistered(effects::HostRegistered),
+    HostReboundRecorded(effects::HostReboundRecorded),
+    HostCapabilitiesRefreshed(effects::HostCapabilitiesRefreshed),
+    HostRevoked(effects::HostRevoked),
+    PersistPendingPlacedSpawn(effects::PersistPendingPlacedSpawn),
+    RequestMemberMaterialization(effects::RequestMemberMaterialization),
+    CommitPlacedSpawnCarrier(effects::CommitPlacedSpawnCarrier),
+    PromoteCommittedPlacedSpawnCarrierBinding(effects::PromoteCommittedPlacedSpawnCarrierBinding),
+    PlacedCarrierCleanupRequested(effects::PlacedCarrierCleanupRequested),
+    PlacedCarrierCleanupAuthorized(effects::PlacedCarrierCleanupAuthorized),
+    PlacedCarrierCleanupResolved(effects::PlacedCarrierCleanupResolved),
+    RequestMemberRelease(effects::RequestMemberRelease),
+    RouteInstallRequested(effects::RouteInstallRequested),
+    MemberOperatorAdmitted(effects::MemberOperatorAdmitted),
+    MemberOperatorRejected(effects::MemberOperatorRejected),
+    FlowStepDispatchClassified(effects::FlowStepDispatchClassified),
+    AuthorizeExternalAgentEventSubscription(effects::AuthorizeExternalAgentEventSubscription),
+    GrantRecorded(effects::GrantRecorded),
+    GrantRevoked(effects::GrantRevoked),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -7885,6 +9402,7 @@ pub enum EffectKind {
     PendingSpawnOperationOwnerAuthorized,
     RequestSessionIngressDetachForMobDestroy,
     AppendLifecycleJournal,
+    PersistPlacedCompletionLifecycleIntent,
     AppendOperatorActionProvenance,
     EmitMemberLifecycleNotice,
     EmitRunLifecycleNotice,
@@ -7988,6 +9506,26 @@ pub enum EffectKind {
     AdaptiveCleanupResolved,
     AdaptiveBodyEvidenceMissing,
     AdaptiveRunTerminalized,
+    RequestHostBind,
+    HostRegistered,
+    HostReboundRecorded,
+    HostCapabilitiesRefreshed,
+    HostRevoked,
+    PersistPendingPlacedSpawn,
+    RequestMemberMaterialization,
+    CommitPlacedSpawnCarrier,
+    PromoteCommittedPlacedSpawnCarrierBinding,
+    PlacedCarrierCleanupRequested,
+    PlacedCarrierCleanupAuthorized,
+    PlacedCarrierCleanupResolved,
+    RequestMemberRelease,
+    RouteInstallRequested,
+    MemberOperatorAdmitted,
+    MemberOperatorRejected,
+    FlowStepDispatchClassified,
+    AuthorizeExternalAgentEventSubscription,
+    GrantRecorded,
+    GrantRevoked,
 }
 
 pub mod command_capabilities {
@@ -8221,6 +9759,7 @@ pub enum TransitionId {
     ResolveCreateMobAdmissionDeniedCompleted,
     ResolveCreateMobAdmissionDeniedDestroyed,
     InitializeAdaptiveRunRunningRunning,
+    InitializeAdaptiveRunReplayRunning,
     RecordAdaptivePlanningDecisionActiveRunning,
     RecordAdaptivePlanningDecisionPlanLimitRunning,
     RecordAdaptivePlanRejectedActiveRunning,
@@ -8235,12 +9774,15 @@ pub enum TransitionId {
     RecordAdaptiveLayerResultValidatedRunning,
     RecordAdaptiveLayerResultInvalidRunning,
     RecordAdaptiveLayerMobDestroyedRunning,
+    RecordAdaptiveLayerMobDestroyedReplayRunning,
     RecordAdaptiveLayerMobRetainedRunning,
     RecordAdaptiveLayerMobRetainedCleanupRequiredRunning,
+    RecordAdaptiveLayerMobRetainedReplayRunning,
     RecordAdaptiveCleanupResolvedRunning,
     RecordAdaptiveBodyEvidenceMissingRunning,
     ResolveAdaptiveFinishRunningRunning,
     RequestAdaptiveCancelRunningRunning,
+    RequestAdaptiveCancelReplayRunning,
     RecordAdaptiveDeadlineObservedExpiredRunning,
     ResolveProfileMutationAdmissionAllowedRunning,
     ResolveProfileMutationAdmissionAllowedStopped,
@@ -8252,6 +9794,7 @@ pub enum TransitionId {
     ResolveProfileMutationAdmissionDeniedDestroyed,
     ClassifyMemberOperationEligibilityAdmittedRunning,
     ClassifyMemberOperationEligibilityRunningDestroyDeniedRunning,
+    ClassifyMemberOperationEligibilityRunningLifecycleDeniedRunning,
     ClassifyMemberOperationEligibilityNotRunningStopped,
     ClassifyMemberOperationEligibilityNotRunningCompleted,
     ClassifyMemberOperationEligibilityNotRunningDestroyed,
@@ -8417,10 +9960,31 @@ pub enum TransitionId {
     ClassifySpawnManyFailureInternalDestroyed,
     CommitSpawnMembershipFresh,
     CommitSpawnMembershipFreshPeerOnly,
-    CommitSpawnMembershipReplacing,
+    CommitSpawnMembershipRemote,
     BeginSpawnExecFresh,
     BeginSpawnExecFreshPeerOnly,
-    BeginSpawnExecReplacing,
+    BeginSpawnExecDeniedNonPortableRustBundles,
+    BeginSpawnExecDeniedNonPortablePerSpawnExternalTools,
+    BeginSpawnExecDeniedNonPortableMobDefaultExternalTools,
+    BeginSpawnExecDeniedNonPortableDefaultLlmClientOverride,
+    BeginSpawnExecDeniedNonPortableHostSurfaceMcpAllowlist,
+    BeginSpawnExecDeniedNonPortableInheritedToolFilter,
+    BeginSpawnExecDeniedNonPortableWorkgraphTools,
+    BeginSpawnExecDeniedSecretBearingShellEnv,
+    BeginSpawnExecDeniedSecretBearingMcpStdioEnv,
+    BeginSpawnExecDeniedSecretBearingMcpHttpHeaders,
+    BeginSpawnExecDeniedHostNotBound,
+    BeginSpawnExecDeniedMissingCapabilityAutonomousMembers,
+    BeginSpawnExecDeniedMissingCapabilityDurableSessions,
+    BeginSpawnExecDeniedMissingCapabilityTrackedInputCancel,
+    BeginSpawnExecDeniedMissingCapabilityProtocolV4,
+    BeginSpawnExecDeniedMissingCapabilityMemoryStore,
+    BeginSpawnExecDeniedMissingCapabilityMcp,
+    BeginSpawnExecDeniedOwnerBridgeAbsent,
+    BeginSpawnExecDeniedResumePlacementMismatch,
+    BeginSpawnExecDeniedDigestAbsent,
+    BeginSpawnExecRemote,
+    RecordMemberMaterializationFailureRunning,
     CommitSpawnActivationFinalRunning,
     CommitSpawnActivationFinalStopped,
     CommitSpawnActivationFinalCompleted,
@@ -8431,13 +9995,32 @@ pub enum TransitionId {
     AbortSpawnExecActiveRunning,
     AbortSpawnExecActiveStopped,
     AbortSpawnExecActiveCompleted,
+    AbortSpawnExecMaterializePendingRunning,
+    AbortSpawnExecMaterializePendingStopped,
+    AbortSpawnExecMaterializePendingCompleted,
     AbortSpawnExecLateArrivalRunning,
     AbortSpawnExecLateArrivalStopped,
     AbortSpawnExecLateArrivalCompleted,
     AbortSpawnExecDestroyed,
+    AuthorizePlacedCarrierCleanupActiveRunning,
+    AuthorizePlacedCarrierCleanupActiveStopped,
+    AuthorizePlacedCarrierCleanupActiveCompleted,
+    ResolvePlacedCarrierCleanupActiveRunning,
+    ResolvePlacedCarrierCleanupActiveStopped,
+    ResolvePlacedCarrierCleanupActiveCompleted,
+    ResolvePlacedCarrierCleanupLateArrivalRunning,
+    ResolvePlacedCarrierCleanupLateArrivalStopped,
+    ResolvePlacedCarrierCleanupLateArrivalCompleted,
+    AuthorizePlacedCarrierCleanupDestroyed,
+    ResolvePlacedCarrierCleanupDestroyed,
     AuthorizeSpawnProfileRunning,
     EnsureMemberRunningExisting,
     EnsureMemberRunningMissing,
+    RecoverPendingPlacedSpawnRunning,
+    RecoverCommittedPlacedSpawnRunning,
+    PromoteCommittedPlacedSpawnCarrierBindingRunning,
+    RecoverPlacedCarrierCleanupRunning,
+    RecoverPlacedCarrierCleanupAlreadyRunning,
     RecoverRosterMemberRunning,
     RecoverRosterMemberAddressabilityRunning,
     RecoverMemberSessionBindingFreshRunning,
@@ -8452,7 +10035,18 @@ pub enum TransitionId {
     RecoverRosterMemberRetirementStartedReleasing,
     RecoverRosterMemberRetirementStartedReleasingAlreadyApplied,
     RecoverRosterMemberRetirementStartedPreservingBinding,
+    RecoverRosterMemberRetirementStartedPlaced,
     RecoverRosterMemberRetirementStartedPeerOnly,
+    ObserveRespawnTopologyPreservationStartedFresh,
+    ObserveRespawnTopologyPreservationStartedAlreadyRecorded,
+    ObserveRespawnTopologyPreservationStartedAbandoned,
+    ObserveRespawnTopologyAbandonedRetiringFresh,
+    ObserveRespawnTopologyAbandonedRetiringAlreadyRecorded,
+    ObserveRespawnTopologyAbandonedTerminalFresh,
+    ObserveRespawnTopologyAbandonedTerminalAlreadyRecorded,
+    ObserveRespawnTopologyAbandonedTerminalRecoveredFresh,
+    ObserveRespawnTopologyAbandonedStaleSuccessor,
+    ObserveRespawnTopologyAbandonedDestroyed,
     RecoverRemoteMemberRuntimeRetiredFreshRunning,
     RecoverRemoteMemberRuntimeRetiredFreshStopped,
     RecoverRemoteMemberRuntimeRetiredAlreadyRecordedRunning,
@@ -8462,8 +10056,11 @@ pub enum TransitionId {
     RecoverRemoteMemberSupervisorRevokedAlreadyRecordedRunning,
     RecoverRemoteMemberSupervisorRevokedAlreadyRecordedStopped,
     RecoverRosterMemberRetiredRunning,
-    RecoverRosterMemberRetiredAlreadyAbsent,
+    RecoverRosterMemberRetiringRunning,
+    RecoverRosterMemberRetiringReplay,
+    RecoverRosterMemberRetiredCurrentAlreadyAbsent,
     RecoverRosterMemberRetiredStaleGeneration,
+    RecoverRosterMemberRetiredStaleIncarnation,
     RecoverMemberKickoffPending,
     RecoverMemberKickoffStarting,
     RecoverMemberKickoffCallbackPending,
@@ -8471,6 +10068,7 @@ pub enum TransitionId {
     RecoverMemberKickoffFailed,
     RecoverMemberKickoffCancelled,
     RecoverObjectiveBinding,
+    RecoverFinalizedPlacedKickoffRunning,
     BindObjectiveOwnerRunning,
     BindObjectiveOwnerIdempotentRunning,
     RecoverObjectiveConclusion,
@@ -8482,14 +10080,104 @@ pub enum TransitionId {
     StartupMarkReadyRunning,
     StartupMarkReadyStopped,
     StartupMarkReadyCompleted,
-    KickoffMarkPendingRunning,
-    KickoffMarkPendingStopped,
-    KickoffMarkPendingCompleted,
+    KickoffMarkPending,
+    KickoffMarkPendingReplayRunning,
+    KickoffMarkPendingReplayStopped,
+    KickoffMarkPendingReplayCompleted,
     ConcludeObjectiveRunning,
     ConcludeObjectiveIdempotentRunning,
-    KickoffMarkStartingRunning,
-    KickoffMarkStartingStopped,
-    KickoffMarkStartingCompleted,
+    KickoffMarkStarting,
+    KickoffMarkStartingReplayRunning,
+    KickoffMarkStartingReplayStopped,
+    KickoffMarkStartingReplayCompleted,
+    StartPlacedKickoffFresh,
+    StartPlacedKickoffPendingReplayRunning,
+    StartPlacedKickoffPendingReplayStopped,
+    StartPlacedKickoffPendingReplayCompleted,
+    StartPlacedKickoffResolvedReplayRunning,
+    StartPlacedKickoffResolvedReplayStopped,
+    StartPlacedKickoffResolvedReplayCompleted,
+    StartPlacedKickoffFinalReplayRunning,
+    StartPlacedKickoffFinalReplayStopped,
+    StartPlacedKickoffFinalReplayCompleted,
+    ResolvePlacedKickoffStartedFreshRunning,
+    ResolvePlacedKickoffStartedFreshStopped,
+    ResolvePlacedKickoffStartedFreshCompleted,
+    ResolvePlacedKickoffStartedAfterCancellationRunning,
+    ResolvePlacedKickoffStartedAfterCancellationStopped,
+    ResolvePlacedKickoffStartedAfterCancellationCompleted,
+    ResolvePlacedKickoffStartedReplayRunning,
+    ResolvePlacedKickoffStartedReplayStopped,
+    ResolvePlacedKickoffStartedReplayCompleted,
+    ResolvePlacedKickoffStartedFinalReplayRunning,
+    ResolvePlacedKickoffStartedFinalReplayStopped,
+    ResolvePlacedKickoffStartedFinalReplayCompleted,
+    ResolvePlacedKickoffStartedFinalReplayDestroyed,
+    ResolvePlacedKickoffCallbackPendingFreshRunning,
+    ResolvePlacedKickoffCallbackPendingFreshStopped,
+    ResolvePlacedKickoffCallbackPendingFreshCompleted,
+    ResolvePlacedKickoffCallbackPendingAfterCancellationRunning,
+    ResolvePlacedKickoffCallbackPendingAfterCancellationStopped,
+    ResolvePlacedKickoffCallbackPendingAfterCancellationCompleted,
+    ResolvePlacedKickoffCallbackPendingReplayRunning,
+    ResolvePlacedKickoffCallbackPendingReplayStopped,
+    ResolvePlacedKickoffCallbackPendingReplayCompleted,
+    ResolvePlacedKickoffCallbackPendingFinalReplayRunning,
+    ResolvePlacedKickoffCallbackPendingFinalReplayStopped,
+    ResolvePlacedKickoffCallbackPendingFinalReplayCompleted,
+    ResolvePlacedKickoffCallbackPendingFinalReplayDestroyed,
+    ResolvePlacedKickoffFailedFreshRunning,
+    ResolvePlacedKickoffFailedFreshStopped,
+    ResolvePlacedKickoffFailedFreshCompleted,
+    ResolvePlacedKickoffFailedAfterCancellationRunning,
+    ResolvePlacedKickoffFailedAfterCancellationStopped,
+    ResolvePlacedKickoffFailedAfterCancellationCompleted,
+    ResolvePlacedKickoffFailedReplayRunning,
+    ResolvePlacedKickoffFailedReplayStopped,
+    ResolvePlacedKickoffFailedReplayCompleted,
+    ResolvePlacedKickoffFailedFinalReplayRunning,
+    ResolvePlacedKickoffFailedFinalReplayStopped,
+    ResolvePlacedKickoffFailedFinalReplayCompleted,
+    ResolvePlacedKickoffFailedFinalReplayDestroyed,
+    ResolvePlacedKickoffCancelledFreshRunning,
+    ResolvePlacedKickoffCancelledFreshStopped,
+    ResolvePlacedKickoffCancelledFreshCompleted,
+    ResolvePlacedKickoffCancelledReplayRunning,
+    ResolvePlacedKickoffCancelledReplayStopped,
+    ResolvePlacedKickoffCancelledReplayCompleted,
+    ResolvePlacedKickoffCancelledFinalReplayRunning,
+    ResolvePlacedKickoffCancelledFinalReplayStopped,
+    ResolvePlacedKickoffCancelledFinalReplayCompleted,
+    ResolvePlacedKickoffCancelledFinalReplayDestroyed,
+    RejectPlacedKickoffBeforeAdmissionFreshRunning,
+    RejectPlacedKickoffBeforeAdmissionFreshStopped,
+    RejectPlacedKickoffBeforeAdmissionFreshCompleted,
+    RejectPlacedKickoffBeforeAdmissionAfterCancellationRunning,
+    RejectPlacedKickoffBeforeAdmissionAfterCancellationStopped,
+    RejectPlacedKickoffBeforeAdmissionAfterCancellationCompleted,
+    RejectPlacedKickoffBeforeAdmissionReplayRunning,
+    RejectPlacedKickoffBeforeAdmissionReplayStopped,
+    RejectPlacedKickoffBeforeAdmissionReplayCompleted,
+    AcknowledgePlacedKickoffOutcomePresentRunning,
+    AcknowledgePlacedKickoffOutcomePresentStopped,
+    AcknowledgePlacedKickoffOutcomePresentCompleted,
+    AcknowledgePlacedKickoffOutcomePresentDestroyed,
+    AcknowledgePlacedKickoffOutcomeReplayRunning,
+    AcknowledgePlacedKickoffOutcomeReplayStopped,
+    AcknowledgePlacedKickoffOutcomeReplayCompleted,
+    AcknowledgePlacedKickoffOutcomeReplayDestroyed,
+    DisposePlacedKickoffObligationActiveRunning,
+    DisposePlacedKickoffObligationActiveStopped,
+    DisposePlacedKickoffObligationActiveCompleted,
+    DisposePlacedKickoffObligationActiveDestroyed,
+    DisposePlacedKickoffObligationTerminalRunning,
+    DisposePlacedKickoffObligationTerminalStopped,
+    DisposePlacedKickoffObligationTerminalCompleted,
+    DisposePlacedKickoffObligationTerminalDestroyed,
+    DisposePlacedKickoffObligationReplayRunning,
+    DisposePlacedKickoffObligationReplayStopped,
+    DisposePlacedKickoffObligationReplayCompleted,
+    DisposePlacedKickoffObligationReplayDestroyed,
     KickoffResolveStartedRunning,
     KickoffResolveStartedStopped,
     KickoffResolveStartedCompleted,
@@ -8605,6 +10293,10 @@ pub enum TransitionId {
     ResolveSubmitWorkRejectionRetiringAsMemberNotFound,
     ResolveSubmitWorkRejectionNotExternallyAddressable,
     ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable,
+    RetireMember,
+    RetireMemberRemote,
+    RetireMemberRemoteConfirmedRevoked,
+    RetireMemberPeerOnly,
     ResolveRuntimeBindingRefusalRunning,
     ResolveRuntimeIngressRefusalRunning,
     ResolveRuntimeRetireRefusalRunning,
@@ -8621,6 +10313,10 @@ pub enum TransitionId {
     RecordRemoteMemberSupervisorRevokedAlreadyRecordedStopped,
     AdmitDestroyMemberRetireLiveRunning,
     AdmitDestroyMemberRetireLiveStopped,
+    AdmitDestroyMemberRetireRemoteRunning,
+    AdmitDestroyMemberRetireRemoteStopped,
+    AdmitDestroyMemberRetireConfirmedRevokedRunning,
+    AdmitDestroyMemberRetireConfirmedRevokedStopped,
     AdmitDestroyMemberRetirePeerOnlyRunning,
     AdmitDestroyMemberRetirePeerOnlyStopped,
     AdmitDestroyMemberRetireAlreadyRetiringSessionRunning,
@@ -8636,9 +10332,15 @@ pub enum TransitionId {
     ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedRunning,
     ObserveRemoteMemberRetirementArchivedAndSupervisorRevokedStopped,
     ObserveMemberRetirementArchivedLive,
+    ObserveMemberRetirementArchivedLivePreservingTopology,
     ObserveMemberRetirementArchivedLiveStopped,
     ObserveMemberRetirementArchivedRetired,
+    ObserveMemberRetirementArchivedRetiredPreservingTopology,
     ObserveMemberRetirementArchivedRetiredStopped,
+    ObserveMemberRetirementArchivedPlacedLiveRunning,
+    ObserveMemberRetirementArchivedPlacedLiveStopped,
+    ObserveMemberRetirementArchivedPlacedRetiredRunning,
+    ObserveMemberRetirementArchivedPlacedRetiredStopped,
     ObserveMemberRetirementArchivedStaleRuntime,
     ObserveMemberRetirementArchivedStaleRuntimeStopped,
     ObserveMemberRetirementArchivedAlreadyCleared,
@@ -8649,10 +10351,12 @@ pub enum TransitionId {
     ObserveDestroyMemberRetirementArchivedLiveStopped,
     ObserveDestroyMemberRetirementArchivedRetiredRunning,
     ObserveDestroyMemberRetirementArchivedRetiredStopped,
+    ObserveDestroyMemberRetirementArchivedPlacedLiveRunning,
+    ObserveDestroyMemberRetirementArchivedPlacedLiveStopped,
+    ObserveDestroyMemberRetirementArchivedPlacedRetiredRunning,
+    ObserveDestroyMemberRetirementArchivedPlacedRetiredStopped,
     ObserveDestroyMemberRetirementArchivedAlreadyClearedRunning,
     ObserveDestroyMemberRetirementArchivedAlreadyClearedStopped,
-    ResetMember,
-    RespawnMember,
     ResolveRespawnTopologyRestoreCompleted,
     ResolveRespawnTopologyRestoreFailed,
     RecoverMemberRestoreFailureRunning,
@@ -8690,13 +10394,11 @@ pub enum TransitionId {
     RecoverRosterWiringAlreadyRecovered,
     RecoverRosterUnwireRunning,
     RecoverRosterUnwireAlreadyAbsent,
-    ConvergeRecoveredRosterTopologyPruneRunning,
-    ConvergeRecoveredRosterTopologyPruneStopped,
-    ConvergeRecoveredRosterTopologyPruneCompleted,
-    ConvergeRecoveredRosterTopologyRetainRunning,
-    ConvergeRecoveredRosterTopologyRetainStopped,
-    ConvergeRecoveredRosterTopologyRetainCompleted,
+    ConvergeRecoveredRosterTopologyPrune,
+    ConvergeRecoveredRosterTopologyRetain,
     ConvergeRecoveredRosterTopologyDestroyed,
+    ConvergeRecoveredRespawnTopologyAbandoned,
+    ConvergeRecoveredRespawnTopologyDestroyed,
     UnwireMembersRunning,
     UnwireMembersAlreadyAbsent,
     CleanupRetiringMemberWiringRunning,
@@ -8713,6 +10415,7 @@ pub enum TransitionId {
     AuthorizeMemberEndpointMigrationTrustCleanupRunningStopped,
     AuthorizeMemberPeerRebindRunning,
     AuthorizeMemberPeerOverlayRunning,
+    AuthorizeRetiringMemberPeerOverlayCleanupRunning,
     AuthorizeMemberTrustWiringRunning,
     AuthorizeMemberTrustUnwiringRunning,
     AuthorizeMemberTrustUnwiringStopped,
@@ -8762,6 +10465,227 @@ pub enum TransitionId {
     RollbackPendingRecipientTrustStopped,
     RollbackPendingRecipientTrustCompleted,
     RollbackPendingRecipientTrustDestroyed,
+    BeginHostBindFreshUnplaced,
+    BeginHostBindFreshReplacement,
+    BeginHostBindRequested,
+    BeginHostBindReplacementRequested,
+    CommitHostBind,
+    HostRebound,
+    RefreshHostCapabilities,
+    RevokeHost,
+    RecoverOrdinaryHostBindRequestRunning,
+    RecoverOrdinaryHostBindRequestStopped,
+    RecoverOrdinaryHostBindRequestCompleted,
+    RecoverOrdinaryHostBindRequestDestroyed,
+    RecoverReplacementHostBindRequestRunning,
+    RecoverReplacementHostBindRequestStopped,
+    RecoverReplacementHostBindRequestCompleted,
+    RecoverReplacementHostBindRequestDestroyed,
+    RecoverHostBindingRunning,
+    RecoverHostBindingStopped,
+    RecoverHostBindingCompleted,
+    RecoverHostBindingDestroyed,
+    RecoverHostBindingGenerationHighwaterRunning,
+    RecoverHostBindingGenerationHighwaterStopped,
+    RecoverHostBindingGenerationHighwaterCompleted,
+    RecoverHostBindingGenerationHighwaterDestroyed,
+    RecoverConfirmedHostBindingRevocationRunning,
+    RecoverConfirmedHostBindingRevocationStopped,
+    RecoverConfirmedHostBindingRevocationCompleted,
+    RecoverConfirmedHostBindingRevocationDestroyed,
+    RecordRouteInstallInstall,
+    AuthorizeRouteRemovalBeforeUnwire,
+    ResolveRouteInstallRunning,
+    ResolveRouteInstallStopped,
+    ResolveRouteInstallCompleted,
+    ResolveRouteInstallDestroyed,
+    RollbackRouteInstallRunning,
+    RollbackRouteInstallStopped,
+    RollbackRouteInstallCompleted,
+    RollbackRouteInstallDestroyed,
+    RecoverRemoteTurnDispatchSequenceAdvance,
+    RecoverRemoteTurnDispatchSequenceReplay,
+    RecordRemoteTurnObligationFresh,
+    RecordRemoteTurnObligationPendingReplay,
+    RecordRemoteTurnObligationCommittedReplay,
+    RecordRemoteTurnObligationResolvedReplay,
+    RecordRemoteTurnObligationHistoricalReplay,
+    AbortRemoteTurnObligationPresentRunning,
+    AbortRemoteTurnObligationPresentStopped,
+    AbortRemoteTurnObligationPresentCompleted,
+    AbortRemoteTurnObligationPresentDestroyed,
+    AbortRemoteTurnObligationReplayRunning,
+    AbortRemoteTurnObligationReplayStopped,
+    AbortRemoteTurnObligationReplayCompleted,
+    AbortRemoteTurnObligationReplayDestroyed,
+    CommitRemoteTurnOutcomePendingRunning,
+    CommitRemoteTurnOutcomePendingStopped,
+    CommitRemoteTurnOutcomePendingCompleted,
+    CommitRemoteTurnOutcomePendingDestroyed,
+    CommitRemoteTurnOutcomeReplayRunning,
+    CommitRemoteTurnOutcomeReplayStopped,
+    CommitRemoteTurnOutcomeReplayCompleted,
+    CommitRemoteTurnOutcomeReplayDestroyed,
+    CommitRemoteTurnOutcomeDisposedReplayRunning,
+    CommitRemoteTurnOutcomeDisposedReplayStopped,
+    CommitRemoteTurnOutcomeDisposedReplayCompleted,
+    CommitRemoteTurnOutcomeDisposedReplayDestroyed,
+    ResolveRemoteTurnObligationCommittedRunning,
+    ResolveRemoteTurnObligationCommittedStopped,
+    ResolveRemoteTurnObligationCommittedCompleted,
+    ResolveRemoteTurnObligationCommittedDestroyed,
+    ResolveRemoteTurnObligationReplayRunning,
+    ResolveRemoteTurnObligationReplayStopped,
+    ResolveRemoteTurnObligationReplayCompleted,
+    ResolveRemoteTurnObligationReplayDestroyed,
+    ResolveRemoteTurnObligationDisposedReplayRunning,
+    ResolveRemoteTurnObligationDisposedReplayStopped,
+    ResolveRemoteTurnObligationDisposedReplayCompleted,
+    ResolveRemoteTurnObligationDisposedReplayDestroyed,
+    AcknowledgeRemoteTurnOutcomePresentRunning,
+    AcknowledgeRemoteTurnOutcomePresentStopped,
+    AcknowledgeRemoteTurnOutcomePresentCompleted,
+    AcknowledgeRemoteTurnOutcomePresentDestroyed,
+    AcknowledgeRemoteTurnOutcomeReplayRunning,
+    AcknowledgeRemoteTurnOutcomeReplayStopped,
+    AcknowledgeRemoteTurnOutcomeReplayCompleted,
+    AcknowledgeRemoteTurnOutcomeReplayDestroyed,
+    DisposeRemoteTurnObligationRunning,
+    DisposeRemoteTurnObligationStopped,
+    DisposeRemoteTurnObligationCompleted,
+    DisposeRemoteTurnObligationDestroyed,
+    BeginPlacedCompletionLifecycleQuiesceFresh,
+    BeginPlacedCompletionLifecycleQuiesceReplay,
+    BeginPlacedCompletionLifecycleQuiesceStoppedFresh,
+    BeginPlacedCompletionLifecycleQuiesceStoppedReplay,
+    BeginPlacedCompletionLifecycleQuiesceCompletedFresh,
+    BeginPlacedCompletionLifecycleQuiesceCompletedReplay,
+    EndPlacedCompletionLifecycleQuiesceRunningFresh,
+    EndPlacedCompletionLifecycleQuiesceRunningReplay,
+    EndPlacedCompletionLifecycleQuiesceStoppedRetireAll,
+    EndPlacedCompletionLifecycleQuiesceStoppedRetireAllReplay,
+    EndPlacedCompletionLifecycleQuiesceCompletedRetireAll,
+    EndPlacedCompletionLifecycleQuiesceCompletedRetireAllReplay,
+    RecoverPlacedCompletionDispatchSequenceAdvanceRunning,
+    RecoverPlacedCompletionDispatchSequenceAdvanceStopped,
+    RecoverPlacedCompletionDispatchSequenceAdvanceCompleted,
+    RecoverPlacedCompletionDispatchSequenceAdvanceDestroyed,
+    RecoverPlacedCompletionDispatchSequenceReplayRunning,
+    RecoverPlacedCompletionDispatchSequenceReplayStopped,
+    RecoverPlacedCompletionDispatchSequenceReplayCompleted,
+    RecoverPlacedCompletionDispatchSequenceReplayDestroyed,
+    RecoverPendingPlacedCompletionRunning,
+    RecoverPendingPlacedCompletionStopped,
+    RecoverPendingPlacedCompletionCompleted,
+    RecoverResolvedPlacedCompletionRunning,
+    RecoverResolvedPlacedCompletionStopped,
+    RecoverResolvedPlacedCompletionCompleted,
+    RecoverCompletedWithCleanupCustody,
+    RecordPlacedCompletionObligationFresh,
+    RecordPlacedCompletionObligationPendingReplayRunning,
+    RecordPlacedCompletionObligationPendingReplayStopped,
+    RecordPlacedCompletionObligationPendingReplayCompleted,
+    RecordPlacedCompletionObligationResolvedReplayRunning,
+    RecordPlacedCompletionObligationResolvedReplayStopped,
+    RecordPlacedCompletionObligationResolvedReplayCompleted,
+    RecordPlacedCompletionObligationHistoricalReplayRunning,
+    RecordPlacedCompletionObligationHistoricalReplayStopped,
+    RecordPlacedCompletionObligationHistoricalReplayCompleted,
+    RecordPlacedCompletionObligationHistoricalReplayDestroyed,
+    RequestPlacedCompletionCancellationPendingRunning,
+    RequestPlacedCompletionCancellationPendingStopped,
+    RequestPlacedCompletionCancellationPendingCompleted,
+    RequestPlacedCompletionCancellationReplayRunning,
+    RequestPlacedCompletionCancellationReplayStopped,
+    RequestPlacedCompletionCancellationReplayCompleted,
+    RequestPlacedCompletionCancellationTerminalReplayRunning,
+    RequestPlacedCompletionCancellationTerminalReplayStopped,
+    RequestPlacedCompletionCancellationTerminalReplayCompleted,
+    RequestPlacedCompletionCancellationTerminalReplayDestroyed,
+    ResolvePlacedCompletionOutcomePendingRunning,
+    ResolvePlacedCompletionOutcomePendingStopped,
+    ResolvePlacedCompletionOutcomePendingCompleted,
+    ResolvePlacedCompletionOutcomeReplayRunning,
+    ResolvePlacedCompletionOutcomeReplayStopped,
+    ResolvePlacedCompletionOutcomeReplayCompleted,
+    ResolvePlacedCompletionOutcomeHistoricalReplayRunning,
+    ResolvePlacedCompletionOutcomeHistoricalReplayStopped,
+    ResolvePlacedCompletionOutcomeHistoricalReplayCompleted,
+    ResolvePlacedCompletionOutcomeHistoricalReplayDestroyed,
+    ClosePlacedCompletionOutcomePendingRunning,
+    ClosePlacedCompletionOutcomePendingStopped,
+    ClosePlacedCompletionOutcomePendingCompleted,
+    ClosePlacedCompletionOutcomeReplayRunning,
+    ClosePlacedCompletionOutcomeReplayStopped,
+    ClosePlacedCompletionOutcomeReplayCompleted,
+    ClosePlacedCompletionOutcomeReplayDestroyed,
+    AcknowledgePlacedCompletionOutcomePresentRunning,
+    AcknowledgePlacedCompletionOutcomePresentStopped,
+    AcknowledgePlacedCompletionOutcomePresentCompleted,
+    AcknowledgePlacedCompletionOutcomeReplayRunning,
+    AcknowledgePlacedCompletionOutcomeReplayStopped,
+    AcknowledgePlacedCompletionOutcomeReplayCompleted,
+    AcknowledgePlacedCompletionOutcomeReplayDestroyed,
+    DisposePlacedCompletionOutcomeRunning,
+    DisposePlacedCompletionOutcomeStopped,
+    DisposePlacedCompletionOutcomeCompleted,
+    DisposePlacedCompletionOutcomeDestroyed,
+    GrantOperatorScopes,
+    RevokeOperatorScopesAll,
+    RevokeOperatorScopesPartial,
+    RevokeOperatorScopesAbsent,
+    ResolveMemberOperatorAdmissionAdmittedRunning,
+    ResolveMemberOperatorAdmissionAdmittedStopped,
+    ResolveMemberOperatorAdmissionAdmittedCompleted,
+    ResolveMemberOperatorAdmissionAdmittedDestroyed,
+    ResolveMemberOperatorAdmissionUnknownIdentityRunning,
+    ResolveMemberOperatorAdmissionUnknownIdentityStopped,
+    ResolveMemberOperatorAdmissionUnknownIdentityCompleted,
+    ResolveMemberOperatorAdmissionUnknownIdentityDestroyed,
+    ResolveMemberOperatorAdmissionSenderKeyMismatchRunning,
+    ResolveMemberOperatorAdmissionSenderKeyMismatchStopped,
+    ResolveMemberOperatorAdmissionSenderKeyMismatchCompleted,
+    ResolveMemberOperatorAdmissionSenderKeyMismatchDestroyed,
+    ResolveMemberOperatorAdmissionStaleGenerationRunning,
+    ResolveMemberOperatorAdmissionStaleGenerationStopped,
+    ResolveMemberOperatorAdmissionStaleGenerationCompleted,
+    ResolveMemberOperatorAdmissionStaleGenerationDestroyed,
+    ResolveMemberOperatorAdmissionStaleFenceRunning,
+    ResolveMemberOperatorAdmissionStaleFenceStopped,
+    ResolveMemberOperatorAdmissionStaleFenceCompleted,
+    ResolveMemberOperatorAdmissionStaleFenceDestroyed,
+    ResolveMemberOperatorAdmissionStaleSessionRunning,
+    ResolveMemberOperatorAdmissionStaleSessionStopped,
+    ResolveMemberOperatorAdmissionStaleSessionCompleted,
+    ResolveMemberOperatorAdmissionStaleSessionDestroyed,
+    ResolveMemberOperatorAdmissionNoPlacementRunning,
+    ResolveMemberOperatorAdmissionNoPlacementStopped,
+    ResolveMemberOperatorAdmissionNoPlacementCompleted,
+    ResolveMemberOperatorAdmissionNoPlacementDestroyed,
+    ResolveMemberOperatorAdmissionStaleHostRunning,
+    ResolveMemberOperatorAdmissionStaleHostStopped,
+    ResolveMemberOperatorAdmissionStaleHostCompleted,
+    ResolveMemberOperatorAdmissionStaleHostDestroyed,
+    ResolveMemberOperatorAdmissionStaleHostBindingGenerationRunning,
+    ResolveMemberOperatorAdmissionStaleHostBindingGenerationStopped,
+    ResolveMemberOperatorAdmissionStaleHostBindingGenerationCompleted,
+    ResolveMemberOperatorAdmissionStaleHostBindingGenerationDestroyed,
+    ResolveMemberOperatorAdmissionHostRevokedRunning,
+    ResolveMemberOperatorAdmissionHostRevokedStopped,
+    ResolveMemberOperatorAdmissionHostRevokedCompleted,
+    ResolveMemberOperatorAdmissionHostRevokedDestroyed,
+    ClassifyFlowStepDispatchLocalRunning,
+    ClassifyFlowStepDispatchLocalStopped,
+    ClassifyFlowStepDispatchLocalCompleted,
+    ClassifyFlowStepDispatchRemoteTurnDirectiveRunning,
+    ClassifyFlowStepDispatchRemoteTurnDirectiveStopped,
+    ClassifyFlowStepDispatchRemoteTurnDirectiveCompleted,
+    ClassifyFlowStepDispatchRejectedOverlayAutonomousRunning,
+    ClassifyFlowStepDispatchRejectedOverlayAutonomousStopped,
+    ClassifyFlowStepDispatchRejectedOverlayAutonomousCompleted,
+    ClassifyFlowStepDispatchRejectedHostIncapableRunning,
+    ClassifyFlowStepDispatchRejectedHostIncapableStopped,
+    ClassifyFlowStepDispatchRejectedHostIncapableCompleted,
     CommitSupervisorRotationRunning,
     CommitSupervisorRotationStopped,
     CommitSupervisorRotationCompleted,
@@ -8772,6 +10696,10 @@ pub enum TransitionId {
     SubscribeAgentEventsStopped,
     SubscribeAgentEventsCompleted,
     SubscribeAgentEventsDestroyed,
+    SubscribeAgentEventsExternalRunning,
+    SubscribeAgentEventsExternalStopped,
+    SubscribeAgentEventsExternalCompleted,
+    SubscribeAgentEventsExternalDestroyed,
     SubscribeAgentEventsMissingMemberRunning,
     SubscribeAgentEventsMissingMemberStopped,
     SubscribeAgentEventsMissingMemberCompleted,
@@ -8874,10 +10802,12 @@ pub enum TransitionId {
     AuthorizeFlowRunReducerCommandConditionRejected,
     AuthorizeFlowRunReducerCommandFailStep,
     AuthorizeFlowRunReducerCommandFailStepEscalating,
+    AuthorizeFlowRunReducerCommandFailStepEscalationSuppressedByLifecycle,
     AuthorizeFlowRunReducerCommandSkipStep,
     AuthorizeFlowRunReducerCommandProjectFrameStepStatus,
     AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailed,
     AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalating,
+    AuthorizeFlowRunReducerCommandProjectFrameStepStatusFailedEscalationSuppressedByLifecycle,
     AuthorizeFlowRunReducerCommandCancelStep,
     AuthorizeFlowRunReducerCommandRegisterTargets,
     AuthorizeFlowRunReducerCommandRecordTargetSuccess,
@@ -8917,6 +10847,18 @@ pub enum TransitionId {
     CompleteFlowRunningZero,
     FinishRunRunning,
     FinishRunRunningZero,
+    CompleteFlowStopped,
+    CompleteFlowStoppedZero,
+    CompleteFlowCompleted,
+    CompleteFlowCompletedZero,
+    CompleteFlowDestroyed,
+    CompleteFlowDestroyedZero,
+    FinishRunStopped,
+    FinishRunStoppedZero,
+    FinishRunCompleted,
+    FinishRunCompletedZero,
+    FinishRunDestroyed,
+    FinishRunDestroyedZero,
     ClassifyRetirePendingSpawnDispositionCancelCommittedRunning,
     ClassifyRetirePendingSpawnDispositionCancelCommittedStopped,
     ClassifyRetirePendingSpawnDispositionCommittedWithoutPendingRunning,
@@ -8924,6 +10866,8 @@ pub enum TransitionId {
     ClassifyRetirePendingSpawnDispositionPreserveAbsentRunning,
     ClassifyRetirePendingSpawnDispositionPreserveAbsentStopped,
     RetireRunningReleasing,
+    RetireRemoteReleasingRunning,
+    RetireRemoteConfirmedRevokedRunning,
     RetireRunningPreservingBinding,
     RetireRunningNoBinding,
     RetireStoppedReleasing,
@@ -8933,6 +10877,8 @@ pub enum TransitionId {
     SessionIngressDetachedForMobDestroyStopped,
     SessionIngressDetachFailedForMobDestroyRunning,
     SessionIngressDetachFailedForMobDestroyStopped,
+    RetireRemoteReleasingStopped,
+    RetireRemoteConfirmedRevokedStopped,
     RetireStoppedPreservingBinding,
     RetireStoppedNoBinding,
     RetireAbsentRunning,
@@ -9129,6 +11075,13 @@ pub fn initial_state() -> State {
         member_kickoff_cancelled: Default::default(),
         member_kickoff_error: Default::default(),
         member_kickoff_objective_ids: Default::default(),
+        member_kickoff_input_ids: Default::default(),
+        retained_placed_kickoff_obligations: Default::default(),
+        member_placed_kickoff_outcome_kinds: Default::default(),
+        member_placed_kickoff_outcome_errors: Default::default(),
+        member_placed_kickoff_closure_kinds: Default::default(),
+        pending_placed_kickoff_outcomes: Default::default(),
+        resolved_placed_kickoff_outcomes: Default::default(),
         objective_owner_ids: Default::default(),
         objective_outcomes: Default::default(),
         concluded_objective_ids: Default::default(),
@@ -9150,6 +11103,8 @@ pub fn initial_state() -> State {
         spawn_exec_phase: Default::default(),
         member_state_markers: Default::default(),
         wiring_edges: Default::default(),
+        pending_respawn_topology: Default::default(),
+        abandoned_respawn_topology: Default::default(),
         external_peer_edges: Default::default(),
         external_peer_edges_by_key: Default::default(),
         supervisor_authority_peer_id: None,
@@ -9253,5 +11208,57 @@ pub fn initial_state() -> State {
         adaptive_layer_fault: Default::default(),
         adaptive_layer_disposition: Default::default(),
         adaptive_missing_body_digest: Default::default(),
+        mob_hosts: Default::default(),
+        host_public_keys: Default::default(),
+        host_endpoints: Default::default(),
+        host_authority_epochs: Default::default(),
+        host_binding_generations: Default::default(),
+        host_binding_generation_highwater: Default::default(),
+        confirmed_host_binding_revocations: Default::default(),
+        replacement_host_bind_endpoints: Default::default(),
+        replacement_host_binding_generations: Default::default(),
+        host_bind_phase: Default::default(),
+        host_protocol_min: Default::default(),
+        host_protocol_max: Default::default(),
+        host_engine_versions: Default::default(),
+        host_durable_sessions: Default::default(),
+        host_autonomous_members: Default::default(),
+        host_hard_cancel_member: Default::default(),
+        host_tracked_input_cancel: Default::default(),
+        host_memory_store: Default::default(),
+        host_mcp: Default::default(),
+        host_resolvable_providers: Default::default(),
+        host_approval_forwarding: Default::default(),
+        host_live_endpoints: Default::default(),
+        member_placement: Default::default(),
+        pending_placed_spawn_ids: Default::default(),
+        pending_placed_spawn_generations: Default::default(),
+        pending_placed_spawn_fence_tokens: Default::default(),
+        pending_placed_spawn_hosts: Default::default(),
+        pending_autonomous_placed_spawns: Default::default(),
+        pending_placed_spawn_host_binding_generations: Default::default(),
+        pending_placed_spawn_spec_digests: Default::default(),
+        pending_placed_spawn_provision_operation_ids: Default::default(),
+        pending_placed_spawn_operation_owner_session_ids: Default::default(),
+        current_placed_spawn_ids: Default::default(),
+        current_placed_spawn_host_binding_generations: Default::default(),
+        current_placed_spawn_provision_operation_ids: Default::default(),
+        current_placed_spawn_operation_owner_session_ids: Default::default(),
+        pending_placed_carrier_cleanup: Default::default(),
+        member_materialization_failures: Default::default(),
+        remote_turn_dispatch_sequence: 0,
+        pending_remote_turn_outcomes: Default::default(),
+        committed_remote_turn_outcomes: Default::default(),
+        resolved_remote_turn_outcomes: Default::default(),
+        placed_completion_dispatch_sequence: 0,
+        placed_completion_lifecycle_quiescing: false,
+        placed_completion_lifecycle_intent: None,
+        pending_placed_completion_outcomes: Default::default(),
+        cancel_requested_placed_completion_outcomes: Default::default(),
+        resolved_placed_completion_outcomes: Default::default(),
+        pending_route_installs: Default::default(),
+        operator_grant_scopes: Default::default(),
+        operator_grant_expiries: Default::default(),
+        spawn_profile_authority_resolved_spec_digests: Default::default(),
     }
 }

@@ -1156,6 +1156,7 @@ fn seam_authorize_spawn_profile_input() -> CompositionWitnessInput {
             witness_field("provider_params_digest", Expr::None),
             witness_field("output_schema_digest", Expr::None),
             witness_field("external_addressable", Expr::Bool(true)),
+            witness_field("resolved_spec_digest", Expr::None),
         ],
     )
 }
@@ -1184,6 +1185,25 @@ fn seam_begin_spawn_exec_input() -> CompositionWitnessInput {
             ),
             witness_field("bridge_session_id", some_string("sessionid_1")),
             witness_field("replacing", Expr::None),
+            witness_field("placement", Expr::None),
+            witness_field("workgraph_required", Expr::Bool(false)),
+            witness_field("rust_bundles_present", Expr::Bool(false)),
+            witness_field("per_spawn_external_tools_present", Expr::Bool(false)),
+            witness_field("mob_default_external_tools_present", Expr::Bool(false)),
+            witness_field("default_llm_client_override_present", Expr::Bool(false)),
+            witness_field("host_surface_mcp_allowlist_present", Expr::Bool(false)),
+            witness_field("inherited_tool_filter_present", Expr::Bool(false)),
+            witness_field("shell_env_present", Expr::Bool(false)),
+            witness_field("mcp_stdio_env_present", Expr::Bool(false)),
+            witness_field("mcp_http_headers_present", Expr::Bool(false)),
+            witness_field("memory_required", Expr::Bool(false)),
+            witness_field("mcp_required", Expr::Bool(false)),
+            witness_field("resume_session_id", Expr::None),
+            witness_field("placed_spawn_id", Expr::None),
+            witness_field("placed_provision_operation_id", Expr::None),
+            witness_field("placed_operation_owner_session_id", Expr::None),
+            witness_field("effective_profile_override_present", Expr::Bool(false)),
+            witness_field("effective_model_override_present", Expr::Bool(false)),
         ],
     )
 }
@@ -1205,6 +1225,11 @@ fn seam_commit_spawn_membership_input() -> CompositionWitnessInput {
             ),
             witness_field("bridge_session_id", some_string("sessionid_1")),
             witness_field("replacing", Expr::None),
+            witness_field("member_peer_endpoint", Expr::None),
+            witness_field("spec_digest_echo", Expr::None),
+            witness_field("ack_engine_version", Expr::None),
+            witness_field("placed_spawn_id", Expr::None),
+            witness_field("provision_operation_id", Expr::None),
         ],
     )
 }

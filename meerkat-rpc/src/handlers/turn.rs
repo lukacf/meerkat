@@ -21,7 +21,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
-use meerkat::surface::{RequestContext, request_action};
+use meerkat::surface::RequestContext;
 use meerkat_runtime::SessionServiceRuntimeExt;
 
 // ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ fn canonical_skill_ids(
 }
 
 /// Collect per-turn override fields into a struct for `SessionRuntime::start_turn`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TurnOverrides {
     pub keep_alive: Option<bool>,
     pub model: Option<String>,
@@ -175,7 +175,7 @@ pub async fn start_turn_with_params(
     params: StartTurnParams,
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
-    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    _runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, &runtime) {
@@ -183,27 +183,14 @@ pub async fn start_turn_with_params(
         Err(resp) => return resp,
     };
 
-    if let Some(context) = request_context.as_ref() {
-        let runtime_adapter = Arc::clone(runtime_adapter);
-        let session_id = session_id.clone();
-        let install = context
-            .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime_adapter = Arc::clone(&runtime_adapter);
-                let session_id = session_id.clone();
-                async move {
-                    let _ = runtime_adapter
-                        .hard_cancel_current_run(&session_id, "RPC request cancelled")
-                        .await;
-                }
-            }))
-            .await;
-        if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            return RpcResponse::error(
-                id,
-                error::REQUEST_CANCELLED,
-                "request cancelled before start",
-            );
-        }
+    if let Some(context) = request_context.as_ref()
+        && context.cancel_already_requested()
+    {
+        return RpcResponse::error(
+            id,
+            error::REQUEST_CANCELLED,
+            "request cancelled before start",
+        );
     }
 
     // Set up MCP lifecycle event forwarding. Agent execution events flow
@@ -242,7 +229,7 @@ pub async fn start_turn_with_params(
     };
 
     let result = match runtime
-        .start_turn_via_runtime(
+        .start_turn_via_runtime_with_request_context(
             &session_id,
             params.prompt,
             params.injected_context.unwrap_or_default(),
@@ -255,6 +242,7 @@ pub async fn start_turn_with_params(
             } else {
                 Some(overrides)
             },
+            request_context,
         )
         .await
     {

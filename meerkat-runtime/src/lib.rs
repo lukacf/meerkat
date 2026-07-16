@@ -62,6 +62,8 @@ pub mod input_state;
 pub mod interrupt_public_result;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
+pub mod member_live;
+pub mod member_observation;
 pub mod mob_adapter;
 pub mod mob_operator_authority;
 pub mod ops_lifecycle;
@@ -97,14 +99,145 @@ use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata as RuntimeStampe
 use std::any::Any;
 use std::sync::Arc;
 
-struct SessionRuntimeBindingsAuthority;
-
-pub(crate) fn session_runtime_bindings_authority() -> Arc<dyn Any + Send + Sync> {
-    Arc::new(SessionRuntimeBindingsAuthority)
+pub(crate) struct SessionRuntimeBindingsAuthority {
+    pub(crate) session_id: meerkat_core::SessionId,
+    pub(crate) epoch_id: meerkat_core::RuntimeEpochId,
+    pub(crate) dsl_authority: Arc<std::sync::Mutex<meerkat_machine::dsl::MeerkatMachineAuthority>>,
+    pub(crate) teardown_gate: Arc<handles::HandleTeardownGate>,
+    pub(crate) materialization_claim_id: Option<uuid::Uuid>,
+    pub(crate) materialization_claim_state:
+        Arc<std::sync::Mutex<RuntimeActorMaterializationClaimState>>,
+    /// Compatibility capability for cloneable `prepare_bindings()` results.
+    /// It is minted only while the registration is unattached and does not
+    /// itself reserve the exact materialization claim. `begin_*` atomically
+    /// converts it into a one-shot claim if the window is still vacant.
+    pub(crate) legacy_actor_materialization_generation: Option<u64>,
+    pub(crate) release_materialization_claim_on_drop: bool,
 }
 
-pub(crate) fn local_session_runtime_bindings_authority() -> Arc<dyn Any + Send + Sync> {
-    session_runtime_bindings_authority()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeActorMaterializationClaimPhase {
+    Vacant,
+    Prepared,
+    Staged,
+    ActorCreating,
+    ActorMaterializedPendingCommit,
+    RetainedActor,
+    Aborting,
+}
+
+pub(crate) struct RuntimeActorMaterializationClaimState {
+    pub(crate) current: Option<uuid::Uuid>,
+    pub(crate) phase: RuntimeActorMaterializationClaimPhase,
+    /// True only when this registry entry was inserted by a unique,
+    /// rollback-owning actor materialization that has not yet attached an
+    /// executor. A successor unique prepare inherits this exact rollback
+    /// authority; cloneable compatibility bindings and pre-existing committed
+    /// registrations never gain it.
+    pub(crate) rollback_registration_available: bool,
+    /// Monotonic incarnation of the cloneable compatibility binding window.
+    /// Executor attachment increments this under the same mutex as the claim
+    /// phase, permanently fencing bindings that escaped an older window.
+    pub(crate) legacy_capability_generation: u64,
+    pub(crate) changed: Arc<crate::tokio::sync::Notify>,
+}
+
+impl RuntimeActorMaterializationClaimState {
+    pub(crate) fn new(rollback_registration_available: bool) -> Self {
+        Self {
+            current: None,
+            phase: RuntimeActorMaterializationClaimPhase::Vacant,
+            rollback_registration_available,
+            legacy_capability_generation: 0,
+            changed: Arc::new(crate::tokio::sync::Notify::new()),
+        }
+    }
+
+    pub(crate) fn exact_claim_is(
+        &self,
+        claim_id: uuid::Uuid,
+        phases: &[RuntimeActorMaterializationClaimPhase],
+    ) -> bool {
+        self.current == Some(claim_id) && phases.contains(&self.phase)
+    }
+}
+
+impl Drop for SessionRuntimeBindingsAuthority {
+    fn drop(&mut self) {
+        if !self.release_materialization_claim_on_drop {
+            return;
+        }
+        let Some(claim_id) = self.materialization_claim_id else {
+            return;
+        };
+        let changed = {
+            let mut state = self
+                .materialization_claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !state.exact_claim_is(
+                claim_id,
+                &[
+                    RuntimeActorMaterializationClaimPhase::Prepared,
+                    RuntimeActorMaterializationClaimPhase::Staged,
+                ],
+            ) {
+                return;
+            }
+            state.current = None;
+            state.phase = RuntimeActorMaterializationClaimPhase::Vacant;
+            Arc::clone(&state.changed)
+        };
+        changed.notify_waiters();
+    }
+}
+
+// Constructor mirrors the opaque session-binding authority payload exactly;
+// keeping each carrier explicit prevents partial or reordered minting.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn session_runtime_bindings_authority(
+    session_id: meerkat_core::SessionId,
+    epoch_id: meerkat_core::RuntimeEpochId,
+    dsl_authority: Arc<std::sync::Mutex<meerkat_machine::dsl::MeerkatMachineAuthority>>,
+    teardown_gate: Arc<handles::HandleTeardownGate>,
+    materialization_claim_id: Option<uuid::Uuid>,
+    materialization_claim_state: Arc<std::sync::Mutex<RuntimeActorMaterializationClaimState>>,
+    legacy_actor_materialization_generation: Option<u64>,
+    release_materialization_claim_on_drop: bool,
+) -> Arc<dyn Any + Send + Sync> {
+    Arc::new(SessionRuntimeBindingsAuthority {
+        session_id,
+        epoch_id,
+        dsl_authority,
+        teardown_gate,
+        materialization_claim_id,
+        materialization_claim_state,
+        legacy_actor_materialization_generation,
+        release_materialization_claim_on_drop,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn local_session_runtime_bindings_authority(
+    session_id: meerkat_core::SessionId,
+    epoch_id: meerkat_core::RuntimeEpochId,
+    dsl_authority: Arc<std::sync::Mutex<meerkat_machine::dsl::MeerkatMachineAuthority>>,
+    teardown_gate: Arc<handles::HandleTeardownGate>,
+    materialization_claim_id: Option<uuid::Uuid>,
+    materialization_claim_state: Arc<std::sync::Mutex<RuntimeActorMaterializationClaimState>>,
+    legacy_actor_materialization_generation: Option<u64>,
+    release_materialization_claim_on_drop: bool,
+) -> Arc<dyn Any + Send + Sync> {
+    session_runtime_bindings_authority(
+        session_id,
+        epoch_id,
+        dsl_authority,
+        teardown_gate,
+        materialization_claim_id,
+        materialization_claim_state,
+        legacy_actor_materialization_generation,
+        release_materialization_claim_on_drop,
+    )
 }
 
 pub fn session_runtime_bindings_have_machine_authority(
@@ -113,6 +246,258 @@ pub fn session_runtime_bindings_have_machine_authority(
     bindings
         .__runtime_authority()
         .is::<SessionRuntimeBindingsAuthority>()
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeActorMaterializationError {
+    #[error("invalid runtime binding materialization authority: {0}")]
+    InvalidAuthority(String),
+    #[error("runtime binding registration no longer admits actor materialization")]
+    RegistrationClosed,
+}
+
+/// Exclusive actor-create permit for one exact prepared runtime binding.
+///
+/// The persistent session service acquires this immediately before it starts
+/// building the live actor. Dropping an uncommitted permit restores the prior
+/// prepared/staged phase; committing it records that the actor exists but is
+/// still owned by the surrounding materialization transaction until executor
+/// attachment or an explicit retained-actor commit.
+pub struct RuntimeActorMaterializationPermit {
+    claim_id: uuid::Uuid,
+    claim_state: Arc<std::sync::Mutex<RuntimeActorMaterializationClaimState>>,
+    session_id: meerkat_core::SessionId,
+    epoch_id: meerkat_core::RuntimeEpochId,
+    dsl_authority: Arc<std::sync::Mutex<meerkat_machine::dsl::MeerkatMachineAuthority>>,
+    teardown_gate: Arc<handles::HandleTeardownGate>,
+    previous_phase: RuntimeActorMaterializationClaimPhase,
+    transactional: bool,
+    phase_policy: RuntimeActorMaterializationPhasePolicy,
+    _mutation_guard: Option<crate::tokio::sync::OwnedMutexGuard<()>>,
+    committed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeActorMaterializationPhasePolicy {
+    RejectRetired,
+    RequireRetired,
+}
+
+impl RuntimeActorMaterializationPermit {
+    pub fn commit(mut self) -> Result<(), RuntimeActorMaterializationError> {
+        let generated_authority = self
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        validate_materialization_registration_authority(
+            &self.session_id,
+            &self.epoch_id,
+            &self.teardown_gate,
+            &generated_authority,
+            self.phase_policy,
+        )?;
+        let mut state = self
+            .claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.exact_claim_is(
+            self.claim_id,
+            &[RuntimeActorMaterializationClaimPhase::ActorCreating],
+        ) {
+            return Err(RuntimeActorMaterializationError::RegistrationClosed);
+        }
+        let changed = if self.transactional {
+            state.phase = RuntimeActorMaterializationClaimPhase::ActorMaterializedPendingCommit;
+            None
+        } else {
+            state.current = None;
+            state.phase = RuntimeActorMaterializationClaimPhase::RetainedActor;
+            state.rollback_registration_available = false;
+            Some(Arc::clone(&state.changed))
+        };
+        self.committed = true;
+        drop(state);
+        if let Some(changed) = changed {
+            changed.notify_waiters();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RuntimeActorMaterializationPermit {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut state = self
+            .claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.exact_claim_is(
+            self.claim_id,
+            &[RuntimeActorMaterializationClaimPhase::ActorCreating],
+        ) {
+            if self.transactional {
+                state.phase = self.previous_phase;
+            } else {
+                state.current = None;
+                state.phase = RuntimeActorMaterializationClaimPhase::Vacant;
+                Arc::clone(&state.changed).notify_waiters();
+            }
+        }
+    }
+}
+
+fn validated_session_runtime_bindings_authority(
+    bindings: &meerkat_core::SessionRuntimeBindings,
+) -> Result<&SessionRuntimeBindingsAuthority, RuntimeActorMaterializationError> {
+    let authority = bindings
+        .__runtime_authority()
+        .downcast_ref::<SessionRuntimeBindingsAuthority>()
+        .ok_or_else(|| {
+            RuntimeActorMaterializationError::InvalidAuthority(
+                "session runtime bindings lack MeerkatMachine authority".to_string(),
+            )
+        })?;
+    if bindings.session_id() != &authority.session_id || bindings.epoch_id() != &authority.epoch_id
+    {
+        return Err(RuntimeActorMaterializationError::InvalidAuthority(
+            "session runtime binding identity does not match its machine authority".into(),
+        ));
+    }
+    Ok(authority)
+}
+
+fn validate_materialization_registration_authority(
+    session_id: &meerkat_core::SessionId,
+    epoch_id: &meerkat_core::RuntimeEpochId,
+    teardown_gate: &Arc<handles::HandleTeardownGate>,
+    generated_authority: &meerkat_machine::dsl::MeerkatMachineAuthority,
+    phase_policy: RuntimeActorMaterializationPhasePolicy,
+) -> Result<(), RuntimeActorMaterializationError> {
+    let state = generated_authority.state();
+    let expected_session_id = meerkat_machine::dsl::SessionId::from_domain(session_id);
+    let expected_epoch_id = meerkat_machine::dsl::RuntimeEpochId::from_domain(epoch_id);
+    let runtime_phase =
+        meerkat_machine::dsl_authority::runtime_phase_from_authority(generated_authority);
+    if !teardown_gate.is_open()
+        || state.session_id.as_ref() != Some(&expected_session_id)
+        || state.registration_phase == meerkat_machine::dsl::RegistrationPhase::Draining
+        || matches!(
+            runtime_phase,
+            crate::runtime_state::RuntimeState::Stopped
+                | crate::runtime_state::RuntimeState::Destroyed
+        )
+        || match phase_policy {
+            RuntimeActorMaterializationPhasePolicy::RejectRetired => {
+                runtime_phase == crate::runtime_state::RuntimeState::Retired
+            }
+            RuntimeActorMaterializationPhasePolicy::RequireRetired => {
+                runtime_phase != crate::runtime_state::RuntimeState::Retired
+            }
+        }
+        || state
+            .active_runtime_epoch_id
+            .as_ref()
+            .is_some_and(|epoch_id| epoch_id != &expected_epoch_id)
+    {
+        return Err(RuntimeActorMaterializationError::RegistrationClosed);
+    }
+    Ok(())
+}
+
+/// Begin exclusive construction of the live actor for an exact prepared
+/// binding. This is the cancellation-safe successor to the read-only validator.
+pub fn begin_session_runtime_actor_materialization(
+    bindings: &meerkat_core::SessionRuntimeBindings,
+) -> Result<RuntimeActorMaterializationPermit, RuntimeActorMaterializationError> {
+    begin_session_runtime_actor_materialization_with_phase_policy(
+        bindings,
+        RuntimeActorMaterializationPhasePolicy::RejectRetired,
+        None,
+    )
+}
+
+/// Begin actor construction for the exact machine-authorized
+/// Archived+Retired revival midpoint.
+///
+/// The public archived-resume service path remains closed; only a caller that
+/// already holds MeerkatMachine's session-control capability may construct the
+/// temporary live actor that the same revival transaction will promote to
+/// Active+Idle before executor attachment.
+pub async fn begin_session_runtime_actor_materialization_for_archived_resume(
+    bindings: &meerkat_core::SessionRuntimeBindings,
+    authorization: crate::meerkat_machine::ArchivedSessionActorMaterializationAuthorization,
+) -> Result<RuntimeActorMaterializationPermit, RuntimeActorMaterializationError> {
+    authorization.begin(bindings).await
+}
+
+fn begin_session_runtime_actor_materialization_with_phase_policy(
+    bindings: &meerkat_core::SessionRuntimeBindings,
+    phase_policy: RuntimeActorMaterializationPhasePolicy,
+    mutation_guard: Option<crate::tokio::sync::OwnedMutexGuard<()>>,
+) -> Result<RuntimeActorMaterializationPermit, RuntimeActorMaterializationError> {
+    let authority = validated_session_runtime_bindings_authority(bindings)?;
+    let generated_authority = authority
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    validate_materialization_registration_authority(
+        &authority.session_id,
+        &authority.epoch_id,
+        &authority.teardown_gate,
+        &generated_authority,
+        phase_policy,
+    )?;
+    let (claim_id, previous_phase, transactional) = {
+        let mut state = authority
+            .materialization_claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(claim_id) = authority.materialization_claim_id {
+            if !state.exact_claim_is(
+                claim_id,
+                &[
+                    RuntimeActorMaterializationClaimPhase::Prepared,
+                    RuntimeActorMaterializationClaimPhase::Staged,
+                ],
+            ) {
+                return Err(RuntimeActorMaterializationError::RegistrationClosed);
+            }
+            let previous = state.phase;
+            state.phase = RuntimeActorMaterializationClaimPhase::ActorCreating;
+            (claim_id, previous, true)
+        } else if authority.legacy_actor_materialization_generation
+            == Some(state.legacy_capability_generation)
+            && state.current.is_none()
+            && state.phase == RuntimeActorMaterializationClaimPhase::Vacant
+        {
+            let claim_id = uuid::Uuid::new_v4();
+            state.current = Some(claim_id);
+            state.phase = RuntimeActorMaterializationClaimPhase::ActorCreating;
+            (
+                claim_id,
+                RuntimeActorMaterializationClaimPhase::Vacant,
+                false,
+            )
+        } else {
+            return Err(RuntimeActorMaterializationError::RegistrationClosed);
+        }
+    };
+    drop(generated_authority);
+    Ok(RuntimeActorMaterializationPermit {
+        claim_id,
+        claim_state: Arc::clone(&authority.materialization_claim_state),
+        session_id: authority.session_id.clone(),
+        epoch_id: authority.epoch_id.clone(),
+        dsl_authority: Arc::clone(&authority.dsl_authority),
+        teardown_gate: Arc::clone(&authority.teardown_gate),
+        previous_phase,
+        transactional,
+        phase_policy,
+        _mutation_guard: mutation_guard,
+        committed: false,
+    })
 }
 
 // Re-exports for convenience
@@ -151,9 +536,17 @@ pub use input_state::{
 };
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{
-    CommsDrainMode, CommsDrainPhase, DrainExitReason, MachineSessionControlAuthority,
-    MeerkatConsumerSurface, MeerkatMachine, PeerIngressOwner, RuntimeBindingsError,
-    RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan, StandaloneSessionRuntimeAuthorities,
+    ArchivedSessionActorMaterializationAuthorization,
+    CommittedRuntimeExecutorAttachmentPublicationLease, CommsDrainMode, CommsDrainPhase,
+    DrainExitReason, EnsureRuntimeExecutorAttachment, LocalSessionMaterializationMode,
+    MachineServiceTurnCommitLease, MachineServiceTurnIdentity, MachineSessionArchiveLease,
+    MachineSessionControlAuthority, MeerkatConsumerSurface, MeerkatMachine, PeerIngressOwner,
+    PendingRuntimeExecutorAttachment, PreparedArchivedResumeCommitLease,
+    PreparedAttachedSessionActorRecovery, PreparedRuntimeExecutorAttachmentRetirement,
+    PreparedSessionMaterialization, PromotedArchivedResumeCommitLease, RuntimeBindingsError,
+    RuntimeCleanupTaskSpawner, RuntimeExecutorAttachmentRetirementCompletion,
+    RuntimeExecutorAttachmentWitness, RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan,
+    RuntimeSessionRegistrationWitness, StandaloneSessionRuntimeAuthorities,
     classify_runtime_lifecycle_state, classify_runtime_loop_queue_admission,
     standalone_session_runtime_authorities, standalone_tool_visibility_owner,
 };
@@ -173,13 +566,16 @@ pub use meerkat_machine_types::{
     MeerkatMachineFieldlessRuntimeInternalInput, MeerkatMachineRuntimeInternalClassificationRecord,
     MeerkatMachineRuntimeInternalInput, MeerkatMachineRuntimeInternalReason,
     MeerkatMachineShellMechanicReason, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
-    canonical_meerkat_machine_command_classifications,
+    OffDrainResponder, SupervisorBridgeCommandAdmissionRoute,
+    SupervisorBridgeCommandClassificationRecord, SupervisorBridgeCommandKind,
+    SupervisorBridgeCommandRealization, canonical_meerkat_machine_command_classifications,
     canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,
     canonical_meerkat_machine_runtime_internal_classifications,
     canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest,
     canonical_meerkat_machine_runtime_internal_input_variant_manifest,
     canonical_meerkat_machine_runtime_internal_manifest,
+    canonical_supervisor_bridge_command_classifications,
 };
 pub use ops_lifecycle::{
     OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,
@@ -249,7 +645,8 @@ pub fn test_peer_input_candidate_from_interaction(
         from_peer: interaction.from.clone(),
         from_peer_id: peer_id,
         kind: match &interaction.content {
-            InteractionContent::Message { body, .. } => {
+            InteractionContent::Message { body, .. }
+            | InteractionContent::IncarnationFencedMessage { body, .. } => {
                 PeerIngressEnvelopeKind::Message { body: body.clone() }
             }
             InteractionContent::Request { intent, params, .. } => {
@@ -280,7 +677,10 @@ pub fn test_peer_input_candidate_from_interaction(
         .expect("generated envelope classification should echo the canonical sender peer id");
     let classification = admission.classification;
     let convention = match &interaction.content {
-        InteractionContent::Message { .. } => meerkat_core::PeerIngressConvention::Message,
+        InteractionContent::Message { .. }
+        | InteractionContent::IncarnationFencedMessage { .. } => {
+            meerkat_core::PeerIngressConvention::Message
+        }
         InteractionContent::Request { intent, .. } => {
             if let Some(kind) = classification.lifecycle_kind {
                 let peer = admission

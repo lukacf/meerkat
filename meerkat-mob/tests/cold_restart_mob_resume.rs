@@ -152,7 +152,14 @@ fn mob_definition(lead_mode: MobRuntimeMode) -> MobDefinition {
         })),
     );
 
-    let mut definition = MobDefinition::explicit(MobId::from("restart-mob"));
+    // Every test in this binary runs in the process-global default inproc
+    // namespace. Give each cold-restart scenario a distinct canonical comms
+    // name so parallel test execution cannot evict another scenario's live
+    // pubkey under `restart-mob/{profile}/{identity}`.
+    let mut definition = MobDefinition::explicit(MobId::from(format!(
+        "restart-mob-{}",
+        meerkat_core::time_compat::new_uuid_v7()
+    )));
     definition.orchestrator = Some(OrchestratorConfig {
         profile: ProfileName::from("lead"),
     });
@@ -293,7 +300,9 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     // ---------------- Lifetime 1 ----------------
     let (service_1, _store_1) = persistent_service(&paths, runtime_store_1.clone());
     let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
-    let handle_1 = MobBuilder::new(mob_definition(lead_mode), storage_1)
+    let definition = mob_definition(lead_mode);
+    let lead_comms_name = format!("{}/lead/lead-1", definition.id);
+    let handle_1 = MobBuilder::new(definition, storage_1)
         .with_session_service(service_1.clone())
         .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
         .create()
@@ -367,7 +376,7 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     send_peer_message_direct(
         service_1.as_ref(),
         &w1_sid,
-        "restart-mob/lead/lead-1",
+        &lead_comms_name,
         "PEER_TOKEN_GAMMA: moose",
     )
     .await;
@@ -503,7 +512,7 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     send_peer_message_direct(
         service_2.as_ref(),
         &w1_sid,
-        "restart-mob/lead/lead-1",
+        &lead_comms_name,
         "PEER_TOKEN_ZETA: otter",
     )
     .await;
@@ -806,7 +815,10 @@ async fn mob_cold_restart_partial_resume_respawns_wired_member() {
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
     let (service_1, store_1) = persistent_service(&paths, runtime_store_1);
     let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
-    let handle_1 = MobBuilder::new(mob_definition(MobRuntimeMode::TurnDriven), storage_1)
+    let definition = mob_definition(MobRuntimeMode::TurnDriven);
+    let replacement_w2_comms_name = format!("{}/worker/w-2", definition.id);
+    let lead_comms_name = format!("{}/lead/lead-1", definition.id);
+    let handle_1 = MobBuilder::new(definition, storage_1)
         .with_session_service(service_1.clone())
         .with_default_llm_client(Arc::new(meerkat_client::TestClient::default()))
         .create()
@@ -917,7 +929,8 @@ async fn mob_cold_restart_partial_resume_respawns_wired_member() {
     );
     assert!(
         lead_peers_after_repair.iter().any(|peer| {
-            peer.peer_id == new_w2_peer_id && peer.name.as_str() == "restart-mob/worker/w-2"
+            peer.peer_id == new_w2_peer_id
+                && peer.name.as_str() == replacement_w2_comms_name.as_str()
         }),
         "lead must trust the exact replacement w2 endpoint"
     );
@@ -926,7 +939,7 @@ async fn mob_cold_restart_partial_resume_respawns_wired_member() {
             .peers()
             .await
             .iter()
-            .any(|peer| peer.name.as_str() == "restart-mob/lead/lead-1"),
+            .any(|peer| peer.name.as_str() == lead_comms_name.as_str()),
         "replacement w2 must trust the resumed lead"
     );
 
@@ -1239,8 +1252,7 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
-        commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         if self.is_cut() {
             return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
@@ -1249,7 +1261,7 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
             ));
         }
         self.inner
-            .commit_unregister_finalization(runtime_id, commit, input_states)
+            .commit_unregister_finalization(runtime_id, finalization)
             .await
     }
 
@@ -1265,6 +1277,28 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         }
         meerkat_runtime::RuntimeStore::persist_ops_lifecycle(&self.inner, runtime_id, snapshot)
             .await
+    }
+
+    async fn initialize_ops_lifecycle_if_absent(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        candidate: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+    ) -> Result<
+        meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        if self.is_cut() {
+            return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                "power cut (initialize_ops_lifecycle_if_absent): durable runtime-store write lost"
+                    .to_string(),
+            ));
+        }
+        meerkat_runtime::RuntimeStore::initialize_ops_lifecycle_if_absent(
+            &self.inner,
+            runtime_id,
+            candidate,
+        )
+        .await
     }
 
     async fn load_ops_lifecycle(

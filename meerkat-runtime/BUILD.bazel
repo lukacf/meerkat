@@ -43,6 +43,7 @@ rust_library(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -88,6 +89,7 @@ rust_library(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -151,6 +153,7 @@ rust_library(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -198,6 +201,7 @@ rust_library(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -251,6 +255,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -316,6 +321,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/auth_reauth_notice.rs",
@@ -385,6 +391,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/composition_dispatch_is_the_path.rs",
@@ -453,6 +460,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/composition_driver_contract.rs",
@@ -521,6 +529,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/control_plane_contract.rs",
@@ -589,6 +598,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/core_apply_terminal_truth.rs",
@@ -663,6 +673,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/detached_wake_contract.rs",
@@ -729,6 +740,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/driver_ephemeral.rs",
@@ -795,6 +807,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/driver_persistent.rs",
@@ -861,6 +874,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/handles_dispatch_through_dispatcher.rs",
@@ -932,6 +946,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/meerkat_machine.rs",
@@ -998,6 +1013,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/ops_lifecycle_contract.rs",
@@ -1064,6 +1080,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/ops_lifecycle_persistence.rs",
@@ -1130,6 +1147,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/peer_handling_mode_contract.rs",
@@ -1196,6 +1214,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/peer_ingress_fact_ratchet.rs",
@@ -1266,6 +1285,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/peer_interaction_dsl.rs",
@@ -1332,6 +1352,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/peer_projection_dsl.rs",
@@ -1398,6 +1419,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/peer_projection_producer_wiring.rs",
@@ -1466,6 +1488,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/recovery_contract.rs",
@@ -1532,6 +1555,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/recovery_replay.rs",
@@ -1598,6 +1622,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/regression_comms_runtime.rs",
@@ -1666,6 +1691,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/runtime_bindings_contract.rs",
@@ -1732,6 +1758,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/runtime_ingress_control.rs",
@@ -1748,6 +1775,75 @@ rust_test(
     ],
     size = "small",
     data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-derive:meerkat_machine_derive",
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-runtime",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-live:meerkat_live",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-runtime:meerkat_runtime_test_support",
+        "//meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "runtime_terminal_publication_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "runtime_terminal_publication_contract",
+    crate_root = "tests/runtime_terminal_publication_contract.rs",
+    crate_features = [
+        "live",
+        "sqlite-store",
+        "test-support",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "src/comms_drain.rs",
+        "src/handles/peer_comms.rs",
+        "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
+    ],
+    srcs = [
+        "tests/runtime_terminal_publication_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.7.31",
+        "CARGO_BIN_NAME": "runtime_terminal_publication_contract",
+        "CARGO_MANIFEST_DIR": "./meerkat-runtime",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "16777216",
     },
@@ -1798,6 +1894,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/trust_reconcile_add_failure.rs",
@@ -1867,6 +1964,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/trust_reconcile_concurrency.rs",
@@ -1936,6 +2034,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/turn_content_shape_contract.rs",
@@ -2004,6 +2103,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/turn_metadata_single_construction_site.rs",
@@ -2072,6 +2172,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/mod.rs",
+        "tests/fixtures/stored_input_state_v3.json",
     ],
     srcs = [
         "tests/unregister_drain_contract.rs",
@@ -2142,6 +2243,7 @@ test_suite(
         ":regression_comms_runtime_test",
         ":runtime_bindings_contract_test",
         ":runtime_ingress_control_test",
+        ":runtime_terminal_publication_contract_test",
         ":trust_reconcile_add_failure_test",
         ":trust_reconcile_concurrency_test",
         ":turn_content_shape_contract_test",

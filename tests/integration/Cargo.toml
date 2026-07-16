@@ -7,11 +7,20 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-meerkat.workspace = true
+meerkat = { workspace = true, features = [
+    # Phase 6b member-live rows: the live pipeline + the ADJ-P6B-4 scripted
+    # realtime fixtures (facade-owned; `fixtures::realtime` is the thin shim).
+    "session-store",
+    "memory-store",
+    "live",
+    "test-realtime-fixtures",
+] }
 meerkat-client.workspace = true
 meerkat-comms.workspace = true
 meerkat-providers.workspace = true
+meerkat-contracts.workspace = true
 meerkat-core.workspace = true
+meerkat-live = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
 meerkat-machine-schema.workspace = true
@@ -25,9 +34,13 @@ meerkat-rpc = { workspace = true, features = [
     "schedule",
     "workgraph",
 ] }
-meerkat-runtime.workspace = true
+# test-support: the shared multi-host fixture (meerkat-mob/tests/support,
+# consumed via #[path] from tests/e2e_fast/multi_host_bind.rs) composes external
+# comms targets with MeerkatMachine::test_install_session_peer_comms_handle_on_runtime.
+meerkat-runtime = { workspace = true, features = ["test-support"] }
 meerkat-session.workspace = true
-meerkat-store = { workspace = true, features = ["memory", "sqlite"] }
+# jsonl: the shared multi-host fixture's persistent session service.
+meerkat-store = { workspace = true, features = ["memory", "sqlite", "jsonl"] }
 meerkat-tools.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
@@ -39,6 +52,11 @@ uuid = { workspace = true, features = ["v4"] }
 
 [features]
 integration-real-tests = []
+# The shared multi-host fixture is path-included into this package as well as
+# `meerkat-mob`'s own integration tests. Declare the same feature name here so
+# its crash-only helpers remain cfg-valid in both crate contexts; all-feature
+# validation also forwards the feature to the dependency that owns the seam.
+test-support = ["meerkat-mob/test-support"]
 
 [[test]]
 name = "live_mob_tools"
@@ -74,3 +92,6 @@ base64.workspace = true
 sha2.workspace = true
 axum.workspace = true
 meerkat-auth-core = { workspace = true, features = ["gcp-auth"] }
+# The e2e-fast multi-host beat #[path]-includes meerkat-mob/tests/support,
+# whose fixture installs an env-gated tracing subscriber.
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

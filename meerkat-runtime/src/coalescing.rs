@@ -143,6 +143,7 @@ mod tests {
     #[test]
     fn response_progress_is_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,
@@ -173,6 +174,7 @@ mod tests {
     #[test]
     fn peer_message_not_coalescing_eligible() {
         let input = Input::Peer(PeerInput {
+            directed_interaction_id: None,
             objective_id: None,
             injected_context: Vec::new(),
             sender_taint: None,

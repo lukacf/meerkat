@@ -310,7 +310,6 @@ Spawn defaults matter:
 | `runtime_mode` | `autonomous_host` |
 | `launch_mode` | fresh member |
 | `tool_access_policy` | inherit |
-| `budget_split_policy` | equal |
 | `auto_wire_parent` | surface-dependent helper behavior |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
@@ -559,13 +558,93 @@ uses the persisted operation ID and resumes observation. See
 [Delivery, Interaction, and Durable Operations](/architecture/delivery-interaction-operations)
 for the protocol boundary and recovery semantics.
 
+## Multi-Host Placement
+
+Use a member-host daemon when the controlling mob should place and supervise
+members on another machine. The daemon uses its own restart-stable realm,
+ideally a dedicated realm or context root; realms are not distributed and do
+not need to match the controller's realm. `--isolated` is rejected because it
+would select a new throwaway realm on every restart and lose the daemon's
+durable member-host state.
+
+```bash
+# On the member host. The descriptor is mode 0600 and its bootstrap token is
+# single-use.
+rkat --realm worker-west-host mob host \
+  --listen-tcp 0.0.0.0:4300 \
+  --advertise-tcp tcp://worker-west.example.com:4300 \
+  --allow-remote \
+  --descriptor-out ./worker-west.host.json
+
+# On the controlling host.
+rkat --realm team-alpha mob bind-host release-triage \
+  --descriptor ./worker-west.host.json
+rkat --realm team-alpha mob hosts release-triage --json
+```
+
+Mixed local/placed edges also need a reverse lane on the controlling process,
+so member hosts can deliver to members that remain local. Configure this in
+the controlling realm's effective configuration:
+
+```toml
+[mob_host]
+listen_tcp = "0.0.0.0:4301"
+advertise_tcp = "tcp://controller.example.com:4301"
+```
+
+`advertise_tcp` must be dialable from every member host. Without an explicit
+controller endpoint, mixed-host route installation remains pending and fails
+closed rather than publishing a process-local address.
+
+The descriptor handoff above does not require network pairing. If you enable
+the host's pairing branch, provide its runtime-only secret through
+`--pairing-password-env <ENV>` or `--pairing-password-file <PATH>` so it stays
+out of process arguments. These options conflict with each other and with the
+compatibility-only `--pairing-password <PASSWORD>` form. The secret is never
+written to `[mob_host]` configuration and must be at least 32 bytes.
+
+The bind report's host id is the `placement` value for `mob/spawn` and
+`mob/spawn_many`. Omitting `placement` keeps the member local:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "mob/spawn",
+  "params": {
+    "mob_id": "release-triage",
+    "profile": "analyst",
+    "agent_identity": "west-analyst-1",
+    "placement": "<HOST_ID>"
+  }
+}
+```
+
+Use `mob/hosts`, `mob/route_installs`, and `mob/member_history` (or the
+matching CLI commands) for placement diagnostics. Python and TypeScript expose
+the full typed RPC family. REST and public MCP intentionally expose the three
+read-only observations, while host binding, grants, hard cancel, and member
+live control remain outside REST and public MCP. Host binding, grants, and
+member live control also have explicit CLI verbs; hard cancel is RPC/SDK-only
+(`rkat mob force-cancel` is the distinct cooperative boundary cancel).
+Browser/WASM mobs remain single-host and reject non-local placement through
+their typed capability boundary.
+
+Embedded and explicitly delegated non-owner console principals need control
+scopes. Stock v1 RPC, REST, stdio, MCP, and CLI entrypoints mint the owning
+console principal; manage narrower delegated principals with `rkat mob grant`,
+`rkat mob revoke-grant`, and `rkat mob grants`. Scope denials and
+host/cursor/fence failures are typed consistently across console surfaces.
+
 ## External Members
 
 Most members are normal session-backed agents. External members are advanced:
 they require an external runtime binding with a concrete address and trusted
 peer identity so the orchestrator can route supervisor bridge traffic to the
-right process. For a remote `rkat` process, start it with the signed comms
-listener and write the binding file:
+right process. This binds one already-running external member; for a managed
+host that can materialize multiple placed members, use the member-host flow
+above. For a remote `rkat` process, start it with the signed comms listener and
+write the binding file:
 
 ```bash
 rkat run \

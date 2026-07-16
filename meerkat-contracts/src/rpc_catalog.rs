@@ -882,6 +882,89 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobStreamCloseParams",
                 "MobStreamCloseResult",
             ),
+            RpcMethodDescriptor::typed(
+                "mob/grant_scopes",
+                "Record (full-replace) a principal's control-scope grant",
+                "MobGrantScopesParams",
+                "MobGrantScopesResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/revoke_scopes",
+                "Revoke control scopes from a principal's grant (omit scopes to revoke the entire grant)",
+                "MobRevokeScopesParams",
+                "MobRevokeScopesResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/grants",
+                "List raw control-scope grant records (expired rows appear verbatim)",
+                "MobIdParams",
+                "MobGrantsResult",
+            ),
+            // Phase 7 (§17 SD-3, DEC-P7A-1): the multi-host console verbs.
+            // All ride `mob_enabled` — multi-host is not a build feature;
+            // runtime unavailability answers typed, never as a catalog hole.
+            RpcMethodDescriptor::typed(
+                "mob/member_history",
+                "Read a mob member transcript page by identity (one shape local and remote)",
+                "MobMemberHistoryParams",
+                "MobMemberHistoryResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/hosts",
+                "List tracked member hosts with bind phase and declared capabilities",
+                "MobIdParams",
+                "MobHostsResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/route_installs",
+                "Outstanding cross-host route-install obligations",
+                "MobIdParams",
+                "MobRouteInstallsResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/bind_host",
+                "Bind a member-host daemon to a mob from its binding descriptor",
+                "MobBindHostParams",
+                "MobBindHostResult",
+            )
+            .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
+            RpcMethodDescriptor::typed(
+                "mob/revoke_host",
+                "Revoke a bound (or bind-requested) member host",
+                "MobRevokeHostParams",
+                "MobRevokeHostResult",
+            )
+            .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
+            RpcMethodDescriptor::typed(
+                "mob/hard_cancel_member",
+                "Hard-cancel a mob member (immediate user-interrupt authority)",
+                "MobHardCancelParams",
+                "MobHardCancelResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/member_live_open",
+                "Open a live realtime channel on a mob member by identity",
+                "MobMemberLiveOpenParams",
+                "LiveOpenResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/member_live_close",
+                "Close one named live channel on a mob member",
+                "MobMemberLiveChannelParams",
+                "LiveCloseResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/member_live_status",
+                "Read live channel status for a mob member (omit channel_id to discover)",
+                "MobMemberLiveStatusParams",
+                "LiveStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/member_live_control",
+                "Drive one turn-level live control verb on a member channel",
+                "MobMemberLiveControlParams",
+                "BridgeLiveControlOutcome",
+            ),
         ]);
     }
 
@@ -1058,6 +1141,25 @@ mod tests {
         assert_eq!(
             descriptor("mob/turn_start").request_lifecycle.resolve(None),
             RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        // DEC-P7A-3: host bind/revoke are remote ceremony over the bridge;
+        // the live family (and every other phase-7 verb) is an internally
+        // deadline-bounded point call (DEC-P7A-4).
+        assert_eq!(
+            descriptor("mob/bind_host").request_lifecycle.resolve(None),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            descriptor("mob/revoke_host")
+                .request_lifecycle
+                .resolve(None),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            descriptor("mob/member_live_open")
+                .request_lifecycle
+                .resolve(None),
+            RequestLifecycle::InlineObservation
         );
         assert_eq!(
             descriptor("session/create")
@@ -1565,6 +1667,63 @@ mod tests {
                 "mob/stream_close",
                 Some("MobStreamCloseParams"),
                 Some("MobStreamCloseResult"),
+            ),
+            (
+                "mob/grant_scopes",
+                Some("MobGrantScopesParams"),
+                Some("MobGrantScopesResult"),
+            ),
+            (
+                "mob/revoke_scopes",
+                Some("MobRevokeScopesParams"),
+                Some("MobRevokeScopesResult"),
+            ),
+            ("mob/grants", Some("MobIdParams"), Some("MobGrantsResult")),
+            (
+                "mob/member_history",
+                Some("MobMemberHistoryParams"),
+                Some("MobMemberHistoryResult"),
+            ),
+            ("mob/hosts", Some("MobIdParams"), Some("MobHostsResult")),
+            (
+                "mob/route_installs",
+                Some("MobIdParams"),
+                Some("MobRouteInstallsResult"),
+            ),
+            (
+                "mob/bind_host",
+                Some("MobBindHostParams"),
+                Some("MobBindHostResult"),
+            ),
+            (
+                "mob/revoke_host",
+                Some("MobRevokeHostParams"),
+                Some("MobRevokeHostResult"),
+            ),
+            (
+                "mob/hard_cancel_member",
+                Some("MobHardCancelParams"),
+                Some("MobHardCancelResult"),
+            ),
+            (
+                "mob/member_live_open",
+                Some("MobMemberLiveOpenParams"),
+                Some("LiveOpenResult"),
+            ),
+            (
+                "mob/member_live_close",
+                Some("MobMemberLiveChannelParams"),
+                Some("LiveCloseResult"),
+            ),
+            (
+                "mob/member_live_status",
+                Some("MobMemberLiveStatusParams"),
+                Some("LiveStatusResult"),
+            ),
+            (
+                "mob/member_live_control",
+                Some("MobMemberLiveControlParams"),
+                Some("BridgeLiveControlOutcome"),
             ),
         ] {
             let descriptor = methods

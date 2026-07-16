@@ -2246,6 +2246,7 @@ pub enum LiveOpenAdmissionRejection {
     #[default]
     AlreadyBound,
     ChannelAlreadyBound,
+    LifecycleClosed,
 }
 
 /// Typed public result class for `live/refresh` after the adapter command

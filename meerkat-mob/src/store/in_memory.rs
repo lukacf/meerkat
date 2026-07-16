@@ -2,15 +2,22 @@
 
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
-    ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
-    MobSpecStore, MobStoreError, SupervisorAuthorityDeletionAuthority,
-    SupervisorAuthorityPersistenceAuthority, SupervisorAuthorityRecord, private,
-    terminal_event_identity, validate_mob_event_write_authority,
+    BeginPlacedSpawnResult, CommitPlacedSpawnResult, DeletePlacedSpawnResult,
+    ExternalBindingOverlayRecord, MobEventStore, MobHostAuthorityDeletionAuthority,
+    MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobMemberEventCursorRecord,
+    MobMemberLiveCleanupRecord, MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin,
+    MobMemberOperatorRequestKey, MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
+    MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord,
+    MobPlacedSpawnBindingPromotionAuthority, MobPlacedSpawnCarrierRecord,
+    MobPlacedSpawnCleanupAuthority, MobPlacedSpawnCommitPersistenceAuthority,
+    MobPlacedSpawnPendingPersistenceAuthority, MobRunStore, MobRuntimeMetadataStore, MobSpecStore,
+    MobStoreError, PlacedSpawnCarrierPhase, PromotePlacedSpawnBindingResult,
+    SupervisorAuthorityDeletionAuthority, SupervisorAuthorityPersistenceAuthority,
+    SupervisorAuthorityRecord, private, step_failed_event_identity, terminal_event_identity,
+    validate_mob_event_write_authority,
 };
 use crate::definition::MobDefinition;
-#[cfg(any(test, feature = "test-support"))]
-use crate::event::MobEventKind;
-use crate::event::{MobEvent, NewMobEvent};
+use crate::event::{MobEvent, MobEventKind, NewMobEvent};
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
@@ -19,8 +26,8 @@ use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FlowAuthorityInputRecord, FrameSnapshot, LoopIterationLedgerEntry,
-    LoopSnapshot, MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
-    mob_machine_run_status_is_terminal,
+    LoopSnapshot, MobRun, MobRunProvenanceAuthority, MobRunRemoteTurnIntent,
+    MobRunRemoteTurnReceipt, MobRunStatus, StepLedgerEntry, mob_machine_run_status_is_terminal,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -30,7 +37,7 @@ use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{RwLock, broadcast};
 
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
@@ -89,6 +96,18 @@ pub struct InMemoryMobEventStore {
     fail_clear: AtomicBool,
     #[cfg(any(test, feature = "test-support"))]
     fail_member_retired_appends: AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_next_members_unwired_after_append: AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_next_members_unwired_before_append: AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    reconciliation_latest_cursor_failures_to_arm: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    reconciliation_poll_failures_to_arm: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    active_reconciliation_latest_cursor_failures: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    active_reconciliation_poll_failures: AtomicU64,
 }
 
 impl Default for InMemoryMobEventStore {
@@ -101,6 +120,18 @@ impl Default for InMemoryMobEventStore {
             fail_clear: AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             fail_member_retired_appends: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_next_members_unwired_after_append: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_next_members_unwired_before_append: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            reconciliation_latest_cursor_failures_to_arm: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            reconciliation_poll_failures_to_arm: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            active_reconciliation_latest_cursor_failures: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            active_reconciliation_poll_failures: AtomicU64::new(0),
         }
     }
 }
@@ -127,6 +158,63 @@ impl InMemoryMobEventStore {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_members_unwired_after_append(&self) {
+        self.fail_next_members_unwired_after_append
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_members_unwired_before_append(&self) {
+        self.fail_next_members_unwired_before_append
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Arm failures only after the next fault-injected MembersUnwired append
+    /// error. The operation's pre-mutation cursor-floor read remains healthy;
+    /// only the exact post-error reconciliation is affected.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_reconciliation_latest_cursor_reads_after_next_members_unwired_error(
+        &self,
+        failures: u64,
+    ) {
+        self.reconciliation_latest_cursor_failures_to_arm
+            .store(failures, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_reconciliation_poll_reads_after_next_members_unwired_error(&self, failures: u64) {
+        self.reconciliation_poll_failures_to_arm
+            .store(failures, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn arm_members_unwired_reconciliation_read_failures(&self) {
+        self.active_reconciliation_latest_cursor_failures.store(
+            self.reconciliation_latest_cursor_failures_to_arm
+                .swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.active_reconciliation_poll_failures.store(
+            self.reconciliation_poll_failures_to_arm
+                .swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn consume_read_failure(counter: &AtomicU64) -> bool {
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                if remaining > 0 {
+                    Some(remaining - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     fn forced_append_error(&self, event: &NewMobEvent) -> Option<MobStoreError> {
         if self.fail_member_retired_appends.load(Ordering::Relaxed)
             && matches!(event.kind, MobEventKind::MemberRetired { .. })
@@ -147,10 +235,20 @@ type ExternalBindingOverlayMap = BTreeMap<
     ExternalBindingOverlayRecord,
 >;
 
+type MemberOperatorRequestMap =
+    BTreeMap<(MobId, MobMemberOperatorRequestKey), MobMemberOperatorRequestRecord>;
+
 /// In-memory runtime metadata store for tests and ephemeral mobs.
 #[derive(Debug, Default)]
 pub struct InMemoryMobRuntimeMetadataStore {
     supervisor_records: Arc<RwLock<BTreeMap<MobId, SupervisorAuthorityRecord>>>,
+    host_authority_records: Arc<RwLock<BTreeMap<(MobId, String), MobHostAuthorityRecord>>>,
+    host_binding_generation_highwaters: Arc<RwLock<BTreeMap<(MobId, String), u64>>>,
+    member_operator_requests: Arc<RwLock<MemberOperatorRequestMap>>,
+    placed_spawns: Arc<RwLock<BTreeMap<(MobId, String), MobPlacedSpawnCarrierRecord>>>,
+    operator_grants: Arc<RwLock<BTreeMap<(MobId, String), MobOperatorGrantRecord>>>,
+    member_event_cursors: Arc<RwLock<BTreeMap<(MobId, String), MobMemberEventCursorRecord>>>,
+    member_live_cleanup_records: Arc<RwLock<BTreeMap<(MobId, String), MobMemberLiveCleanupRecord>>>,
     external_binding_overlays: Arc<RwLock<ExternalBindingOverlayMap>>,
 }
 
@@ -242,6 +340,558 @@ impl MobRuntimeMetadataStore for InMemoryMobRuntimeMetadataStore {
         Ok(true)
     }
 
+    async fn load_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        host_id: &str,
+    ) -> Result<Option<MobHostAuthorityRecord>, MobStoreError> {
+        Ok(self
+            .host_authority_records
+            .read()
+            .await
+            .get(&(mob_id.clone(), host_id.to_string()))
+            .cloned())
+    }
+
+    async fn list_mob_host_authorities(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobHostAuthorityRecord>, MobStoreError> {
+        Ok(self
+            .host_authority_records
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+
+    async fn put_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        record: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityPersistenceAuthority,
+    ) -> Result<(), MobStoreError> {
+        authority.verify_record(record)?;
+        self.host_authority_records
+            .write()
+            .await
+            .insert((mob_id.clone(), record.host_id.clone()), record.clone());
+        Ok(())
+    }
+
+    async fn put_mob_host_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityPersistenceAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_record(record)?;
+        let key = (mob_id.clone(), record.host_id.clone());
+        let mut guard = self.host_authority_records.write().await;
+        if guard.contains_key(&key) {
+            return Ok(false);
+        }
+        guard.insert(key, record.clone());
+        Ok(true)
+    }
+
+    async fn compare_and_put_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &MobHostAuthorityRecord,
+        record: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityPersistenceAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_record(record)?;
+        let key = (mob_id.clone(), record.host_id.clone());
+        let mut guard = self.host_authority_records.write().await;
+        if guard.get(&key) != Some(expected) {
+            return Ok(false);
+        }
+        guard.insert(key, record.clone());
+        Ok(true)
+    }
+
+    async fn delete_mob_host_authority(
+        &self,
+        mob_id: &MobId,
+        expected: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityDeletionAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_record(expected)?;
+        let key = (mob_id.clone(), expected.host_id.clone());
+        let mut guard = self.host_authority_records.write().await;
+        if guard.get(&key) != Some(expected) {
+            return Ok(false);
+        }
+        guard.remove(&key);
+        Ok(true)
+    }
+
+    async fn put_mob_host_binding_generation_highwater(
+        &self,
+        mob_id: &MobId,
+        expected: &MobHostAuthorityRecord,
+        authority: &MobHostAuthorityDeletionAuthority,
+    ) -> Result<(), MobStoreError> {
+        authority.verify_record(expected)?;
+        let mut guard = self.host_binding_generation_highwaters.write().await;
+        let highwater = guard
+            .entry((mob_id.clone(), expected.host_id.clone()))
+            .or_insert(0);
+        *highwater = (*highwater).max(expected.binding_generation);
+        Ok(())
+    }
+
+    async fn list_mob_host_binding_generation_highwaters(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<(String, u64)>, MobStoreError> {
+        Ok(self
+            .host_binding_generation_highwaters
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|((_, host_id), generation)| (host_id.clone(), *generation))
+            .collect())
+    }
+
+    async fn begin_member_operator_request(
+        &self,
+        mob_id: &MobId,
+        record: &MobMemberOperatorRequestRecord,
+    ) -> Result<MobMemberOperatorRequestBegin, MobStoreError> {
+        record.validate_pending()?;
+        let key = (mob_id.clone(), record.key());
+        let mut guard = self.member_operator_requests.write().await;
+        if let Some(existing) = guard.get(&key) {
+            existing.validate()?;
+            return Ok(MobMemberOperatorRequestBegin::Existing(existing.clone()));
+        }
+        let incarnation_rows = guard
+            .keys()
+            .filter(|(stored_mob, stored_key)| {
+                stored_mob == mob_id
+                    && stored_key.agent_identity == record.agent_identity
+                    && stored_key.generation == record.generation
+                    && stored_key.fence_token == record.fence_token
+                    && stored_key.host_id == record.host_id
+                    && stored_key.host_binding_generation == record.host_binding_generation
+                    && stored_key.member_session_id == record.member_session_id
+            })
+            .count();
+        if incarnation_rows >= super::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION {
+            return Err(MobStoreError::WriteFailed(format!(
+                "member operator request quota exhausted for '{}' generation {} fence {} host '{}' binding generation {} session '{}' (max {})",
+                record.agent_identity,
+                record.generation,
+                record.fence_token,
+                record.host_id,
+                record.host_binding_generation,
+                record.member_session_id,
+                super::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION,
+            )));
+        }
+        let mob_rows = guard
+            .keys()
+            .filter(|(stored_mob, ..)| stored_mob == mob_id)
+            .count();
+        if mob_rows >= super::MEMBER_OPERATOR_REQUEST_MAX_PER_MOB {
+            return Err(MobStoreError::WriteFailed(format!(
+                "member operator request quota exhausted for mob '{}' (max {})",
+                mob_id,
+                super::MEMBER_OPERATOR_REQUEST_MAX_PER_MOB,
+            )));
+        }
+        guard.insert(key, record.clone());
+        Ok(MobMemberOperatorRequestBegin::Started)
+    }
+
+    async fn load_member_operator_request(
+        &self,
+        mob_id: &MobId,
+        key: &MobMemberOperatorRequestKey,
+    ) -> Result<Option<MobMemberOperatorRequestRecord>, MobStoreError> {
+        let record = self
+            .member_operator_requests
+            .read()
+            .await
+            .get(&(mob_id.clone(), key.clone()))
+            .cloned();
+        if let Some(record) = &record {
+            record.validate()?;
+        }
+        Ok(record)
+    }
+
+    async fn compare_and_put_member_operator_request(
+        &self,
+        mob_id: &MobId,
+        expected: &MobMemberOperatorRequestRecord,
+        record: &MobMemberOperatorRequestRecord,
+    ) -> Result<bool, MobStoreError> {
+        expected.validate_terminal_transition(record)?;
+        let key = (mob_id.clone(), expected.key());
+        let mut guard = self.member_operator_requests.write().await;
+        if guard.get(&key) != Some(expected) {
+            return Ok(false);
+        }
+        guard.insert(key, record.clone());
+        Ok(true)
+    }
+
+    async fn list_member_operator_requests(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobMemberOperatorRequestRecord>, MobStoreError> {
+        let records = self
+            .member_operator_requests
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>();
+        for record in &records {
+            record.validate()?;
+        }
+        Ok(records)
+    }
+
+    async fn prune_stale_member_operator_requests(
+        &self,
+        mob_id: &MobId,
+        authority: &MobMemberOperatorPruneAuthority,
+    ) -> Result<u64, MobStoreError> {
+        let mut guard = self.member_operator_requests.write().await;
+        for ((stored_mob_id, ..), record) in guard.iter() {
+            if stored_mob_id == mob_id {
+                record.validate()?;
+            }
+        }
+        let before = guard.len();
+        guard.retain(|(stored_mob_id, ..), record| {
+            stored_mob_id != mob_id || authority.preserves(record)
+        });
+        u64::try_from(before - guard.len()).map_err(|_| {
+            MobStoreError::Internal("member operator request prune count overflow".to_string())
+        })
+    }
+
+    async fn delete_member_operator_requests(&self, mob_id: &MobId) -> Result<u64, MobStoreError> {
+        let mut guard = self.member_operator_requests.write().await;
+        let before = guard.len();
+        guard.retain(|(stored_mob_id, _), _| stored_mob_id != mob_id);
+        u64::try_from(before - guard.len()).map_err(|_| {
+            MobStoreError::Internal("member operator request delete count overflow".to_string())
+        })
+    }
+
+    async fn load_placed_spawn(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &str,
+    ) -> Result<Option<MobPlacedSpawnCarrierRecord>, MobStoreError> {
+        let record = self
+            .placed_spawns
+            .read()
+            .await
+            .get(&(mob_id.clone(), agent_identity.to_string()))
+            .cloned();
+        if let Some(record) = &record {
+            record.validate_for_store_key(mob_id, agent_identity)?;
+        }
+        Ok(record)
+    }
+
+    async fn list_placed_spawns(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobPlacedSpawnCarrierRecord>, MobStoreError> {
+        let mut keyed_records = self
+            .placed_spawns
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|((_, agent_identity), record)| (agent_identity.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        keyed_records.sort_by(|left, right| left.0.cmp(&right.0));
+        for (agent_identity, record) in &keyed_records {
+            record.validate_for_store_key(mob_id, agent_identity)?;
+        }
+        let records = keyed_records
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>();
+        Ok(records)
+    }
+
+    async fn begin_placed_spawn_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnPendingPersistenceAuthority,
+    ) -> Result<BeginPlacedSpawnResult, MobStoreError> {
+        record.validate_for_mob(mob_id)?;
+        authority.verify_record(record)?;
+        let key = (mob_id.clone(), record.agent_identity.clone());
+        let mut guard = self.placed_spawns.write().await;
+        let Some(existing) = guard.get(&key) else {
+            guard.insert(key, record.clone());
+            return Ok(BeginPlacedSpawnResult::Inserted);
+        };
+        existing.validate_for_store_key(mob_id, &record.agent_identity)?;
+        if !existing.same_attempt_as(record) {
+            return Ok(BeginPlacedSpawnResult::Conflict);
+        }
+        Ok(match existing.phase {
+            PlacedSpawnCarrierPhase::Pending => BeginPlacedSpawnResult::ExistingExactPending,
+            PlacedSpawnCarrierPhase::Committed(_) => BeginPlacedSpawnResult::ExistingExactCommitted,
+        })
+    }
+
+    async fn compare_and_commit_placed_spawn(
+        &self,
+        mob_id: &MobId,
+        expected_pending: &MobPlacedSpawnCarrierRecord,
+        committed: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnCommitPersistenceAuthority,
+    ) -> Result<CommitPlacedSpawnResult, MobStoreError> {
+        expected_pending.validate_for_mob(mob_id)?;
+        committed.validate_for_mob(mob_id)?;
+        authority.verify_record(committed)?;
+        if !matches!(expected_pending.phase, PlacedSpawnCarrierPhase::Pending)
+            || !expected_pending.same_attempt_as(committed)
+        {
+            return Err(MobStoreError::Internal(
+                "placed-spawn commit CAS changed its attempt tuple or expected non-pending state"
+                    .to_string(),
+            ));
+        }
+        let key = (mob_id.clone(), expected_pending.agent_identity.clone());
+        let mut guard = self.placed_spawns.write().await;
+        let Some(existing) = guard.get(&key) else {
+            return Ok(CommitPlacedSpawnResult::Conflict);
+        };
+        existing.validate_for_store_key(mob_id, &expected_pending.agent_identity)?;
+        if existing == committed {
+            return Ok(CommitPlacedSpawnResult::AlreadyCommittedExact);
+        }
+        if existing == expected_pending {
+            guard.insert(key, committed.clone());
+            return Ok(CommitPlacedSpawnResult::Committed);
+        }
+        if existing.same_attempt_as(expected_pending)
+            && matches!(existing.phase, PlacedSpawnCarrierPhase::Pending)
+        {
+            return Ok(CommitPlacedSpawnResult::StillPending);
+        }
+        Ok(CommitPlacedSpawnResult::Conflict)
+    }
+
+    async fn compare_and_promote_placed_spawn_binding(
+        &self,
+        mob_id: &MobId,
+        expected: &MobPlacedSpawnCarrierRecord,
+        promoted: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnBindingPromotionAuthority,
+    ) -> Result<PromotePlacedSpawnBindingResult, MobStoreError> {
+        expected.validate_for_mob(mob_id)?;
+        promoted.validate_for_mob(mob_id)?;
+        authority.verify_records(expected, promoted)?;
+        let key = (mob_id.clone(), expected.agent_identity.clone());
+        let mut guard = self.placed_spawns.write().await;
+        let Some(existing) = guard.get(&key) else {
+            return Ok(PromotePlacedSpawnBindingResult::Conflict);
+        };
+        existing.validate_for_store_key(mob_id, &expected.agent_identity)?;
+        if existing == promoted {
+            return Ok(PromotePlacedSpawnBindingResult::AlreadyPromotedExact);
+        }
+        if existing != expected {
+            return Ok(PromotePlacedSpawnBindingResult::Conflict);
+        }
+        guard.insert(key, promoted.clone());
+        Ok(PromotePlacedSpawnBindingResult::Promoted)
+    }
+
+    async fn compare_and_delete_placed_spawn(
+        &self,
+        mob_id: &MobId,
+        expected: &MobPlacedSpawnCarrierRecord,
+        authority: &MobPlacedSpawnCleanupAuthority,
+    ) -> Result<DeletePlacedSpawnResult, MobStoreError> {
+        expected.validate_for_mob(mob_id)?;
+        authority.verify_record(expected)?;
+        let key = (mob_id.clone(), expected.agent_identity.clone());
+        let mut guard = self.placed_spawns.write().await;
+        match guard.get(&key) {
+            None => Ok(DeletePlacedSpawnResult::AlreadyAbsent),
+            Some(current) => {
+                current.validate_for_store_key(mob_id, &expected.agent_identity)?;
+                if current != expected {
+                    return Ok(DeletePlacedSpawnResult::Conflict);
+                }
+                guard.remove(&key);
+                Ok(DeletePlacedSpawnResult::Deleted)
+            }
+        }
+    }
+
+    async fn list_mob_operator_grants(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobOperatorGrantRecord>, MobStoreError> {
+        Ok(self
+            .operator_grants
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+
+    async fn put_mob_operator_grant(
+        &self,
+        mob_id: &MobId,
+        record: &MobOperatorGrantRecord,
+        authority: &MobOperatorGrantPersistenceAuthority,
+    ) -> Result<(), MobStoreError> {
+        authority.verify_record(record)?;
+        self.operator_grants
+            .write()
+            .await
+            .insert((mob_id.clone(), record.principal.clone()), record.clone());
+        Ok(())
+    }
+
+    async fn delete_mob_operator_grant(
+        &self,
+        mob_id: &MobId,
+        principal: &str,
+        authority: &MobOperatorGrantDeletionAuthority,
+    ) -> Result<bool, MobStoreError> {
+        authority.verify_principal(principal)?;
+        Ok(self
+            .operator_grants
+            .write()
+            .await
+            .remove(&(mob_id.clone(), principal.to_string()))
+            .is_some())
+    }
+
+    async fn delete_mob_operator_grants(&self, mob_id: &MobId) -> Result<u64, MobStoreError> {
+        let mut guard = self.operator_grants.write().await;
+        let before = guard.len();
+        guard.retain(|(stored_mob_id, _), _| stored_mob_id != mob_id);
+        Ok((before - guard.len()) as u64)
+    }
+
+    async fn list_member_event_cursors(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobMemberEventCursorRecord>, MobStoreError> {
+        Ok(self
+            .member_event_cursors
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+
+    async fn put_member_event_cursor(
+        &self,
+        mob_id: &MobId,
+        record: &MobMemberEventCursorRecord,
+    ) -> Result<(), MobStoreError> {
+        self.member_event_cursors.write().await.insert(
+            (mob_id.clone(), record.agent_identity.clone()),
+            record.clone(),
+        );
+        Ok(())
+    }
+
+    async fn delete_member_event_cursor(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &str,
+    ) -> Result<bool, MobStoreError> {
+        Ok(self
+            .member_event_cursors
+            .write()
+            .await
+            .remove(&(mob_id.clone(), agent_identity.to_string()))
+            .is_some())
+    }
+
+    async fn delete_member_event_cursors(&self, mob_id: &MobId) -> Result<u64, MobStoreError> {
+        let mut guard = self.member_event_cursors.write().await;
+        let before = guard.len();
+        guard.retain(|(stored_mob_id, _), _| stored_mob_id != mob_id);
+        Ok((before - guard.len()) as u64)
+    }
+
+    async fn list_member_live_cleanup_records(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<MobMemberLiveCleanupRecord>, MobStoreError> {
+        Ok(self
+            .member_live_cleanup_records
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+
+    async fn put_member_live_cleanup_record_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &MobMemberLiveCleanupRecord,
+    ) -> Result<bool, MobStoreError> {
+        let key = (mob_id.clone(), record.cleanup_id.clone());
+        let mut records = self.member_live_cleanup_records.write().await;
+        match records.get(&key) {
+            Some(existing) if existing == record => Ok(false),
+            Some(_) => Err(MobStoreError::Internal(format!(
+                "member-live cleanup id '{}' was reused for a conflicting record",
+                record.cleanup_id
+            ))),
+            None => {
+                records.insert(key, record.clone());
+                Ok(true)
+            }
+        }
+    }
+
+    async fn delete_member_live_cleanup_record(
+        &self,
+        mob_id: &MobId,
+        expected: &MobMemberLiveCleanupRecord,
+    ) -> Result<bool, MobStoreError> {
+        let key = (mob_id.clone(), expected.cleanup_id.clone());
+        let mut records = self.member_live_cleanup_records.write().await;
+        match records.get(&key) {
+            None => Ok(false),
+            Some(current) if current == expected => {
+                records.remove(&key);
+                Ok(true)
+            }
+            Some(_) => Err(MobStoreError::Internal(format!(
+                "member-live cleanup id '{}' no longer matches its expected immutable record",
+                expected.cleanup_id
+            ))),
+        }
+    }
+
     async fn list_external_binding_overlays(
         &self,
         mob_id: &MobId,
@@ -321,6 +971,18 @@ impl MobEventStore for InMemoryMobEventStore {
         validate_mob_event_write_authority(&event.kind)?;
 
         #[cfg(any(test, feature = "test-support"))]
+        if matches!(&event.kind, MobEventKind::MembersUnwired { .. })
+            && self
+                .fail_next_members_unwired_before_append
+                .swap(false, Ordering::Relaxed)
+        {
+            self.arm_members_unwired_reconciliation_read_failures();
+            return Err(MobStoreError::Internal(
+                "forced mob event store MembersUnwired failure before append".to_string(),
+            ));
+        }
+
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(error) = self.forced_append_error(&event) {
             return Err(error);
         }
@@ -336,6 +998,17 @@ impl MobEventStore for InMemoryMobEventStore {
         events.push(stored.clone());
         drop(events);
         let _ = self.event_tx.send(stored.clone());
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(&stored.kind, MobEventKind::MembersUnwired { .. })
+            && self
+                .fail_next_members_unwired_after_append
+                .swap(false, Ordering::Relaxed)
+        {
+            self.arm_members_unwired_reconciliation_read_failures();
+            return Err(MobStoreError::Internal(
+                "forced mob event store MembersUnwired lost append acknowledgement".to_string(),
+            ));
+        }
         Ok(stored)
     }
 
@@ -361,6 +1034,57 @@ impl MobEventStore for InMemoryMobEventStore {
                     },
                 )
         }) {
+            return Ok(None);
+        }
+
+        let cursor = events.last().map_or(1, |existing| existing.cursor + 1);
+        let stored = MobEvent {
+            cursor,
+            timestamp: event.timestamp.unwrap_or_else(Utc::now),
+            mob_id: event.mob_id,
+            kind: event.kind,
+        };
+        events.push(stored.clone());
+        drop(events);
+        let _ = self.event_tx.send(stored.clone());
+        Ok(Some(stored))
+    }
+
+    async fn append_step_failed_event_if_absent(
+        &self,
+        event: NewMobEvent,
+    ) -> Result<Option<MobEvent>, MobStoreError> {
+        validate_mob_event_write_authority(&event.kind)?;
+        let Some((run_id, step_id, _)) = step_failed_event_identity(&event.kind) else {
+            return Err(MobStoreError::Internal(
+                "append_step_failed_event_if_absent requires a StepFailed event".to_string(),
+            ));
+        };
+        let run_id = run_id.clone();
+        let step_id = step_id.clone();
+        let mob_id = event.mob_id.clone();
+
+        let mut events = self.events.write().await;
+        let mut exact_replay = false;
+        for existing in events.iter() {
+            if existing.mob_id != mob_id {
+                continue;
+            }
+            let Some((existing_run_id, existing_step_id, _)) =
+                step_failed_event_identity(&existing.kind)
+            else {
+                continue;
+            };
+            if existing_run_id == &run_id && existing_step_id == &step_id {
+                if existing.kind != event.kind {
+                    return Err(MobStoreError::Internal(format!(
+                        "StepFailed event conflict for run '{run_id}' step '{step_id}'"
+                    )));
+                }
+                exact_replay = true;
+            }
+        }
+        if exact_replay {
             return Ok(None);
         }
 
@@ -411,6 +1135,12 @@ impl MobEventStore for InMemoryMobEventStore {
     }
 
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if Self::consume_read_failure(&self.active_reconciliation_poll_failures) {
+            return Err(MobStoreError::Internal(
+                "forced mob event store reconciliation poll failure".to_string(),
+            ));
+        }
         let events = self.events.read().await;
         Ok(events
             .iter()
@@ -425,6 +1155,12 @@ impl MobEventStore for InMemoryMobEventStore {
     }
 
     async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if Self::consume_read_failure(&self.active_reconciliation_latest_cursor_failures) {
+            return Err(MobStoreError::Internal(
+                "forced mob event store reconciliation latest-cursor failure".to_string(),
+            ));
+        }
         Ok(self
             .events
             .read()
@@ -461,6 +1197,8 @@ impl MobEventStore for InMemoryMobEventStore {
 #[derive(Debug, Default)]
 pub struct InMemoryMobRunStore {
     runs: Arc<RwLock<IndexMap<RunId, MobRun>>>,
+    remote_turn_intents: Arc<RwLock<BTreeMap<(RunId, u64), MobRunRemoteTurnIntent>>>,
+    remote_turn_receipts: Arc<RwLock<BTreeMap<(RunId, u64), MobRunRemoteTurnReceipt>>>,
 }
 
 impl InMemoryMobRunStore {
@@ -505,6 +1243,135 @@ impl MobRunStore for InMemoryMobRunStore {
             })
             .cloned()
             .collect())
+    }
+
+    async fn put_remote_turn_intent(
+        &self,
+        run_id: &RunId,
+        intent: &MobRunRemoteTurnIntent,
+    ) -> Result<bool, MobStoreError> {
+        if &intent.obligation.run_id != run_id || intent.obligation.dispatch_sequence == 0 {
+            return Err(MobStoreError::Internal(format!(
+                "remote-turn intent does not match run '{run_id}' or has sequence zero"
+            )));
+        }
+        let runs = self.runs.read().await;
+        let run = runs
+            .get(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run '{run_id}'")))?;
+        intent
+            .validate_for(run_id, &run.mob_id)
+            .map_err(MobStoreError::Internal)?;
+        drop(runs);
+        let key = (run_id.clone(), intent.obligation.dispatch_sequence);
+        let mut intents = self.remote_turn_intents.write().await;
+        match intents.get(&key) {
+            Some(existing) if existing == intent => Ok(false),
+            Some(_) => Err(MobStoreError::Internal(format!(
+                "remote-turn intent sequence {} conflicts for run '{run_id}'",
+                intent.obligation.dispatch_sequence
+            ))),
+            None => {
+                intents.insert(key, intent.clone());
+                Ok(true)
+            }
+        }
+    }
+
+    async fn delete_remote_turn_intent(
+        &self,
+        run_id: &RunId,
+        dispatch_sequence: u64,
+    ) -> Result<bool, MobStoreError> {
+        Ok(self
+            .remote_turn_intents
+            .write()
+            .await
+            .remove(&(run_id.clone(), dispatch_sequence))
+            .is_some())
+    }
+
+    async fn list_remote_turn_intents(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<MobRunRemoteTurnIntent>, MobStoreError> {
+        Ok(self
+            .remote_turn_intents
+            .read()
+            .await
+            .iter()
+            .filter(|((intent_run_id, _), _)| intent_run_id == run_id)
+            .map(|(_, intent)| intent.clone())
+            .collect())
+    }
+
+    async fn put_remote_turn_receipt(
+        &self,
+        run_id: &RunId,
+        receipt: &MobRunRemoteTurnReceipt,
+    ) -> Result<bool, MobStoreError> {
+        if &receipt.obligation.run_id != run_id || receipt.obligation.dispatch_sequence == 0 {
+            return Err(MobStoreError::Internal(format!(
+                "remote-turn receipt does not match run '{run_id}' or has sequence zero"
+            )));
+        }
+        let runs = self.runs.read().await;
+        let run = runs
+            .get(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run '{run_id}'")))?;
+        let intents = self.remote_turn_intents.read().await;
+        let intent = intents
+            .get(&(run_id.clone(), receipt.obligation.dispatch_sequence))
+            .ok_or_else(|| {
+                MobStoreError::Internal(
+                    "remote-turn receipt has no exact durable intent".to_string(),
+                )
+            })?;
+        receipt
+            .validate_for(run_id, &run.mob_id, intent)
+            .map_err(MobStoreError::Internal)?;
+        drop(intents);
+        drop(runs);
+        let key = (run_id.clone(), receipt.obligation.dispatch_sequence);
+        let mut receipts = self.remote_turn_receipts.write().await;
+        match receipts.get(&key) {
+            Some(existing) if existing == receipt => Ok(false),
+            Some(_) => Err(MobStoreError::Internal(format!(
+                "remote-turn receipt sequence {} conflicts for run '{run_id}'",
+                receipt.obligation.dispatch_sequence
+            ))),
+            None => {
+                receipts.insert(key, receipt.clone());
+                Ok(true)
+            }
+        }
+    }
+
+    async fn list_remote_turn_receipts(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<MobRunRemoteTurnReceipt>, MobStoreError> {
+        Ok(self
+            .remote_turn_receipts
+            .read()
+            .await
+            .iter()
+            .filter(|((receipt_run_id, _), _)| receipt_run_id == run_id)
+            .map(|(_, receipt)| receipt.clone())
+            .collect())
+    }
+
+    async fn delete_remote_turn_receipt(
+        &self,
+        run_id: &RunId,
+        dispatch_sequence: u64,
+    ) -> Result<bool, MobStoreError> {
+        Ok(self
+            .remote_turn_receipts
+            .write()
+            .await
+            .remove(&(run_id.clone(), dispatch_sequence))
+            .is_some())
     }
 
     async fn cas_flow_state_with_authority(
@@ -632,6 +1499,42 @@ impl MobRunStore for InMemoryMobRunStore {
         validate_authorized_run_projection(&candidate)?;
         *run = candidate;
         Ok(())
+    }
+
+    async fn append_failure_entry_if_absent_with_authority(
+        &self,
+        run_id: &RunId,
+        entry: FailureLedgerEntry,
+        authority: MobRunProvenanceAuthority,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        authority
+            .validate_failure_entry(run, &entry)
+            .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+        if let Some(existing) = run
+            .failure_ledger
+            .iter()
+            .find(|existing| existing.step_id == entry.step_id)
+        {
+            if existing.reason == entry.reason
+                && existing.error_report == entry.error_report
+                && existing.error == entry.error
+            {
+                return Ok(false);
+            }
+            return Err(MobStoreError::Internal(format!(
+                "failure ledger conflict for run '{run_id}' step '{}'",
+                entry.step_id
+            )));
+        }
+        let mut candidate = run.clone();
+        candidate.failure_ledger.push(entry);
+        validate_authorized_run_projection(&candidate)?;
+        *run = candidate;
+        Ok(true)
     }
 
     async fn cas_frame_state_with_authority(
@@ -1127,6 +2030,282 @@ mod tests {
     use futures::future::join_all;
     use std::collections::BTreeMap;
 
+    fn operator_request(
+        identity: &str,
+        generation: u64,
+        sequence: usize,
+    ) -> MobMemberOperatorRequestRecord {
+        MobMemberOperatorRequestRecord::pending(
+            MobMemberOperatorRequestKey::new(
+                identity,
+                generation,
+                1,
+                "host-a",
+                1,
+                "member-session-a",
+                format!("request-{sequence}"),
+            ),
+            "0".repeat(64),
+        )
+    }
+
+    #[tokio::test]
+    async fn member_operator_request_key_separates_host_generation_and_member_session() {
+        let mob_id = MobId::from("operator-execution-fence-key");
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        let base = MobMemberOperatorRequestRecord::pending(
+            MobMemberOperatorRequestKey::new(
+                "member-a",
+                7,
+                11,
+                "host-a",
+                1,
+                "member-session-a",
+                "same-request-id",
+            ),
+            "0".repeat(64),
+        );
+        let mut host_generation_two = base.clone();
+        host_generation_two.host_binding_generation = 2;
+        let mut replacement_session = host_generation_two.clone();
+        replacement_session.member_session_id = "member-session-b".to_string();
+
+        for record in [&base, &host_generation_two, &replacement_session] {
+            assert_eq!(
+                store
+                    .begin_member_operator_request(&mob_id, record)
+                    .await
+                    .expect("insert exact execution-fence key"),
+                MobMemberOperatorRequestBegin::Started,
+            );
+        }
+        assert!(matches!(
+            store
+                .begin_member_operator_request(&mob_id, &base)
+                .await
+                .expect("exact duplicate replays"),
+            MobMemberOperatorRequestBegin::Existing(existing) if existing == base
+        ));
+
+        for record in [&base, &host_generation_two, &replacement_session] {
+            assert_eq!(
+                store
+                    .load_member_operator_request(&mob_id, &record.key())
+                    .await
+                    .expect("load exact execution-fence key"),
+                Some(record.clone()),
+            );
+        }
+        assert_eq!(
+            store
+                .list_member_operator_requests(&mob_id)
+                .await
+                .expect("list distinct execution-fence rows")
+                .len(),
+            3,
+        );
+    }
+
+    #[tokio::test]
+    async fn member_operator_request_ledger_bounds_keys_and_both_quotas() {
+        let mob_id = MobId::from("operator-quota");
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        let oversized = MobMemberOperatorRequestRecord::pending(
+            MobMemberOperatorRequestKey::new(
+                "member",
+                1,
+                1,
+                "host-a",
+                1,
+                "member-session-a",
+                "x".repeat(crate::store::MEMBER_OPERATOR_REQUEST_ID_MAX_BYTES + 1),
+            ),
+            "0".repeat(64),
+        );
+        assert!(
+            store
+                .begin_member_operator_request(&mob_id, &oversized)
+                .await
+                .is_err(),
+            "oversized idempotency keys must fail before persistence"
+        );
+
+        for sequence in 0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION {
+            assert!(matches!(
+                store
+                    .begin_member_operator_request(
+                        &mob_id,
+                        &operator_request("member-a", 1, sequence),
+                    )
+                    .await
+                    .expect("row below per-incarnation ceiling"),
+                MobMemberOperatorRequestBegin::Started
+            ));
+        }
+        assert!(
+            store
+                .begin_member_operator_request(
+                    &mob_id,
+                    &operator_request(
+                        "member-a",
+                        1,
+                        crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION,
+                    ),
+                )
+                .await
+                .is_err(),
+            "a new key at the per-incarnation ceiling must be rejected"
+        );
+        assert!(matches!(
+            store
+                .begin_member_operator_request(&mob_id, &operator_request("member-a", 1, 0),)
+                .await
+                .expect("duplicates replay even at the ceiling"),
+            MobMemberOperatorRequestBegin::Existing(_)
+        ));
+
+        for member in 1..4 {
+            for sequence in 0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION {
+                store
+                    .begin_member_operator_request(
+                        &mob_id,
+                        &operator_request(&format!("member-{member}"), 1, sequence),
+                    )
+                    .await
+                    .expect("row below global ceiling");
+            }
+        }
+        assert!(
+            store
+                .begin_member_operator_request(
+                    &mob_id,
+                    &operator_request("member-global-overflow", 1, 0),
+                )
+                .await
+                .is_err(),
+            "cross-incarnation growth must stop at the per-mob hard ceiling"
+        );
+        assert!(matches!(
+            store
+                .begin_member_operator_request(&mob_id, &operator_request("member-3", 1, 0),)
+                .await
+                .expect("global ceiling still replays existing keys"),
+            MobMemberOperatorRequestBegin::Existing(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn member_operator_prune_reclaims_stale_rows_but_preserves_current_replay_and_caps() {
+        use meerkat_contracts::wire::supervisor_bridge::{
+            MemberOperatorOutcome, MemberOperatorReply, WireOpaqueJson,
+        };
+
+        let mob_id = MobId::from("operator-prune-capacity");
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        for sequence in 0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION {
+            store
+                .begin_member_operator_request(
+                    &mob_id,
+                    &operator_request("member-current", 1, sequence),
+                )
+                .await
+                .expect("seed current incarnation to its ceiling");
+        }
+        let current_pending = operator_request("member-current", 1, 0);
+        let current_terminal = current_pending
+            .terminal(MemberOperatorReply {
+                request_id: current_pending.request_id.clone(),
+                outcome: MemberOperatorOutcome::Completed {
+                    result: WireOpaqueJson::from_value(&serde_json::json!({"ok": true})),
+                },
+            })
+            .expect("terminalize current replay row");
+        assert!(
+            store
+                .compare_and_put_member_operator_request(
+                    &mob_id,
+                    &current_pending,
+                    &current_terminal,
+                )
+                .await
+                .expect("persist current terminal")
+        );
+        for stale in 0..3 {
+            for sequence in 0..crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION {
+                store
+                    .begin_member_operator_request(
+                        &mob_id,
+                        &operator_request(&format!("member-stale-{stale}"), 1, sequence),
+                    )
+                    .await
+                    .expect("seed stale incarnation to the global ceiling");
+            }
+        }
+        assert!(
+            store
+                .begin_member_operator_request(&mob_id, &operator_request("member-new", 1, 0))
+                .await
+                .is_err(),
+            "the global cap must remain fail closed before actor-authorized pruning"
+        );
+
+        let authority = MobMemberOperatorPruneAuthority::from_actor_current_residencies(
+            std::collections::BTreeSet::from([
+                crate::store::MobMemberOperatorResidency {
+                    agent_identity: "member-current".to_string(),
+                    generation: 1,
+                    fence_token: 1,
+                    host_id: "host-a".to_string(),
+                    host_binding_generation: 1,
+                    member_session_id: "member-session-a".to_string(),
+                },
+                crate::store::MobMemberOperatorResidency {
+                    agent_identity: "member-new".to_string(),
+                    generation: 1,
+                    fence_token: 1,
+                    host_id: "host-a".to_string(),
+                    host_binding_generation: 1,
+                    member_session_id: "member-session-a".to_string(),
+                },
+            ]),
+        );
+        assert_eq!(
+            store
+                .prune_stale_member_operator_requests(&mob_id, &authority)
+                .await
+                .expect("prune stale in-memory incarnations"),
+            3 * crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION as u64,
+        );
+        assert_eq!(
+            store
+                .begin_member_operator_request(&mob_id, &current_pending)
+                .await
+                .expect("current terminal still replays after prune"),
+            MobMemberOperatorRequestBegin::Existing(current_terminal),
+        );
+        assert!(
+            store
+                .begin_member_operator_request(
+                    &mob_id,
+                    &operator_request(
+                        "member-current",
+                        1,
+                        crate::store::MEMBER_OPERATOR_REQUEST_MAX_PER_INCARNATION,
+                    ),
+                )
+                .await
+                .is_err(),
+            "pruning must not weaken the current incarnation ceiling"
+        );
+        assert_eq!(
+            store
+                .begin_member_operator_request(&mob_id, &operator_request("member-new", 1, 0))
+                .await
+                .expect("stale rows must free global capacity"),
+            MobMemberOperatorRequestBegin::Started,
+        );
+    }
+
     fn default_bridge_protocol_version()
     -> meerkat_contracts::wire::supervisor_bridge::BridgeProtocolVersion {
         meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_default_protocol_version()
@@ -1281,6 +2460,7 @@ mod tests {
                     step_id: StepId::from("review"),
                     target: crate::ids::AgentRuntimeId::initial(AgentIdentity::from("reviewer")),
                     reason: "LLM failure terminal turn".to_string(),
+                    remote_turn_obligation: None,
                     error_report: None,
                     error: Some(meerkat_core::TurnErrorMetadata::terminal(
                         meerkat_core::TurnTerminalCauseKind::LlmFailure,
@@ -1743,6 +2923,137 @@ mod tests {
         assert_eq!(
             store.load_supervisor_authority(&mob_id).await.unwrap(),
             Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_metadata_store_roundtrips_mob_host_authority_records() {
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        let mob_id = MobId::from("mob-hosts");
+        let other_mob = MobId::from("mob-other");
+        let host_b = crate::store::sample_mob_host_authority_record("host-peer-b", 1);
+        let host_c = crate::store::sample_mob_host_authority_record("host-peer-c", 2);
+        let host_b_authority =
+            crate::store::mob_host_authority_persistence_authority_for_record(&host_b).unwrap();
+        let host_c_authority =
+            crate::store::mob_host_authority_persistence_authority_for_record(&host_c).unwrap();
+
+        assert!(
+            store
+                .put_mob_host_authority_if_absent(&mob_id, &host_b, &host_b_authority)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_mob_host_authority_if_absent(&mob_id, &host_b, &host_b_authority)
+                .await
+                .unwrap(),
+            "duplicate (mob, host) insert must be ignored"
+        );
+        store
+            .put_mob_host_authority(&mob_id, &host_c, &host_c_authority)
+            .await
+            .unwrap();
+        store
+            .put_mob_host_authority(&other_mob, &host_b, &host_b_authority)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_mob_host_authority(&mob_id, "host-peer-b")
+                .await
+                .unwrap(),
+            Some(host_b.clone())
+        );
+        assert_eq!(
+            store.list_mob_host_authorities(&mob_id).await.unwrap(),
+            vec![host_b.clone(), host_c.clone()],
+            "listing is mob-scoped and host-id ordered"
+        );
+
+        // Rebind: CAS to the next epoch under a rebind-witnessed authority.
+        let host_b_rebound = MobHostAuthorityRecord {
+            authority_epoch: 2,
+            live_endpoint: None,
+            ..host_b.clone()
+        };
+        let rebound_authority =
+            crate::store::mob_host_authority_persistence_authority_for_record(&host_b_rebound)
+                .unwrap();
+        assert!(
+            !store
+                .compare_and_put_mob_host_authority(
+                    &mob_id,
+                    &host_b_rebound,
+                    &host_b_rebound,
+                    &rebound_authority
+                )
+                .await
+                .unwrap(),
+            "mismatched expected record must not update"
+        );
+        assert!(
+            store
+                .compare_and_put_mob_host_authority(
+                    &mob_id,
+                    &host_b,
+                    &host_b_rebound,
+                    &rebound_authority
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .load_mob_host_authority(&mob_id, "host-peer-b")
+                .await
+                .unwrap(),
+            Some(host_b_rebound.clone())
+        );
+
+        // Revoke: delete requires the exact expected record + a revoke
+        // witness; other mobs' rows survive (A14 isolation).
+        let deletion =
+            crate::store::mob_host_authority_deletion_authority_for_record(&host_b_rebound)
+                .unwrap();
+        store
+            .put_mob_host_binding_generation_highwater(&mob_id, &host_b_rebound, &deletion)
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .delete_mob_host_authority(&mob_id, &host_b, &deletion)
+                .await
+                .unwrap(),
+            "stale expected record must not delete"
+        );
+        assert!(
+            store
+                .delete_mob_host_authority(&mob_id, &host_b_rebound, &deletion)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .load_mob_host_authority(&mob_id, "host-peer-b")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .list_mob_host_binding_generation_highwaters(&mob_id)
+                .await
+                .unwrap(),
+            vec![("host-peer-b".to_string(), host_b_rebound.binding_generation)],
+            "the non-prunable generation tombstone survives active-row deletion",
+        );
+        assert_eq!(
+            store.list_mob_host_authorities(&other_mob).await.unwrap(),
+            vec![host_b],
+            "another mob's binding for the same host must survive"
         );
     }
 

@@ -9,15 +9,17 @@
 //! and destroys its owned mobs in a single call.
 
 use async_trait::async_trait;
+use meerkat_contracts::wire::WireHostRef;
 use meerkat_core::error::ToolError;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::types::{
     ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
 };
 use meerkat_core::{AgentToolDispatcher, ToolUnavailableReason};
+use meerkat_mob::machines::mob_machine::HostId;
 use meerkat_mob::{
-    AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
-    SpawnMemberSpec, SpawnResult, runtime::MobSessionService,
+    AgentIdentity, MobBackendKind, MobDefinition, MobError, MobHandle, MobId, MobRuntimeMode,
+    ProfileName, SpawnMemberSpec, SpawnResult, runtime::MobSessionService,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -94,6 +96,10 @@ pub(crate) fn effective_child_tool_access_policy(
     }
 }
 
+fn lower_wire_placement(placement: Option<WireHostRef>) -> Option<HostId> {
+    placement.map(|host| HostId::from(host.0))
+}
+
 // ─── AgentMobToolSurface ─────────────────────────────────────────────────
 
 /// Agent-internal tool surface for mob delegation and orchestration.
@@ -122,9 +128,25 @@ pub struct AgentMobToolSurface {
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Context for capturing a parent agent's tool scope snapshot.
     snapshot_context: meerkat_core::service::MobToolSnapshotContext,
+    /// Chokepoint-(b) console principal for this surface (SD-7 / DEC-P5E-8):
+    /// injected at build, never ambient. v1: a locally built session belongs
+    /// to the building surface's principal (`Owner`); v2 derives it from the
+    /// session's builder (owner-session equality against the machine owner
+    /// fact — `MobControlPrincipal::from_owner_bridge_session`).
+    control_principal: meerkat_mob::MobControlPrincipal,
 }
 
 impl AgentMobToolSurface {
+    /// Acquire a mob handle bound to THIS surface's console principal
+    /// (chokepoint-(b) principal minting; SD-7: this surface is gated
+    /// exactly like the RPC/REST/MCP handlers). The agent-lane `ensure_*`
+    /// gates on the machine-composed authority context stay, additive.
+    async fn bound_handle(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
+        Ok(self.state.handle_for(mob_id).await?.with_command_authority(
+            meerkat_mob::CommandAuthority::principal(self.control_principal.clone()),
+        ))
+    }
+
     fn trusted_descriptor_from_runtime(
         name: &str,
         peer_id: PeerId,
@@ -282,6 +304,10 @@ impl AgentMobToolSurface {
             comms_peer_id,
             comms_runtime,
             snapshot_context,
+            // v1: every locally built session surface is the owner console
+            // (A16); byte-identical single-user behavior. The field is the
+            // v2 injection seam, not an ambient default at call sites.
+            control_principal: meerkat_mob::MobControlPrincipal::Owner,
         }
     }
 
@@ -417,7 +443,7 @@ impl AgentMobToolSurface {
         let can_manage_mob = self
             .authority_context_snapshot()
             .can_manage_mob(mob_id.as_str());
-        let handle = self.state.handle_for(mob_id).await.map_err(|error| {
+        let handle = self.bound_handle(mob_id).await.map_err(|error| {
             ToolError::execution_failed(format!(
                 "tool '{tool_name}' current-mob admission failed: {error}"
             ))
@@ -462,7 +488,7 @@ impl AgentMobToolSurface {
             auth_binding_present: args.auth_binding.is_some(),
             ..meerkat_mob::SpawnMemberAdmissionObservations::default()
         };
-        let handle = self.state.handle_for(mob_id).await.map_err(|error| {
+        let handle = self.bound_handle(mob_id).await.map_err(|error| {
             ToolError::execution_failed(format!(
                 "tool '{tool_name}' spawn-member admission failed: {error}"
             ))
@@ -754,7 +780,7 @@ impl AgentMobToolSurface {
             return false;
         };
 
-        let Ok(handle) = self.state.handle_for(mob_id).await else {
+        let Ok(handle) = self.bound_handle(mob_id).await else {
             return false;
         };
         let roster = handle.roster().await;
@@ -951,6 +977,7 @@ impl AgentMobToolSurface {
         if let Some(instructions) = args.additional_instructions {
             spec.additional_instructions = Some(vec![instructions]);
         }
+        spec.placement = lower_wire_placement(args.placement);
 
         // Resolve spawn tooling: default to InheritParent for delegates
         let tooling = args
@@ -1000,7 +1027,7 @@ impl AgentMobToolSurface {
             result["system_notice"] = json!(notice);
         }
 
-        if let Ok(handle) = self.state.handle_for(&mob_id).await {
+        if let Ok(handle) = self.bound_handle(&mob_id).await {
             self.record_successful_operator_action(&handle, call.name)
                 .await;
         }
@@ -1047,7 +1074,7 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        if let Ok(handle) = self.state.handle_for(&mob_id).await {
+        if let Ok(handle) = self.bound_handle(&mob_id).await {
             self.record_successful_operator_action(&handle, call.name)
                 .await;
         }
@@ -1067,7 +1094,7 @@ impl AgentMobToolSurface {
         let mob_id = MobId::from(args.mob_id.clone());
 
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
-        let audit_handle = self.state.handle_for(&mob_id).await.ok();
+        let audit_handle = self.bound_handle(&mob_id).await.ok();
 
         let report = self
             .state
@@ -1109,8 +1136,7 @@ impl AgentMobToolSurface {
         self.ensure_spawn_member_scope(call.name, &mob_id, &args)
             .await?;
         let audit_handle = self
-            .state
-            .handle_for(&mob_id)
+            .bound_handle(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -1134,6 +1160,7 @@ impl AgentMobToolSurface {
         spec.objective_id = objective_id;
         spec.runtime_mode = args.runtime_mode;
         spec.backend = args.backend;
+        spec.placement = lower_wire_placement(args.placement);
         if let Some(auto_wire) = args.auto_wire_parent {
             spec.auto_wire_parent = auto_wire;
         }
@@ -1214,8 +1241,7 @@ impl AgentMobToolSurface {
         let mob_id = MobId::from(args.mob_id);
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
         let audit_handle = self
-            .state
-            .handle_for(&mob_id)
+            .bound_handle(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -1298,7 +1324,7 @@ impl AgentMobToolSurface {
         let mut mob_list: Vec<serde_json::Value> = Vec::new();
         for (id, status) in mobs {
             let can_manage_mob = authority_context.can_manage_mob(id.as_str());
-            let Ok(handle) = self.state.handle_for(&id).await else {
+            let Ok(handle) = self.bound_handle(&id).await else {
                 continue;
             };
             match handle.resolve_current_mob_admission(can_manage_mob).await {
@@ -1327,8 +1353,7 @@ impl AgentMobToolSurface {
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
         let audit_handle = self
-            .state
-            .handle_for(&mob_id)
+            .bound_handle(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -1353,8 +1378,7 @@ impl AgentMobToolSurface {
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
         let audit_handle = self
-            .state
-            .handle_for(&mob_id)
+            .bound_handle(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -1674,6 +1698,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             state: this.state,
             cached_implicit_mob_id: this.cached_implicit_mob_id,
             effective_authority: this.effective_authority,
+            control_principal: this.control_principal,
             tools: this.tools,
             owner_bridge_session_id,
             model: this.model,
@@ -2038,6 +2063,9 @@ struct DelegateArgs {
     /// not allocate member identity).
     #[serde(default)]
     member_id: Option<String>,
+    /// Bound host peer ID for placed execution; omit for the controlling host.
+    #[serde(default)]
+    placement: Option<WireHostRef>,
     /// Extra instructions appended to the helper's system prompt.
     #[serde(default)]
     additional_instructions: Option<String>,
@@ -2089,6 +2117,9 @@ struct SpawnMemberArgs {
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
     backend: Option<MobBackendKind>,
+    /// Bound host peer ID for placed execution; omit for the controlling host.
+    #[serde(default)]
+    placement: Option<WireHostRef>,
     /// If true, auto-wire bidirectional comms with the orchestrator after spawn.
     #[serde(default)]
     auto_wire_parent: Option<bool>,
@@ -2343,6 +2374,85 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+    /// T-B12 (DEC-P7B-18, ADJ-P7-6): the LLM-visible delegation roster is
+    /// snapshot-pinned — phase 7 adds NOTHING here. No live, no host, no
+    /// grant, no member-history tools; drift into the agent-facing surface
+    /// must be a reviewed roster change, never an accident.
+    #[test]
+    fn agent_tool_roster_unchanged() {
+        let names = |defs: Arc<[Arc<ToolDef>]>| -> Vec<String> {
+            defs.iter().map(|def| def.name.to_string()).collect()
+        };
+
+        // Full composition (profile store + snapshot provider present).
+        assert_eq!(
+            names(build_tool_defs_with_profile_support(true, true, true)),
+            vec![
+                "delegate",
+                "conclude_objective",
+                "mob_create",
+                "mob_destroy",
+                "mob_spawn_member",
+                "mob_retire_member",
+                "mob_check_member",
+                "mob_list_members",
+                "mob_list",
+                "mob_wire",
+                "mob_unwire",
+                "mob_profile_create",
+                "mob_profile_get",
+                "mob_profile_list",
+                "mob_profile_update",
+                "mob_profile_delete",
+                "mob_profile_list_sources",
+            ],
+            "agent-facing roster (full composition) must stay exactly this set"
+        );
+
+        // Minimal composition.
+        assert_eq!(
+            names(build_tool_defs()),
+            vec![
+                "delegate",
+                "conclude_objective",
+                "mob_create",
+                "mob_destroy",
+                "mob_spawn_member",
+                "mob_retire_member",
+                "mob_check_member",
+                "mob_list_members",
+                "mob_list",
+                "mob_wire",
+                "mob_unwire",
+            ],
+            "agent-facing roster (minimal composition) must stay exactly this set"
+        );
+
+        // Explicit negatives (SD-4/SD-7/§16.9): none of the phase-7
+        // console verbs leak into the LLM-visible tool surface.
+        let full = names(build_tool_defs_with_profile_support(true, true, true));
+        for forbidden in [
+            "mob_member_history",
+            "mob_hosts",
+            "mob_route_installs",
+            "mob_bind_host",
+            "mob_revoke_host",
+            "mob_grant_scopes",
+            "mob_revoke_scopes",
+            "mob_grants",
+            "mob_member_live_open",
+            "mob_member_live_close",
+            "mob_member_live_status",
+            "mob_member_live_control",
+            "mob_hard_cancel_member",
+        ] {
+            assert!(
+                !full.iter().any(|name| name == forbidden),
+                "{forbidden} must never appear in the agent-facing roster"
+            );
+        }
+    }
 
     #[test]
     fn test_agent_surface_destroy_error_preserves_incomplete_error_data() {
@@ -2895,8 +3005,14 @@ mod tests {
         }
     }
 
+    struct RealCommsSessionActor {
+        comms: Arc<TestCommsRuntime>,
+        witness: meerkat_session::LiveSessionActorWitness,
+    }
+
     struct RealCommsSessionSvc {
-        sessions: tokio::sync::RwLock<HashMap<SessionId, Arc<TestCommsRuntime>>>,
+        sessions: tokio::sync::RwLock<HashMap<SessionId, RealCommsSessionActor>>,
+        actor_registry: meerkat_session::LiveSessionActorRegistry,
         counter: AtomicU64,
         runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
         registry: Arc<TestCommsRegistry>,
@@ -2907,6 +3023,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 sessions: tokio::sync::RwLock::new(HashMap::new()),
+                actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
                 counter: AtomicU64::new(0),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
                 registry: Arc::new(TestCommsRegistry::default()),
@@ -2915,19 +3032,21 @@ mod tests {
         }
 
         async fn real_comms(&self, session_id: &SessionId) -> Option<Arc<TestCommsRuntime>> {
-            self.sessions.read().await.get(session_id).cloned()
+            self.sessions
+                .read()
+                .await
+                .get(session_id)
+                .map(|actor| actor.comms.clone())
         }
 
         async fn register_external_comms(&self, name: &str) -> Arc<TestCommsRuntime> {
             TestCommsRuntime::new(name, Arc::clone(&self.registry)).await
         }
-    }
 
-    #[async_trait]
-    impl SessionService for RealCommsSessionSvc {
-        async fn create_session(
+        async fn create_session_with_actor_slot(
             &self,
             req: meerkat_core::service::CreateSessionRequest,
+            actor_witness_slot: &meerkat_session::LiveSessionActorWitnessSlot,
         ) -> Result<RunResult, SessionError> {
             let sid = req
                 .build
@@ -2939,10 +3058,45 @@ mod tests {
             let name = req
                 .build
                 .as_ref()
-                .and_then(|b| b.comms_name.clone())
+                .and_then(|build| build.comms_name.clone())
                 .unwrap_or_else(|| format!("real-comms-session-{n}"));
+            let actor_materialization_permit =
+                crate::begin_live_actor_materialization(req.build.as_ref().and_then(|build| {
+                    match &build.runtime_build_mode {
+                        meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => Some(bindings),
+                        meerkat_core::RuntimeBuildMode::StandaloneEphemeral => None,
+                    }
+                }))?;
             let comms = TestCommsRuntime::new(&name, Arc::clone(&self.registry)).await;
-            self.sessions.write().await.insert(sid.clone(), comms);
+            let actor_witness = {
+                let mut sessions = self.sessions.write().await;
+                if sessions.contains_key(&sid) {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "live session actor is already registered: {sid}"
+                        )),
+                    ));
+                }
+                let witness = crate::register_live_actor(
+                    &self.actor_registry,
+                    actor_witness_slot,
+                    sid.clone(),
+                )?;
+                sessions.insert(
+                    sid.clone(),
+                    RealCommsSessionActor {
+                        comms,
+                        witness: witness.clone(),
+                    },
+                );
+                witness
+            };
+            crate::commit_live_actor_materialization_or_discard(
+                self,
+                actor_materialization_permit,
+                &actor_witness,
+            )
+            .await?;
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: sid,
@@ -2955,6 +3109,18 @@ mod tests {
                 schema_warnings: None,
                 skill_diagnostics: None,
             })
+        }
+    }
+
+    #[async_trait]
+    impl SessionService for RealCommsSessionSvc {
+        async fn create_session(
+            &self,
+            req: meerkat_core::service::CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            let actor_witness_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
+            self.create_session_with_actor_slot(req, &actor_witness_slot)
+                .await
         }
 
         async fn start_turn(
@@ -3014,7 +3180,19 @@ mod tests {
         }
 
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-            let removed = self.sessions.write().await.remove(id).is_some();
+            let removed = {
+                let mut sessions = self.sessions.write().await;
+                let had_live_actor = sessions.contains_key(id);
+                let removed_registry_actor = self.actor_registry.remove_current(id);
+                if had_live_actor && !removed_registry_actor {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "live actor registry omitted current session {id} during archive"
+                        )),
+                    ));
+                }
+                sessions.remove(id).is_some()
+            };
             if removed {
                 Ok(())
             } else {
@@ -3030,7 +3208,7 @@ mod tests {
                 .read()
                 .await
                 .get(session_id)
-                .map(|runtime| runtime.clone() as Arc<dyn CoreCommsRuntime>)
+                .map(|actor| actor.comms.clone() as Arc<dyn CoreCommsRuntime>)
         }
 
         async fn event_injector(
@@ -3080,6 +3258,61 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for RealCommsSessionSvc {
+        async fn create_session_under_runtime_turn_boundary(
+            &self,
+            req: meerkat_core::service::CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            <Self as SessionService>::create_session(self, req).await
+        }
+
+        async fn create_session_with_actor_witness_under_runtime_turn_boundary(
+            &self,
+            req: meerkat_core::service::CreateSessionRequest,
+            actor_witness_slot: &meerkat_session::LiveSessionActorWitnessSlot,
+        ) -> Result<RunResult, SessionError> {
+            self.create_session_with_actor_slot(req, actor_witness_slot)
+                .await
+        }
+
+        async fn archive_with_mob_lifecycle_authority_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.archive_with_mob_lifecycle_authority(session_id).await
+        }
+
+        async fn discard_live_session_under_runtime_turn_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.discard_live_session(session_id).await
+        }
+
+        async fn discard_live_session_actor_under_runtime_turn_boundary(
+            &self,
+            witness: &meerkat_session::LiveSessionActorWitness,
+        ) -> Result<bool, SessionError> {
+            let removed = {
+                let mut sessions = self.sessions.write().await;
+                let Some(actor) = sessions.get(witness.session_id()) else {
+                    return Ok(false);
+                };
+                if !actor.witness.eq(witness) {
+                    return Ok(false);
+                }
+                if !self.actor_registry.compare_remove(witness) {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "live actor registry rejected current witness for {}",
+                            witness.session_id()
+                        )),
+                    ));
+                }
+                sessions.remove(witness.session_id()).is_some()
+            };
+            Ok(removed)
+        }
+
         async fn subscribe_session_events(
             &self,
             session_id: &SessionId,
@@ -3091,8 +3324,32 @@ mod tests {
             true
         }
 
+        async fn live_session_actor_registered(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<bool, SessionError> {
+            Ok(self.actor_registry.contains(session_id))
+        }
+
         fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
             Some(self.runtime_adapter.clone())
+        }
+
+        async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+            {
+                let mut sessions = self.sessions.write().await;
+                let had_live_actor = sessions.contains_key(session_id);
+                let removed_registry_actor = self.actor_registry.remove_current(session_id);
+                if had_live_actor && !removed_registry_actor {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "live actor registry omitted current session {session_id} during discard"
+                        )),
+                    ));
+                }
+                sessions.remove(session_id);
+            }
+            Ok(())
         }
 
         async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
@@ -3407,6 +3664,53 @@ mod tests {
         assert!(
             delegate.input_schema["properties"].get("tooling").is_some(),
             "delegate schema must expose the typed tooling control field"
+        );
+        assert!(
+            delegate.input_schema["properties"]
+                .get("placement")
+                .is_some(),
+            "delegate schema must expose the typed placement field"
+        );
+
+        let spawn_member = defs
+            .iter()
+            .find(|definition| definition.name == "mob_spawn_member")
+            .expect("mob_spawn_member tool definition");
+        assert!(
+            spawn_member.input_schema["properties"]
+                .get("placement")
+                .is_some(),
+            "mob_spawn_member schema must expose the typed placement field"
+        );
+    }
+
+    #[test]
+    fn agent_spawn_args_parse_and_lower_wire_placement() {
+        let delegate: DelegateArgs = serde_json::from_value(json!({
+            "task": "review",
+            "member_id": "reviewer",
+            "placement": "host-b-peer"
+        }))
+        .expect("delegate placement parses");
+        assert_eq!(
+            lower_wire_placement(delegate.placement)
+                .as_ref()
+                .map(HostId::as_str),
+            Some("host-b-peer")
+        );
+
+        let spawn: SpawnMemberArgs = serde_json::from_value(json!({
+            "mob_id": "mob-1",
+            "profile": "worker",
+            "member_id": "worker-1",
+            "placement": "host-c-peer"
+        }))
+        .expect("mob spawn placement parses");
+        assert_eq!(
+            lower_wire_placement(spawn.placement)
+                .as_ref()
+                .map(HostId::as_str),
+            Some("host-c-peer")
         );
     }
 
@@ -4302,7 +4606,10 @@ mod tests {
     #[tokio::test]
     async fn test_delegate_dispatch_auto_wires_parent_and_helper_peers() {
         let service = Arc::new(RealCommsSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(service.clone()));
+        let state = Arc::new(MobMcpState::new(
+            service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
         let parent_name = "parent/lead/l-1".to_string();
         let parent_comms = service.register_external_comms(&parent_name).await;
         let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
@@ -4387,7 +4694,10 @@ mod tests {
     #[tokio::test]
     async fn test_delegate_wiring_links_parent_and_helper_peers_and_emits_peer_added_lifecycle() {
         let service = Arc::new(RealCommsSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(service.clone()));
+        let state = Arc::new(MobMcpState::new(
+            service.clone(),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
         let parent_name = "parent/lead/l-1".to_string();
         let parent_comms = service.register_external_comms(&parent_name).await;
         let parent_peer_id = parent_comms.peer_id().expect("parent peer id");

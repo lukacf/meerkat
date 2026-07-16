@@ -261,13 +261,7 @@ impl LiveChannelCloseCommitAuthority {
         channel_id: &LiveChannelId,
         close_sequence: u64,
     ) -> Self {
-        let mut authority =
-            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineAuthority::new();
-        authority
-            .apply_signal(
-                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal::Initialize,
-            )
-            .expect("initialize generated MeerkatMachine authority");
+        let mut authority = generated_test_machine_for_registered_session(session_id);
         let channel_id_string = channel_id.as_str().to_owned();
         meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
             &mut authority,
@@ -1045,6 +1039,11 @@ struct ChannelState {
     command_acceptance_sequence: u64,
     close_observation_sequence: u64,
     adapter: Option<Arc<dyn LiveAdapter>>,
+    /// Mechanical proof that no provider adapter remains reachable for this
+    /// channel. New channels start absent, attachment clears the proof, and a
+    /// successful adapter `close()` restores it. Generated close authority is
+    /// forbidden from committing until this is true.
+    physical_close_confirmed: bool,
     /// Transport-retention deadline for a channel the generated owner has
     /// already closed/terminalized. This is a resource-cache timer: public
     /// lifecycle/admission surfaces must route through generated authority
@@ -1094,6 +1093,29 @@ fn generated_test_llm_identity()
         provider_params_repr: None,
         auth_binding: None,
     }
+}
+
+#[cfg(test)]
+fn generated_test_machine_for_registered_session(
+    session_id: &SessionId,
+) -> meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineAuthority {
+    use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
+        MeerkatMachineAuthority, MeerkatMachineInput, MeerkatMachineMutator, MeerkatMachineSignal,
+        SessionId as DslSessionId,
+    };
+
+    let mut authority = MeerkatMachineAuthority::new();
+    authority
+        .apply_signal(MeerkatMachineSignal::Initialize)
+        .expect("initialize generated MeerkatMachine authority");
+    MeerkatMachineMutator::apply(
+        &mut authority,
+        MeerkatMachineInput::RegisterSession {
+            session_id: DslSessionId(session_id.to_string()),
+        },
+    )
+    .expect("register session in generated MeerkatMachine authority");
+    authority
 }
 
 #[cfg(test)]
@@ -1185,13 +1207,7 @@ impl LiveChannelOpenAuthority {
 
     #[cfg(test)]
     fn from_generated_test_machine(session_id: SessionId, channel_id: LiveChannelId) -> Self {
-        let mut authority =
-            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineAuthority::new();
-        authority
-            .apply_signal(
-                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal::Initialize,
-            )
-            .expect("initialize generated MeerkatMachine authority");
+        let mut authority = generated_test_machine_for_registered_session(&session_id);
         let channel_id_string = channel_id.as_str().to_owned();
         let transition = meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
             &mut authority,
@@ -1728,6 +1744,7 @@ impl LiveAdapterHost {
                 command_acceptance_sequence: 0,
                 close_observation_sequence: 0,
                 adapter: None,
+                physical_close_confirmed: true,
                 retire_at: None,
                 pending_synthetic_obs: None,
             },
@@ -1756,6 +1773,7 @@ impl LiveAdapterHost {
             return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
         }
         channel.adapter = Some(adapter);
+        channel.physical_close_confirmed = false;
         // Intentionally NOT setting status to Ready (F32). Driven by
         // adapter observations.
         Ok(())
@@ -2486,6 +2504,7 @@ impl LiveAdapterHost {
         let observation = self
             .signal_terminal_error_observed(channel_id, code)
             .await?;
+        self.prepare_channel_physical_close(&observation).await?;
         let authority = self
             .close_commit_authority_from_generated_test_machine(&observation)
             .await?;
@@ -2569,7 +2588,6 @@ impl LiveAdapterHost {
         observation: &LiveChannelCloseObservation,
         authority: &LiveChannelCloseCommitAuthority,
     ) -> Result<(), LiveAdapterHostError> {
-        authority.consume_once()?;
         if authority.channel_id() != observation.channel_id()
             || authority.close_sequence() != observation.close_sequence()
         {
@@ -2582,22 +2600,71 @@ impl LiveAdapterHost {
         // called only after generated close authority accepts the typed close
         // observation.
         let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
-        let adapter = {
+        {
             let mut inner = self.inner.lock().await;
             Self::reap_retired_locked(&mut inner);
             let channel = inner
                 .channels
                 .get_mut(&channel_id)
                 .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-            let adapter = channel.adapter.take();
+            if !channel.physical_close_confirmed || channel.adapter.is_some() {
+                return Err(LiveAdapterHostError::CloseNotAuthorized);
+            }
+            // Consume and commit under the same host lock as the physical
+            // proof check. An adapter reattachment cannot slip between proof
+            // validation and terminal cache publication.
+            authority.consume_once()?;
             channel.status = LiveAdapterStatus::Closed;
             channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-            adapter
-        };
-        if let Some(adapter) = adapter {
-            let _ = adapter.close().await;
         }
         Ok(())
+    }
+
+    /// Establish transport-mechanical absence before generated close
+    /// terminality is allowed to commit.
+    ///
+    /// Adapter close failure keeps both the adapter handle and the generated
+    /// active-channel binding discoverable, so a retry cannot misread
+    /// `ChannelNotFound` as proof of physical cleanup. A successful close
+    /// drops the exact adapter only if no concurrent replacement occurred.
+    pub async fn prepare_channel_physical_close(
+        &self,
+        observation: &LiveChannelCloseObservation,
+    ) -> Result<(), LiveAdapterHostError> {
+        let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
+        let adapter = {
+            let mut inner = self.inner.lock().await;
+            Self::reap_retired_locked(&mut inner);
+            let channel = inner
+                .channels
+                .get(&channel_id)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+            if channel.physical_close_confirmed && channel.adapter.is_none() {
+                return Ok(());
+            }
+            channel
+                .adapter
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?
+        };
+
+        adapter.close().await?;
+
+        let mut inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get_mut(&channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        match channel.adapter.as_ref() {
+            Some(current) if Arc::ptr_eq(current, &adapter) => {
+                channel.adapter = None;
+                channel.physical_close_confirmed = true;
+                Ok(())
+            }
+            None if channel.physical_close_confirmed => Ok(()),
+            _ => Err(LiveAdapterHostError::CloseNotAuthorized),
+        }
     }
 
     #[cfg(test)]
@@ -2622,6 +2689,7 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
     ) -> Result<LiveChannelCloseObservation, LiveAdapterHostError> {
         let observation = self.reserve_channel_close_observation(channel_id).await?;
+        self.prepare_channel_physical_close(&observation).await?;
         let authority = self
             .close_commit_authority_from_generated_test_machine(&observation)
             .await?;
@@ -2650,13 +2718,7 @@ impl LiveAdapterHost {
         let channel_id_string = channel_id.as_str().to_owned();
         let (status, degradation_reason, degradation_detail) =
             generated_test_live_channel_status(observation.status());
-        let mut authority =
-            meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineAuthority::new();
-        authority
-            .apply_signal(
-                meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineSignal::Initialize,
-            )
-            .expect("initialize generated MeerkatMachine authority");
+        let mut authority = generated_test_machine_for_registered_session(&session_id);
         meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineMutator::apply(
             &mut authority,
             meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInput::ResolveLiveOpenAdmission {
@@ -3237,6 +3299,52 @@ mod tests {
         // G42: post-close status is `Closed`, not `ChannelNotFound`.
         let status = host.channel_status(&ch).await.unwrap();
         assert_eq!(status, LiveAdapterStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn physical_close_failure_retains_discovery_and_blocks_terminal_commit() {
+        let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.attach_adapter(&ch, Arc::new(FailOnceCloseAdapter::default()))
+            .await
+            .unwrap();
+        let observation = host.reserve_channel_close_observation(&ch).await.unwrap();
+
+        assert!(matches!(
+            host.prepare_channel_physical_close(&observation).await,
+            Err(LiveAdapterHostError::AdapterError(_))
+        ));
+        assert!(
+            host.active_channels().await.contains(&ch),
+            "failed physical close must retain host discovery for retry"
+        );
+        let premature_authority = host
+            .close_commit_authority_from_generated_test_machine(&observation)
+            .await
+            .unwrap();
+        assert!(matches!(
+            host.commit_channel_close_observation(&observation, &premature_authority)
+                .await,
+            Err(LiveAdapterHostError::CloseNotAuthorized)
+        ));
+
+        host.prepare_channel_physical_close(&observation)
+            .await
+            .expect("retry physically closes the exact retained adapter");
+        let authority = host
+            .close_commit_authority_from_generated_test_machine(&observation)
+            .await
+            .unwrap();
+        host.commit_channel_close_observation(&observation, &authority)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.channel_status(&ch).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
     }
 
     #[tokio::test]
@@ -5204,6 +5312,42 @@ mod tests {
     impl StubAdapter {
         fn new() -> Self {
             Self
+        }
+    }
+
+    #[derive(Default)]
+    struct FailOnceCloseAdapter {
+        closes: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LiveAdapter for FailOnceCloseAdapter {
+        async fn send_command(&self, _command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+            Ok(())
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+            Ok(None)
+        }
+
+        fn status(&self) -> LiveAdapterStatus {
+            LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), LiveAdapterError> {
+            if self
+                .closes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                Err(LiveAdapterError::TransportError {
+                    message: "scripted first physical close failure".to_string(),
+                })
+            } else {
+                Ok(())
+            }
         }
     }
 

@@ -8,20 +8,35 @@ use indexmap::{IndexMap, IndexSet};
 use std::fmt;
 
 const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+    "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",
     "meerkat_peer_endpoint_option_peer_id_matches",
     "meerkat_peer_endpoint_peer_id_matches",
     "meerkat_peer_endpoint_set_peer_ids_unique",
     "mob_machine_identity_has_session_binding",
+    "mob_machine_remote_turn_custody_admits",
+    "mob_machine_placed_completion_obligation_well_formed",
+    "mob_machine_placed_completion_custody_admits",
+    "mob_machine_placed_kickoff_obligation_well_formed",
+    "mob_machine_finalized_placed_kickoff_recovery_well_formed",
+    "mob_machine_placed_kickoff_correlation_available",
+    "mob_machine_placed_kickoff_custody_absent_for_identity",
+    "mob_machine_placed_kickoff_custody_absent_for_host",
+    "mob_machine_remote_turn_input_id_available_to_kickoff",
+    "mob_machine_adaptive_lifecycle_drained",
+    "mob_machine_adaptive_run_custody_drained",
     "mob_machine_external_peer_edge_has_matching_key",
     "mob_machine_external_peer_edge_local",
     "mob_machine_external_peer_edge_peer_id",
     "mob_machine_external_peer_identity_absent",
     "mob_machine_external_peer_key_matches_edge",
+    "mob_machine_external_peer_edges_by_key_without_identity",
+    "mob_machine_external_peer_edges_without_identity",
     "mob_machine_external_peer_key_matches_local",
     "mob_machine_session_bound_live_runtime_ids_match",
     "mob_machine_member_peer_endpoint_peer_id",
+    "mob_machine_host_id_matches_peer_id",
     "mob_machine_member_peer_id_available_for_identity",
     "mob_machine_member_has_no_external_peer_edges",
     "mob_machine_member_prior_peer_endpoints_after_migration",
@@ -29,10 +44,15 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_member_peer_overlay",
     "mob_machine_member_peer_overlay_complete",
     "mob_machine_member_peer_overlay_peer_ids_unique",
+    "mob_machine_member_peer_overlay_without_identity",
+    "mob_machine_member_peer_overlay_without_identity_complete",
+    "mob_machine_member_peer_overlay_without_identity_peer_ids_unique",
     "mob_machine_wiring_edge_a",
     "mob_machine_wiring_edge_b",
     "mob_machine_wiring_edge_contains_identity",
+    "mob_machine_wiring_contains_pair",
     "mob_machine_wiring_edge_matches_members",
+    "mob_machine_wiring_edges_without_identity",
     "mob_machine_run_step_status_after_set",
     "mob_machine_run_step_bool_after_set",
     "mob_machine_run_step_condition_result_after_set",
@@ -52,8 +72,26 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_coordination_resource_claim_inactive_at",
     // WAVE G2 machine folds (#181 respawn generation, #351 membership reconcile).
     "mob_machine_next_respawn_generation",
+    "mob_machine_u64_is_exact_successor",
+    "mob_machine_optional_u64_is_exact_successor",
     "mob_machine_members_to_spawn",
     "mob_machine_members_to_retire",
+    "mob_machine_placed_cleanup_absent_for_identity",
+    "mob_machine_placed_cleanup_obligation",
+    "mob_machine_placed_carrier_binding_active",
+    "mob_machine_placed_carrier_binding_confirmed_revoked",
+    "mob_machine_host_binding_generation_tombstone",
+    // MobHostBindingAuthority natives (mob-scoped row clears + generation-
+    // scoped turn-outcome retention). Non-canonical scoped authority (plan
+    // §21.5): Rust bodies only, in the shared macro arm in
+    // `catalog/dsl/mob_host_binding_authority.rs`; no TLA operators exist for
+    // it because it has no machine-codegen artifacts.
+    "mob_host_binding_authority_member_rows_without_mob",
+    "mob_host_binding_authority_turn_rows_without_mob",
+    "mob_host_binding_authority_turn_rows_after_release",
+    "mob_host_binding_authority_turn_rows_for_materialization",
+    "mob_host_binding_authority_turn_key_is_current",
+    "mob_host_binding_authority_turn_occupancy",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +125,12 @@ pub struct MachineSchema {
     /// may need a lower limit to keep CI verification tractable. `None` uses the
     /// codegen default (6 for CI, 8 for deep).
     pub ci_step_limit: Option<u32>,
+    /// Per-domain sample-cardinality overrides for the DEEP TLC profile,
+    /// keyed by the generated CONSTANT name (e.g. `"AgentIdentityValues"`).
+    /// Model-checker configuration only — never machine vocabulary. Mirrors
+    /// `CompositionSchema.deep_domain_overrides`; absent keys use the codegen
+    /// default deep cardinality.
+    pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
 }
 
 impl MachineSchema {
@@ -2086,6 +2130,7 @@ mod tests {
                 "AuthorizeRuntimeLoopBatch",
                 "AuthorizedStageForRun",
                 "AuthorizedRuntimeLoopRunCommit",
+                "AuthorizedInteractionTerminalOutboxAdoption",
                 "AuthorizedRuntimeCompletionResultClosure"
             ]
         );
@@ -2191,6 +2236,46 @@ mod tests {
                 ]
             );
         }
+
+        let adoption_plan = schema
+            .command_plans
+            .iter()
+            .find(|plan| plan.name == "AuthorizedInteractionTerminalOutboxAdoption")
+            .expect("interaction terminal outbox adoption command plan");
+        assert_eq!(
+            adoption_plan
+                .source_inputs
+                .iter()
+                .map(|input| input.as_str())
+                .collect::<Vec<_>>(),
+            vec!["AuthorizeInteractionTerminalOutboxAdoption"]
+        );
+        assert_eq!(
+            adoption_plan
+                .effects
+                .iter()
+                .map(|effect| effect.as_str())
+                .collect::<Vec<_>>(),
+            vec!["InteractionTerminalOutboxAdoptionAuthorized"]
+        );
+        assert_eq!(adoption_plan.effect_closures.len(), 1);
+        let adoption_closure = &adoption_plan.effect_closures[0];
+        assert_eq!(
+            adoption_closure.effect.as_str(),
+            "InteractionTerminalOutboxAdoptionAuthorized"
+        );
+        assert_eq!(
+            adoption_closure.authority_type,
+            "AuthorizedInteractionTerminalOutboxAdoption"
+        );
+        assert_eq!(
+            adoption_closure.closure_policy,
+            "DurableOutboxBindingAdoption"
+        );
+        assert_eq!(
+            adoption_closure.lifecycle,
+            vec!["Authorized", "Attempted", "Realized", "Failed", "Abandoned"]
+        );
 
         let completion_closure_plan = schema
             .command_plans

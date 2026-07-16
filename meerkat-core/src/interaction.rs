@@ -95,6 +95,15 @@ pub enum InteractionContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
     },
+    /// Authenticated peer message whose signed envelope carried an exact
+    /// recipient residency. Runtime admission validates the mandatory fence
+    /// before projecting this to ordinary peer-message work semantics.
+    IncarnationFencedMessage {
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        expected_recipient: crate::comms::PeerRecipientIncarnation,
+    },
     /// A request for the agent to perform an action.
     Request {
         intent: String,
@@ -439,6 +448,13 @@ pub struct PeerIngressFact {
     pub signing_pubkey: Option<[u8; 32]>,
     /// Resolved route/binding handle for replies to this sender.
     pub route: Option<PeerRoute>,
+    /// Source-confined callback endpoint for a response to this exact
+    /// request. This is populated only for signature-verified TCP ingress by
+    /// combining the kernel-observed source IP with the signed, nonzero
+    /// `reply_endpoint` port. The sender-selected host is discarded; payload
+    /// addresses, UDS, and open-auth ingress never populate this field. It is
+    /// not a durable trust route.
+    pub declared_reply_endpoint: Option<crate::comms::PeerAddress>,
     /// Auth decision used by peer ingress admission.
     pub auth: Option<PeerIngressAuthDecision>,
     /// Typed peer convention admitted at ingress.
@@ -501,6 +517,7 @@ impl PeerIngressFact {
             display_name,
             signing_pubkey,
             route,
+            declared_reply_endpoint: None,
             auth,
             convention,
         }
@@ -521,9 +538,22 @@ impl PeerIngressFact {
             display_name: None,
             signing_pubkey: None,
             route: None,
+            declared_reply_endpoint: None,
             auth: None,
             convention: PeerIngressConvention::PlainEvent { source_name },
         }
+    }
+
+    /// Attach the source-confined callback projected from a signature-verified
+    /// TCP Request. Kept as a builder so non-request ingress constructors
+    /// cannot accidentally inherit endpoint state. Callers must never pass a
+    /// raw envelope, decoded payload, or sender-selected address here.
+    pub fn with_declared_reply_endpoint(
+        mut self,
+        endpoint: Option<crate::comms::PeerAddress>,
+    ) -> Self {
+        self.declared_reply_endpoint = endpoint;
+        self
     }
 
     pub fn canonical_peer_id_string(&self) -> Option<String> {

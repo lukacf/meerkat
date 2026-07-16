@@ -148,7 +148,8 @@ fn test_peer_input_candidate_from_interaction(
         from_peer: interaction.from.clone(),
         from_peer_id: peer_id,
         kind: match &interaction.content {
-            InteractionContent::Message { body, .. } => {
+            InteractionContent::Message { body, .. }
+            | InteractionContent::IncarnationFencedMessage { body, .. } => {
                 PeerIngressEnvelopeKind::Message { body: body.clone() }
             }
             InteractionContent::Request { intent, params, .. } => {
@@ -179,7 +180,10 @@ fn test_peer_input_candidate_from_interaction(
         .expect("generated envelope classification should echo the canonical sender peer id");
     let classification = admission.classification;
     let convention = match &interaction.content {
-        InteractionContent::Message { .. } => meerkat_core::PeerIngressConvention::Message,
+        InteractionContent::Message { .. }
+        | InteractionContent::IncarnationFencedMessage { .. } => {
+            meerkat_core::PeerIngressConvention::Message
+        }
         InteractionContent::Request { intent, .. } => {
             if let Some(kind) = classification.lifecycle_kind {
                 let peer = admission
@@ -335,7 +339,7 @@ async fn completed_response_admission_stamps_apply_intent_without_context_projec
 // §2: Accepted response injects context, no continuation (no wake)
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn accepted_response_policy_no_wake_but_idle_admission_wakes() {
+async fn accepted_response_policy_no_wake_keeps_idle_admission_passive() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Accepted);
     let input = runtime_input_for_interaction(&interaction, &rid());
@@ -364,13 +368,13 @@ async fn accepted_response_policy_no_wake_but_idle_admission_wakes() {
         meerkat_runtime::ConsumePoint::OnRunComplete
     );
 
-    // Verify driver: accepted and queued; the generated idle admission
-    // signal wakes the loop even though progress policy itself is no-wake.
+    // Verify driver: accepted and queued without waking the idle loop. A
+    // progress response remains passive until a later run boundary.
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted(), "unexpected outcome: {outcome:?}");
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop
+        PostAdmissionSignal::None
     );
 
     // Input should be queued (StageRunBoundary queues for boundary application)

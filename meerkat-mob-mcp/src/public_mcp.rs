@@ -69,6 +69,10 @@ struct MeerkatMobSpawnInput {
     additional_instructions: Option<Vec<String>>,
     #[serde(default)]
     auth_binding: Option<WireAuthBindingRef>,
+    /// Host placement (comms peer id of a bound member host, multi-host
+    /// mobs ADJ-7); admission stays with the spawn-exec ladder.
+    #[serde(default)]
+    placement: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -99,6 +103,10 @@ struct MeerkatMobSpawnInputSpec {
     additional_instructions: Option<Vec<String>>,
     #[serde(default)]
     auth_binding: Option<WireAuthBindingRef>,
+    /// Host placement (comms peer id of a bound member host, multi-host
+    /// mobs ADJ-7); admission stays with the spawn-exec ladder.
+    #[serde(default)]
+    placement: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -458,6 +466,32 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
         description: "Delete a realm profile.",
         schema: typed_schema::<MeerkatMobProfileDeleteInput>,
     },
+    // ─── Phase-7 multi-host OBSERVATION tools (SD-4) ─────────────────────
+    // Deliberate absences, recorded as intent — the first deliberate
+    // asymmetry in the otherwise near-full `meerkat_mob_*` mirror:
+    // - NO host/grant admin tools (`meerkat_mob_bind_host` / `revoke_host` /
+    //   the grant family): MCP servers are routinely wired into agent tool
+    //   contexts, and an LLM-reachable `AdminHost`/`AdminGrants` mutation is
+    //   a plane-(b) escalation vector (SD-4). Unknown names fail closed.
+    // - NO `meerkat_mob_member_live_*` tools: live channels are
+    //   console/operator-only (§16.9).
+    // - NO drive verb for route installs — the drain is actor-owned on
+    //   EVERY surface (DEC-P7B-16); this is the read projection only.
+    PublicTool {
+        name: "meerkat_mob_member_history",
+        description: "Read a mob member transcript page by identity (local or placed).",
+        schema: typed_schema::<meerkat_contracts::wire::MobMemberHistoryParams>,
+    },
+    PublicTool {
+        name: "meerkat_mob_hosts",
+        description: "List bound member hosts with capabilities for one mob.",
+        schema: typed_schema::<MeerkatMobIdInput>,
+    },
+    PublicTool {
+        name: "meerkat_mob_route_installs",
+        description: "Read outstanding cross-host route-install obligations for one mob.",
+        schema: typed_schema::<MeerkatMobIdInput>,
+    },
 ];
 
 pub fn public_tool_names() -> Vec<&'static str> {
@@ -522,6 +556,9 @@ const DISPATCH_TOOL_NAMES: &[&str] = &[
     "meerkat_mob_profile_list",
     "meerkat_mob_profile_update",
     "meerkat_mob_profile_delete",
+    "meerkat_mob_member_history",
+    "meerkat_mob_hosts",
+    "meerkat_mob_route_installs",
 ];
 
 pub async fn handle_public_tools_call(
@@ -538,7 +575,7 @@ pub async fn handle_public_tools_call(
             let mob_id = state
                 .mob_create_definition(definition)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "mob_id": mob_id }))
         }
         "meerkat_mob_list" => {
@@ -547,7 +584,7 @@ pub async fn handle_public_tools_call(
             let mobs = state
                 .mob_list()
                 .await
-                .map_err(|err| McpToolError::internal(err.to_string()))?
+                .map_err(|err| McpToolError::from_mob(&err))?
                 .into_iter()
                 .map(|(mob_id, status)| meerkat_contracts::MobStatusResult {
                     mob_id: mob_id.to_string(),
@@ -562,7 +599,7 @@ pub async fn handle_public_tools_call(
             let status = state
                 .mob_status(&mob_id)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!(meerkat_contracts::MobStatusResult {
                 mob_id: mob_id.to_string(),
                 status: crate::wire_mob_lifecycle_status(status),
@@ -574,14 +611,7 @@ pub async fn handle_public_tools_call(
             let destroy_report = state
                 .mob_lifecycle_action(&mob_id, input.action)
                 .await
-                .map_err(|err| match err {
-                    crate::MobMcpDestroyError::Incomplete { report } => {
-                        McpToolError::destroy_incomplete(&report)
-                    }
-                    crate::MobMcpDestroyError::Mob(err) => {
-                        McpToolError::invalid_params(err.to_string())
-                    }
-                })?
+                .map_err(|err| McpToolError::from_mob_destroy(&err))?
                 .map(|report| {
                     serde_json::to_value(&report).map_err(|err| {
                         McpToolError::internal(format!("destroy report serialize: {err}"))
@@ -609,11 +639,12 @@ pub async fn handle_public_tools_call(
                 input.context,
                 input.additional_instructions,
                 input.auth_binding,
+                input.placement,
             )?;
             let spawn_result = state
                 .mob_spawn_spec(&mob_id, spec)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!(spawn_result_payload(&mob_id, &spawn_result)))
         }
         "meerkat_mob_spawn_many" => {
@@ -634,13 +665,14 @@ pub async fn handle_public_tools_call(
                         spec.context,
                         spec.additional_instructions,
                         spec.auth_binding,
+                        spec.placement,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let results = state
                 .mob_spawn_many(&mob_id, specs)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!(meerkat_contracts::MobSpawnManyResult {
                 results: results
                     .into_iter()
@@ -674,7 +706,7 @@ pub async fn handle_public_tools_call(
                     meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
                 )
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!(meerkat_contracts::MobRetireResult { retired: true }))
         }
         "meerkat_mob_respawn" => {
@@ -708,7 +740,7 @@ pub async fn handle_public_tools_call(
                         .map(std::string::ToString::to_string)
                         .collect::<Vec<_>>(),
                 })),
-                Err(err) => Err(McpToolError::invalid_params(err.to_string())),
+                Err(err) => Err(McpToolError::from_mob_respawn(&err)),
             }
         }
         "meerkat_mob_wire" => {
@@ -722,7 +754,7 @@ pub async fn handle_public_tools_call(
                     target,
                 )
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "wired": true }))
         }
         "meerkat_mob_wire_members_batch" => {
@@ -741,7 +773,7 @@ pub async fn handle_public_tools_call(
             let report = state
                 .mob_wire_members_batch(&mob_id, edges)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!(report))
         }
         "meerkat_mob_unwire" => {
@@ -755,7 +787,7 @@ pub async fn handle_public_tools_call(
                     target,
                 )
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "unwired": true }))
         }
         "meerkat_mob_member_send" => {
@@ -771,7 +803,7 @@ pub async fn handle_public_tools_call(
                     input.render_metadata.map(Into::into),
                 )
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({
                 "mob_id": mob_id,
                 "agent_identity": receipt.identity,
@@ -801,7 +833,7 @@ pub async fn handle_public_tools_call(
                     },
                 )
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob_append_system_context(&err))?;
             Ok(json!({
                 "mob_id": mob_id,
                 "agent_identity": agent_identity,
@@ -814,7 +846,7 @@ pub async fn handle_public_tools_call(
             let events = state
                 .mob_events(&mob_id, input.after_cursor, input.limit)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "events": events }))
         }
         "meerkat_mob_flows" => {
@@ -823,7 +855,7 @@ pub async fn handle_public_tools_call(
             let flows = state
                 .mob_list_flows(&mob_id)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "mob_id": mob_id, "flows": flows }))
         }
         "meerkat_mob_flow_run" => {
@@ -836,7 +868,7 @@ pub async fn handle_public_tools_call(
                     input.params,
                 )
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "run_id": run_id }))
         }
         "meerkat_mob_run" => {
@@ -847,7 +879,7 @@ pub async fn handle_public_tools_call(
             let run_id = state
                 .mob_run_flow(&mob_id, flow_id, params)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "run_id": run_id }))
         }
         "meerkat_mob_flow_status" => {
@@ -857,9 +889,9 @@ pub async fn handle_public_tools_call(
             let run = state
                 .mob_flow_status(&mob_id, run_id)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             let run = meerkat_mob::MobRun::public_flow_status_run_value(run.as_ref())
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             serde_json::to_value(meerkat_contracts::MobFlowStatusResult { run })
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
@@ -870,9 +902,9 @@ pub async fn handle_public_tools_call(
             let run = state
                 .mob_flow_status(&mob_id, run_id)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             let run = meerkat_mob::MobRun::public_run_result_value(run.as_ref())
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             serde_json::to_value(meerkat_contracts::MobRunResult { run })
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
@@ -883,7 +915,7 @@ pub async fn handle_public_tools_call(
             state
                 .mob_cancel_flow(&mob_id, run_id)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "canceled": true }))
         }
         "meerkat_mob_force_cancel" => {
@@ -895,7 +927,7 @@ pub async fn handle_public_tools_call(
                     meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
                 )
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "cancelled": true }))
         }
         "meerkat_mob_wait_kickoff" => {
@@ -909,7 +941,7 @@ pub async fn handle_public_tools_call(
             let members = state
                 .mob_wait_kickoff(&mob_id, member_ids, input.timeout_ms)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "members": members }))
         }
         "meerkat_mob_wait_ready" => {
@@ -923,7 +955,7 @@ pub async fn handle_public_tools_call(
             let members = state
                 .mob_wait_ready(&mob_id, member_ids, input.timeout_ms)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({ "members": members }))
         }
         "meerkat_mob_profile_create" => {
@@ -931,7 +963,7 @@ pub async fn handle_public_tools_call(
             let stored = state
                 .realm_profile_create(&input.name, &input.profile)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
@@ -951,14 +983,14 @@ pub async fn handle_public_tools_call(
                     updated_at: None,
                 })
                 .map_err(|err| McpToolError::invalid_params(err.to_string())),
-                Err(err) => Err(McpToolError::invalid_params(err.to_string())),
+                Err(err) => Err(McpToolError::from_mob(&err)),
             }
         }
         "meerkat_mob_profile_list" => {
             let profiles = state
                 .realm_profile_list()
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             let profiles = profiles
                 .iter()
                 .map(meerkat_mob::stored_realm_profile_to_wire)
@@ -971,7 +1003,7 @@ pub async fn handle_public_tools_call(
             let stored = state
                 .realm_profile_update(&input.name, &input.profile, input.expected_revision)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))
         }
@@ -980,8 +1012,43 @@ pub async fn handle_public_tools_call(
             let deleted = state
                 .realm_profile_delete(&input.name, input.expected_revision)
                 .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                .map_err(|err| McpToolError::from_mob(&err))?;
             Ok(json!({"name": deleted.name, "deleted_revision": deleted.revision}))
+        }
+        "meerkat_mob_member_history" => {
+            let input: meerkat_contracts::wire::MobMemberHistoryParams = parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let result = state
+                .mob_member_history(
+                    &mob_id,
+                    meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
+                    input.from_index,
+                    input.limit,
+                )
+                .await
+                .map_err(|err| McpToolError::from_mob(&err))?;
+            serde_json::to_value(result)
+                .map_err(|err| McpToolError::internal(format!("member history serialize: {err}")))
+        }
+        "meerkat_mob_hosts" => {
+            let input: MeerkatMobIdInput = parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let result = state
+                .mob_hosts(&mob_id)
+                .await
+                .map_err(|err| McpToolError::from_mob(&err))?;
+            serde_json::to_value(result)
+                .map_err(|err| McpToolError::internal(format!("hosts serialize: {err}")))
+        }
+        "meerkat_mob_route_installs" => {
+            let input: MeerkatMobIdInput = parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let result = state
+                .mob_route_installs(&mob_id)
+                .await
+                .map_err(|err| McpToolError::from_mob(&err))?;
+            serde_json::to_value(result)
+                .map_err(|err| McpToolError::internal(format!("route installs serialize: {err}")))
         }
         _ => Err(McpToolError::method_not_found(format!(
             "Method not found: {name}"
@@ -1090,6 +1157,7 @@ fn build_spawn_spec(
     context: Option<Value>,
     additional_instructions: Option<Vec<String>>,
     auth_binding: Option<WireAuthBindingRef>,
+    placement: Option<String>,
 ) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
     let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), agent_identity.as_str());
     spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;
@@ -1100,7 +1168,17 @@ fn build_spawn_spec(
         (Some(wb), None) => Some(runtime_binding_from_wire(wb)?),
         (Some(wb), Some(bk)) => {
             let resolved = runtime_binding_from_wire(wb)?;
-            if resolved.kind() != backend_kind_from_wire(bk) {
+            // Placement (`HostMaterialized`) is spawn vocabulary, not backend
+            // vocabulary — it conflicts with any legacy `backend` tag.
+            let backend_matches = match backend_kind_from_wire(bk) {
+                meerkat_mob::MobBackendKind::Session => {
+                    matches!(resolved, meerkat_mob::RuntimeBinding::Session)
+                }
+                meerkat_mob::MobBackendKind::External => {
+                    matches!(resolved, meerkat_mob::RuntimeBinding::External { .. })
+                }
+            };
+            if !backend_matches {
                 return Err(McpToolError::invalid_params(
                     "conflicting 'backend' and 'binding' fields",
                 ));
@@ -1125,6 +1203,9 @@ fn build_spawn_spec(
     spec.context = context;
     spec.additional_instructions = additional_instructions;
     spec.auth_binding = auth_binding.map(Into::into);
+    // ADJ-7 passthrough: placement admissibility (bound host, portability,
+    // capability) is decided by the spawn-exec ladder's typed denial causes.
+    spec.placement = placement.map(meerkat_mob::machines::mob_machine::HostId::from);
     Ok(spec)
 }
 
@@ -1157,6 +1238,54 @@ mod tests {
     use super::*;
     use crate::MobMcpState;
     use std::collections::BTreeSet;
+
+    /// ADJ-7: the public spawn surface threads `placement` through to the
+    /// domain spec verbatim (comms peer id → `HostId`); absent placement
+    /// stays `None`. Admission is NOT decided here — the spawn-exec ladder
+    /// owns the typed placement denial causes.
+    #[test]
+    fn build_spawn_spec_threads_placement_to_the_domain_spec() {
+        let placed = build_spawn_spec(
+            "worker".to_string(),
+            "b2".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("host-peer-1".to_string()),
+        )
+        .expect("placed spawn spec builds");
+        assert_eq!(
+            placed.placement,
+            Some(meerkat_mob::machines::mob_machine::HostId::from(
+                "host-peer-1".to_string()
+            )),
+            "placement passes through to the domain spec"
+        );
+
+        let unplaced = build_spawn_spec(
+            "worker".to_string(),
+            "b2".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("unplaced spawn spec builds");
+        assert_eq!(
+            unplaced.placement, None,
+            "absent placement stays None (controlling-host default)"
+        );
+    }
 
     /// All three public-tool surfaces must agree on the exact same name set:
     ///   (a) the [`PUBLIC_TOOLS`] source-of-truth table (via [`public_tool_names`]),
@@ -1207,10 +1336,159 @@ mod tests {
             table_names.contains("meerkat_mob_run"),
             "meerkat_mob_run must be routable, advertised, and dispatched"
         );
+        // Phase 7 (SD-4): the three multi-host OBSERVATION tools.
+        for name in [
+            "meerkat_mob_member_history",
+            "meerkat_mob_hosts",
+            "meerkat_mob_route_installs",
+        ] {
+            assert!(
+                table_names.contains(name),
+                "{name} must be routable, advertised, and dispatched"
+            );
+        }
         assert_eq!(
             table_names.len(),
-            28,
-            "expected exactly 28 public tools across all surfaces"
+            31,
+            "expected exactly 31 public tools across all surfaces"
+        );
+    }
+
+    /// T-B7 (SD-4 + §16.9 negatives, ADJ-P7-6): host/grant admin and live
+    /// tool names — and the route-install drive — are DELIBERATELY absent
+    /// from the roster and dispatch as unknown (fail-closed asymmetry).
+    #[tokio::test]
+    async fn host_grant_live_tool_names_stay_fail_closed() {
+        let table_names: BTreeSet<String> = public_tool_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let state = MobMcpState::new_in_memory();
+        for name in [
+            "meerkat_mob_bind_host",
+            "meerkat_mob_revoke_host",
+            "meerkat_mob_grant_scopes",
+            "meerkat_mob_revoke_scopes",
+            "meerkat_mob_grants",
+            "meerkat_mob_member_live_open",
+            "meerkat_mob_member_live_close",
+            "meerkat_mob_member_live_status",
+            "meerkat_mob_member_live_control",
+            "meerkat_mob_drive_route_installs",
+        ] {
+            assert!(
+                !table_names.contains(name),
+                "{name} must NOT be advertised on the MCP surface"
+            );
+            let err = handle_public_tools_call(&state, name, &json!({"mob_id": "m"}))
+                .await
+                .expect_err("absent admin/live tool names must dispatch as unknown");
+            assert_eq!(
+                err.code, -32601,
+                "{name} must fail closed as method-not-found"
+            );
+        }
+    }
+
+    /// W4 laundering ratchet: after the §17.4 sweep, every remaining
+    /// string-laundering `invalid_params` site in this file is a payload
+    /// serialize (`serde_json::to_value`) or boundary identity-resolve
+    /// site — zero mob-family errors are string-laundered. Adding a new
+    /// laundering site bumps this count and must justify itself here.
+    #[test]
+    fn no_mob_family_error_laundering_remains() {
+        let source = include_str!("public_mcp.rs");
+        // Split so this test's own source never matches the needle.
+        let needle = ["invalid_params(err", ".to_string())"].concat();
+        let count = source.matches(needle.as_str()).count();
+        // 7 serde_json::to_value payload-encode sites (flow_status,
+        // run_result, profile create/get-some/get-none/list/update) + 1
+        // WireTrustedPeerIdentity resolve in runtime_binding_from_wire.
+        assert_eq!(
+            count, 8,
+            "unexpected string-laundering site count — a mob-family error is \
+             being string-laundered instead of routed through \
+             McpToolError::from_mob/from_mob_respawn/from_mob_destroy"
+        );
+    }
+
+    /// T-B6: a ScopeDenied driven through `handle_public_tools_call` on a
+    /// named-principal console renders TYPED — stable JSON-RPC code with
+    /// the bare `{required, presented}` data — not a laundered -32602
+    /// string.
+    #[tokio::test]
+    async fn public_dispatch_renders_mob_errors_typed_not_laundered() {
+        // Owner console creates the mob; the named-principal console
+        // shares the live handle (the ADJ-P5-10 deterministic lane).
+        let owner = MobMcpState::new_in_memory();
+        handle_public_tools_call(
+            &owner,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "typed-error-dispatch",
+                    "profiles": {
+                        "worker": {
+                            "model": "gpt-5.4",
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("owner creates mob");
+
+        let viewer = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::External(
+            meerkat_core::auth::PrincipalId::new("viewer").expect("principal id"),
+        ));
+        let mob_id = meerkat_mob::MobId::from("typed-error-dispatch");
+        let handle = owner
+            .handle_for(&mob_id)
+            .await
+            .expect("owner handle for seeded mob");
+        viewer.mob_insert_handle(mob_id, handle).await;
+
+        // wait_kickoff enters the actor-linearized SubscribeEvents admission;
+        // the ungranted viewer is denied with the typed pair.
+        let err = handle_public_tools_call(
+            &viewer,
+            "meerkat_mob_wait_kickoff",
+            &json!({"mob_id": "typed-error-dispatch"}),
+        )
+        .await
+        .expect_err("ungranted principal must be scope-denied");
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+            "ScopeDenied must carry the stable -32025 code, not -32602"
+        );
+        let data = err.data.expect("typed denial data");
+        assert_eq!(
+            data,
+            json!({ "required": "subscribe_events", "presented": [] }),
+            "data is the bare typed {{required, presented}} pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_mob_list_owner_gate_renders_typed_scope_denial() {
+        let viewer = MobMcpState::new_in_memory_as(meerkat_mob::MobControlPrincipal::External(
+            meerkat_core::auth::PrincipalId::new("viewer").expect("principal id"),
+        ));
+
+        let err = handle_public_tools_call(&viewer, "meerkat_mob_list", &json!({}))
+            .await
+            .expect_err("cross-mob enumeration is owner-only");
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code()
+        );
+        assert_eq!(
+            err.data,
+            Some(json!({ "required": "list", "presented": [] }))
         );
     }
 
@@ -1347,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn public_mcp_wire_members_batch_schema_is_local_member_edges_only() {
+    fn public_mcp_wire_members_batch_schema_is_member_identity_edges_only() {
         let tools = public_tools_list();
         let schema = tools
             .iter()

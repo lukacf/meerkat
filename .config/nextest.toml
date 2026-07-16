@@ -8,18 +8,51 @@
 # wrappers left behind explicit `cargo e2e-*` aliases.
 default-filter = 'not binary(e2e_auth_lane) and not binary(e2e_build_lane) and not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)'
 
+# Real-loopback mob integration tests previously shared a process-local mutex,
+# but Nextest runs each test in its own process. On macOS, concurrent binaries
+# can therefore exhaust the 16k ephemeral-port range because every comms
+# envelope opens a fresh TCP connection. This group restores the intended
+# serialization for only that network cohort; unrelated tests stay parallel.
+[test-groups.mob-real-comms-macos]
+max-threads = 1
+
+[[profile.fast.overrides]]
+filter = '''
+binary(cross_host_events)
+or binary(cross_host_flows)
+or binary(cross_host_live)
+or binary(cross_host_wiring)
+or binary(host_actor_persistence)
+or binary(host_bind_ceremony)
+or binary(host_materialize_serving)
+or binary(host_member_release)
+or binary(host_member_revival)
+or binary(host_orphan_reconciliation)
+or binary(host_resume_recovery)
+or binary(member_upcall_lane)
+or binary(placed_member_respawn)
+or binary(remote_spawn_ladder)
+or binary(remote_spawn_materialization)
+or (binary(scope_matrix) and (
+    test(live_granted_principal_opens_end_to_end)
+    or test(live_family_denies_without_live_scope_and_mutates_nothing)
+))
+'''
+platform = 'cfg(target_os = "macos")'
+test-group = 'mob-real-comms-macos'
+
 [[profile.fast.overrides]]
 # Dense mob-topology materialization is intentionally a high-blast stress test:
 # it spawns 300 local members and installs 45k directional trust writes while
 # asserting a wall-clock budget. Keep the test concurrent internally, but do
 # not run other nextest cases beside it.
-filter = 'test(test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'
+filter = 'test(~test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'
 threads-required = "num-cpus"
 
 [[profile.default.overrides]]
 # The workspace unit lane uses the default profile and discovers this lib test
 # too. Keep the wall-clock stress case isolated there as well as in fast.
-filter = 'test(test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'
+filter = 'test(~test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds)'
 threads-required = "num-cpus"
 
 [[profile.fast.overrides]]
@@ -28,7 +61,7 @@ threads-required = "num-cpus"
 # can consume their terminal-state wait budget without surfacing a product
 # failure. Keep each case isolated in the fast profile; the tests still execute
 # their branch/join concurrency internally.
-filter = 'test(test_branch_winner_and_join_any_behavior) or test(test_branch_winner_is_selected_only_after_success_allowing_fallback)'
+filter = 'test(~test_branch_winner_and_join_any_behavior) or test(~test_branch_winner_is_selected_only_after_success_allowing_fallback)'
 threads-required = "num-cpus"
 
 [[profile.default.overrides]]

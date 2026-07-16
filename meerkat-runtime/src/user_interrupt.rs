@@ -13,8 +13,46 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: impl Into<String>,
     ) -> Result<(), RuntimeDriverError> {
-        self.dispatch_user_interrupt(session_id, reason.into())
+        self.dispatch_user_interrupt(session_id, None, None, reason.into())
             .await
+            .map(|_| ())
+    }
+
+    /// Assert a hard cancel only while `expected_run_id` remains the exact
+    /// machine-owned current run.
+    ///
+    /// Returns `true` when the interrupt was delivered to that run and `false`
+    /// when the run was already unbound/terminal (including when another run
+    /// has since become current). The compare and interrupt admission share the
+    /// per-session mutation gate, so a stale bridge retry cannot race the
+    /// comparison and cancel a newer run.
+    pub async fn hard_cancel_run_if_current(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        reason: impl Into<String>,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.dispatch_user_interrupt(session_id, Some(expected_run_id), None, reason.into())
+            .await
+    }
+
+    /// Run-fenced hard cancel additionally pinned to one exact host-member
+    /// residency. Both comparisons and the interrupt stage share the same
+    /// session mutation gate.
+    pub(crate) async fn hard_cancel_run_if_current_for_member_incarnation(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        expected_member: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        reason: impl Into<String>,
+    ) -> Result<bool, RuntimeDriverError> {
+        self.dispatch_user_interrupt(
+            session_id,
+            Some(expected_run_id),
+            Some(expected_member),
+            reason.into(),
+        )
+        .await
     }
 
     // `user_interrupt` is mounted as a private child of `dispatch_session`, so

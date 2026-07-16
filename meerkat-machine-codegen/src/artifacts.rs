@@ -38,6 +38,7 @@ macro_rules! writeln {
 
 const TLA_RUST_U64_MAX_CONSTANT: &str = "RustU64Max";
 const TLC_SAFE_RUST_U64_MAX_VALUE: u64 = 2_147_483_647;
+const SESSION_ID_STRING_BRIDGE_HELPER: &str = "meerkat_machine_session_id_matches_string";
 
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
@@ -417,7 +418,9 @@ fn expr_uses_u64_max(expr: &Expr) -> bool {
             expr_uses_u64_max(map) || expr_uses_u64_max(key)
         }
         Expr::SeqStartsWith { seq, prefix } => expr_uses_u64_max(seq) || expr_uses_u64_max(prefix),
-        Expr::Call { args, .. } => args.iter().any(expr_uses_u64_max),
+        Expr::Call { helper, args } => {
+            native_helper_uses_u64_max(helper) || args.iter().any(expr_uses_u64_max)
+        }
         Expr::Quantified { over, body, .. } => expr_uses_u64_max(over) || expr_uses_u64_max(body),
         Expr::Bool(_)
         | Expr::U64(_)
@@ -432,6 +435,21 @@ fn expr_uses_u64_max(expr: &Expr) -> bool {
         | Expr::Variant(_)
         | Expr::None => false,
     }
+}
+
+fn expr_calls_helper(expr: &Expr, helper: &str) -> bool {
+    let mut calls = BTreeSet::new();
+    collect_helper_calls(expr, &mut calls);
+    calls.contains(helper)
+}
+
+fn native_helper_uses_u64_max(helper: &str) -> bool {
+    matches!(
+        helper,
+        "mob_machine_next_respawn_generation"
+            | "mob_machine_u64_is_exact_successor"
+            | "mob_machine_optional_u64_is_exact_successor"
+    )
 }
 
 fn update_uses_u64_max(update: &Update) -> bool {
@@ -458,6 +476,44 @@ fn update_uses_u64_max(update: &Update) -> bool {
         }
         Update::ForEach { over, updates, .. } => {
             expr_uses_u64_max(over) || updates.iter().any(update_uses_u64_max)
+        }
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => false,
+    }
+}
+
+fn update_calls_helper(update: &Update, helper: &str) -> bool {
+    match update {
+        Update::Assign { expr, .. }
+        | Update::SetInsert { value: expr, .. }
+        | Update::SetRemove { value: expr, .. }
+        | Update::SeqAppend { value: expr, .. }
+        | Update::SeqPrepend { values: expr, .. }
+        | Update::SeqRemoveValue { value: expr, .. }
+        | Update::SeqRemoveAll { values: expr, .. } => expr_calls_helper(expr, helper),
+        Update::MapInsert { key, value, .. } => {
+            expr_calls_helper(key, helper) || expr_calls_helper(value, helper)
+        }
+        Update::MapRemove { key, .. }
+        | Update::MapIncrement { key, .. }
+        | Update::MapDecrement { key, .. } => expr_calls_helper(key, helper),
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            expr_calls_helper(condition, helper)
+                || then_updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, helper))
+                || else_updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, helper))
+        }
+        Update::ForEach { over, updates, .. } => {
+            expr_calls_helper(over, helper)
+                || updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, helper))
         }
         Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => false,
     }
@@ -493,6 +549,49 @@ fn machine_uses_u64_max(schema: &MachineSchema) -> bool {
                     .iter()
                     .any(|effect| effect.fields.values().any(expr_uses_u64_max))
         })
+}
+
+fn machine_uses_session_id_string_bridge(schema: &MachineSchema) -> bool {
+    schema
+        .state
+        .init
+        .fields
+        .iter()
+        .any(|field| expr_calls_helper(&field.expr, SESSION_ID_STRING_BRIDGE_HELPER))
+        || schema
+            .helpers
+            .iter()
+            .chain(schema.derived.iter())
+            .any(|helper| expr_calls_helper(&helper.body, SESSION_ID_STRING_BRIDGE_HELPER))
+        || schema
+            .invariants
+            .iter()
+            .any(|invariant| expr_calls_helper(&invariant.expr, SESSION_ID_STRING_BRIDGE_HELPER))
+        || schema.transitions.iter().any(|transition| {
+            transition
+                .guards
+                .iter()
+                .any(|guard| expr_calls_helper(&guard.expr, SESSION_ID_STRING_BRIDGE_HELPER))
+                || transition
+                    .updates
+                    .iter()
+                    .any(|update| update_calls_helper(update, SESSION_ID_STRING_BRIDGE_HELPER))
+                || transition.emit.iter().any(|effect| {
+                    effect
+                        .fields
+                        .values()
+                        .any(|expr| expr_calls_helper(expr, SESSION_ID_STRING_BRIDGE_HELPER))
+                })
+        })
+}
+
+fn composition_uses_session_id_string_bridge(
+    machine_by_instance: &BTreeMap<&str, &MachineSchema>,
+) -> bool {
+    machine_by_instance
+        .values()
+        .copied()
+        .any(machine_uses_session_id_string_bridge)
 }
 
 fn composition_uses_u64_max(
@@ -1157,6 +1256,22 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     let sample_cardinality = machine_cfg_sample_cardinality(schema, deep);
     let operator_suffix = if deep { "Deep" } else { "Ci" };
     let uses_u64_max = machine_uses_u64_max(schema);
+    let session_id_cardinality = if deep {
+        schema
+            .deep_domain_overrides
+            .get("SessionIdValues")
+            .copied()
+            .unwrap_or(sample_cardinality)
+    } else {
+        sample_cardinality
+    };
+    let session_id_string_bridge_sample = session_id_string_bridge_sample(
+        deep && machine_uses_session_id_string_bridge(schema),
+        &domains,
+        session_id_cardinality,
+        &named_samples,
+        &named_bindings,
+    );
 
     pushln!(&mut out, "SPECIFICATION Spec");
     if !domains.is_empty() || uses_u64_max {
@@ -1180,16 +1295,28 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
                 )
                 .expect("write to string");
             } else {
+                // Deep-profile per-domain override (machine analog of the
+                // composition path): absent keys use the profile default.
+                let domain_cardinality = if deep {
+                    schema
+                        .deep_domain_overrides
+                        .get(name.as_str())
+                        .copied()
+                        .unwrap_or(sample_cardinality)
+                } else {
+                    sample_cardinality
+                };
                 writeln!(
                     &mut out,
                     "  {} = {}",
                     name,
-                    render_default_domain_assignment(
+                    render_cfg_domain_assignment(
                         &ty,
-                        sample_cardinality,
+                        domain_cardinality,
                         &named_samples,
                         &named_bindings,
                         false,
+                        session_id_string_bridge_sample.as_deref(),
                     )
                 )
                 .expect("write to string");
@@ -1240,6 +1367,22 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     let operator_suffix = if deep { "Deep" } else { "Ci" };
     let mut instance_invariants = Vec::new();
     let uses_u64_max = composition_uses_u64_max(schema, &machine_by_instance);
+    let session_id_cardinality = if deep {
+        schema
+            .deep_domain_overrides
+            .get("SessionIdValues")
+            .copied()
+            .unwrap_or(schema.deep_domain_cardinality)
+    } else {
+        default_sample_cardinality(false)
+    };
+    let session_id_string_bridge_sample = session_id_string_bridge_sample(
+        deep && composition_uses_session_id_string_bridge(&machine_by_instance),
+        &domains,
+        session_id_cardinality,
+        &named_samples,
+        &named_bindings,
+    );
 
     for instance in &schema.machines {
         let Some(machine) = machine_by_instance
@@ -1292,12 +1435,13 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
                     &mut out,
                     "  {} = {}",
                     name,
-                    render_default_domain_assignment(
+                    render_cfg_domain_assignment(
                         &ty,
                         cardinality,
                         &named_samples,
                         &named_bindings,
                         false,
+                        session_id_string_bridge_sample.as_deref(),
                     )
                 )
                 .expect("write to string");
@@ -1613,6 +1757,89 @@ fn machine_cfg_sample_cardinality(schema: &MachineSchema, deep: bool) -> usize {
     } else {
         default_sample_cardinality(deep)
     }
+}
+
+fn session_id_string_bridge_sample(
+    enabled: bool,
+    domains: &BTreeMap<String, TypeRef>,
+    session_id_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+
+    assert!(
+        matches!(
+            domains.get("SessionIdValues"),
+            Some(TypeRef::Named(name)) if name.as_str() == "SessionId"
+        ) && matches!(domains.get("StringValues"), Some(TypeRef::String)),
+        "the SessionId/String native bridge requires both model domains"
+    );
+
+    let sample = sample_values_for_named_type(
+        "SessionId",
+        session_id_cardinality.max(1),
+        named_samples,
+        named_bindings,
+    )
+    .into_iter()
+    .next();
+    assert!(
+        sample.is_some(),
+        "the SessionId/String native bridge requires a SessionId sample"
+    );
+    sample
+}
+
+fn render_cfg_domain_assignment(
+    ty: &TypeRef,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    include_string_samples: bool,
+    session_id_string_bridge_sample: Option<&str>,
+) -> String {
+    let bridge_applies_to_session_id = matches!(
+        ty,
+        TypeRef::Named(name) if name.as_str() == "SessionId"
+    );
+    let effective_cardinality = if session_id_string_bridge_sample.is_some()
+        && (matches!(ty, TypeRef::String) || bridge_applies_to_session_id)
+    {
+        sample_cardinality.max(1)
+    } else {
+        sample_cardinality
+    };
+
+    if let (TypeRef::String, Some(bridge_sample)) = (ty, session_id_string_bridge_sample) {
+        let mut samples =
+            collected_string_samples(effective_cardinality, named_samples, include_string_samples)
+                .into_iter()
+                .map(|sample| tla_string(&sample))
+                .collect::<Vec<_>>();
+        let baseline_sample_count = samples.len();
+        samples.retain(|sample| sample != bridge_sample);
+        samples.insert(0, bridge_sample.to_owned());
+        // Deep transition coverage makes the equality branch a non-vacuity
+        // gate. Substitute the shared SessionId value into StringValues rather
+        // than growing the renderer's actual baseline pool (which can be
+        // smaller than a configured cardinality) and multiplying the explored
+        // state space.
+        if !include_string_samples {
+            samples.truncate(baseline_sample_count);
+        }
+        return format!("{{{}}}", samples.join(", "));
+    }
+
+    render_default_domain_assignment(
+        ty,
+        effective_cardinality,
+        named_samples,
+        named_bindings,
+        include_string_samples,
+    )
 }
 
 fn push_cfg_assignment_operator_definitions(
@@ -4667,6 +4894,53 @@ mod tests {
         EffectVariantId, MachineId, MachineInstanceId, TransitionId,
     };
 
+    fn string_domain_values(assignment: &str) -> BTreeSet<String> {
+        assignment
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .split(", ")
+            .filter(|value| !value.is_empty())
+            .map(|value| value.trim_matches('"').to_owned())
+            .collect()
+    }
+
+    fn cfg_string_domain_values(cfg: &str, domain: &str) -> BTreeSet<String> {
+        let prefix = format!("  {domain} = ");
+        cfg.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .map(string_domain_values)
+            .unwrap_or_default()
+    }
+
+    fn default_string_domain_values(sample_cardinality: usize) -> BTreeSet<String> {
+        string_domain_values(&render_default_domain_assignment(
+            &TypeRef::String,
+            sample_cardinality,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+        ))
+    }
+
+    fn assert_session_id_string_overlap(cfg: &str, profile: &str) {
+        let session_ids = cfg_string_domain_values(cfg, "SessionIdValues");
+        let strings = cfg_string_domain_values(cfg, "StringValues");
+        assert!(
+            !session_ids.is_empty() && !strings.is_empty(),
+            "{profile} must sample both bridged domains"
+        );
+        assert!(
+            !session_ids.is_disjoint(&strings),
+            "{profile} must make the SessionId/string equality branch satisfiable"
+        );
+        assert!(
+            strings
+                .iter()
+                .any(|candidate| !session_ids.contains(candidate)),
+            "{profile} must retain a non-matching string candidate for the rejection branch"
+        );
+    }
+
     #[test]
     fn conjunctive_bool_specialization_is_literal_only_and_conservative() {
         let expr = Expr::And(vec![
@@ -4814,6 +5088,184 @@ mod tests {
                     if path == "crate::catalog::dsl::meerkat_machine::PeerAddress"
             ),
             "path-only TypePath twins should not block composition-domain binding merge"
+        );
+    }
+
+    #[test]
+    fn mob_generation_native_helper_declares_and_assigns_u64_boundary() {
+        let schema = mob_machine();
+        assert!(machine_uses_u64_max(&schema));
+
+        let model = render_machine_semantic_model(&schema).expect("render MobMachine model");
+        let constants_line = model
+            .lines()
+            .find(|line| line.starts_with("CONSTANTS "))
+            .expect("MobMachine model constants");
+        assert!(constants_line.contains(TLA_RUST_U64_MAX_CONSTANT));
+
+        for deep in [false, true] {
+            let cfg = render_machine_ci_cfg(&schema, deep);
+            assert!(
+                cfg.contains(&format!(
+                    "  {TLA_RUST_U64_MAX_CONSTANT} = {TLC_SAFE_RUST_U64_MAX_VALUE}"
+                )),
+                "{} config must assign the boundary",
+                if deep { "deep" } else { "ci" }
+            );
+        }
+    }
+
+    #[test]
+    fn meerkat_deep_cfg_samples_the_native_session_id_string_bridge() {
+        let schema = meerkat_machine();
+        assert!(machine_uses_session_id_string_bridge(&schema));
+
+        let deep_cfg = render_machine_ci_cfg(&schema, true);
+        assert_session_id_string_overlap(&deep_cfg, "MeerkatMachine Deep config");
+        assert_eq!(
+            cfg_string_domain_values(&deep_cfg, "StringValues").len(),
+            default_string_domain_values(default_sample_cardinality(true)).len(),
+            "bridge reachability must substitute a Deep string sample, not add one"
+        );
+
+        let ci_cfg = render_machine_ci_cfg(&schema, false);
+        assert!(
+            cfg_string_domain_values(&ci_cfg, "SessionIdValues").is_empty()
+                && cfg_string_domain_values(&ci_cfg, "StringValues").is_empty(),
+            "the step-limit-one CI profile must remain uninflated"
+        );
+    }
+
+    #[test]
+    fn mob_deep_cfg_does_not_inflate_unrelated_string_domains() {
+        let schema = mob_machine();
+        assert!(!machine_uses_session_id_string_bridge(&schema));
+
+        let deep_cfg = render_machine_ci_cfg(&schema, true);
+        let session_ids = cfg_string_domain_values(&deep_cfg, "SessionIdValues");
+        let strings = cfg_string_domain_values(&deep_cfg, "StringValues");
+        assert!(
+            session_ids.is_disjoint(&strings),
+            "a machine without the native bridge must retain independent domains"
+        );
+    }
+
+    #[test]
+    fn meerkat_mob_composition_deep_cfg_samples_the_included_native_bridge() {
+        let schema = meerkat_mob_seam_composition();
+        let deep_cfg = render_composition_ci_cfg(&schema, true);
+
+        assert_session_id_string_overlap(&deep_cfg, "Meerkat/Mob composition Deep config");
+        let string_cardinality = schema
+            .deep_domain_overrides
+            .get("StringValues")
+            .copied()
+            .unwrap_or(schema.deep_domain_cardinality);
+        assert_eq!(
+            cfg_string_domain_values(&deep_cfg, "StringValues").len(),
+            default_string_domain_values(string_cardinality).len(),
+            "composition bridge reachability must substitute a string sample, not add one"
+        );
+
+        let ci_cfg = render_composition_ci_cfg(&schema, false);
+        assert!(
+            cfg_string_domain_values(&ci_cfg, "SessionIdValues")
+                .is_disjoint(&cfg_string_domain_values(&ci_cfg, "StringValues")),
+            "the composition CI profile must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn meerkat_session_id_native_helper_matches_typed_option_contract() {
+        let model =
+            render_machine_semantic_model(&meerkat_machine()).expect("render MeerkatMachine model");
+        let expected = r"meerkat_machine_session_id_matches_string(current, candidate) ==
+    current # None /\ current.value = candidate
+";
+
+        assert!(
+            model.contains(expected),
+            "MeerkatMachine TLA session identity operator must preserve the Rust typed-option/string comparison contract"
+        );
+    }
+
+    #[test]
+    fn mob_placed_native_helpers_are_defined_in_the_tla_model() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+
+        for operator in [
+            "mob_machine_finalized_placed_kickoff_recovery_well_formed(",
+            "mob_machine_placed_completion_obligation_well_formed(",
+            "mob_machine_placed_completion_custody_admits(",
+            "mob_machine_adaptive_lifecycle_drained(",
+            "mob_machine_adaptive_run_custody_drained(",
+            "mob_machine_placed_kickoff_obligation_well_formed(",
+            "mob_machine_placed_kickoff_correlation_available(",
+            "mob_machine_placed_kickoff_custody_absent_for_identity(",
+            "mob_machine_placed_kickoff_custody_absent_for_host(",
+            "mob_machine_remote_turn_input_id_available_to_kickoff(",
+            "mob_machine_placed_carrier_binding_active(",
+            "mob_machine_placed_carrier_binding_confirmed_revoked(",
+            "mob_machine_host_binding_generation_tombstone(",
+        ] {
+            assert!(
+                model
+                    .lines()
+                    .any(|line| line.starts_with(operator) && line.ends_with(" ==")),
+                "MobMachine TLA model must define native operator {operator}"
+            );
+        }
+    }
+
+    #[test]
+    fn mob_placed_kickoff_correlation_tla_helper_covers_every_shared_input_namespace() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        let expected = r"mob_machine_placed_kickoff_correlation_available(pending_kickoffs, resolved_kickoffs, retained_kickoffs, pending_turns, committed_turns, resolved_turns, pending_completions, resolved_completions, candidate) ==
+    /\ \A row \in pending_kickoffs \cup resolved_kickoffs : /\ row.agent_identity # candidate.agent_identity /\ \lnot (/\ row.host_id = candidate.host_id /\ row.generation = candidate.generation /\ row.fence_token = candidate.fence_token /\ row.input_id = candidate.input_id)
+    /\ \A identity \in DOMAIN retained_kickoffs : retained_kickoffs[identity].agent_identity # candidate.agent_identity
+    /\ \A row \in pending_turns \cup committed_turns \cup resolved_turns : \lnot (/\ row.agent_identity = candidate.agent_identity /\ row.host_id = candidate.host_id /\ row.generation = candidate.generation /\ row.fence_token = candidate.fence_token /\ row.input_id = candidate.input_id)
+    /\ \A row \in pending_completions \cup resolved_completions : \lnot (/\ row.agent_identity = candidate.agent_identity /\ row.host_id = candidate.host_id /\ row.generation = candidate.generation /\ row.fence_token = candidate.fence_token /\ row.input_id = candidate.input_id)
+";
+
+        assert!(
+            model.contains(expected),
+            "MobMachine TLA kickoff-correlation helper must reject collisions across kickoff, remote-turn, and placed-completion custody"
+        );
+    }
+
+    #[test]
+    fn mob_placed_kickoff_recovery_tla_helper_does_not_shadow_machine_phase() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        assert!(
+            model.contains(
+                r#"Cardinality({ kickoff_phase \in {"Started", "CallbackPending", "Failed", "Cancelled"} :"#
+            ),
+            "kickoff recovery helper must bind a helper-local identifier"
+        );
+        assert!(
+            !model.contains(
+                r#"Cardinality({ phase \in {"Started", "CallbackPending", "Failed", "Cancelled"} :"#
+            ),
+            "TLA forbids the helper-local binder from shadowing the machine's phase variable"
+        );
+    }
+
+    #[test]
+    fn mob_adaptive_run_custody_native_helper_matches_rust_contract() {
+        let model = render_machine_semantic_model(&mob_machine()).expect("render MobMachine model");
+        let expected = r#"mob_machine_adaptive_run_custody_drained(adaptive_run_id, active_layer, active_members, layer_run, layer_phases, layer_dispositions) ==
+    /\ adaptive_run_id \notin DOMAIN active_layer
+    /\ (IF adaptive_run_id \in DOMAIN active_members THEN active_members[adaptive_run_id] ELSE 0) = 0
+    /\ \A layer_id \in DOMAIN layer_run :
+           \/ layer_run[layer_id] # adaptive_run_id
+           \/ /\ layer_id \in DOMAIN layer_dispositions
+              /\ layer_id \in DOMAIN layer_phases
+              /\ layer_phases[layer_id] \in {"Completed", "SetupFailed", "RunFailed", "ResultInvalid", "Canceled"}
+"#;
+
+        assert!(
+            model.contains(expected),
+            "MobMachine TLA adaptive-run custody operator must preserve the Rust absence, zero-active-member, and terminal-layer contract"
         );
     }
 }
@@ -7922,7 +8374,7 @@ impl<'a> MachineTlaCompiler<'a> {
             &CfgAssignmentOperatorProfile {
                 suffix: "Deep".to_owned(),
                 sample_cardinality: machine_cfg_sample_cardinality(self.schema, true),
-                domain_overrides: None,
+                domain_overrides: Some(&self.schema.deep_domain_overrides),
                 named_samples: &named_samples,
                 include_string_samples: false,
             },
@@ -8257,6 +8709,13 @@ impl<'a> MachineTlaCompiler<'a> {
         let prefix = |name: &str| self.scoped_helper_name(name);
         writeln!(
             out,
+            "{}(current, candidate) ==",
+            prefix("meerkat_machine_session_id_matches_string")
+        )
+        .expect("write to string");
+        pushln!(out, "    current # None /\\ current.value = candidate");
+        writeln!(
+            out,
             "{}(endpoints, endpoint_count) ==",
             prefix("meerkat_peer_endpoint_set_cardinality_matches")
         )
@@ -8305,8 +8764,8 @@ impl<'a> MachineTlaCompiler<'a> {
         let prefix = |name: &str| self.scoped_helper_name(name);
         let local = |name: &str| self.local_binding_name(name);
         // Row #181: compute the next monotone respawn generation for an
-        // identity. This mirrors the catalog helper: missing identity starts at
-        // generation 1, otherwise increment the machine-owned current value.
+        // identity. Missing identity starts at generation zero. A retained
+        // u64::MAX generation has no successor and must never wrap to zero.
         writeln!(
             out,
             "{}(arg_identity_runtime_generations, arg_agent_identity) ==",
@@ -8315,13 +8774,320 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         pushln!(
             out,
-            "    IF arg_agent_identity \\in DOMAIN arg_identity_runtime_generations"
+            "    IF arg_agent_identity \\notin DOMAIN arg_identity_runtime_generations"
+        );
+        pushln!(out, "    THEN Some(0)");
+        pushln!(
+            out,
+            "    ELSE IF arg_identity_runtime_generations[arg_agent_identity] = {TLA_RUST_U64_MAX_CONSTANT}"
+        );
+        pushln!(out, "         THEN None");
+        pushln!(
+            out,
+            "         ELSE Some(arg_identity_runtime_generations[arg_agent_identity] + 1)"
+        );
+        // Supervisor epochs use the same non-wrapping u64 successor relation
+        // in both plain and Option-valued recovered tuples. These operators
+        // deliberately mention the Rust u64 ceiling so TLC cannot admit
+        // MAX -> 0 as a successor through unbounded integer arithmetic.
+        writeln!(
+            out,
+            "{}(arg_current, arg_next) ==",
+            prefix("mob_machine_u64_is_exact_successor")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ arg_current # {TLA_RUST_U64_MAX_CONSTANT}");
+        pushln!(out, "    /\\ arg_next = arg_current + 1");
+        writeln!(
+            out,
+            "{}(arg_current, arg_next) ==",
+            prefix("mob_machine_optional_u64_is_exact_successor")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ arg_current # {TLA_RUST_U64_MAX_CONSTANT}");
+        pushln!(out, "    /\\ arg_next = Some(arg_current + 1)");
+        // Remote-turn custody admission is a native MobMachine reducer because
+        // it enforces aggregate cardinality and correlation-key uniqueness
+        // across all three custody sets. Keep this operator structurally
+        // equivalent to the Rust helper in the canonical MobMachine catalog.
+        writeln!(
+            out,
+            "{}(pending, committed, resolved, candidate) ==",
+            prefix("mob_machine_remote_turn_custody_admits")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET same_member_host_count == Cardinality({{ row \\in pending : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
         );
         pushln!(
             out,
-            "    THEN arg_identity_runtime_generations[arg_agent_identity] + 1"
+            "            + Cardinality({{ row \\in committed : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
         );
-        pushln!(out, "    ELSE 1");
+        pushln!(
+            out,
+            "            + Cardinality({{ row \\in resolved : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
+        );
+        pushln!(
+            out,
+            "    IN /\\ Cardinality(pending) + Cardinality(committed) + Cardinality(resolved) < 4096"
+        );
+        pushln!(out, "       /\\ candidate.dispatch_sequence > 0");
+        pushln!(out, "       /\\ candidate.input_id # \"\"");
+        pushln!(out, "       /\\ candidate.run_id # \"\"");
+        pushln!(out, "       /\\ candidate.step_id # \"\"");
+        pushln!(out, "       /\\ candidate.host_id # \"\"");
+        pushln!(out, "       /\\ candidate.member_session_id # \"\"");
+        for rows in ["pending", "committed", "resolved"] {
+            pushln!(
+                out,
+                "       /\\ \\A row \\in {rows} : /\\ row.dispatch_sequence # candidate.dispatch_sequence /\\ \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+            );
+        }
+        pushln!(out, "       /\\ same_member_host_count < 256");
+        // Placed completion/kickoff helpers. TLC treats canonical UUID lexical
+        // shape as an abstract non-empty string property; Rust performs the
+        // stricter parse-and-roundtrip check at the executable boundary.
+        writeln!(
+            out,
+            "{}(candidate) ==",
+            prefix("mob_machine_placed_completion_obligation_well_formed")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ candidate.agent_identity # \"\"");
+        pushln!(out, "    /\\ candidate.host_id # \"\"");
+        pushln!(out, "    /\\ candidate.host_binding_generation > 0");
+        pushln!(out, "    /\\ candidate.member_session_id # \"\"");
+        pushln!(out, "    /\\ candidate.dispatch_sequence > 0");
+        pushln!(out, "    /\\ candidate.input_id # \"\"");
+        writeln!(
+            out,
+            "{}(pending, resolved, candidate) ==",
+            prefix("mob_machine_placed_completion_custody_admits")
+        )
+        .expect("write to string");
+        pushln!(out, "    LET rows == pending \\cup resolved");
+        pushln!(
+            out,
+            "        same_member_host == Cardinality({{ row \\in rows : /\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id }})"
+        );
+        pushln!(out, "    IN /\\ Cardinality(rows) < 4096");
+        pushln!(
+            out,
+            "       /\\ \\A row \\in rows : /\\ row.dispatch_sequence # candidate.dispatch_sequence /\\ \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(out, "       /\\ same_member_host < 256");
+        writeln!(
+            out,
+            "{}(active_run, active_layer, active_members, layer_phases, layer_dispositions) ==",
+            prefix("mob_machine_adaptive_lifecycle_drained")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ active_run = None");
+        pushln!(out, "    /\\ DOMAIN active_layer = {{}}");
+        pushln!(
+            out,
+            "    /\\ \\A run_id \\in DOMAIN active_members : active_members[run_id] = 0"
+        );
+        pushln!(out, "    /\\ \\A layer_id \\in DOMAIN layer_phases :");
+        pushln!(
+            out,
+            "           \\/ layer_phases[layer_id] = \"Validating\""
+        );
+        pushln!(
+            out,
+            "           \\/ /\\ layer_id \\in DOMAIN layer_dispositions"
+        );
+        pushln!(
+            out,
+            "              /\\ layer_phases[layer_id] \\in {{\"Completed\", \"SetupFailed\", \"RunFailed\", \"ResultInvalid\", \"Canceled\"}}"
+        );
+        writeln!(
+            out,
+            "{}(adaptive_run_id, active_layer, active_members, layer_run, layer_phases, layer_dispositions) ==",
+            prefix("mob_machine_adaptive_run_custody_drained")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ adaptive_run_id \\notin DOMAIN active_layer");
+        pushln!(
+            out,
+            "    /\\ (IF adaptive_run_id \\in DOMAIN active_members THEN active_members[adaptive_run_id] ELSE 0) = 0"
+        );
+        pushln!(out, "    /\\ \\A layer_id \\in DOMAIN layer_run :");
+        pushln!(out, "           \\/ layer_run[layer_id] # adaptive_run_id");
+        pushln!(
+            out,
+            "           \\/ /\\ layer_id \\in DOMAIN layer_dispositions"
+        );
+        pushln!(out, "              /\\ layer_id \\in DOMAIN layer_phases");
+        pushln!(
+            out,
+            "              /\\ layer_phases[layer_id] \\in {{\"Completed\", \"SetupFailed\", \"RunFailed\", \"ResultInvalid\", \"Canceled\"}}"
+        );
+        writeln!(
+            out,
+            "{}(started, callback_pending, failed, cancelled, kickoff_errors, identity, outcome_kind, outcome_error, closure_kind) ==",
+            prefix("mob_machine_finalized_placed_kickoff_recovery_well_formed")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ Cardinality({{ kickoff_phase \\in {{\"Started\", \"CallbackPending\", \"Failed\", \"Cancelled\"}} :"
+        );
+        pushln!(
+            out,
+            "           CASE kickoff_phase = \"Started\" -> identity \\in started"
+        );
+        pushln!(
+            out,
+            "             [] kickoff_phase = \"CallbackPending\" -> identity \\in callback_pending"
+        );
+        pushln!(
+            out,
+            "             [] kickoff_phase = \"Failed\" -> identity \\in failed"
+        );
+        pushln!(
+            out,
+            "             [] OTHER -> identity \\in cancelled }}) = 1"
+        );
+        pushln!(
+            out,
+            "    /\\ CASE outcome_kind = \"Failed\" -> outcome_error # None"
+        );
+        pushln!(
+            out,
+            "          [] outcome_kind = \"RejectedNoEffect\" -> /\\ outcome_error # None /\\ outcome_error.value # \"\""
+        );
+        pushln!(out, "          [] OTHER -> outcome_error = None");
+        pushln!(
+            out,
+            "    /\\ CASE closure_kind = \"Acknowledged\" -> /\\ outcome_kind # \"RejectedNoEffect\" /\\ outcome_kind # \"Disposed\""
+        );
+        pushln!(
+            out,
+            "          [] closure_kind = \"RejectedNoEffect\" -> outcome_kind = \"RejectedNoEffect\""
+        );
+        pushln!(
+            out,
+            "          [] OTHER -> outcome_kind # \"RejectedNoEffect\""
+        );
+        pushln!(
+            out,
+            "    /\\ CASE identity \\in cancelled -> identity \\notin DOMAIN kickoff_errors"
+        );
+        pushln!(
+            out,
+            "          [] identity \\in started -> /\\ outcome_kind = \"Started\" /\\ identity \\notin DOMAIN kickoff_errors"
+        );
+        pushln!(
+            out,
+            "          [] identity \\in callback_pending -> /\\ outcome_kind = \"CallbackPending\" /\\ identity \\notin DOMAIN kickoff_errors"
+        );
+        pushln!(
+            out,
+            "          [] OTHER -> /\\ outcome_kind \\in {{\"Failed\", \"RejectedNoEffect\"}} /\\ identity \\in DOMAIN kickoff_errors /\\ outcome_error = Some(kickoff_errors[identity])"
+        );
+        writeln!(
+            out,
+            "{}(candidate) ==",
+            prefix("mob_machine_placed_kickoff_obligation_well_formed")
+        )
+        .expect("write to string");
+        pushln!(out, "    /\\ candidate.agent_identity # \"\"");
+        pushln!(out, "    /\\ candidate.host_id # \"\"");
+        pushln!(out, "    /\\ candidate.host_binding_generation > 0");
+        pushln!(out, "    /\\ candidate.member_session_id # \"\"");
+        pushln!(out, "    /\\ candidate.input_id # \"\"");
+        pushln!(out, "    /\\ candidate.objective_id # \"\"");
+        writeln!(
+            out,
+            "{}(pending_kickoffs, resolved_kickoffs, retained_kickoffs, pending_turns, committed_turns, resolved_turns, pending_completions, resolved_completions, candidate) ==",
+            prefix("mob_machine_placed_kickoff_correlation_available")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending_kickoffs \\cup resolved_kickoffs : /\\ row.agent_identity # candidate.agent_identity /\\ \\lnot (/\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A identity \\in DOMAIN retained_kickoffs : retained_kickoffs[identity].agent_identity # candidate.agent_identity"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending_turns \\cup committed_turns \\cup resolved_turns : \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending_completions \\cup resolved_completions : \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        writeln!(
+            out,
+            "{}(pending, resolved, agent_identity) ==",
+            prefix("mob_machine_placed_kickoff_custody_absent_for_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A row \\in pending \\cup resolved : row.agent_identity # agent_identity"
+        );
+        writeln!(
+            out,
+            "{}(pending, resolved, host_id) ==",
+            prefix("mob_machine_placed_kickoff_custody_absent_for_host")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A row \\in pending \\cup resolved : row.host_id # host_id"
+        );
+        writeln!(
+            out,
+            "{}(pending, resolved, retained, candidate) ==",
+            prefix("mob_machine_remote_turn_input_id_available_to_kickoff")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    /\\ \\A row \\in pending \\cup resolved : \\lnot (/\\ row.agent_identity = candidate.agent_identity /\\ row.host_id = candidate.host_id /\\ row.generation = candidate.generation /\\ row.fence_token = candidate.fence_token /\\ row.input_id = candidate.input_id)"
+        );
+        pushln!(
+            out,
+            "    /\\ \\A identity \\in DOMAIN retained : \\lnot (/\\ retained[identity].agent_identity = candidate.agent_identity /\\ retained[identity].host_id = candidate.host_id /\\ retained[identity].generation = candidate.generation /\\ retained[identity].fence_token = candidate.fence_token /\\ retained[identity].input_id = candidate.input_id)"
+        );
+        // Retirement atomically prunes every local wiring edge incident to
+        // the retiring identity. This mirrors the catalog-native Rust helper
+        // and keeps cold replay from resurrecting topology to an absent member.
+        writeln!(
+            out,
+            "{}(arg_wiring_edges, arg_agent_identity) ==",
+            prefix("mob_machine_wiring_edges_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ edge \\in arg_wiring_edges : /\\ edge.a # arg_agent_identity /\\ edge.b # arg_agent_identity }}"
+        );
+        writeln!(
+            out,
+            "{}(arg_external_peer_edges, arg_agent_identity) ==",
+            prefix("mob_machine_external_peer_edges_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ edge \\in arg_external_peer_edges : edge.local # arg_agent_identity }}"
+        );
+        writeln!(
+            out,
+            "{}(arg_external_peer_edges_by_key, arg_agent_identity) ==",
+            prefix("mob_machine_external_peer_edges_by_key_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [key \\in {{ key \\in DOMAIN arg_external_peer_edges_by_key : key.local # arg_agent_identity }} |-> arg_external_peer_edges_by_key[key]]"
+        );
         // Row #351: reconcile-membership spawn/retire set helpers. The DSL
         // ReconcileMembership effect emits calls to these, but they had no TLA+
         // operator definitions, so TLC reported "Unknown operator" for
@@ -8353,6 +9119,123 @@ impl<'a> MachineTlaCompiler<'a> {
             "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired }}"
         );
         pushln!(out, "    ELSE {{}}");
+        // Placed-carrier cleanup is identity-exclusive and carries the exact
+        // durable operation tuple. Both operators are native Rust helpers in
+        // the catalog, so every standalone/composition TLA namespace must
+        // define their semantic twins explicitly.
+        writeln!(
+            out,
+            "{}(arg_obligations, arg_agent_identity) ==",
+            prefix("mob_machine_placed_cleanup_absent_for_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A obligation \\in arg_obligations : obligation.agent_identity # arg_agent_identity"
+        );
+        writeln!(
+            out,
+            "{}(arg_agent_identity, arg_spawn_id, arg_generation, arg_fence_token, arg_provision_operation_id, arg_operation_owner_session_id, arg_expected_phase) ==",
+            prefix("mob_machine_placed_cleanup_obligation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [agent_identity |-> arg_agent_identity, spawn_id |-> arg_spawn_id, generation |-> arg_generation, fence_token |-> arg_fence_token, provision_operation_id |-> arg_provision_operation_id, operation_owner_session_id |-> arg_operation_owner_session_id, expected_phase |-> arg_expected_phase]"
+        );
+        // A placed carrier is live only at the exact currently bound host
+        // generation. Keep every partial-map read behind a TLA IF so sampled
+        // malformed/partial states evaluate to FALSE instead of indexing an
+        // absent function key.
+        writeln!(
+            out,
+            "{}(arg_member_placement, arg_current_binding_generations, arg_host_bind_phase, arg_host_binding_generations, arg_agent_identity) ==",
+            prefix("mob_machine_placed_carrier_binding_active")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_agent_identity \\notin DOMAIN arg_member_placement"
+        );
+        pushln!(out, "    THEN FALSE");
+        pushln!(
+            out,
+            "    ELSE LET host == arg_member_placement[arg_agent_identity]"
+        );
+        pushln!(
+            out,
+            "         IN IF host \\notin DOMAIN arg_host_bind_phase"
+        );
+        pushln!(out, "            THEN FALSE");
+        pushln!(
+            out,
+            "            ELSE IF arg_host_bind_phase[host] # \"Bound\""
+        );
+        pushln!(out, "                 THEN FALSE");
+        pushln!(
+            out,
+            "                 ELSE IF arg_agent_identity \\notin DOMAIN arg_current_binding_generations"
+        );
+        pushln!(out, "                      THEN FALSE");
+        pushln!(
+            out,
+            "                      ELSE LET generation == arg_current_binding_generations[arg_agent_identity]"
+        );
+        pushln!(out, "                           IN /\\ generation > 0");
+        pushln!(
+            out,
+            "                              /\\ host \\in DOMAIN arg_host_binding_generations"
+        );
+        pushln!(
+            out,
+            "                              /\\ arg_host_binding_generations[host] = generation"
+        );
+        writeln!(
+            out,
+            "{}(arg_host_id, arg_binding_generation) ==",
+            prefix("mob_machine_host_binding_generation_tombstone")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [host_id |-> arg_host_id, binding_generation |-> arg_binding_generation]"
+        );
+        // Cleanup after a revoke is authorized only when the exact retained
+        // carrier generation has a durable revocation tombstone and that host
+        // is no longer Bound.
+        writeln!(
+            out,
+            "{}(arg_member_placement, arg_current_binding_generations, arg_host_bind_phase, arg_confirmed_revocations, arg_agent_identity) ==",
+            prefix("mob_machine_placed_carrier_binding_confirmed_revoked")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_agent_identity \\notin DOMAIN arg_member_placement"
+        );
+        pushln!(out, "    THEN FALSE");
+        pushln!(
+            out,
+            "    ELSE LET host == arg_member_placement[arg_agent_identity]"
+        );
+        pushln!(
+            out,
+            "         IN IF arg_agent_identity \\notin DOMAIN arg_current_binding_generations"
+        );
+        pushln!(out, "            THEN FALSE");
+        pushln!(
+            out,
+            "            ELSE LET generation == arg_current_binding_generations[arg_agent_identity]"
+        );
+        pushln!(out, "                 IN /\\ generation > 0");
+        pushln!(
+            out,
+            "                    /\\ (IF host \\in DOMAIN arg_host_bind_phase THEN arg_host_bind_phase[host] # \"Bound\" ELSE TRUE)"
+        );
+        pushln!(
+            out,
+            "                    /\\ [host_id |-> host, binding_generation |-> generation] \\in arg_confirmed_revocations"
+        );
         // Mob-coordination temporal predicates (work-intent / resource-claim
         // expiry). The DSL emits calls to these guards but they had no TLA+
         // definitions, so TLC reported "Unknown operator" for MobMachine (and
@@ -8498,6 +9381,12 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         writeln!(
             out,
+            "{}(host_id, peer_id) == host_id = peer_id",
+            prefix("mob_machine_host_id_matches_peer_id")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
             "{}(current_endpoints, prior_endpoints, agent_identity, candidate_endpoint) ==",
             prefix("mob_machine_member_peer_id_available_for_identity")
         )
@@ -8626,6 +9515,87 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key] : edge \\in local_external_edges }}"
         );
+        writeln!(
+            out,
+            "{}({}, a_identity, b_identity) == \\E edge \\in {}: (edge.a = a_identity /\\ edge.b = b_identity) \\/ (edge.a = b_identity /\\ edge.b = a_identity)",
+            prefix("mob_machine_wiring_contains_pair"),
+            local("wiring_edges"),
+            local("wiring_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "{}({}, {}, agent_identity, excluded_identity) ==",
+            prefix("mob_machine_member_peer_overlay_without_identity_complete"),
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    \\A edge \\in {}: IF edge.a = agent_identity /\\ edge.b # excluded_identity THEN edge.b \\in DOMAIN {} ELSE IF edge.b = agent_identity /\\ edge.a # excluded_identity THEN edge.a \\in DOMAIN {} ELSE TRUE",
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("member_peer_endpoints")
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity, excluded_identity) ==",
+            prefix("mob_machine_member_peer_overlay_without_identity"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET outgoing_edges == {{ edge \\in {} : edge.a = agent_identity /\\ edge.b # excluded_identity /\\ edge.b \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        incoming_edges == {{ edge \\in {} : edge.b = agent_identity /\\ edge.a # excluded_identity /\\ edge.a \\in DOMAIN {} }}",
+            local("wiring_edges"),
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "        local_external_edges == {{ edge \\in {} : edge.local = agent_identity }}",
+            local("external_peer_edges")
+        );
+        pushln!(
+            out,
+            "    IN {{ {}[edge.b] : edge \\in outgoing_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ {}[edge.a] : edge \\in incoming_edges }}",
+            local("member_peer_endpoints")
+        );
+        pushln!(
+            out,
+            "       \\cup {{ [name |-> edge.endpoint.name, peer_id |-> edge.endpoint.peer_id, address |-> edge.endpoint.address, signing_key |-> edge.endpoint.signing_key] : edge \\in local_external_edges }}"
+        );
+        writeln!(
+            out,
+            "{}({}, {}, {}, agent_identity, excluded_identity) ==",
+            prefix("mob_machine_member_peer_overlay_without_identity_peer_ids_unique"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
+        writeln!(
+            out,
+            "    LET overlay == {}({}, {}, {}, agent_identity, excluded_identity) IN Cardinality(overlay) = Cardinality({{endpoint.peer_id : endpoint \\in overlay}})",
+            prefix("mob_machine_member_peer_overlay_without_identity"),
+            local("wiring_edges"),
+            local("member_peer_endpoints"),
+            local("external_peer_edges")
+        )
+        .expect("write to string");
         writeln!(
             out,
             "{}({}, {}, {}, agent_identity) ==",

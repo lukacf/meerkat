@@ -21,6 +21,8 @@ macro_rules! system_suite {
 }
 
 system_suite!(e2e_system_cli_init_snapshot, "cli-init-snapshot");
+system_suite!(e2e_system_cli_mob_host_daemon, "cli-mob-host-daemon");
+system_suite!(e2e_system_cli_mob_verbs, "cli-mob-verbs");
 system_suite!(e2e_system_cli_resume_tools, "cli-resume-tools");
 system_suite!(e2e_system_rest_resume_metadata, "rest-resume-metadata");
 system_suite!(

@@ -11,9 +11,10 @@ pub fn wire_mob_tools(
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     persistent_storage_root: Option<PathBuf>,
+    console_principal: meerkat_mob::MobControlPrincipal,
 ) -> Arc<MobMcpState> {
     let state = Arc::new(
-        MobMcpState::new_with_runtime_adapter(session_service, runtime_adapter)
+        MobMcpState::new_with_runtime_adapter(session_service, runtime_adapter, console_principal)
             .with_persistent_storage_root(persistent_storage_root),
     );
     *builder_mob_tools_slot
@@ -40,7 +41,13 @@ mod tests {
             Arc::new(crate::LocalSessionService::new());
         let runtime_adapter = Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()));
 
-        let state = wire_mob_tools(&slot, session_service, runtime_adapter, None);
+        let state = wire_mob_tools(
+            &slot,
+            session_service,
+            runtime_adapter,
+            None,
+            meerkat_mob::MobControlPrincipal::Owner,
+        );
 
         assert!(
             slot.read()
@@ -66,6 +73,7 @@ mod tests {
             session_service,
             Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
             Some(root.clone()),
+            meerkat_mob::MobControlPrincipal::Owner,
         );
 
         assert_eq!(

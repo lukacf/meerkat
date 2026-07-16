@@ -175,6 +175,8 @@ pub enum LiveWebrtcError {
     Json(serde_json::Error),
     #[error("missing local WebRTC description after answer")]
     MissingLocalDescription,
+    #[error("WebRTC peer close failed: {detail}")]
+    PeerClose { detail: String },
 }
 
 impl LiveWebrtcError {
@@ -195,6 +197,7 @@ impl LiveWebrtcError {
             Self::Audio { .. } => "audio",
             Self::Json(_) => "json_frame",
             Self::MissingLocalDescription => "missing_local_description",
+            Self::PeerClose { .. } => "peer_close",
         }
     }
 }
@@ -439,8 +442,52 @@ impl LiveWebrtcState {
     }
 
     pub async fn close_peer(&self, channel_id: &LiveChannelId) {
-        if let Some(peer) = self.peers.lock().await.remove(channel_id) {
-            let _ = peer.peer.close().await;
+        if let Err(error) = self.close_peer_checked(channel_id).await {
+            tracing::warn!(
+                channel = %channel_id,
+                error = %error,
+                "best-effort WebRTC peer close failed"
+            );
+        }
+    }
+
+    /// Physically close and only then remove the exact peer registry entry.
+    /// Lifecycle cleanup uses this checked form so a failed transport close
+    /// remains discoverable and retryable before machine terminality.
+    pub async fn close_peer_checked(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<(), LiveWebrtcError> {
+        loop {
+            let peer = self
+                .peers
+                .lock()
+                .await
+                .get(channel_id)
+                .map(|entry| Arc::clone(&entry.peer));
+            let Some(peer) = peer else {
+                return Ok(());
+            };
+            peer.close()
+                .await
+                .map_err(|error| LiveWebrtcError::PeerClose {
+                    detail: error.to_string(),
+                })?;
+            let mut peers = self.peers.lock().await;
+            let current_is_closed_peer = peers
+                .get(channel_id)
+                .map(|current| Arc::ptr_eq(&current.peer, &peer));
+            match current_is_closed_peer {
+                Some(true) => {
+                    peers.remove(channel_id);
+                    return Ok(());
+                }
+                None => return Ok(()),
+                // A concurrent replacement is still physical custody for the
+                // same channel. Drop the registry lock and close that exact
+                // peer too; never report absence from closing only a stale Arc.
+                Some(false) => {}
+            }
         }
     }
 
@@ -1054,6 +1101,14 @@ async fn close_channel_with_generated_feedback(
             return false;
         }
     };
+    if let Err(err) = host.prepare_channel_physical_close(&observation).await {
+        tracing::warn!(
+            channel = %channel_id,
+            error = %err,
+            "live WebRTC physical adapter close failed before generated feedback"
+        );
+        return false;
+    }
     let authority = match close_feedback
         .record_live_channel_closed(channel_id, &observation)
         .await
@@ -1862,6 +1917,10 @@ mod tests {
             (
                 LiveWebrtcError::MissingLocalDescription,
                 "missing_local_description",
+            ),
+            (
+                LiveWebrtcError::PeerClose { detail: "x".into() },
+                "peer_close",
             ),
         ];
         let mut seen = std::collections::HashSet::new();

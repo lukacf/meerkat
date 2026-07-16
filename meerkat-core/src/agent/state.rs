@@ -1062,6 +1062,38 @@ where
         }
     }
 
+    /// Hydrate one fully composed model request while its exact boundary state
+    /// is still canonical pending rather than applied. A cancellation or blob
+    /// fault here therefore leaves the context eligible for explicit run-exit
+    /// cleanup/recovery instead of falsely recording model consumption.
+    async fn hydrate_llm_request_messages(
+        &self,
+        mut messages: Vec<Message>,
+    ) -> Result<Vec<Message>, AgentError> {
+        let Some(blob_store) = self.blob_store.as_ref() else {
+            return Ok(messages);
+        };
+        // The model boundary is always fail-closed: a durable blob missing at
+        // live LLM-execution hydration is a typed terminal fault, never silently
+        // rewritten into placeholder prompt text. Placeholder hydration exists
+        // only for read-side transcript rendering.
+        hydrate_messages_for_execution(
+            blob_store.as_ref(),
+            &mut messages,
+            MissingBlobBehavior::Error,
+        )
+        .await
+        .map_err(|err| match err {
+            crate::blob::BlobStoreError::NotFound(blob_id) => AgentError::ConfigError(format!(
+                "required image blob is unavailable before llm execution: {blob_id}"
+            )),
+            other => AgentError::InternalError(format!(
+                "failed to hydrate image refs before llm execution: {other}"
+            )),
+        })?;
+        Ok(messages)
+    }
+
     /// Call LLM with retry logic, budget-aware at all liveness points.
     ///
     /// This is the single LLM-call liveness gate. It enforces:
@@ -1087,31 +1119,7 @@ where
             durable_visibility_parent,
         } = request;
 
-        let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
-            let mut hydrated = messages.to_vec();
-            // The model boundary is always fail-closed: a durable blob missing
-            // at live LLM-execution hydration is a typed terminal fault, never
-            // silently rewritten into placeholder prompt text. Placeholder
-            // hydration exists only for read-side transcript rendering.
-            hydrate_messages_for_execution(
-                blob_store.as_ref(),
-                &mut hydrated,
-                MissingBlobBehavior::Error,
-            )
-            .await
-            .map_err(|err| match err {
-                crate::blob::BlobStoreError::NotFound(blob_id) => AgentError::ConfigError(format!(
-                    "required image blob is unavailable before llm execution: {blob_id}"
-                )),
-                other => AgentError::InternalError(format!(
-                    "failed to hydrate image refs before llm execution: {other}"
-                )),
-            })?;
-            Some(hydrated)
-        } else {
-            None
-        };
-        let mut current_messages = hydrated_messages.unwrap_or_else(|| messages.to_vec());
+        let mut current_messages = messages.to_vec();
         // `tools` is already the ToolScope authority's boundary projection;
         // the client cannot narrow or widen it with a private semantic view.
         let mut current_tools: Arc<[Arc<ToolDef>]> = tools.to_vec().into();
@@ -2765,10 +2773,13 @@ where
         // most once per boundary regardless of how many commands queued. A
         // disconnected producer simply means no request is pending.
         let mut requested = false;
-        while let Ok(crate::agent::CancelAfterBoundaryCommand) =
-            self.cancel_after_boundary_rx.try_recv()
-        {
-            requested = true;
+        while let Ok(command) = self.cancel_after_boundary_rx.try_recv() {
+            // Commands are attachment/run capabilities, not SessionId-level
+            // wishes. Discard stale commands instead of carrying them across a
+            // turn transition and cancelling the successor run.
+            if command.expected_run_id() == run_id {
+                requested = true;
+            }
         }
         if !requested {
             return Ok(());
@@ -2808,6 +2819,7 @@ where
             return Ok(());
         }
         self.terminal_error_detail = Some(error.to_string());
+        self.terminal_error_metadata = crate::TurnErrorMetadata::from_agent_error(error);
         let transition = self.apply_turn_input(TurnExecutionInput::FatalFailure {
             run_id: run_id.clone(),
             failure: TurnFailureSource::from_agent_error(error),
@@ -2958,6 +2970,15 @@ where
             })?;
             run_id
         };
+        self.runtime_started_run_id = Some(run_id.clone());
+        // Open the first actor-local boundary generation before the first
+        // suspension point, and retain a run-scope guard so normal errors,
+        // natural completion, hard-interrupt future drops, and task abort all
+        // close any pending or parked preparation.
+        let _system_context_boundary_run = self
+            .system_context_state
+            .begin_boundary_run(run_id.clone())
+            .map_err(|error| AgentError::InternalError(error.to_string()))?;
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
             run_id: run_id.clone(),
@@ -3020,6 +3041,9 @@ where
 
             match self.turn_phase()? {
                 TurnPhase::Ready | TurnPhase::ApplyingPrimitive | TurnPhase::CallingLlm => {
+                    self.system_context_state
+                        .open_next_boundary(&run_id)
+                        .map_err(|error| AgentError::InternalError(error.to_string()))?;
                     // 0. Auth lease refresh loop (Phase 1.5-rev).
                     //    The canonical auth-state owner is the MeerkatMachine
                     //    DSL (see meerkat-machine-schema/src/catalog/dsl/
@@ -3585,15 +3609,25 @@ where
                     let typed_provider_params =
                         Some(effective_provider_params).filter(|params| !params.is_empty());
 
-                    // Call LLM with retry — route errors through machine authority
+                    // Park on the exact boundary first, but keep the canonical
+                    // context pending across fallible/async request hydration.
+                    // Only the final synchronous consume below records that the
+                    // model request has crossed its consumption seam.
                     let boundary_system_context = self
-                        .take_pending_system_context_boundary()
+                        .prepare_pending_system_context_boundary(&run_id)
+                        .await
                         .map_err(|e| AgentError::InternalError(e.to_string()))?;
-                    // Steer-delivered peer content commits here (applied as
-                    // runtime system context at the model boundary): project
-                    // the peer-ingestion observe fact from the same typed
-                    // renderable the boundary application consumes.
-                    for append in &boundary_system_context {
+                    let request_messages = self.llm_messages_with_runtime_system_context(
+                        boundary_system_context.appends(),
+                    );
+                    let request_messages =
+                        self.hydrate_llm_request_messages(request_messages).await?;
+                    // Peer-ingestion observations are emitted while canonical
+                    // context is still pending. If an awaited event send is
+                    // cancelled, dropping the runner witness leaves it
+                    // unapplied. Once the final send returns, consume and the
+                    // LLM call follow synchronously in the same task poll.
+                    for append in boundary_system_context.appends() {
                         for event in crate::event::peer_content_ingested_events(&append.content) {
                             let _ = crate::event_tap::tap_emit(
                                 &self.event_tap,
@@ -3603,8 +3637,12 @@ where
                             .await;
                         }
                     }
-                    let request_messages =
-                        self.llm_messages_with_runtime_system_context(&boundary_system_context);
+                    self.consume_pending_system_context_boundary(boundary_system_context)
+                        .map_err(|e| AgentError::InternalError(e.to_string()))?;
+                    // Steer-delivered peer content commits here (applied as
+                    // runtime system context at the model boundary). There is
+                    // no unrelated await between this consume and entry into
+                    // the exact LLM future.
                     let result = match self
                         .call_llm_with_retry(LlmRetryRequest {
                             run_id: &run_id,
@@ -3654,17 +3692,30 @@ where
                                 // Recoverable LLM failures reaching this point have
                                 // exhausted retry authority; non-recoverable LLM
                                 // failures keep their typed LLM cause.
-                                let failure = if crate::retry::LlmRetryFailure::from_agent_error(&e)
-                                    .is_some()
-                                {
+                                let retry_failure =
+                                    crate::retry::LlmRetryFailure::from_agent_error(&e);
+                                let failure = if retry_failure.is_some() {
                                     TurnFailureSource::llm_retry_exhausted(&e)
                                 } else {
                                     TurnFailureSource::from_agent_error(&e)
                                 };
-                                self.apply_turn_input(TurnExecutionInput::FatalFailure {
-                                    run_id: run_id.clone(),
-                                    failure,
-                                })?;
+                                self.terminal_error_detail = Some(e.to_string());
+                                // Diagnostic fidelity is safe to retain only
+                                // when the generated cause remains LlmFailure.
+                                // Retry exhaustion is a different generated
+                                // cause and is intentionally reconstructed
+                                // from terminal truth by the runtime witness.
+                                if retry_failure.is_none() {
+                                    self.terminal_error_metadata =
+                                        crate::TurnErrorMetadata::from_agent_error(&e);
+                                }
+                                let transition =
+                                    self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                                        run_id: run_id.clone(),
+                                        failure,
+                                    })?;
+                                self.execute_turn_effects(&transition, turn_count, &event_tx)
+                                    .await?;
                                 return self.build_result(turn_count, tool_call_count).await;
                             }
                             self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &e)
@@ -3887,6 +3938,13 @@ where
                             run_id: run_id.clone(),
                             tool_count: tc_count,
                         })?;
+                        // The generated turn is now committed to a future
+                        // post-tool model boundary. Open its exact actor-local
+                        // generation before any tool/hook await so Steer can
+                        // prepare while tools or barrier ops are still running.
+                        self.system_context_state
+                            .open_next_boundary(&run_id)
+                            .map_err(|error| AgentError::InternalError(error.to_string()))?;
 
                         // Execute tool calls in parallel
                         let tools_ref = Arc::clone(&self.tools);
@@ -4057,6 +4115,20 @@ where
                                     tool_name: callback_tool,
                                     args: callback_args,
                                 }) => {
+                                    // Callback-pending is a successful
+                                    // continuation boundary for this core
+                                    // turn, not a hard failure. Close the
+                                    // generated turn before returning the
+                                    // typed external terminal so the runtime
+                                    // never observes a completed application
+                                    // backed by a live WaitingForOps turn.
+                                    let transition = self.apply_turn_input(
+                                        TurnExecutionInput::CallbackPending {
+                                            run_id: run_id.clone(),
+                                        },
+                                    )?;
+                                    self.execute_turn_effects(&transition, turn_count, &event_tx)
+                                        .await?;
                                     // Merge tool_use_id into args for external handler
                                     let mut merged_args =
                                         callback_args.as_object().cloned().unwrap_or_default();
@@ -10648,6 +10720,136 @@ mod tests {
         assert_eq!(outcome.terminal_cause(), None);
     }
 
+    #[tokio::test]
+    async fn callback_pending_closes_generated_turn_before_external_terminal() {
+        struct CallbackPendingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for CallbackPendingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::callback_pending(
+                    call.name,
+                    serde_json::json!({ "question": "approve?" }),
+                ))
+            }
+        }
+
+        struct CallbackToolCallClient;
+
+        #[async_trait]
+        impl AgentLlmClient for CallbackToolCallClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "callback-call".to_string(),
+                        name: "ask_user".into(),
+                        args: serde_json::value::RawValue::from_string(
+                            r#"{"question":"approve?"}"#.to_string(),
+                        )
+                        .expect("static callback arguments should parse"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(CallbackToolCallClient),
+                Arc::new(CallbackPendingDispatcher {
+                    tools: Arc::from([Arc::new(ToolDef::new(
+                        "ask_user",
+                        "waits for an external callback",
+                        serde_json::json!({ "type": "object" }),
+                    ))]),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("callback tool dispatch must return the external terminal");
+        match error {
+            AgentError::CallbackPending { tool_name, args } => {
+                assert_eq!(tool_name, "ask_user");
+                assert_eq!(args["question"], "approve?");
+                assert_eq!(args["tool_use_id"], "callback-call");
+            }
+            other => panic!("expected callback-pending terminal, got {other:?}"),
+        }
+
+        let assistant_run_id = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::BlockAssistant(assistant) if assistant.has_tool_calls() => {
+                    assistant.identity.run_id.clone()
+                }
+                _ => None,
+            })
+            .expect("callback continuation must retain its run-stamped assistant tool call");
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .all(|message| !matches!(message, Message::ToolResults { .. })),
+            "the callback result remains an external continuation responsibility"
+        );
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Completed);
+        assert!(snapshot.turn_terminal);
+        assert_eq!(snapshot.active_run_id, None);
+        assert_eq!(snapshot.terminal_run_id, Some(assistant_run_id));
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Completed
+        );
+        assert_eq!(snapshot.terminal_cause_kind, None);
+        assert_eq!(snapshot.tool_calls_pending, 0);
+        assert_eq!(turn_handle.run_completed_effect_count(), 1);
+        assert_eq!(turn_handle.run_failed_effect_count(), 0);
+    }
+
     /// Row 273: a `WaitingForOps` authority fault (here: barrier ops
     /// registered without an `ops_lifecycle` registry) must terminalize the
     /// turn through `TurnExecutionInput::FatalFailure` BEFORE returning the
@@ -11939,6 +12141,35 @@ mod tests {
         }
     }
 
+    struct InvalidModelLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for InvalidModelLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Err(AgentError::llm(
+                "mock",
+                crate::error::LlmFailureReason::InvalidModel("retired-model".to_string()),
+                "requested model is no longer available",
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "retired-model"
+        }
+    }
+
     struct ReasoningOnlyLlmClient;
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -12009,7 +12240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_fatal_llm_failure_uses_machine_terminal_cause() {
+    async fn generic_fatal_llm_failure_uses_machine_terminal_cause_and_preserves_detail() {
         let mut agent = build_agent(Arc::new(FatalLlmClient)).await;
         agent.config.max_turns = Some(1);
 
@@ -12028,9 +12259,10 @@ mod tests {
                 assert_eq!(cause_kind, crate::TurnTerminalCauseKind::LlmFailure);
                 assert_eq!(
                     message,
-                    crate::TurnTerminalCauseKind::LlmFailure
-                        .default_message(outcome)
-                        .to_string()
+                    format!(
+                        "{}: LLM error (mock): display-only LLM failure",
+                        crate::TurnTerminalCauseKind::LlmFailure.default_message(outcome)
+                    )
                 );
             }
             other => panic!("expected machine-owned terminal failure, got {other:?}"),
@@ -12048,6 +12280,95 @@ mod tests {
         assert_eq!(
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::LlmFailure)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_failure_records_exact_machine_terminal_witness() {
+        let mut agent = build_agent(Arc::new(FatalLlmClient)).await;
+        agent.config.max_turns = Some(1);
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        let error = agent
+            .run("runtime prompt".to_string().into())
+            .await
+            .expect_err("fatal runtime failure should remain the public error");
+        let durable_run_failed_detail = error.to_string();
+        let witness = agent
+            .take_runtime_terminal_failure_witness()
+            .expect("runtime witness projection should succeed")
+            .expect("admitted runtime failure should carry an exact witness");
+        assert_eq!(witness.outcome, Some(crate::TurnTerminalOutcome::Failed));
+        assert_eq!(witness.kind, crate::TurnTerminalCauseKind::LlmFailure);
+        assert!(witness.terminal);
+        assert_eq!(witness.provider.as_deref(), Some("mock"));
+        assert_eq!(witness.model, None);
+        assert_eq!(witness.retryable, Some(false));
+        assert!(
+            durable_run_failed_detail.contains("display-only LLM failure"),
+            "runtime failure must retain the concrete provider diagnostic"
+        );
+        assert_eq!(
+            witness.detail.as_deref(),
+            Some(durable_run_failed_detail.as_str()),
+            "the runtime witness must match the exact RunFailed error-report detail"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_invalid_model_witness_preserves_model_metadata() {
+        let mut agent = build_agent(Arc::new(InvalidModelLlmClient)).await;
+        agent.config.max_turns = Some(1);
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        agent
+            .run("runtime invalid model".to_string().into())
+            .await
+            .expect_err("invalid model should terminalize the runtime turn");
+        let witness = agent
+            .take_runtime_terminal_failure_witness()
+            .expect("invalid-model witness projection should succeed")
+            .expect("invalid-model runtime failure should carry an exact witness");
+
+        assert_eq!(witness.kind, crate::TurnTerminalCauseKind::LlmFailure);
+        assert_eq!(witness.outcome, Some(crate::TurnTerminalOutcome::Failed));
+        assert_eq!(witness.provider.as_deref(), Some("mock"));
+        assert_eq!(witness.model.as_deref(), Some("retired-model"));
+        assert_eq!(witness.retryable, Some(false));
+    }
+
+    #[tokio::test]
+    async fn runtime_preflight_failure_cannot_reuse_prior_terminal_witness() {
+        let mut agent = build_agent(Arc::new(FatalLlmClient)).await;
+        agent.config.max_turns = Some(1);
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        agent
+            .run("first runtime prompt".to_string().into())
+            .await
+            .expect_err("first runtime turn should terminalize");
+        assert!(
+            agent
+                .take_runtime_terminal_failure_witness()
+                .expect("first witness projection")
+                .is_some()
+        );
+
+        // `run_loop` checks the resolved turn cap before it starts a new turn
+        // machine run. The previous hard-terminal snapshot therefore remains
+        // visible, exactly reproducing the stale-post-snapshot hazard.
+        agent.config.max_turns = None;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        let error = agent
+            .run("second runtime prompt".to_string().into())
+            .await
+            .expect_err("missing resolved turn cap should fail before run admission");
+        assert!(matches!(error, AgentError::InternalError(_)));
+        assert!(
+            agent
+                .take_runtime_terminal_failure_witness()
+                .expect("second witness projection")
+                .is_none(),
+            "a completed future without a newly admitted machine run must not reuse prior terminal truth"
         );
     }
 
@@ -12346,6 +12667,7 @@ mod tests {
 
         struct RequestBoundaryCancelHook {
             sender: CancelAfterBoundarySender,
+            expected_run_id: RunId,
         }
 
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -12358,7 +12680,9 @@ mod tests {
             ) -> Result<HookExecutionReport, HookEngineError> {
                 if invocation.point == HookPoint::PostLlmResponse {
                     self.sender
-                        .send(CancelAfterBoundaryCommand)
+                        .send(CancelAfterBoundaryCommand::for_run(
+                            self.expected_run_id.clone(),
+                        ))
                         .expect("agent must retain the cancel-after-boundary receiver");
                 }
                 Ok(HookExecutionReport::empty())
@@ -12366,8 +12690,27 @@ mod tests {
         }
 
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        let expected_run_id = {
+            let handle = agent
+                .turn_state_handle
+                .as_deref()
+                .expect("test agent should have a turn-state handle");
+            let run_id = RunId::new();
+            handle
+                .start_conversation_run(
+                    run_id.clone(),
+                    TurnPrimitiveKind::ConversationTurn,
+                    ContentShape::Conversation,
+                    false,
+                    false,
+                    0,
+                )
+                .expect("stage the exact run for run_loop to apply");
+            run_id
+        };
         agent.hook_engine = Some(Arc::new(RequestBoundaryCancelHook {
             sender: agent.cancel_after_boundary_handle(),
+            expected_run_id,
         }));
 
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
@@ -12376,7 +12719,10 @@ mod tests {
             .await
             .expect_err("boundary cancellation after a terminal LLM response must cancel the run");
 
-        assert!(matches!(error, AgentError::Cancelled));
+        assert!(
+            matches!(error, AgentError::Cancelled),
+            "unexpected post-LLM boundary cancellation result: {error:?}"
+        );
         assert_eq!(AgentErrorClass::from(&error), AgentErrorClass::Cancelled);
 
         let snapshot = agent
@@ -12431,7 +12777,7 @@ mod tests {
         // on a cloned producer handle — the raw AtomicBool carrier is gone.
         let sender = agent.cancel_after_boundary_handle();
         sender
-            .send(CancelAfterBoundaryCommand)
+            .send(CancelAfterBoundaryCommand::for_run(run_id.clone()))
             .expect("agent must retain the cancel-after-boundary receiver");
 
         agent
@@ -12457,6 +12803,41 @@ mod tests {
         agent
             .observe_cancel_after_boundary_request(&run_id)
             .expect("a second observe with no fresh command must be a no-op");
+    }
+
+    #[tokio::test]
+    async fn typed_cancel_after_boundary_discards_stale_run_command() {
+        use crate::agent::CancelAfterBoundaryCommand;
+
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        let active_run_id = {
+            let handle = agent
+                .turn_state_handle
+                .as_deref()
+                .expect("test agent should have a turn-state handle");
+            start_test_conversation_turn(handle)
+        };
+        let stale_run_id = RunId::new();
+        assert_ne!(stale_run_id, active_run_id);
+
+        agent
+            .cancel_after_boundary_handle()
+            .send(CancelAfterBoundaryCommand::for_run(stale_run_id))
+            .expect("agent must retain the cancel-after-boundary receiver");
+        agent
+            .observe_cancel_after_boundary_request(&active_run_id)
+            .expect("stale command observation must be a benign no-op");
+
+        assert!(
+            !agent
+                .turn_cancel_after_boundary()
+                .expect("cancel-after-boundary flag"),
+            "a command for an old run must not cancel its successor"
+        );
+        assert!(matches!(
+            agent.cancel_after_boundary_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

@@ -749,6 +749,23 @@ permanent save rejections after a torn shutdown.
   unaffected; the former fail-closed-resume expectation — which WAS the
   field wedge — now pins a successful resume.
 
+### Added
+
+- `rkat mob host` — the mob member-host daemon (multi-host mobs phase 2):
+  host acceptor with identity demux, one-time bootstrap-token bind ceremony
+  (`BindHost`/`RebindHost` served through the generated
+  `MobHostBindingAuthority`), 0600 host binding descriptor, realm-durable
+  `runtime_mob_host_bindings` rows with recover-on-restart, schedule host
+  with typed mob-target refusal, and an optional (inert until remote live
+  channels ship) live-ws listener. `--isolated` is a typed startup
+  rejection; `[mob_host]` config block added with flag-over-file precedence.
+
+### Changed
+
+- `rkat-rpc --live-ws` now enforces the same conservative TCP bind policy
+  as `--tcp` (DL7): a non-loopback live-ws bind without `--allow-remote` is
+  a typed startup error. Previously such binds were silently accepted.
+
 ## [0.7.23] - 2026-07-08
 
 Meerkat 0.7.23 completes the never-run-member disposal arc for

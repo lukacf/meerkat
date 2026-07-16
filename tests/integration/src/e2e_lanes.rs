@@ -207,6 +207,8 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s89_cli_mobpack_callable_flow_run_live, 89);
             scenario(e2e_smoke_s90_openai_responses_tool_result_image_output, 90);
             scenario(e2e_smoke_s91_live_adapter_image_input, 91);
+            scenario(e2e_smoke_s92_remote_mob_live_placed_overlay_roundtrip, 92);
+            scenario(e2e_smoke_s93_remote_mob_two_host_constellation_join, 93);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -3694,6 +3696,44 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        92 => Some(&Spec {
+            id: Some(92),
+            lane: Lane::Smoke,
+            title: "Real provider-backed placed remote mob roundtrip",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_flow_runtime",
+                test_name: "e2e_smoke_s92_remote_mob_live_placed_overlay_roundtrip",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        93 => Some(&Spec {
+            id: Some(93),
+            lane: Lane::Smoke,
+            title: "Two-host live remote mob parallel branches and join",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_flow_runtime",
+                test_name: "e2e_smoke_s93_remote_mob_two_host_constellation_join",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
         73 => Some(&Spec {
             id: Some(73),
             lane: Lane::Smoke,
@@ -4301,6 +4341,44 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 test_target: "system_cli_init",
                 test_name: "integration_real_rkat_init_snapshot",
                 features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        "cli-mob-host-daemon" => Some(&Spec {
+            id: None,
+            lane: Lane::System,
+            title: "rkat mob host daemon lifecycle (multi-host §W4.5)",
+            timeout_secs: 600,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "rkat",
+                test_target: "system_mob_host_daemon",
+                test_name: "integration_real_mob_host_daemon_lifecycle",
+                features: &["integration-real-tests", "mob", "comms"],
+                all_features: false,
+            },
+        }),
+        "cli-mob-verbs" => Some(&Spec {
+            id: None,
+            lane: Lane::System,
+            title: "rkat mob console verbs over real TCP (multi-host §17.11, T-B14)",
+            timeout_secs: 900,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "rkat",
+                test_target: "system_mob_cli_verbs",
+                test_name: "integration_real_mob_cli_verbs_over_tcp",
+                features: &["integration-real-tests", "mob", "comms"],
                 all_features: false,
             },
         }),

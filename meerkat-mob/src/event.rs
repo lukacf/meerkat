@@ -199,7 +199,10 @@ impl<'de> Deserialize<'de> for MemberRef {
 // v8: `MemberRef` carries the single canonical `bridge_session_id` wire key
 // (legacy dual `session_id` spelling removed), `BackendPeer.pubkey` and
 // `MemberSpawnedEvent.runtime_mode` are required.
-const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 8;
+// v9: stored member lifecycle events may carry the internal canonical
+// `placed_spawn_id` ABA fence and exact peer endpoints; public event payloads
+// still exclude every replay-only field.
+const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn stored_mob_event_format_error(message: impl Into<String>) -> serde_json::Error {
@@ -238,6 +241,124 @@ pub enum FlowFailureClass {
     AlreadyFailed,
     /// An internal runtime fault aborted the run.
     Internal,
+}
+
+/// Exact controller-side correlation for one remote directed turn. This is
+/// the durable recovery carrier for the MobMachine obligation; generation
+/// and fence together identify the member authority incarnation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteTurnObligationEvent {
+    pub agent_identity: AgentIdentity,
+    /// Exact owning member host. Generation/fence are scoped to this host;
+    /// an otherwise identical row from a replacement host cannot resolve it.
+    #[serde(default)]
+    pub host_id: String,
+    /// Exact host binding generation under which the member residency was
+    /// admitted. A replacement bind may reuse every member-local field.
+    #[serde(default)]
+    pub host_binding_generation: u64,
+    /// Exact host-resident member session addressed by the delivery.
+    #[serde(default)]
+    pub member_session_id: String,
+    pub generation: Generation,
+    pub fence_token: FenceToken,
+    pub dispatch_sequence: u64,
+    pub input_id: String,
+    pub run_id: RunId,
+    pub step_id: StepId,
+}
+
+/// Durable controller cleanup custody for one ordinary placed
+/// `TurnCompleted` request. The caller promise is volatile; this exact tuple
+/// survives until a folded terminal is ACKed or the host certifies that
+/// cancellation/no-effect closed the tracked input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlacedCompletionObligationEvent {
+    pub agent_identity: AgentIdentity,
+    pub host_id: String,
+    pub host_binding_generation: u64,
+    pub member_session_id: String,
+    pub generation: Generation,
+    pub fence_token: FenceToken,
+    pub dispatch_sequence: u64,
+    pub input_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlacedCompletionHostOutcomeEvent {
+    InteractionComplete,
+    InteractionCallbackPending,
+    InteractionFailed { error: String },
+}
+
+/// Exact proof that a pending ordinary completion no longer owns a host
+/// terminal row. Delivery rejection is admitted only for the typed
+/// pre-effect class; the other variants come from the replay-stable tracked
+/// cancellation command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacedCompletionClosureEvent {
+    DeliveryRejected,
+    HostNoEffect,
+    HostCancelled,
+}
+
+/// Exact controller-side custody for one placed autonomous kickoff.
+///
+/// The prompt itself remains in the private placed-spawn carrier. This
+/// token-free structural projection carries only the correlation and
+/// residency facts required to recover the MobMachine obligation and to
+/// fence a host terminal/ack after controller restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlacedKickoffObligationEvent {
+    pub agent_identity: AgentIdentity,
+    pub host_id: String,
+    pub host_binding_generation: u64,
+    pub member_session_id: String,
+    pub generation: Generation,
+    pub fence_token: FenceToken,
+    pub input_id: String,
+    pub objective_id: meerkat_core::interaction::ObjectiveId,
+}
+
+/// Exact host-journal terminal retained independently from the public kickoff
+/// lifecycle projection.
+///
+/// Cancellation can win the user-visible lifecycle race after the host has
+/// already produced one of these outcomes. The structural log must therefore
+/// persist both facts: the lifecycle snapshot may remain `Cancelled`, while
+/// this payload preserves the exact host outcome needed to rebuild ACK custody
+/// and accept an idempotent host replay after restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlacedKickoffHostOutcomeEvent {
+    InteractionComplete,
+    InteractionCallbackPending,
+    InteractionFailed {
+        error: String,
+    },
+    /// Exact durable host cancel/tombstone authority. Unlike a transport
+    /// channel close, this certifies that the tracked input can no longer
+    /// produce runtime work for its fenced residency.
+    InteractionCancelled,
+}
+
+/// Token-free controller authority for one exact host-bind attempt. The
+/// bootstrap token is a one-time transport proof and must never enter the
+/// structural event log; crash recovery is instead fenced by this canonical
+/// descriptor tuple and the monotone binding generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteHostBindRequestEvent {
+    pub host_id: String,
+    pub peer_id: String,
+    pub signing_key: [u8; 32],
+    pub endpoint: String,
+    pub authority_epoch: u64,
+    pub binding_generation: u64,
+    /// Event truth for which disjoint pending region recovery must restore.
+    /// Never re-derived from the placement snapshot at restart.
+    pub replacement: bool,
 }
 
 /// Structural event kinds covering all mob state transitions.
@@ -284,8 +405,8 @@ pub enum MobEventKind {
     /// Unlike the other `Member*` variants which use inline struct fields,
     /// this variant wraps a named [`MemberSpawnedEvent`] struct. The reason
     /// is load-bearing and not cosmetic: [`MemberSpawnedEvent`] carries
-    /// `#[serde(skip)]` bridge-member and exact peer-endpoint fields used by
-    /// in-crate event replay (see
+    /// `#[serde(skip)]` bridge-member, placed-carrier, and exact peer-endpoint
+    /// fields used by in-crate event replay (see
     /// [`encode_stored_mob_event`] / [`decode_stored_mob_event`]) that is
     /// deliberately omitted from the public wire shape. A named struct
     /// keeps the internal replay facts, their `#[serde(skip)]` attributes,
@@ -322,6 +443,11 @@ pub enum MobEventKind {
         /// retired runtime. Older journals may omit it.
         #[serde(skip, default)]
         retiring_peer_endpoint: Option<TrustedPeerDescriptor>,
+        /// Respawn-only durability bit: retain the MobMachine-owned desired
+        /// topology while the old incarnation is terminal and the replacement
+        /// has not committed yet. Ordinary retire/destroy leaves this false.
+        #[serde(skip, default)]
+        preserve_machine_topology: bool,
     },
     /// A peer-only member runtime has acknowledged retirement, while
     /// supervisor revocation and terminal member archival are still pending.
@@ -352,6 +478,24 @@ pub enum MobEventKind {
         generation: Generation,
         /// Profile name of the retired member.
         role: ProfileName,
+    },
+    /// A respawn attempt terminally abandoned the topology preserved for the
+    /// retired incarnation.
+    ///
+    /// The public event identifies the abandoned member generation. Exact
+    /// runtime/fence correlation is replay-only metadata carried by the
+    /// internal stored-event codec.
+    RespawnTopologyAbandoned {
+        /// Stable identity whose preserved respawn topology was abandoned.
+        agent_identity: AgentIdentity,
+        /// Retired generation whose preserved topology was abandoned.
+        generation: Generation,
+        /// Exact retired runtime id used by recovery correlation.
+        #[serde(skip, default)]
+        agent_runtime_id: Option<AgentRuntimeId>,
+        /// Exact retired fence token used by recovery correlation.
+        #[serde(skip, default)]
+        fence_token: Option<FenceToken>,
     },
     /// A member was reset to a new generation.
     ///
@@ -497,6 +641,14 @@ pub enum MobEventKind {
         run_id: RunId,
         step_id: StepId,
         target: AgentRuntimeId,
+        /// Replay-complete per-target value. Present for remote flow-turn
+        /// receipts; legacy/local notices may omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<serde_json::Value>,
+        /// Present only for a remote directed turn. Its durable append is the
+        /// pending -> committed custody boundary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_turn_obligation: Option<RemoteTurnObligationEvent>,
     },
     /// Per-target failure event.
     StepTargetFailed {
@@ -504,10 +656,164 @@ pub enum MobEventKind {
         step_id: StepId,
         target: AgentRuntimeId,
         reason: String,
+        /// Present only for a remote directed turn. Failure, timeout,
+        /// cancellation, and retry terminals all commit the exact obligation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_turn_obligation: Option<RemoteTurnObligationEvent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_report: Option<meerkat_core::event::AgentErrorReport>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<meerkat_core::event::TurnErrorMetadata>,
+    },
+    /// Durable record-before-send carrier for controller custody.
+    RemoteTurnObligationRecorded {
+        obligation: RemoteTurnObligationEvent,
+    },
+    /// The exact host terminal has been safely folded and the machine moved
+    /// it from committed into resolved/ACK-pending custody.
+    RemoteTurnOutcomeResolved {
+        obligation: RemoteTurnObligationEvent,
+    },
+    /// A successful poll response proved that the host applied the exact ACK.
+    RemoteTurnOutcomeAcknowledged {
+        obligation: RemoteTurnObligationEvent,
+    },
+    /// Host release/superseding materialization or an authenticated exact
+    /// tracked-input cancellation closed the host key, so controller custody
+    /// may be disposed without a turn-outcome ACK.
+    RemoteTurnOutcomeDisposed {
+        obligation: RemoteTurnObligationEvent,
+    },
+    /// Durable Stop origin barrier. New SubmitWork admission remains closed
+    /// across retryable Stop results and controller restart until Resume.
+    PlacedCompletionLifecycleQuiesceStarted {
+        intent: crate::machines::mob_machine::PlacedCompletionLifecycleIntentKind,
+    },
+    /// All Stop consequences completed and MobMachine may be reconstructed in
+    /// `Stopped`. A preceding Stop-intent marker alone means retryable Stop is
+    /// still in progress and must never be mistaken for this terminal fact.
+    MobStopped,
+    /// A non-terminal member-retirement drain completed. New work may be
+    /// originated again only after this durable close marker is committed.
+    PlacedCompletionLifecycleQuiesceEnded {
+        intent: crate::machines::mob_machine::PlacedCompletionLifecycleIntentKind,
+    },
+    /// Record-before-send carrier for an ordinary placed TurnCompleted call.
+    PlacedCompletionObligationRecorded {
+        obligation: PlacedCompletionObligationEvent,
+    },
+    /// The volatile caller deadline elapsed (or cold recovery found no
+    /// promise); exact host cancellation must continue independently.
+    PlacedCompletionCancellationRequested {
+        obligation: PlacedCompletionObligationEvent,
+    },
+    /// Exact folded host terminal; remains ACK-pending in MobMachine state.
+    PlacedCompletionOutcomeResolved {
+        obligation: PlacedCompletionObligationEvent,
+        outcome: PlacedCompletionHostOutcomeEvent,
+    },
+    /// Typed pre-effect rejection or exact host cancellation/no-effect proof.
+    PlacedCompletionOutcomeClosed {
+        obligation: PlacedCompletionObligationEvent,
+        closure: PlacedCompletionClosureEvent,
+    },
+    /// A successful member-events poll proved application of the exact ACK.
+    PlacedCompletionOutcomeAcknowledged {
+        obligation: PlacedCompletionObligationEvent,
+    },
+    /// Host release/rematerialization pruned the row before member custody
+    /// was removed.
+    PlacedCompletionOutcomeDisposed {
+        obligation: PlacedCompletionObligationEvent,
+    },
+    /// Record-before-send projection for a placed autonomous kickoff. The
+    /// replay-complete prompt remains private in the placed-spawn carrier.
+    PlacedKickoffObligationRecorded {
+        obligation: PlacedKickoffObligationEvent,
+    },
+    /// The exact retained host terminal was durably applied to kickoff state;
+    /// the obligation remains ACK-pending until the host confirms pruning.
+    PlacedKickoffOutcomeResolved {
+        obligation: PlacedKickoffObligationEvent,
+        outcome: PlacedKickoffHostOutcomeEvent,
+        kickoff: MobMemberKickoffSnapshot,
+    },
+    /// An authenticated/pre-effect rejection proved the tracked interaction
+    /// was never admitted, so the kickoff can fail without host ACK custody.
+    PlacedKickoffRejectedNoEffect {
+        obligation: PlacedKickoffObligationEvent,
+        error: String,
+        kickoff: MobMemberKickoffSnapshot,
+    },
+    /// A successful member-events poll proved the host applied the exact ACK.
+    PlacedKickoffOutcomeAcknowledged {
+        obligation: PlacedKickoffObligationEvent,
+    },
+    /// Exact host release/rematerialization proved the journal row was pruned,
+    /// allowing teardown to dispose custody without observing an ACK.
+    PlacedKickoffOutcomeDisposed {
+        obligation: PlacedKickoffObligationEvent,
+    },
+    /// Authenticated exact host release terminal; matching host rows cannot
+    /// reappear after this carrier.
+    RemoteMemberReleaseConfirmed {
+        agent_identity: AgentIdentity,
+        host_id: String,
+        member_session_id: String,
+        generation: Generation,
+        fence_token: FenceToken,
+    },
+    /// Durable pre-send anchor for one exact controller-to-host bind attempt.
+    RemoteHostBindStarted {
+        operation_id: String,
+        request: RemoteHostBindRequestEvent,
+    },
+    /// Authenticated canonical BindHost ACK. The full token-free authority
+    /// record is sufficient to reconstruct local Bound truth after a crash;
+    /// every field must match the Started request where the shapes overlap.
+    RemoteHostBindConfirmed {
+        operation_id: String,
+        authority: crate::store::MobHostAuthorityRecord,
+    },
+    /// Local authority row and MobMachine bind commit both completed.
+    RemoteHostBindCompleted {
+        operation_id: String,
+        host_id: String,
+        authority_epoch: u64,
+        binding_generation: u64,
+    },
+    /// A before-send failure or authenticated pre-persistence rejection
+    /// proved that the Started attempt had no remote effect.
+    RemoteHostBindAbortedNoEffect {
+        operation_id: String,
+        host_id: String,
+        authority_epoch: u64,
+        binding_generation: u64,
+    },
+    /// Durable intent/retry anchor for one host-binding revoke operation.
+    /// The operation id distinguishes repeated revoke/rebind cycles at the
+    /// same supervisor epoch.
+    RemoteHostRevokeStarted {
+        operation_id: String,
+        host_id: String,
+        epoch: u64,
+        binding_generation: u64,
+    },
+    /// Authenticated host-wide revoke terminal (including authenticated
+    /// NotBound convergence), bound to the exact local retry operation.
+    RemoteHostRevokeConfirmed {
+        operation_id: String,
+        host_id: String,
+        epoch: u64,
+        binding_generation: u64,
+    },
+    /// Local host-authority deletion and MobMachine RevokeHost transition
+    /// completed for the exact durable operation.
+    RemoteHostRevokeCompleted {
+        operation_id: String,
+        host_id: String,
+        epoch: u64,
+        binding_generation: u64,
     },
     /// Aggregate step completion event.
     StepCompleted { run_id: RunId, step_id: StepId },
@@ -613,6 +919,12 @@ pub struct MemberSpawnedEvent {
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
     pub(crate) bridge_member_ref: Option<MemberRef>,
+    /// Controller-minted id of the canonical placed-spawn carrier.
+    ///
+    /// Like `bridge_member_ref`, this is stored only by the internal event
+    /// codec and is deliberately absent from the public event contract.
+    #[serde(skip, default)]
+    pub(crate) placed_spawn_id: Option<crate::ids::PlacedSpawnId>,
     /// Exact comms endpoint bound to this spawned runtime generation.
     ///
     /// MobMachine owns the live endpoint map. This replay-only journal fact
@@ -643,6 +955,7 @@ impl MemberSpawnedEvent {
             effective_model_override: None,
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             bridge_member_ref: None,
+            placed_spawn_id: None,
             member_peer_endpoint: None,
         }
     }
@@ -660,12 +973,22 @@ impl MemberSpawnedEvent {
         self
     }
 
-    #[cfg(any(not(target_arch = "wasm32"), test))]
     pub(crate) fn bridge_member_ref(&self) -> Option<&MemberRef> {
         self.bridge_member_ref.as_ref()
     }
 
-    #[cfg(any(not(target_arch = "wasm32"), test))]
+    pub(crate) fn with_placed_spawn_id(
+        mut self,
+        placed_spawn_id: Option<crate::ids::PlacedSpawnId>,
+    ) -> Self {
+        self.placed_spawn_id = placed_spawn_id;
+        self
+    }
+
+    pub(crate) fn placed_spawn_id(&self) -> Option<&crate::ids::PlacedSpawnId> {
+        self.placed_spawn_id.as_ref()
+    }
+
     pub(crate) fn member_peer_endpoint(&self) -> Option<&TrustedPeerDescriptor> {
         self.member_peer_endpoint.as_ref()
     }
@@ -765,6 +1088,59 @@ impl MobEventKind {
         }
     }
 
+    pub(crate) fn respawn_topology_abandoned_correlation(
+        &self,
+    ) -> Option<(
+        &AgentIdentity,
+        Generation,
+        Option<&AgentRuntimeId>,
+        Option<FenceToken>,
+    )> {
+        match self {
+            Self::RespawnTopologyAbandoned {
+                agent_identity,
+                generation,
+                agent_runtime_id,
+                fence_token,
+            } => Some((
+                agent_identity,
+                *generation,
+                agent_runtime_id.as_ref(),
+                *fence_token,
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_respawn_topology_abandoned_correlation(
+        &mut self,
+        exact_runtime_id: AgentRuntimeId,
+        exact_fence_token: FenceToken,
+    ) -> Result<(), serde_json::Error> {
+        match self {
+            Self::RespawnTopologyAbandoned {
+                agent_identity,
+                generation,
+                agent_runtime_id,
+                fence_token,
+            } => {
+                if exact_runtime_id.identity != *agent_identity
+                    || exact_runtime_id.generation != *generation
+                {
+                    return Err(stored_mob_event_format_error(
+                        "stored RespawnTopologyAbandoned agent_runtime_id must match agent_identity and generation",
+                    ));
+                }
+                *agent_runtime_id = Some(exact_runtime_id);
+                *fence_token = Some(exact_fence_token);
+                Ok(())
+            }
+            _ => Err(stored_mob_event_format_error(
+                "stored respawn topology correlation belongs only to RespawnTopologyAbandoned",
+            )),
+        }
+    }
+
     pub(crate) fn retiring_peer_endpoint(&self) -> Option<&TrustedPeerDescriptor> {
         match self {
             Self::MemberRetirementStarted {
@@ -792,6 +1168,34 @@ impl MobEventKind {
             )),
         }
     }
+
+    pub(crate) fn preserves_machine_topology(&self) -> bool {
+        matches!(
+            self,
+            Self::MemberRetirementStarted {
+                preserve_machine_topology: true,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn set_preserve_machine_topology(
+        &mut self,
+        preserve_machine_topology: bool,
+    ) -> Result<(), serde_json::Error> {
+        match self {
+            Self::MemberRetirementStarted {
+                preserve_machine_topology: stored,
+                ..
+            } => {
+                *stored = preserve_machine_topology;
+                Ok(())
+            }
+            _ => Err(stored_mob_event_format_error(
+                "stored preserve_machine_topology belongs only to MemberRetirementStarted",
+            )),
+        }
+    }
 }
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
@@ -806,6 +1210,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert(
             "bridge_member_ref".to_string(),
             serde_json::to_value(bridge_member_ref)?,
+        );
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(placed_spawn_id) = member_spawned.placed_spawn_id()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "placed_spawn_id".to_string(),
+            serde_json::to_value(placed_spawn_id)?,
         );
     }
     if let Some(member_spawned) = event.kind.member_spawned()
@@ -835,12 +1248,56 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             serde_json::to_value(member_peer_endpoint)?,
         );
     }
+    if let Some((agent_identity, generation, agent_runtime_id, fence_token)) =
+        event.kind.respawn_topology_abandoned_correlation()
+    {
+        let agent_runtime_id = agent_runtime_id.ok_or_else(|| {
+            stored_mob_event_format_error(
+                "stored RespawnTopologyAbandoned missing exact agent_runtime_id",
+            )
+        })?;
+        let fence_token = fence_token.ok_or_else(|| {
+            stored_mob_event_format_error(
+                "stored RespawnTopologyAbandoned missing exact fence_token",
+            )
+        })?;
+        if agent_runtime_id.identity != *agent_identity || agent_runtime_id.generation != generation
+        {
+            return Err(stored_mob_event_format_error(
+                "stored RespawnTopologyAbandoned agent_runtime_id must match agent_identity and generation",
+            ));
+        }
+        let kind = value
+            .get_mut("kind")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                stored_mob_event_format_error(
+                    "stored RespawnTopologyAbandoned kind must be an object",
+                )
+            })?;
+        kind.insert(
+            "agent_runtime_id".to_string(),
+            serde_json::to_value(agent_runtime_id)?,
+        );
+        kind.insert(
+            "fence_token".to_string(),
+            serde_json::to_value(fence_token)?,
+        );
+    }
     if let Some(retiring_peer_endpoint) = event.kind.retiring_peer_endpoint()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
         kind.insert(
             "retiring_peer_endpoint".to_string(),
             serde_json::to_value(retiring_peer_endpoint)?,
+        );
+    }
+    if event.kind.preserves_machine_topology()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "preserve_machine_topology".to_string(),
+            serde_json::to_value(true)?,
         );
     }
     serde_json::to_vec(&serde_json::json!({
@@ -877,6 +1334,12 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .get_mut("kind")
         .and_then(Value::as_object_mut)
         .and_then(|kind| kind.remove("bridge_member_ref"))
+        .map(serde_json::from_value)
+        .transpose()?;
+    let placed_spawn_id = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| kind.remove("placed_spawn_id"))
         .map(serde_json::from_value)
         .transpose()?;
     let spawned_member_peer_endpoint = value
@@ -917,6 +1380,41 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         })
         .map(serde_json::from_value)
         .transpose()?;
+    let respawn_topology_abandoned_private = {
+        let kind = value
+            .get_mut("kind")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                stored_mob_event_format_error("stored mob event kind must be an object")
+            })?;
+        if kind.get("type").and_then(Value::as_str) == Some("respawn_topology_abandoned") {
+            let agent_runtime_id = kind.remove("agent_runtime_id");
+            let fence_token = kind.remove("fence_token");
+            match (agent_runtime_id, fence_token) {
+                (Some(agent_runtime_id), Some(fence_token)) => Some((
+                    serde_json::from_value::<AgentRuntimeId>(agent_runtime_id)?,
+                    serde_json::from_value::<FenceToken>(fence_token)?,
+                )),
+                (None, None) => {
+                    return Err(stored_mob_event_format_error(
+                        "stored RespawnTopologyAbandoned missing exact agent_runtime_id and fence_token",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(stored_mob_event_format_error(
+                        "stored RespawnTopologyAbandoned missing exact agent_runtime_id",
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(stored_mob_event_format_error(
+                        "stored RespawnTopologyAbandoned missing exact fence_token",
+                    ));
+                }
+            }
+        } else {
+            None
+        }
+    };
     let retiring_peer_endpoint = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -929,11 +1427,29 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         })
         .map(serde_json::from_value)
         .transpose()?;
+    let preserve_machine_topology = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_retirement_started") {
+                kind.remove("preserve_machine_topology")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or(false);
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.bridge_member_ref = Some(bridge_member_ref);
+    }
+    if let Some(placed_spawn_id) = placed_spawn_id
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.placed_spawn_id = Some(placed_spawn_id);
     }
     if let Some(member_peer_endpoint) = spawned_member_peer_endpoint
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -950,10 +1466,20 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     {
         recovered.member_peer_endpoint = Some(member_peer_endpoint);
     }
+    if let Some((agent_runtime_id, fence_token)) = respawn_topology_abandoned_private {
+        event
+            .kind
+            .set_respawn_topology_abandoned_correlation(agent_runtime_id, fence_token)?;
+    }
     if let Some(retiring_peer_endpoint) = retiring_peer_endpoint {
         event
             .kind
             .set_retiring_peer_endpoint(retiring_peer_endpoint)?;
+    }
+    if preserve_machine_topology {
+        event
+            .kind
+            .set_preserve_machine_topology(preserve_machine_topology)?;
     }
     Ok(event)
 }
@@ -1108,12 +1634,15 @@ mod tests {
             run_id: run_id.clone(),
             step_id: step_id.clone(),
             target: runtime_id.clone(),
+            output: Some(serde_json::json!({"ok": true})),
+            remote_turn_obligation: None,
         });
         roundtrip(&MobEventKind::StepTargetFailed {
             run_id: run_id.clone(),
             step_id: step_id.clone(),
             target: runtime_id.clone(),
             reason: "fail".to_string(),
+            remote_turn_obligation: None,
             error_report: None,
             error: None,
         });
@@ -1312,8 +1841,9 @@ mod tests {
     }
 
     #[test]
-    fn test_stored_mob_event_roundtrip_preserves_bridge_member_ref() {
+    fn test_stored_v9_mob_event_roundtrip_preserves_all_spawn_replay_metadata() {
         let sid = SessionId::from_uuid(Uuid::nil());
+        let placed_spawn_id = crate::ids::PlacedSpawnId::new();
         let identity = AgentIdentity::from("researcher");
         let pubkey = [7; 32];
         let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
@@ -1337,11 +1867,16 @@ mod tests {
                     ProfileName::from("worker"),
                 )
                 .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone())))
+                .with_placed_spawn_id(Some(placed_spawn_id.clone()))
                 .with_member_peer_endpoint(Some(endpoint.clone())),
             ),
         };
 
         let encoded = encode_stored_mob_event(&event).unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(stored["schema_version"], 9);
+        assert!(stored["event"]["kind"].get("bridge_member_ref").is_some());
+        assert!(stored["event"]["kind"].get("placed_spawn_id").is_some());
         assert!(
             String::from_utf8_lossy(&encoded).contains("member_peer_endpoint"),
             "stored spawn event must carry the replay-only endpoint"
@@ -1356,6 +1891,7 @@ mod tests {
                         .and_then(MemberRef::bridge_session_id),
                     Some(&sid)
                 );
+                assert_eq!(member_spawned.placed_spawn_id(), Some(&placed_spawn_id));
                 assert_eq!(member_spawned.member_peer_endpoint(), Some(&endpoint));
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
@@ -1363,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stored_v8_member_spawned_without_peer_endpoint_decodes_to_none() {
+    fn test_stored_v9_member_spawned_without_peer_endpoint_decodes_to_none() {
         let sid = SessionId::from_uuid(Uuid::nil());
         let identity = AgentIdentity::from("legacy-worker");
         let pubkey = [8; 32];
@@ -1392,7 +1928,7 @@ mod tests {
             ),
         };
 
-        let encoded = encode_stored_mob_event(&event).expect("encode current v8 event");
+        let encoded = encode_stored_mob_event(&event).expect("encode current v9 event");
         let mut stored: serde_json::Value =
             serde_json::from_slice(&encoded).expect("parse stored event");
         let removed = stored
@@ -1402,9 +1938,9 @@ mod tests {
             .and_then(|kind| kind.remove("member_peer_endpoint"));
         assert!(removed.is_some(), "current event must contain the endpoint");
 
-        let legacy_encoded = serde_json::to_vec(&stored).expect("encode legacy v8 event");
+        let legacy_encoded = serde_json::to_vec(&stored).expect("encode v9 event without endpoint");
         let decoded = decode_stored_mob_event(&legacy_encoded)
-            .expect("v8 event without endpoint must remain readable");
+            .expect("v9 event without endpoint must remain readable");
         match decoded.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
                 assert_eq!(member_spawned.member_peer_endpoint(), None);
@@ -1463,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stored_v8_recovered_binding_without_peer_endpoint_decodes_to_none() {
+    fn test_stored_v9_recovered_binding_without_peer_endpoint_decodes_to_none() {
         let sid = SessionId::from_uuid(Uuid::nil());
         let identity = AgentIdentity::from("legacy-recovered-worker");
         let event = MobEvent {
@@ -1479,9 +2015,9 @@ mod tests {
             ),
         };
 
-        let encoded = encode_stored_mob_event(&event).expect("encode legacy-shaped v8 event");
+        let encoded = encode_stored_mob_event(&event).expect("encode v9 event without endpoint");
         let decoded = decode_stored_mob_event(&encoded)
-            .expect("v8 recovered binding without endpoint must remain readable");
+            .expect("v9 recovered binding without endpoint must remain readable");
         match decoded.kind {
             MobEventKind::MemberSessionBindingRecovered(recovered) => {
                 assert_eq!(recovered.bridge_session_id(), Some(&sid));
@@ -1520,6 +2056,7 @@ mod tests {
             // set the internal pointer so we know the exclusion is real,
             // not a side-effect of it being None.
             .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+            .with_placed_spawn_id(Some(crate::ids::PlacedSpawnId::new()))
             .with_member_peer_endpoint(Some(endpoint)),
         );
 
@@ -1538,6 +2075,10 @@ mod tests {
                 && !serialized.contains("member_peer_endpoint"),
             "public MemberSpawned wire shape must never expose internal replay metadata; got: {serialized}",
         );
+        assert!(
+            !serialized.contains("placed_spawn_id"),
+            "public MemberSpawned wire shape must never expose placed_spawn_id; got: {serialized}",
+        );
 
         // And the standard struct fields ARE present.
         let payload_carrier = object.values().find(|v| v.is_object()).unwrap_or(&value);
@@ -1549,7 +2090,7 @@ mod tests {
     }
 
     #[test]
-    fn member_session_binding_recovered_public_wire_shape_excludes_bridge_session_id() {
+    fn member_session_binding_recovered_public_wire_shape_excludes_internal_replay_metadata() {
         let identity = AgentIdentity::from("researcher");
         let sid = SessionId::from_uuid(Uuid::nil());
         let pubkey = [9; 32];
@@ -1793,11 +2334,13 @@ mod tests {
                 )
                 .expect("retiring peer endpoint"),
             ),
+            preserve_machine_topology: true,
         };
         let public_value = serde_json::to_value(&event).expect("serialize retirement-start event");
         let public_json = serde_json::to_string(&public_value).expect("render retirement-start");
         assert!(
             !public_json.contains("retiring_peer_endpoint")
+                && !public_json.contains("preserve_machine_topology")
                 && !public_json.contains(&peer_id.to_string()),
             "public retirement event must not expose the durable peer endpoint: {public_json}"
         );
@@ -1807,6 +2350,7 @@ mod tests {
             decoded,
             MobEventKind::MemberRetirementStarted {
                 retiring_peer_endpoint: None,
+                preserve_machine_topology: false,
                 ..
             }
         ));
@@ -1824,9 +2368,108 @@ mod tests {
             decoded.kind,
             MobEventKind::MemberRetirementStarted {
                 retiring_peer_endpoint: Some(endpoint),
+                preserve_machine_topology: true,
                 ..
             } if endpoint.peer_id == peer_id
         ));
+    }
+
+    #[test]
+    fn test_respawn_topology_abandoned_public_wire_omits_private_correlation() {
+        let identity = AgentIdentity::from("researcher");
+        let generation = Generation::new(2);
+        let event = MobEventKind::RespawnTopologyAbandoned {
+            agent_identity: identity.clone(),
+            generation,
+            agent_runtime_id: Some(AgentRuntimeId::new(identity.clone(), generation)),
+            fence_token: Some(FenceToken::new(41)),
+        };
+
+        let public_value = serde_json::to_value(&event).expect("serialize abandonment event");
+        assert_eq!(
+            public_value,
+            json!({
+                "type": "respawn_topology_abandoned",
+                "agent_identity": "researcher",
+                "generation": 2,
+            }),
+            "public abandonment event must expose only stable identity and generation"
+        );
+
+        let decoded: MobEventKind =
+            serde_json::from_value(public_value).expect("decode public abandonment event");
+        assert!(matches!(
+            decoded,
+            MobEventKind::RespawnTopologyAbandoned {
+                agent_runtime_id: None,
+                fence_token: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_respawn_topology_abandoned_stored_roundtrip_preserves_private_correlation() {
+        let identity = AgentIdentity::from("researcher");
+        let generation = Generation::new(2);
+        let old_runtime_id = AgentRuntimeId::new(identity.clone(), generation);
+        let old_fence_token = FenceToken::new(41);
+        let stored = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::RespawnTopologyAbandoned {
+                agent_identity: identity.clone(),
+                generation,
+                agent_runtime_id: Some(old_runtime_id.clone()),
+                fence_token: Some(old_fence_token),
+            },
+        };
+
+        let encoded = encode_stored_mob_event(&stored).expect("encode stored abandonment event");
+        let encoded_value: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("decode stored abandonment JSON");
+        assert_eq!(
+            encoded_value["event"]["kind"]["agent_runtime_id"],
+            serde_json::to_value(&old_runtime_id).expect("serialize old runtime id")
+        );
+        assert_eq!(encoded_value["event"]["kind"]["fence_token"], json!(41));
+
+        let decoded =
+            decode_stored_mob_event(&encoded).expect("decode stored abandonment correlation");
+        assert!(matches!(
+            decoded.kind,
+            MobEventKind::RespawnTopologyAbandoned {
+                agent_identity,
+                generation: actual_generation,
+                agent_runtime_id: Some(actual_runtime_id),
+                fence_token: Some(actual_fence_token),
+            } if agent_identity == identity
+                && actual_generation == generation
+                && actual_runtime_id == old_runtime_id
+                && actual_fence_token == old_fence_token
+        ));
+    }
+
+    #[test]
+    fn test_respawn_topology_abandoned_stored_codec_requires_exact_private_correlation() {
+        let identity = AgentIdentity::from("researcher");
+        let generation = Generation::new(2);
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::RespawnTopologyAbandoned {
+                agent_identity: identity,
+                generation,
+                agent_runtime_id: None,
+                fence_token: None,
+            },
+        };
+
+        let error = encode_stored_mob_event(&event)
+            .expect_err("stored abandonment without exact private correlation must fail");
+        assert!(error.to_string().contains("agent_runtime_id"));
     }
 
     #[test]

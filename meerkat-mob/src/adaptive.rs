@@ -4,6 +4,8 @@ use crate::definition::{
 };
 use crate::ids::{FlowId, MobId, ProfileName, StepId};
 use crate::profile::{Profile, ProfileBinding};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::time as tokio_time;
 use crate::{MobDefinition, MobHandle, MobRun, RunId, SpawnMemberSpec};
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -12,6 +14,20 @@ use meerkat_core::types::ContentInput;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::time as tokio_time;
+
+const ADAPTIVE_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(25);
+const ADAPTIVE_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(1);
+const ADAPTIVE_RETRY_DIAGNOSTIC_LIMIT: usize = 8;
+
+fn push_bounded_retry_error(errors: &mut Vec<AdaptiveError>, error: AdaptiveError) {
+    if errors.len() == ADAPTIVE_RETRY_DIAGNOSTIC_LIMIT {
+        errors.remove(0);
+    }
+    errors.push(error);
+}
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -939,6 +955,14 @@ pub trait AdaptiveKernel {
         capability: &Self::Capability,
         final_result_digest: &BodyDigest,
     ) -> Result<(), AdaptiveError>;
+
+    async fn cancel(&self, capability: &Self::Capability) -> Result<(), AdaptiveError>;
+
+    async fn layer_exists(
+        &self,
+        capability: &Self::Capability,
+        layer_id: &LayerId,
+    ) -> Result<bool, AdaptiveError>;
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1094,6 +1118,21 @@ impl AdaptiveKernel for AdaptiveDriver {
     ) -> Result<(), AdaptiveError> {
         AdaptiveDriver::resolve_finish(self, capability, final_result_digest).await
     }
+
+    async fn cancel(&self, capability: &Self::Capability) -> Result<(), AdaptiveError> {
+        AdaptiveDriver::cancel(self, capability).await
+    }
+
+    async fn layer_exists(
+        &self,
+        capability: &Self::Capability,
+        layer_id: &LayerId,
+    ) -> Result<bool, AdaptiveError> {
+        Ok(AdaptiveDriver::snapshot(self, capability)
+            .await?
+            .layers
+            .contains_key(layer_id.as_str()))
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1111,7 +1150,7 @@ pub trait AdaptiveDriverRuntime {
     async fn provision_layer(
         &mut self,
         compiled: &CompiledLayer,
-    ) -> Result<Self::Layer, AdaptiveError>;
+    ) -> AdaptiveLayerProvision<Self::Layer>;
 
     async fn start_layer_flow(
         &mut self,
@@ -1125,12 +1164,328 @@ pub trait AdaptiveDriverRuntime {
         run_id: RunId,
     ) -> Result<MobRun, AdaptiveError>;
 
+    /// Resolve physical ownership of a child layer.
+    ///
+    /// The borrow preserves caller custody across every `Err`. Returning
+    /// `Destroyed` requires proof of completed destruction. Returning
+    /// `Retained` requires the runtime to have installed an independent,
+    /// durable owner before this method returns; it is not a fallback for an
+    /// uncertain destroy attempt.
     async fn cleanup_layer(
         &mut self,
-        layer: Self::Layer,
+        layer: &Self::Layer,
         layer_id: &LayerId,
         attempt: u64,
     ) -> Result<AdaptiveLayerCleanup, AdaptiveError>;
+}
+
+/// Ownership-preserving result of provisioning an adaptive child mob.
+///
+/// A runtime must never hide a created child behind an error. When setup
+/// fails after child creation, ownership returns to the driver so its joined
+/// cleanup path can destroy the child and record the exact disposition.
+pub enum AdaptiveLayerProvision<L> {
+    Ready(L),
+    /// Provisioning failed. `Some` returns every possibly-live child to the
+    /// joined cleanup path; `None` certifies that no child was created (or
+    /// that creation rolled back with equivalent proof).
+    Failed {
+        primary: AdaptiveError,
+        layer: Option<L>,
+        spawned_members: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OwnedAdaptiveLayerStage<'a> {
+    Setup {
+        fault: crate::AdaptiveLayerSetupFault,
+        spawned_members: u64,
+        requested_members: u64,
+    },
+    Running {
+        terminal_run: Option<&'a MobRun>,
+    },
+    Collecting,
+}
+
+async fn terminalize_owned_layer_after_error<K>(
+    kernel: &K,
+    capability: &K::Capability,
+    layer_id: &LayerId,
+    attempt: u64,
+    stage: OwnedAdaptiveLayerStage<'_>,
+) -> Result<(), AdaptiveError>
+where
+    K: AdaptiveKernel + Sync,
+{
+    match stage {
+        OwnedAdaptiveLayerStage::Setup {
+            fault,
+            spawned_members,
+            requested_members,
+        } => {
+            kernel
+                .record_layer_setup_fault(
+                    capability,
+                    layer_id,
+                    attempt,
+                    fault,
+                    spawned_members,
+                    requested_members,
+                )
+                .await
+        }
+        OwnedAdaptiveLayerStage::Running {
+            terminal_run: Some(child_run),
+        } => {
+            // A failed terminal-ingest acknowledgement is ambiguous: the
+            // first input may already have committed. Try the collecting
+            // terminalizer first, then replay the terminal observation only
+            // when that proves the layer was still Running.
+            if kernel
+                .record_layer_result_invalid(capability, layer_id, attempt)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+            kernel
+                .ingest_layer_terminal(capability, layer_id, attempt, child_run)
+                .await?;
+            kernel
+                .record_layer_result_invalid(capability, layer_id, attempt)
+                .await
+        }
+        OwnedAdaptiveLayerStage::Running { terminal_run: None } => {
+            Err(AdaptiveError::DriverRuntime(format!(
+                "adaptive layer '{}' failed before a terminal child-run observation was available",
+                layer_id.as_str()
+            )))
+        }
+        OwnedAdaptiveLayerStage::Collecting => {
+            kernel
+                .record_layer_result_invalid(capability, layer_id, attempt)
+                .await
+        }
+    }
+}
+
+async fn record_owned_layer_cleanup<K>(
+    kernel: &K,
+    capability: &K::Capability,
+    layer_id: &LayerId,
+    attempt: u64,
+    cleanup: AdaptiveLayerCleanup,
+) -> Result<(), AdaptiveError>
+where
+    K: AdaptiveKernel + Sync,
+{
+    match cleanup {
+        AdaptiveLayerCleanup::Destroyed => {
+            kernel
+                .record_layer_mob_destroyed(capability, layer_id, attempt)
+                .await
+        }
+        AdaptiveLayerCleanup::Retained(disposition) => {
+            kernel
+                .record_layer_mob_retained(capability, layer_id, attempt, disposition)
+                .await
+        }
+    }
+}
+
+async fn cancel_adaptive_run_until_confirmed<K>(
+    kernel: &K,
+    capability: &K::Capability,
+) -> Vec<AdaptiveError>
+where
+    K: AdaptiveKernel + Sync,
+{
+    let mut retry_delay = ADAPTIVE_CLEANUP_RETRY_INITIAL;
+    let mut retry_errors = Vec::new();
+    loop {
+        match kernel.cancel(capability).await {
+            Ok(()) => return retry_errors,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    retry_delay_ms = retry_delay.as_millis(),
+                    "adaptive cancellation was not acknowledged; retrying idempotently",
+                );
+                push_bounded_retry_error(&mut retry_errors, error);
+                tokio_time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(ADAPTIVE_CLEANUP_RETRY_MAX);
+            }
+        }
+    }
+}
+
+async fn adaptive_layer_exists_until_confirmed<K>(
+    kernel: &K,
+    capability: &K::Capability,
+    layer_id: &LayerId,
+) -> (bool, Vec<AdaptiveError>)
+where
+    K: AdaptiveKernel + Sync,
+{
+    let mut retry_delay = ADAPTIVE_CLEANUP_RETRY_INITIAL;
+    let mut retry_errors = Vec::new();
+    loop {
+        match kernel.layer_exists(capability, layer_id).await {
+            Ok(exists) => return (exists, retry_errors),
+            Err(error) => {
+                tracing::warn!(
+                    layer_id = layer_id.as_str(),
+                    error = %error,
+                    retry_delay_ms = retry_delay.as_millis(),
+                    "adaptive layer snapshot failed; retrying before releasing reservation custody",
+                );
+                push_bounded_retry_error(&mut retry_errors, error);
+                tokio_time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(ADAPTIVE_CLEANUP_RETRY_MAX);
+            }
+        }
+    }
+}
+
+async fn record_owned_layer_cleanup_until_confirmed<K>(
+    kernel: &K,
+    capability: &K::Capability,
+    layer_id: &LayerId,
+    attempt: u64,
+    cleanup: AdaptiveLayerCleanup,
+) -> Vec<AdaptiveError>
+where
+    K: AdaptiveKernel + Sync,
+{
+    let mut retry_delay = ADAPTIVE_CLEANUP_RETRY_INITIAL;
+    let mut retry_errors = Vec::new();
+    loop {
+        match record_owned_layer_cleanup(kernel, capability, layer_id, attempt, cleanup).await {
+            Ok(()) => return retry_errors,
+            Err(error) => {
+                tracing::warn!(
+                    layer_id = layer_id.as_str(),
+                    attempt,
+                    error = %error,
+                    retry_delay_ms = retry_delay.as_millis(),
+                    "adaptive cleanup disposition was not acknowledged; retrying idempotently",
+                );
+                push_bounded_retry_error(&mut retry_errors, error);
+                tokio_time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(ADAPTIVE_CLEANUP_RETRY_MAX);
+            }
+        }
+    }
+}
+
+async fn cleanup_owned_layer_until_success<R>(
+    runtime: &mut R,
+    layer: &R::Layer,
+    layer_id: &LayerId,
+    attempt: u64,
+) -> (AdaptiveLayerCleanup, Vec<AdaptiveError>)
+where
+    R: AdaptiveDriverRuntime + Send,
+{
+    let mut retry_delay = ADAPTIVE_CLEANUP_RETRY_INITIAL;
+    let mut retry_errors = Vec::new();
+    loop {
+        match runtime.cleanup_layer(layer, layer_id, attempt).await {
+            Ok(cleanup) => return (cleanup, retry_errors),
+            Err(error) => {
+                tracing::warn!(
+                    layer_id = layer_id.as_str(),
+                    attempt,
+                    error = %error,
+                    retry_delay_ms = retry_delay.as_millis(),
+                    "adaptive child cleanup failed; retaining ownership and retrying",
+                );
+                push_bounded_retry_error(&mut retry_errors, error);
+                tokio_time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(ADAPTIVE_CLEANUP_RETRY_MAX);
+            }
+        }
+    }
+}
+
+fn operation_error_with_followup_failures(
+    primary: AdaptiveError,
+    failures: Vec<(&'static str, AdaptiveError)>,
+) -> AdaptiveError {
+    if failures.is_empty() {
+        return primary;
+    }
+    let cleanup = failures
+        .into_iter()
+        .map(|(stage, error)| format!("{stage}: {error}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    AdaptiveError::OperationFailedWithCleanup {
+        primary: Box::new(primary),
+        cleanup,
+    }
+}
+
+// Cleanup joins the exact layer/run authority carriers; keep them explicit at
+// this boundary rather than introducing a second aggregate ownership shape.
+#[allow(clippy::too_many_arguments)]
+async fn cleanup_owned_layer_after_error<K, R>(
+    kernel: &K,
+    runtime: &mut R,
+    capability: &K::Capability,
+    layer: R::Layer,
+    layer_id: &LayerId,
+    attempt: u64,
+    stage: OwnedAdaptiveLayerStage<'_>,
+    primary: AdaptiveError,
+    cancel_confirmed: &mut bool,
+) -> AdaptiveError
+where
+    K: AdaptiveKernel + Sync,
+    R: AdaptiveDriverRuntime + Send,
+{
+    // Explicit Result::Err exits remain joined to cleanup. An arbitrary
+    // external cancellation that drops this future cannot run async Drop;
+    // callers that need that guarantee must supervise and join the loop.
+    let _ = terminalize_owned_layer_after_error(kernel, capability, layer_id, attempt, stage).await;
+    let mut failures = Vec::new();
+    let (cleanup, retry_errors) =
+        cleanup_owned_layer_until_success(runtime, &layer, layer_id, attempt).await;
+    // Cancellation is also the exact fallback terminalizer for an
+    // admitted/provisioning/running layer whose primary failure left no
+    // terminal child-run observation. No disposition is recorded until the
+    // joined cleanup above has proved success.
+    let cancel_errors = cancel_adaptive_run_until_confirmed(kernel, capability).await;
+    *cancel_confirmed = true;
+    let disposition_errors =
+        record_owned_layer_cleanup_until_confirmed(kernel, capability, layer_id, attempt, cleanup)
+            .await;
+    failures.extend(
+        retry_errors
+            .into_iter()
+            .map(|error| ("layer cleanup retry", error)),
+    );
+    failures.extend(
+        cancel_errors
+            .into_iter()
+            .map(|error| ("adaptive cancellation retry", error)),
+    );
+    failures.extend(
+        disposition_errors
+            .into_iter()
+            .map(|error| ("layer cleanup disposition retry", error)),
+    );
+    operation_error_with_followup_failures(primary, failures)
 }
 
 pub async fn run_adaptive_loop<K, R>(
@@ -1149,6 +1504,37 @@ where
             request.started_at_ms,
         )
         .await?;
+    let mut cancel_confirmed = false;
+    let result =
+        run_initialized_adaptive_loop(kernel, runtime, &capability, request, &mut cancel_confirmed)
+            .await;
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(primary) if cancel_confirmed => Err(primary),
+        Err(primary) => {
+            let retry_errors = cancel_adaptive_run_until_confirmed(kernel, &capability).await;
+            Err(operation_error_with_followup_failures(
+                primary,
+                retry_errors
+                    .into_iter()
+                    .map(|error| ("adaptive cancellation retry", error))
+                    .collect(),
+            ))
+        }
+    }
+}
+
+async fn run_initialized_adaptive_loop<K, R>(
+    kernel: &K,
+    runtime: &mut R,
+    capability: &K::Capability,
+    request: AdaptiveRunRequest,
+    cancel_confirmed: &mut bool,
+) -> Result<AdaptiveRunOutcome, AdaptiveError>
+where
+    K: AdaptiveKernel + Sync,
+    R: AdaptiveDriverRuntime + Send,
+{
     let mut body_store = InMemoryBodyStore::default();
     let mut context = request.compile_context.clone();
     context.adaptive_run_id = request.adaptive_run_id.clone();
@@ -1163,13 +1549,13 @@ where
             })
             .await?;
         kernel
-            .record_planning_decision(&capability, &decision)
+            .record_planning_decision(capability, &decision)
             .await?;
 
         match decision {
             LayerDecision::Finish { result, .. } => {
                 let digest = body_store.put_json(&result.result)?;
-                kernel.resolve_finish(&capability, &digest).await?;
+                kernel.resolve_finish(capability, &digest).await?;
                 return Ok(AdaptiveRunOutcome {
                     adaptive_run_id: request.adaptive_run_id,
                     final_result_digest: Some(digest),
@@ -1183,123 +1569,353 @@ where
                 let compiled = match compile_layer(&plan, &context, &request.policy) {
                     Ok(compiled) if compiled.plan_digest == plan_digest => compiled,
                     Ok(compiled) => {
-                        kernel
-                            .record_plan_rejected(&capability, &scoped_layer_id)
-                            .await?;
-                        return Err(AdaptiveError::BodyDigestMismatch {
+                        let primary = AdaptiveError::BodyDigestMismatch {
                             expected: plan_digest,
                             actual: compiled.plan_digest,
-                        });
+                        };
+                        if let Err(error) = kernel
+                            .record_plan_rejected(capability, &scoped_layer_id)
+                            .await
+                        {
+                            return Err(operation_error_with_followup_failures(
+                                primary,
+                                vec![("plan rejection recording", error)],
+                            ));
+                        }
+                        return Err(primary);
                     }
-                    Err(error) => {
-                        kernel
-                            .record_plan_rejected(&capability, &scoped_layer_id)
-                            .await?;
-                        return Err(error);
+                    Err(primary) => {
+                        if let Err(error) = kernel
+                            .record_plan_rejected(capability, &scoped_layer_id)
+                            .await
+                        {
+                            return Err(operation_error_with_followup_failures(
+                                primary,
+                                vec![("plan rejection recording", error)],
+                            ));
+                        }
+                        return Err(primary);
                     }
                 };
-                let admission = kernel
+                let admission = match kernel
                     .resolve_layer_admission(
-                        &capability,
+                        capability,
                         &scoped_layer_id,
                         context.attempt,
                         &compiled,
                         runtime.now_ms(),
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(admission) => admission,
+                    Err(primary) => {
+                        // Admission acknowledgement is ambiguous. If Allowed
+                        // committed, cancel terminalizes its active layer and
+                        // the absent disposition releases the reservation. If
+                        // it did not commit, disposition guard rejection is an
+                        // expected no-op.
+                        let mut failures = Vec::new();
+                        let cancel_errors =
+                            cancel_adaptive_run_until_confirmed(kernel, capability).await;
+                        *cancel_confirmed = true;
+                        let (layer_exists, snapshot_errors) =
+                            adaptive_layer_exists_until_confirmed(
+                                kernel,
+                                capability,
+                                &scoped_layer_id,
+                            )
+                            .await;
+                        failures.extend(
+                            cancel_errors
+                                .into_iter()
+                                .map(|error| ("adaptive cancellation retry", error)),
+                        );
+                        failures.extend(
+                            snapshot_errors
+                                .into_iter()
+                                .map(|error| ("adaptive layer snapshot retry", error)),
+                        );
+                        if layer_exists {
+                            failures.extend(
+                                record_owned_layer_cleanup_until_confirmed(
+                                    kernel,
+                                    capability,
+                                    &scoped_layer_id,
+                                    context.attempt,
+                                    AdaptiveLayerCleanup::Destroyed,
+                                )
+                                .await
+                                .into_iter()
+                                .map(|error| ("ambiguous admission disposition retry", error)),
+                            );
+                        }
+                        return Err(operation_error_with_followup_failures(primary, failures));
+                    }
+                };
                 if !matches!(admission, crate::AdaptiveLayerAdmission::Allowed) {
                     continue;
                 }
 
+                let requested_members = compiled.spawn_specs.len() as u64;
                 let layer = match runtime.provision_layer(&compiled).await {
-                    Ok(layer) => layer,
-                    Err(error) => {
-                        kernel
+                    AdaptiveLayerProvision::Ready(layer) => layer,
+                    AdaptiveLayerProvision::Failed {
+                        primary,
+                        layer: Some(layer),
+                        spawned_members,
+                    } => {
+                        return Err(cleanup_owned_layer_after_error(
+                            kernel,
+                            runtime,
+                            capability,
+                            layer,
+                            &scoped_layer_id,
+                            context.attempt,
+                            OwnedAdaptiveLayerStage::Setup {
+                                fault: crate::AdaptiveLayerSetupFault::SpawnFailed,
+                                spawned_members,
+                                requested_members,
+                            },
+                            primary,
+                            cancel_confirmed,
+                        )
+                        .await);
+                    }
+                    AdaptiveLayerProvision::Failed {
+                        primary,
+                        layer: None,
+                        spawned_members,
+                    } => {
+                        let mut failures = Vec::new();
+                        let terminalization_error = kernel
                             .record_layer_setup_fault(
-                                &capability,
+                                capability,
                                 &scoped_layer_id,
                                 context.attempt,
                                 crate::AdaptiveLayerSetupFault::MobCreateFailed,
-                                0,
-                                compiled.spawn_specs.len() as u64,
+                                spawned_members,
+                                requested_members,
                             )
-                            .await?;
-                        return Err(error);
+                            .await
+                            .err();
+                        if terminalization_error.is_some() {
+                            // If setup-fault recording did not establish a
+                            // terminal layer, typed cancel moves the active
+                            // reservation to Canceled before disposition.
+                            let cancel_errors =
+                                cancel_adaptive_run_until_confirmed(kernel, capability).await;
+                            *cancel_confirmed = true;
+                            failures.extend(
+                                cancel_errors
+                                    .into_iter()
+                                    .map(|error| ("adaptive cancellation retry", error)),
+                            );
+                        }
+                        if let Some(error) = terminalization_error {
+                            failures.push(("layer terminalization", error));
+                        }
+                        failures.extend(
+                            record_owned_layer_cleanup_until_confirmed(
+                                kernel,
+                                capability,
+                                &scoped_layer_id,
+                                context.attempt,
+                                AdaptiveLayerCleanup::Destroyed,
+                            )
+                            .await
+                            .into_iter()
+                            .map(|error| ("absent layer disposition retry", error)),
+                        );
+                        return Err(operation_error_with_followup_failures(primary, failures));
                     }
                 };
-                kernel
-                    .record_layer_provisioned(&capability, &scoped_layer_id, context.attempt)
-                    .await?;
-                let child_run_id = runtime
+                if let Err(primary) = kernel
+                    .record_layer_provisioned(capability, &scoped_layer_id, context.attempt)
+                    .await
+                {
+                    return Err(cleanup_owned_layer_after_error(
+                        kernel,
+                        runtime,
+                        capability,
+                        layer,
+                        &scoped_layer_id,
+                        context.attempt,
+                        OwnedAdaptiveLayerStage::Setup {
+                            fault: crate::AdaptiveLayerSetupFault::Interrupted,
+                            spawned_members: requested_members,
+                            requested_members,
+                        },
+                        primary,
+                        cancel_confirmed,
+                    )
+                    .await);
+                }
+                let child_run_id = match runtime
                     .start_layer_flow(&layer, compiled.activation_params.clone())
-                    .await?;
-                kernel
+                    .await
+                {
+                    Ok(child_run_id) => child_run_id,
+                    Err(primary) => {
+                        return Err(cleanup_owned_layer_after_error(
+                            kernel,
+                            runtime,
+                            capability,
+                            layer,
+                            &scoped_layer_id,
+                            context.attempt,
+                            OwnedAdaptiveLayerStage::Setup {
+                                fault: crate::AdaptiveLayerSetupFault::Interrupted,
+                                spawned_members: requested_members,
+                                requested_members,
+                            },
+                            primary,
+                            cancel_confirmed,
+                        )
+                        .await);
+                    }
+                };
+                if let Err(primary) = kernel
                     .record_layer_run_started(
-                        &capability,
+                        capability,
                         &scoped_layer_id,
                         context.attempt,
                         child_run_id.clone(),
                     )
-                    .await?;
-                let child_run = runtime.await_layer_terminal(&layer, child_run_id).await?;
-                kernel
+                    .await
+                {
+                    return Err(cleanup_owned_layer_after_error(
+                        kernel,
+                        runtime,
+                        capability,
+                        layer,
+                        &scoped_layer_id,
+                        context.attempt,
+                        OwnedAdaptiveLayerStage::Setup {
+                            fault: crate::AdaptiveLayerSetupFault::Interrupted,
+                            spawned_members: requested_members,
+                            requested_members,
+                        },
+                        primary,
+                        cancel_confirmed,
+                    )
+                    .await);
+                }
+                let child_run = match runtime.await_layer_terminal(&layer, child_run_id).await {
+                    Ok(child_run) => child_run,
+                    Err(primary) => {
+                        return Err(cleanup_owned_layer_after_error(
+                            kernel,
+                            runtime,
+                            capability,
+                            layer,
+                            &scoped_layer_id,
+                            context.attempt,
+                            OwnedAdaptiveLayerStage::Running { terminal_run: None },
+                            primary,
+                            cancel_confirmed,
+                        )
+                        .await);
+                    }
+                };
+                if let Err(primary) = kernel
                     .ingest_layer_terminal(
-                        &capability,
+                        capability,
                         &scoped_layer_id,
                         context.attempt,
                         &child_run,
                     )
-                    .await?;
+                    .await
+                {
+                    return Err(cleanup_owned_layer_after_error(
+                        kernel,
+                        runtime,
+                        capability,
+                        layer,
+                        &scoped_layer_id,
+                        context.attempt,
+                        OwnedAdaptiveLayerStage::Running {
+                            terminal_run: Some(&child_run),
+                        },
+                        primary,
+                        cancel_confirmed,
+                    )
+                    .await);
+                }
 
                 let layer_result = match extract_layer_result(&plan, &child_run)
                     .and_then(|value| validate_layer_result(&plan, &context.schema_registry, value))
                 {
                     Ok(result) => result,
-                    Err(error) => {
-                        kernel
-                            .record_layer_result_invalid(
-                                &capability,
-                                &scoped_layer_id,
-                                context.attempt,
-                            )
-                            .await?;
-                        return Err(error);
+                    Err(primary) => {
+                        return Err(cleanup_owned_layer_after_error(
+                            kernel,
+                            runtime,
+                            capability,
+                            layer,
+                            &scoped_layer_id,
+                            context.attempt,
+                            OwnedAdaptiveLayerStage::Collecting,
+                            primary,
+                            cancel_confirmed,
+                        )
+                        .await);
                     }
                 };
-                let result_digest = body_store.put_json(&layer_result)?;
-                kernel
+                let result_digest = match body_store.put_json(&layer_result) {
+                    Ok(result_digest) => result_digest,
+                    Err(primary) => {
+                        return Err(cleanup_owned_layer_after_error(
+                            kernel,
+                            runtime,
+                            capability,
+                            layer,
+                            &scoped_layer_id,
+                            context.attempt,
+                            OwnedAdaptiveLayerStage::Collecting,
+                            primary,
+                            cancel_confirmed,
+                        )
+                        .await);
+                    }
+                };
+                if let Err(primary) = kernel
                     .record_layer_result_validated(
-                        &capability,
+                        capability,
                         &scoped_layer_id,
                         context.attempt,
                         &result_digest,
                     )
-                    .await?;
-
-                match runtime
-                    .cleanup_layer(layer, &scoped_layer_id, context.attempt)
-                    .await?
+                    .await
                 {
-                    AdaptiveLayerCleanup::Destroyed => {
-                        kernel
-                            .record_layer_mob_destroyed(
-                                &capability,
-                                &scoped_layer_id,
-                                context.attempt,
-                            )
-                            .await?;
-                    }
-                    AdaptiveLayerCleanup::Retained(disposition) => {
-                        kernel
-                            .record_layer_mob_retained(
-                                &capability,
-                                &scoped_layer_id,
-                                context.attempt,
-                                disposition,
-                            )
-                            .await?;
-                    }
+                    return Err(cleanup_owned_layer_after_error(
+                        kernel,
+                        runtime,
+                        capability,
+                        layer,
+                        &scoped_layer_id,
+                        context.attempt,
+                        OwnedAdaptiveLayerStage::Collecting,
+                        primary,
+                        cancel_confirmed,
+                    )
+                    .await);
                 }
+
+                let (cleanup, _retry_errors) = cleanup_owned_layer_until_success(
+                    runtime,
+                    &layer,
+                    &scoped_layer_id,
+                    context.attempt,
+                )
+                .await;
+                let _disposition_retry_errors = record_owned_layer_cleanup_until_confirmed(
+                    kernel,
+                    capability,
+                    &scoped_layer_id,
+                    context.attempt,
+                    cleanup,
+                )
+                .await;
 
                 previous_layer_result = Some(layer_result);
                 context.attempt = context.attempt.saturating_add(1);
@@ -1978,6 +2594,12 @@ pub enum AdaptiveError {
     LayerResultSchemaViolation,
     #[error("adaptive driver runtime failed: {0}")]
     DriverRuntime(String),
+    #[error("adaptive operation failed: {primary}; cleanup/terminalization also failed: {cleanup}")]
+    OperationFailedWithCleanup {
+        #[source]
+        primary: Box<AdaptiveError>,
+        cleanup: String,
+    },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -2188,6 +2810,9 @@ mod tests {
     #[derive(Default)]
     struct FakeKernel {
         events: Mutex<Vec<String>>,
+        fail_admission: bool,
+        cancel_failures_remaining: Mutex<u64>,
+        disposition_failures_remaining: Mutex<u64>,
     }
 
     impl FakeKernel {
@@ -2245,6 +2870,11 @@ mod tests {
             _observed_at_ms: u64,
         ) -> Result<crate::AdaptiveLayerAdmission, AdaptiveError> {
             self.push(format!("admission:{}", layer_id.as_str()));
+            if self.fail_admission {
+                return Err(AdaptiveError::DriverRuntime(
+                    "admission acknowledgement failed".to_string(),
+                ));
+            }
             Ok(crate::AdaptiveLayerAdmission::Allowed)
         }
 
@@ -2321,6 +2951,13 @@ mod tests {
             _attempt: u64,
         ) -> Result<(), AdaptiveError> {
             self.push(format!("destroyed:{}", layer_id.as_str()));
+            let mut remaining = self.disposition_failures_remaining.lock().unwrap();
+            if *remaining > 0 {
+                *remaining = remaining.saturating_sub(1);
+                return Err(AdaptiveError::DriverRuntime(
+                    "cleanup disposition acknowledgement failed".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -2343,12 +2980,43 @@ mod tests {
             self.push("finish");
             Ok(())
         }
+
+        async fn cancel(&self, _capability: &Self::Capability) -> Result<(), AdaptiveError> {
+            self.push("cancel");
+            let mut remaining = self.cancel_failures_remaining.lock().unwrap();
+            if *remaining > 0 {
+                *remaining = remaining.saturating_sub(1);
+                return Err(AdaptiveError::DriverRuntime(
+                    "cancel acknowledgement failed".to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn layer_exists(
+            &self,
+            _capability: &Self::Capability,
+            _layer_id: &LayerId,
+        ) -> Result<bool, AdaptiveError> {
+            Ok(self.fail_admission)
+        }
+    }
+
+    enum FakeProvisionFailure {
+        BeforeChild,
+        WithChild { spawned_members: u64 },
     }
 
     struct FakeRuntime {
         decisions: VecDeque<LayerDecision>,
         layer_run: Option<MobRun>,
         saw_previous_layer_result: bool,
+        planning_error: Option<String>,
+        provision_failure: Option<FakeProvisionFailure>,
+        start_error: Option<String>,
+        await_error: Option<String>,
+        cleanup_error: Option<String>,
+        cleanup_calls: usize,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -2367,14 +3035,37 @@ mod tests {
             if request.previous_layer_result.is_some() {
                 self.saw_previous_layer_result = true;
             }
+            if let Some(error) = self.planning_error.take() {
+                return Err(AdaptiveError::DriverRuntime(error));
+            }
             Ok(self.decisions.pop_front().expect("planning decision"))
         }
 
         async fn provision_layer(
             &mut self,
             compiled: &CompiledLayer,
-        ) -> Result<Self::Layer, AdaptiveError> {
-            Ok(compiled.child_mob_id.to_string())
+        ) -> AdaptiveLayerProvision<Self::Layer> {
+            if let Some(failure) = self.provision_failure.take() {
+                return match failure {
+                    FakeProvisionFailure::BeforeChild => AdaptiveLayerProvision::Failed {
+                        primary: AdaptiveError::DriverRuntime(
+                            "provision failed before child".to_string(),
+                        ),
+                        layer: None,
+                        spawned_members: 0,
+                    },
+                    FakeProvisionFailure::WithChild { spawned_members } => {
+                        AdaptiveLayerProvision::Failed {
+                            primary: AdaptiveError::DriverRuntime(
+                                "provision failed with child".to_string(),
+                            ),
+                            layer: Some(compiled.child_mob_id.to_string()),
+                            spawned_members,
+                        }
+                    }
+                };
+            }
+            AdaptiveLayerProvision::Ready(compiled.child_mob_id.to_string())
         }
 
         async fn start_layer_flow(
@@ -2382,6 +3073,9 @@ mod tests {
             _layer: &Self::Layer,
             _activation_params: BTreeMap<String, serde_json::Value>,
         ) -> Result<RunId, AdaptiveError> {
+            if let Some(error) = self.start_error.take() {
+                return Err(AdaptiveError::DriverRuntime(error));
+            }
             Ok(RunId::new())
         }
 
@@ -2390,15 +3084,22 @@ mod tests {
             _layer: &Self::Layer,
             _run_id: RunId,
         ) -> Result<MobRun, AdaptiveError> {
+            if let Some(error) = self.await_error.take() {
+                return Err(AdaptiveError::DriverRuntime(error));
+            }
             Ok(self.layer_run.take().expect("layer run"))
         }
 
         async fn cleanup_layer(
             &mut self,
-            _layer: Self::Layer,
+            _layer: &Self::Layer,
             _layer_id: &LayerId,
             _attempt: u64,
         ) -> Result<AdaptiveLayerCleanup, AdaptiveError> {
+            self.cleanup_calls = self.cleanup_calls.saturating_add(1);
+            if let Some(error) = self.cleanup_error.take() {
+                return Err(AdaptiveError::DriverRuntime(error));
+            }
             Ok(AdaptiveLayerCleanup::Destroyed)
         }
     }
@@ -2484,6 +3185,12 @@ mod tests {
             }]),
             layer_run: None,
             saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: None,
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
         };
 
         let outcome = run_adaptive_loop(
@@ -2514,6 +3221,259 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adaptive_loop_cancels_initialized_run_after_pre_layer_error() {
+        let kernel = FakeKernel::default();
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::new(),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: Some("planning failed".to_string()),
+            provision_failure: None,
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("planning failure must fail the adaptive loop");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DriverRuntime(ref message) if message == "planning failed"
+        ));
+        assert_eq!(kernel.events(), vec!["initialize:run-1", "cancel"]);
+    }
+
+    #[tokio::test]
+    async fn adaptive_loop_retries_cancel_until_acknowledged() {
+        let kernel = FakeKernel {
+            cancel_failures_remaining: Mutex::new(1),
+            ..FakeKernel::default()
+        };
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::new(),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: Some("planning failed".to_string()),
+            provision_failure: None,
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("planning failure must fail the adaptive loop");
+
+        match error {
+            AdaptiveError::OperationFailedWithCleanup { primary, cleanup } => {
+                assert!(matches!(
+                    *primary,
+                    AdaptiveError::DriverRuntime(ref message) if message == "planning failed"
+                ));
+                assert!(cleanup.contains("cancel acknowledgement failed"));
+            }
+            other => panic!("expected cancellation retry diagnostics, got {other:?}"),
+        }
+        assert_eq!(
+            kernel.events(),
+            vec!["initialize:run-1", "cancel", "cancel"]
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_loop_cancels_and_disposes_ambiguous_admission() {
+        let kernel = FakeKernel {
+            fail_admission: true,
+            ..FakeKernel::default()
+        };
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::from([LayerDecision::RunLayer {
+                reason: "verify findings".to_string(),
+                plan: layer_plan(),
+            }]),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: None,
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("admission acknowledgement failure must fail the adaptive loop");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DriverRuntime(ref message)
+                if message == "admission acknowledgement failed"
+        ));
+        assert_eq!(runtime.cleanup_calls, 0);
+        assert_eq!(
+            kernel.events(),
+            vec![
+                "initialize:run-1",
+                "decision:run_layer",
+                "admission:run-1-verify-findings",
+                "cancel",
+                "destroyed:run-1-verify-findings",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_loop_keeps_failed_provision_child_owned_until_cleanup() {
+        let kernel = FakeKernel::default();
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::from([LayerDecision::RunLayer {
+                reason: "verify findings".to_string(),
+                plan: layer_plan(),
+            }]),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: Some(FakeProvisionFailure::WithChild { spawned_members: 1 }),
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("provision failure must fail the adaptive loop");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DriverRuntime(ref message) if message == "provision failed with child"
+        ));
+        assert_eq!(runtime.cleanup_calls, 1);
+        assert_eq!(
+            kernel.events(),
+            vec![
+                "initialize:run-1",
+                "decision:run_layer",
+                "admission:run-1-verify-findings",
+                "setup_fault:run-1-verify-findings",
+                "cancel",
+                "destroyed:run-1-verify-findings",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_loop_records_absent_disposition_after_pre_child_provision_failure() {
+        let kernel = FakeKernel::default();
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::from([LayerDecision::RunLayer {
+                reason: "verify findings".to_string(),
+                plan: layer_plan(),
+            }]),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: Some(FakeProvisionFailure::BeforeChild),
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("provision failure must fail the adaptive loop");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DriverRuntime(ref message)
+                if message == "provision failed before child"
+        ));
+        assert_eq!(runtime.cleanup_calls, 0);
+        assert_eq!(
+            kernel.events(),
+            vec![
+                "initialize:run-1",
+                "decision:run_layer",
+                "admission:run-1-verify-findings",
+                "setup_fault:run-1-verify-findings",
+                "destroyed:run-1-verify-findings",
+                "cancel",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn adaptive_loop_runs_layer_validates_result_and_feeds_next_planning_turn() {
         let plan = layer_plan();
         let kernel = FakeKernel::default();
@@ -2533,6 +3493,12 @@ mod tests {
             ]),
             layer_run: Some(completed_layer_run(layer_output)),
             saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: None,
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
         };
 
         let outcome = run_adaptive_loop(
@@ -2570,6 +3536,184 @@ mod tests {
                 "destroyed:run-1-verify-findings",
                 "decision:finish",
                 "finish",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_loop_destroys_and_records_owned_layer_after_start_error() {
+        let plan = layer_plan();
+        let kernel = FakeKernel::default();
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::from([LayerDecision::RunLayer {
+                reason: "verify findings".to_string(),
+                plan,
+            }]),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: None,
+            start_error: Some("start failed".to_string()),
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("start failure must fail the adaptive loop");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DriverRuntime(ref message) if message == "start failed"
+        ));
+        assert_eq!(runtime.cleanup_calls, 1);
+        assert_eq!(
+            kernel.events(),
+            vec![
+                "initialize:run-1",
+                "decision:run_layer",
+                "admission:run-1-verify-findings",
+                "provisioned:run-1-verify-findings",
+                "setup_fault:run-1-verify-findings",
+                "cancel",
+                "destroyed:run-1-verify-findings",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_loop_cancel_terminalizes_running_layer_before_disposition() {
+        let kernel = FakeKernel::default();
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::from([LayerDecision::RunLayer {
+                reason: "verify findings".to_string(),
+                plan: layer_plan(),
+            }]),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: None,
+            start_error: None,
+            await_error: Some("terminal observation failed".to_string()),
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("terminal observation failure must fail the adaptive loop");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DriverRuntime(ref message) if message == "terminal observation failed"
+        ));
+        assert_eq!(runtime.cleanup_calls, 1);
+        assert_eq!(
+            kernel.events(),
+            vec![
+                "initialize:run-1",
+                "decision:run_layer",
+                "admission:run-1-verify-findings",
+                "provisioned:run-1-verify-findings",
+                "run_started:run-1-verify-findings",
+                "cancel",
+                "destroyed:run-1-verify-findings",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_loop_retries_cleanup_before_disposition_and_preserves_error() {
+        let plan = layer_plan();
+        let kernel = FakeKernel {
+            disposition_failures_remaining: Mutex::new(1),
+            ..FakeKernel::default()
+        };
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::from([LayerDecision::RunLayer {
+                reason: "verify findings".to_string(),
+                plan,
+            }]),
+            layer_run: Some(completed_layer_run(serde_json::json!({"not": "valid"}))),
+            saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: None,
+            start_error: None,
+            await_error: None,
+            cleanup_error: Some("destroy failed".to_string()),
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("run-1").unwrap(),
+                policy: AdaptivePolicy {
+                    limits: limits(10),
+                    ..AdaptivePolicy::default()
+                },
+                compile_context: compile_context(),
+                objective: "Audit provider auth.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("invalid result and failed cleanup must both be visible");
+
+        match error {
+            AdaptiveError::OperationFailedWithCleanup { primary, cleanup } => {
+                assert!(matches!(
+                    *primary,
+                    AdaptiveError::LayerResultSchemaViolation
+                ));
+                assert!(cleanup.contains("layer cleanup"));
+                assert!(cleanup.contains("destroy failed"));
+                assert!(cleanup.contains("cleanup disposition acknowledgement failed"));
+            }
+            other => panic!("expected combined operation/cleanup error, got {other:?}"),
+        }
+        assert_eq!(runtime.cleanup_calls, 2);
+        assert_eq!(
+            kernel.events(),
+            vec![
+                "initialize:run-1",
+                "decision:run_layer",
+                "admission:run-1-verify-findings",
+                "provisioned:run-1-verify-findings",
+                "run_started:run-1-verify-findings",
+                "terminal:run-1-verify-findings",
+                "result_invalid:run-1-verify-findings",
+                "cancel",
+                "destroyed:run-1-verify-findings",
+                "destroyed:run-1-verify-findings",
             ]
         );
     }

@@ -21,8 +21,8 @@ use meerkat_core::service::{
 use meerkat_core::types::{AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, Usage};
 use meerkat_core::{
     CancelAfterBoundaryCommand, CancelAfterBoundarySender, HookDecision, HookEngine,
-    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, Session,
-    SessionDeferredTurnState, SystemContextStateError,
+    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, RunId,
+    Session, SessionDeferredTurnState, SystemContextStateError,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -273,14 +273,19 @@ impl SessionAgentBuilder for MockAgentBuilder {
 
     async fn build_agent(
         &self,
-        _req: &CreateSessionRequest,
+        req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<MockAgent, SessionError> {
         if let Some(delay) = self.build_delay_ms {
             tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
         }
         Ok(MockAgent {
-            session_id: SessionId::new(),
+            session_id: req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.id().clone())
+                .unwrap_or_default(),
             message_count: 0,
             delay_ms: self.delay_ms,
             callback_pending: self.callback_pending,
@@ -345,7 +350,11 @@ impl HookEngine for DenyNextPreLlmHookEngine {
 }
 
 fn session_for_request(req: &CreateSessionRequest) -> Session {
-    let mut session = Session::new();
+    let mut session = req
+        .build
+        .as_ref()
+        .and_then(|build| build.resume_session.clone())
+        .unwrap_or_default();
     if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
         session.set_system_prompt(system_prompt.to_string());
     }
@@ -563,7 +572,7 @@ impl SessionAgent for RealSessionAgent {
     fn cancel(&mut self) {
         let _ = self
             .cancel_after_boundary_tx
-            .send(CancelAfterBoundaryCommand);
+            .send(CancelAfterBoundaryCommand::for_run(RunId::new()));
     }
 
     fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
@@ -683,7 +692,7 @@ impl SessionAgent for CompactionSessionAgent {
     fn cancel(&mut self) {
         let _ = self
             .cancel_after_boundary_tx
-            .send(CancelAfterBoundaryCommand);
+            .send(CancelAfterBoundaryCommand::for_run(RunId::new()));
     }
 
     fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
@@ -1327,7 +1336,7 @@ async fn test_interrupt_cancels_inflight_turn() {
 }
 
 #[tokio::test]
-async fn test_cancel_after_boundary_is_accepted_for_real_inflight_turn() {
+async fn test_cancel_after_boundary_is_unsupported_without_exact_turn_state() {
     let service = Arc::new(EphemeralSessionService::new(
         RealAgentBuilder {
             provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1350,10 +1359,15 @@ async fn test_cancel_after_boundary_is_accepted_for_real_inflight_turn() {
         tokio::spawn(async move { service_clone.start_turn(&sid_clone, turn_req("Slow")).await });
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    service
+    let error = service
         .cancel_after_boundary(&session_id)
         .await
-        .expect("boundary cancel should be accepted while running");
+        .expect_err("a busy standalone fixture must not synthesize exact run authority");
+    assert!(matches!(
+        error,
+        SessionError::Unsupported(operation)
+            if operation == "cancel_after_boundary_exact_run_authority"
+    ));
 
     let result = turn.await.expect("turn join should succeed");
     assert!(
@@ -2086,7 +2100,7 @@ async fn test_interrupt_when_idle_returns_not_running() {
 }
 
 #[tokio::test]
-async fn test_cancel_after_boundary_when_idle_returns_not_running() {
+async fn test_cancel_after_boundary_when_idle_is_unsupported_without_exact_turn_state() {
     let service = Arc::new(EphemeralSessionService::new(
         RealAgentBuilder {
             provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -2104,7 +2118,11 @@ async fn test_cancel_after_boundary_when_idle_returns_not_running() {
     let result = service.cancel_after_boundary(&session_id).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert_eq!(err.code(), "SESSION_NOT_RUNNING");
+    assert!(matches!(
+        err,
+        SessionError::Unsupported(operation)
+            if operation == "cancel_after_boundary_exact_run_authority"
+    ));
 }
 
 // ---------------------------------------------------------------------------

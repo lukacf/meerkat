@@ -17,9 +17,8 @@
 //! The fixtures model three flows:
 //!   * Fresh spawn + retire — one identity lifecycle, binding is set then
 //!     released.
-//!   * Spawn + respawn (spawn-over-existing) + retire — identity is
-//!     rotated atomically to a new bridge session id; final retire
-//!     emits a (Some, None) Changed for the new session id.
+//!   * Retire + respawn — a live duplicate is rejected, retirement clears the
+//!     old binding, and the exact-successor spawn publishes a fresh binding.
 //!   * Guard enforcement — a caller that passes the wrong `replacing`
 //!     witness fails the transition (no silent self-heal).
 //!
@@ -30,9 +29,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use meerkat_mob::machines::mob_machine::{
-    AgentIdentity, AgentRuntimeId, FenceToken, Generation, MobId, MobMachineAuthority,
-    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, SessionId,
-    SpawnPolicyRuntimeMode,
+    AgentIdentity, AgentRuntimeId, FenceToken, Generation, MemberSessionDisposal, MobId,
+    MobMachineAuthority, MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal,
+    SessionId, SpawnPolicyRuntimeMode,
 };
 
 fn identity(name: &str) -> AgentIdentity {
@@ -68,6 +67,7 @@ fn authorize_spawn_profile(
             provider_params_digest: None,
             output_schema_digest: None,
             external_addressable: false,
+            resolved_spec_digest: None,
         },
     )
     .expect("spawn profile material must be authorized before Spawn");
@@ -89,6 +89,25 @@ fn begin_spawn_input(
         runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
         bridge_session_id: Some(session_id(bridge_sid)),
         replacing,
+        placement: None,
+        workgraph_required: false,
+        rust_bundles_present: false,
+        per_spawn_external_tools_present: false,
+        mob_default_external_tools_present: false,
+        default_llm_client_override_present: false,
+        host_surface_mcp_allowlist_present: false,
+        inherited_tool_filter_present: false,
+        shell_env_present: false,
+        mcp_stdio_env_present: false,
+        mcp_http_headers_present: false,
+        memory_required: false,
+        mcp_required: false,
+        resume_session_id: None,
+        placed_spawn_id: None,
+        placed_provision_operation_id: None,
+        placed_operation_owner_session_id: None,
+        effective_profile_override_present: false,
+        effective_model_override_present: false,
     }
 }
 
@@ -108,6 +127,11 @@ fn commit_membership_input(
         runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
         bridge_session_id: Some(session_id(bridge_sid)),
         replacing,
+        member_peer_endpoint: None,
+        spec_digest_echo: None,
+        ack_engine_version: None,
+        placed_spawn_id: None,
+        provision_operation_id: None,
     }
 }
 
@@ -214,7 +238,7 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
 
     let rejected = authority.apply_signal(recover_member_session_binding_signal(
         "alpha",
-        1,
+        0,
         "bridge-a-gen1",
         None,
     ));
@@ -224,12 +248,12 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
     );
 
     authority
-        .apply_signal(recover_roster_member_signal("alpha", 1))
+        .apply_signal(recover_roster_member_signal("alpha", 0))
         .expect("roster member recovery must be accepted");
     let transition = authority
         .apply_signal(recover_member_session_binding_signal(
             "alpha",
-            1,
+            0,
             "bridge-a-gen1",
             None,
         ))
@@ -247,7 +271,7 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
     let idempotent = authority
         .apply_signal(recover_member_session_binding_signal(
             "alpha",
-            1,
+            0,
             "bridge-a-gen1",
             Some(session_id("bridge-a-gen1")),
         ))
@@ -260,7 +284,7 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
     let rotated = authority
         .apply_signal(recover_member_session_binding_signal(
             "alpha",
-            1,
+            0,
             "bridge-a-gen2",
             Some(session_id("bridge-a-gen1")),
         ))
@@ -277,7 +301,7 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
 
     let wrong_replacing = authority.apply_signal(recover_member_session_binding_signal(
         "alpha",
-        1,
+        0,
         "bridge-a-gen3",
         Some(session_id("bridge-a-gen1")),
     ));
@@ -298,8 +322,8 @@ fn recovery_member_session_binding_is_generated_authority_owned() {
 #[test]
 fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
     let mut authority = MobMachineAuthority::new();
-    authorize_spawn_profile(&mut authority, "alpha", 1);
-    let transition = apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+    authorize_spawn_profile(&mut authority, "alpha", 0);
+    let transition = apply_spawn_ladder(&mut authority, "alpha", 0, "bridge-a-gen1", None)
         .expect("fresh spawn must be accepted");
 
     let bindings = &authority.state().member_session_bindings;
@@ -323,33 +347,75 @@ fn fresh_spawn_emits_member_session_binding_changed_none_to_some() {
 }
 
 #[test]
-fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
+fn respawn_requires_terminal_retirement_then_fresh_exact_successor_spawn() {
     let mut authority = MobMachineAuthority::new();
     // Initial spawn — binds alpha to bridge-a-gen1.
-    authorize_spawn_profile(&mut authority, "alpha", 1);
-    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+    authorize_spawn_profile(&mut authority, "alpha", 0);
+    apply_spawn_ladder(&mut authority, "alpha", 0, "bridge-a-gen1", None)
         .expect("initial spawn must be accepted");
 
-    // Simulate the actor's handle_respawn retire-half firing Retire with
-    // `releasing = current binding`, then the replacement Spawn must
-    // be guarded-matched by SpawnRunningReplacing. Between those two
-    // calls the binding map is transiently cleared by Retire, so
-    // `replacing` for the second spawn is None (the map was cleared).
-    //
-    // For the W3-H-1 contract here we exercise the Replacing variant
-    // directly: a second Spawn fired without an intermediate Retire
-    // models the invariant that an identity that is STILL bound at
-    // spawn time rotates its session pointer. This is the shape the
-    // respawn flow will produce once the realtime observer lands (the
-    // observer deduplicates the rotation window).
+    // A hot second spawn must not overwrite a live runtime. Doing so would
+    // orphan the old runtime/fence/session authority, so respawn is strictly
+    // retire-terminal -> fresh exact-successor spawn.
     let prior = authority
         .state()
         .member_session_bindings
         .get(&identity("alpha"))
         .cloned();
-    authorize_spawn_profile(&mut authority, "alpha", 2);
-    let transition = apply_spawn_ladder(&mut authority, "alpha", 2, "bridge-a-gen2", prior)
-        .expect("respawn spawn must be accepted when replacing witnesses the prior session id");
+    authorize_spawn_profile(&mut authority, "alpha", 1);
+    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen2", prior.clone())
+        .expect_err("a live member must not be overwritten by a hot replacement spawn");
+    assert_eq!(
+        authority
+            .state()
+            .member_session_bindings
+            .get(&identity("alpha")),
+        prior.as_ref(),
+        "rejected hot replacement must preserve the current binding",
+    );
+
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::Retire {
+            mob_id: MobId("test-mob".to_string()),
+            agent_runtime_id: runtime_id("alpha", 0),
+            agent_identity: identity("alpha"),
+            generation: Generation(0),
+            releasing: None,
+            session_id: prior.clone(),
+        },
+    )
+    .expect("binding-preserving respawn retire-half must be accepted");
+    authority
+        .apply_signal(
+            MobMachineSignal::ObserveRespawnTopologyPreservationStarted {
+                agent_identity: identity("alpha"),
+                agent_runtime_id: runtime_id("alpha", 0),
+                fence_token: FenceToken(0),
+                generation: Generation(0),
+            },
+        )
+        .expect("respawn must durably start topology preservation before retirement terminality");
+    authority
+        .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+            agent_runtime_id: runtime_id("alpha", 0),
+            fence_token: FenceToken(0),
+        })
+        .expect("runtime retirement must settle before member archive terminality");
+    authority
+        .apply_signal(MobMachineSignal::ObserveMemberRetirementArchived {
+            agent_identity: identity("alpha"),
+            agent_runtime_id: runtime_id("alpha", 0),
+            fence_token: FenceToken(0),
+            generation: Generation(0),
+            session_id: prior,
+            disposal: MemberSessionDisposal::Archived,
+            preserve_machine_topology: true,
+        })
+        .expect("terminal retirement must clear the old current incarnation");
+
+    let transition = apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen2", None)
+        .expect("exact-successor respawn must re-enter through the fresh branch");
 
     assert_eq!(
         authority
@@ -357,7 +423,7 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
             .member_session_bindings
             .get(&identity("alpha")),
         Some(&session_id("bridge-a-gen2")),
-        "respawn rotates the binding to the new bridge session id",
+        "respawn binds the exact-successor incarnation to the new bridge session id",
     );
 
     let changed = find_binding_changed(&transition);
@@ -366,18 +432,18 @@ fn respawn_spawn_emits_member_session_binding_changed_some_to_some() {
         Some((
             authority.state().topology_epoch,
             identity("alpha"),
-            Some(session_id("bridge-a-gen1")),
+            None,
             Some(session_id("bridge-a-gen2")),
         )),
-        "respawn must emit MemberSessionBindingChanged (Some -> Some) with the old and new session ids",
+        "post-retirement respawn must publish a fresh (None -> Some) binding",
     );
 }
 
 #[test]
 fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
     let mut authority = MobMachineAuthority::new();
-    authorize_spawn_profile(&mut authority, "alpha", 1);
-    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+    authorize_spawn_profile(&mut authority, "alpha", 0);
+    apply_spawn_ladder(&mut authority, "alpha", 0, "bridge-a-gen1", None)
         .expect("spawn must be accepted");
 
     let releasing = authority
@@ -385,7 +451,7 @@ fn retire_after_spawn_emits_member_session_binding_changed_some_to_none() {
         .member_session_bindings
         .get(&identity("alpha"))
         .cloned();
-    let transition = MobMachineMutator::apply(&mut authority, retire_input("alpha", 1, releasing))
+    let transition = MobMachineMutator::apply(&mut authority, retire_input("alpha", 0, releasing))
         .expect("retire must be accepted when releasing witnesses the prior session id");
 
     assert!(
@@ -417,11 +483,11 @@ fn spawn_with_wrong_replacing_witness_is_rejected() {
     // SpawnRunningReplacing requires the state's binding map to contain
     // the identity. Neither guard matches, so the transition is
     // rejected.
-    authorize_spawn_profile(&mut authority, "ghost", 1);
+    authorize_spawn_profile(&mut authority, "ghost", 0);
     let result = apply_spawn_ladder(
         &mut authority,
         "ghost",
-        1,
+        0,
         "bridge-g-gen1",
         Some(session_id("fabricated")),
     );
@@ -449,8 +515,8 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
     // atomic rotation (Some -> Some) `MemberSessionBindingChanged`.
     // No binding-change effect is emitted; the binding stays put.
     let mut authority = MobMachineAuthority::new();
-    authorize_spawn_profile(&mut authority, "alpha", 1);
-    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+    authorize_spawn_profile(&mut authority, "alpha", 0);
+    apply_spawn_ladder(&mut authority, "alpha", 0, "bridge-a-gen1", None)
         .expect("spawn must be accepted");
 
     let session_id_for_route = authority
@@ -462,9 +528,9 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
         &mut authority,
         MobMachineInput::Retire {
             mob_id: MobId("test-mob".to_string()),
-            agent_runtime_id: runtime_id("alpha", 1),
+            agent_runtime_id: runtime_id("alpha", 0),
             agent_identity: identity("alpha"),
-            generation: Generation(1),
+            generation: Generation(0),
             releasing: None,
             session_id: session_id_for_route,
         },
@@ -488,13 +554,13 @@ fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
 #[test]
 fn retire_with_some_releasing_but_wrong_value_is_rejected() {
     let mut authority = MobMachineAuthority::new();
-    authorize_spawn_profile(&mut authority, "alpha", 1);
-    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+    authorize_spawn_profile(&mut authority, "alpha", 0);
+    apply_spawn_ladder(&mut authority, "alpha", 0, "bridge-a-gen1", None)
         .expect("spawn must be accepted");
 
     let error = MobMachineMutator::apply(
         &mut authority,
-        retire_input("alpha", 1, Some(session_id("mismatch"))),
+        retire_input("alpha", 0, Some(session_id("mismatch"))),
     )
     .expect_err("Retire with a caller-smuggled releasing witness must be rejected");
     assert!(
@@ -520,8 +586,8 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
     // identity for the mob even after retirement). So the subset
     // relation holds through the whole lifecycle.
     let mut authority = MobMachineAuthority::new();
-    authorize_spawn_profile(&mut authority, "alpha", 1);
-    apply_spawn_ladder(&mut authority, "alpha", 1, "bridge-a-gen1", None)
+    authorize_spawn_profile(&mut authority, "alpha", 0);
+    apply_spawn_ladder(&mut authority, "alpha", 0, "bridge-a-gen1", None)
         .expect("spawn must be accepted");
 
     let check_invariant = |state: &meerkat_mob::machines::mob_machine::MobMachineState| {
@@ -539,7 +605,7 @@ fn bindings_require_known_identity_invariant_holds_through_spawn_retire_cycle() 
         .member_session_bindings
         .get(&identity("alpha"))
         .cloned();
-    MobMachineMutator::apply(&mut authority, retire_input("alpha", 1, releasing))
+    MobMachineMutator::apply(&mut authority, retire_input("alpha", 0, releasing))
         .expect("retire must be accepted");
     check_invariant(authority.state());
 }

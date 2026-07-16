@@ -751,6 +751,84 @@
       "result_type": "MobStreamCloseResult"
     },
     {
+      "description": "Record (full-replace) a principal's control-scope grant",
+      "name": "mob/grant_scopes",
+      "params_type": "MobGrantScopesParams",
+      "result_type": "MobGrantScopesResult"
+    },
+    {
+      "description": "Revoke control scopes from a principal's grant (omit scopes to revoke the entire grant)",
+      "name": "mob/revoke_scopes",
+      "params_type": "MobRevokeScopesParams",
+      "result_type": "MobRevokeScopesResult"
+    },
+    {
+      "description": "List raw control-scope grant records (expired rows appear verbatim)",
+      "name": "mob/grants",
+      "params_type": "MobIdParams",
+      "result_type": "MobGrantsResult"
+    },
+    {
+      "description": "Read a mob member transcript page by identity (one shape local and remote)",
+      "name": "mob/member_history",
+      "params_type": "MobMemberHistoryParams",
+      "result_type": "MobMemberHistoryResult"
+    },
+    {
+      "description": "List tracked member hosts with bind phase and declared capabilities",
+      "name": "mob/hosts",
+      "params_type": "MobIdParams",
+      "result_type": "MobHostsResult"
+    },
+    {
+      "description": "Outstanding cross-host route-install obligations",
+      "name": "mob/route_installs",
+      "params_type": "MobIdParams",
+      "result_type": "MobRouteInstallsResult"
+    },
+    {
+      "description": "Bind a member-host daemon to a mob from its binding descriptor",
+      "name": "mob/bind_host",
+      "params_type": "MobBindHostParams",
+      "result_type": "MobBindHostResult"
+    },
+    {
+      "description": "Revoke a bound (or bind-requested) member host",
+      "name": "mob/revoke_host",
+      "params_type": "MobRevokeHostParams",
+      "result_type": "MobRevokeHostResult"
+    },
+    {
+      "description": "Hard-cancel a mob member (immediate user-interrupt authority)",
+      "name": "mob/hard_cancel_member",
+      "params_type": "MobHardCancelParams",
+      "result_type": "MobHardCancelResult"
+    },
+    {
+      "description": "Open a live realtime channel on a mob member by identity",
+      "name": "mob/member_live_open",
+      "params_type": "MobMemberLiveOpenParams",
+      "result_type": "LiveOpenResult"
+    },
+    {
+      "description": "Close one named live channel on a mob member",
+      "name": "mob/member_live_close",
+      "params_type": "MobMemberLiveChannelParams",
+      "result_type": "LiveCloseResult"
+    },
+    {
+      "description": "Read live channel status for a mob member (omit channel_id to discover)",
+      "name": "mob/member_live_status",
+      "params_type": "MobMemberLiveStatusParams",
+      "result_type": "LiveStatusResult"
+    },
+    {
+      "description": "Drive one turn-level live control verb on a member channel",
+      "name": "mob/member_live_control",
+      "params_type": "MobMemberLiveControlParams",
+      "result_type": "BridgeLiveControlOutcome"
+    },
+    {
       "description": "Stage live MCP server add for a session",
       "name": "mcp/add",
       "params_type": "McpAddParams",

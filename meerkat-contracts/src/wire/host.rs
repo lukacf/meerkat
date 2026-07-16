@@ -48,6 +48,10 @@ pub struct RuntimeHostFeatureFlags {
     pub approvals: bool,
     pub external_members: bool,
     pub secure_remote_rpc: bool,
+    /// Multi-host mob orchestration (host bind + remote materialization).
+    /// Defaulted so pre-field payloads keep decoding (SD-8).
+    #[serde(default)]
+    pub multi_host_mobs: bool,
 }
 
 /// Realm/config metadata projected from the owning config store.
@@ -138,7 +142,23 @@ mod tests {
             approvals: false,
             external_members: false,
             secure_remote_rpc: false,
+            multi_host_mobs: false,
         }
+    }
+
+    #[test]
+    fn feature_flags_multi_host_mobs_defaults_false_for_pre_field_payloads() {
+        let mut value = serde_json::to_value(sample_flags()).expect("serialize flags");
+        value
+            .as_object_mut()
+            .expect("flags object")
+            .remove("multi_host_mobs");
+        let decoded: RuntimeHostFeatureFlags =
+            serde_json::from_value(value).expect("pre-field flags payload decodes");
+        assert!(
+            !decoded.multi_host_mobs,
+            "absent multi_host_mobs must decode to false (SD-8)"
+        );
     }
 
     #[test]

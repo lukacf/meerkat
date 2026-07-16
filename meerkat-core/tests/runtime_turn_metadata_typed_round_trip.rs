@@ -71,6 +71,9 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         peer_response_terminal_apply_intent: Some(
             PeerResponseTerminalApplyIntent::AppendContextAndRun,
         ),
+        directed_interaction_ids: vec![meerkat_core::interaction::InteractionId(
+            uuid::Uuid::new_v4(),
+        )],
         transcript_identity: Default::default(),
     }
 }

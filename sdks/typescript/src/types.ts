@@ -6,7 +6,6 @@
 
 import type {
   CommsChecksumTokenParams as WireCommsChecksumTokenParams,
-  CommsSendResult,
   CustomModelConfig,
   MobBackendConfigInput,
   MobEventRouterConfigInput,
@@ -20,9 +19,9 @@ import type {
   MobTopologySpecInput,
   MobTurnStartParams,
   MobWiringRulesInput,
-  WireBudgetSplitPolicy,
   WireAuthBindingRef,
   WireContentInput,
+  WireHostRef,
   WireMemberLaunchMode,
   Provider,
   WireMobBackendKind,
@@ -33,6 +32,7 @@ import type {
   WireToolAccessPolicy,
   WireToolFilter,
 } from "./generated/types.js";
+import type * as Generated from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
 export type { TurnTerminalCauseKind, Usage } from "./events.js";
@@ -115,7 +115,7 @@ export interface InlineImageBlock {
   readonly data: string;
 }
 
-/** Blob-backed image content accepted by input-bearing APIs and emitted by history surfaces. */
+/** Blob-backed image content accepted by input-bearing APIs. */
 export interface BlobImageBlock {
   readonly type: "image";
   readonly media_type: string;
@@ -149,8 +149,18 @@ export type ContentBlock =
   | InlineVideoBlock
   | UriVideoBlock;
 
-/** Canonical content input returned by history surfaces and accepted by input-bearing APIs. */
+/** Canonical content input accepted by input-bearing APIs. */
 export type ContentInput = string | readonly ContentBlock[];
+
+/**
+ * Generated transcript content block. Unlike input-bearing `ContentBlock`,
+ * history may contain structured or explicitly unknown blocks and may omit
+ * provider bytes that are not part of the wire projection.
+ */
+export type SessionContentBlock = Generated.WireContentBlock;
+
+/** Exact generated content projection used by session and tool-result history. */
+export type SessionContentInput = Generated.WireContentInput;
 
 /** Raw blob bytes fetched by blob id. */
 export interface BlobPayload {
@@ -218,7 +228,7 @@ export interface SessionInfo {
 
 export interface SessionToolResult {
   readonly toolUseId: string;
-  readonly content: ContentInput;
+  readonly content: SessionContentInput;
   readonly isError: boolean;
 }
 
@@ -245,10 +255,10 @@ export interface SessionAssistantBlock {
   readonly revisedPrompt?: Record<string, unknown>;
   readonly meta?: Record<string, unknown>;
   /**
-   * Lane provenance for `transcript` blocks (e.g. `"spoken"`). Undefined
-   * for non-transcript block types.
+   * Generated lane provenance for `transcript` blocks. Undefined for
+   * non-transcript block types; unknown provenance preserves its debug value.
    */
-  readonly source?: string;
+  readonly source?: Generated.WireTranscriptSource;
   readonly raw?: Record<string, unknown>;
 }
 
@@ -257,7 +267,7 @@ export interface SessionMessage {
   readonly createdAt: string;
   readonly kind?: string;
   readonly body?: string;
-  readonly content?: ContentInput;
+  readonly content?: SessionContentInput;
   readonly stopReason?: string;
   readonly interactionId?: string;
   readonly runId?: string;
@@ -307,9 +317,14 @@ export interface SessionTranscriptRevisionList {
 /** Behavior for transcript edit requests when the source session has active work. */
 export type TranscriptEditRunningBehavior = "reject";
 
-/** Options shared by transcript fork/edit APIs. */
+/** Options shared by transcript mutation APIs. */
 export interface TranscriptEditOptions {
   readonly runningBehavior?: TranscriptEditRunningBehavior;
+}
+
+/** Options specific to transcript fork APIs. */
+export interface TranscriptForkOptions extends TranscriptEditOptions {
+  readonly toolAccessPolicy?: WireToolAccessPolicy;
 }
 
 /** Canonical message-shaped replacement payload for `session/fork_replace`. */
@@ -525,6 +540,8 @@ export interface SpawnManySpec {
   readonly labels?: Record<string, string>;
   readonly context?: unknown;
   readonly additionalInstructions?: string[];
+  /** Bound host peer ID for placed execution; omit for the controlling host. */
+  readonly placement?: WireHostRef;
   readonly authBinding?: WireAuthBindingRef;
   readonly modelOverride?: string;
 }
@@ -535,7 +552,6 @@ export interface SpawnSpec extends SpawnManySpec {
   readonly autoWireParent?: boolean;
   readonly launchMode?: WireMemberLaunchMode;
   readonly toolAccessPolicy?: WireToolAccessPolicy;
-  readonly budgetSplitPolicy?: WireBudgetSplitPolicy;
   readonly inheritedToolFilter?: WireToolFilter;
   readonly overrideProfile?: WireMobProfile;
 }
@@ -574,6 +590,16 @@ export interface MobMember {
   readonly error?: string;
   readonly isFinal?: boolean;
 }
+
+/** Closed control-plane scope vocabulary, derived from the wire contract. */
+export type MobControlScope = Generated.WireControlScope;
+
+/**
+ * One raw control-scope grant record. The SDK intentionally preserves the
+ * generated snake_case wire shape, including `expires_at_ms`; expired rows
+ * appear verbatim and the server evaluates expiry at the enforcement seam.
+ */
+export type MobGrantRecord = Generated.WireGrantRecord;
 
 export interface MobSummary {
   readonly mobId: string;
@@ -683,8 +709,14 @@ export interface Capability {
 // longer owns a camelCase projection of it.
 export type { ConfigEnvelope, ConfigWriteResult } from "./generated/types.js";
 
-/** Canonical generated result union returned by `comms/send`. */
-export type CommsSendReceipt = CommsSendResult;
+export type CommsSendReceipt = Generated.CommsSendResult & {
+  readonly requestId?: string;
+  readonly interactionId?: string;
+  readonly inputId?: string;
+  readonly envelopeId?: string;
+  readonly streamReserved?: boolean;
+  readonly inReplyTo?: string;
+};
 
 // ---------------------------------------------------------------------------
 // comms/send typed command surface.
@@ -724,96 +756,170 @@ export interface CommsPeerLifecycleCommand {
   params?: unknown;
 }
 
-export type BridgeProtocolVersion = number;
+// The supervisor bridge is a generated wire contract. The package-root
+// surface derives every field from that authority so schema evolution cannot
+// drift behind a hand-authored shadow union. Deep readonly preserves the
+// SDK's intentional input ergonomics; the only semantic adapter is content,
+// where the public SDK's richer `ContentInput` is the supported caller shape.
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? readonly DeepReadonly<Item>[]
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
 
-export type BridgeBootstrapToken = string;
-
-export interface BridgePeerSpec {
-  readonly address: string;
-  readonly name: string;
-  readonly peer_id: string;
-  readonly pubkey?: readonly number[];
-}
-
-export interface BridgeMobPeerOverlayHandoff {
-  readonly recipient_peer_id: string;
-  readonly topology_epoch: number;
-  readonly peer_specs: readonly BridgePeerSpec[];
-}
-
-interface BridgeCommandBase {
-  readonly epoch: number;
-  readonly protocol_version: BridgeProtocolVersion;
-  readonly supervisor: BridgePeerSpec;
-}
-
-export interface BridgeCommandBindMember extends BridgeCommandBase {
-  readonly command: "bind_member";
-  readonly bootstrap_token: BridgeBootstrapToken;
-  readonly expected_address: string;
-  readonly expected_peer_id: string;
-}
-
-export interface BridgeCommandAuthorizeSupervisor extends BridgeCommandBase {
-  readonly command: "authorize_supervisor";
-}
-
-export interface BridgeCommandRevokeSupervisor extends BridgeCommandBase {
-  readonly command: "revoke_supervisor";
-}
-
-export interface BridgeCommandDeliverMemberInput extends BridgeCommandBase {
-  readonly command: "deliver_member_input";
+type PublicBridgeDelivery<T> = Omit<
+  DeepReadonly<T>,
+  "content" | "injected_context"
+> & {
   readonly content: ContentInput;
-  readonly handling_mode: CommsHandlingMode;
-  readonly input_id: string;
-}
+  readonly injected_context?: readonly ContentInput[];
+};
 
-export interface BridgeCommandObserveMember extends BridgeCommandBase {
-  readonly command: "observe_member";
-}
+type PublicBridgeCommandVariant<T> =
+  T extends Generated.BridgeCommandDeliverMemberInput
+    ? PublicBridgeDelivery<T>
+    : DeepReadonly<T>;
 
-export interface BridgeCommandInterruptMember extends BridgeCommandBase {
-  readonly command: "interrupt_member";
-}
+type GeneratedBridgeCommandVariant<
+  Command extends Generated.BridgeCommand["command"],
+> = Extract<Generated.BridgeCommand, { command: Command }>;
 
-export interface BridgeCommandHardCancelMember extends BridgeCommandBase {
-  readonly command: "hard_cancel_member";
-  readonly reason: string;
-}
+export type BridgeBootstrapToken = Generated.BridgeBootstrapToken;
+export type BridgeCommand = PublicBridgeCommandVariant<Generated.BridgeCommand>;
+export type BridgeCommandBindMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"bind_member">
+>;
+export type BridgeCommandAuthorizeSupervisor = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"authorize_supervisor">
+>;
+export type BridgeCommandRevokeSupervisor = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"revoke_supervisor">
+>;
+export type BridgeCommandDeliverMemberInput = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"deliver_member_input">
+>;
+export type BridgeCommandObserveMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"observe_member">
+>;
+export type BridgeCommandInterruptMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"interrupt_member">
+>;
+export type BridgeCommandHardCancelMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"hard_cancel_member">
+>;
+export type BridgeCommandCancelTrackedMemberInput = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"cancel_tracked_member_input">
+>;
+export type BridgeCommandRetireMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"retire_member">
+>;
+export type BridgeCommandDestroyMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"destroy_member">
+>;
+export type BridgeCommandWireMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"wire_member">
+>;
+export type BridgeCommandUnwireMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"unwire_member">
+>;
+export type BridgeCommandDeclareMemberOutboundTaint = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"declare_member_outbound_taint">
+>;
+export type BridgeCommandReadMemberHistory = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"read_member_history">
+>;
+export type BridgeCommandPollMemberEvents = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"poll_member_events">
+>;
+export type BridgeCommandOpenMemberLiveChannel = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"open_member_live_channel">
+>;
+export type BridgeCommandCloseMemberLiveChannel = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"close_member_live_channel">
+>;
+export type BridgeCommandMemberLiveChannelStatus = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"member_live_channel_status">
+>;
+export type BridgeCommandControlMemberLiveChannel = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"control_member_live_channel">
+>;
+export type BridgeCommandBindHost = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"bind_host">
+>;
+export type BridgeCommandRebindHost = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"rebind_host">
+>;
+export type BridgeCommandRevokeHost = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"revoke_host">
+>;
+export type BridgeCommandMaterializeMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"materialize_member">
+>;
+export type BridgeCommandReleaseMember = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"release_member">
+>;
+export type BridgeCommandInstallPeerTrust = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"install_peer_trust">
+>;
+export type BridgeCommandRemovePeerTrust = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"remove_peer_trust">
+>;
+export type BridgeCommandHostStatus = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"host_status">
+>;
+export type BridgeCommandMemberOperatorRequest = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"member_operator_request">
+>;
+export type BridgeCommandObserveSupervisorRotation = PublicBridgeCommandVariant<
+  GeneratedBridgeCommandVariant<"observe_supervisor_rotation">
+>;
 
-export interface BridgeCommandRetireMember extends BridgeCommandBase {
-  readonly command: "retire_member";
-}
-
-export interface BridgeCommandDestroyMember extends BridgeCommandBase {
-  readonly command: "destroy_member";
-}
-
-export interface BridgeCommandWireMember extends BridgeCommandBase {
-  readonly command: "wire_member";
-  readonly mob_peer_overlay: BridgeMobPeerOverlayHandoff;
-  readonly peer_spec: BridgePeerSpec;
-}
-
-export interface BridgeCommandUnwireMember extends BridgeCommandBase {
-  readonly command: "unwire_member";
-  readonly mob_peer_overlay: BridgeMobPeerOverlayHandoff;
-  readonly peer_spec: BridgePeerSpec;
-}
-
-export type BridgeCommand =
-  | BridgeCommandBindMember
-  | BridgeCommandAuthorizeSupervisor
-  | BridgeCommandRevokeSupervisor
-  | BridgeCommandDeliverMemberInput
-  | BridgeCommandObserveMember
-  | BridgeCommandInterruptMember
-  | BridgeCommandHardCancelMember
-  | BridgeCommandRetireMember
-  | BridgeCommandDestroyMember
-  | BridgeCommandWireMember
-  | BridgeCommandUnwireMember;
+export type BridgeDeliveryPayload = PublicBridgeDelivery<Generated.BridgeDeliveryPayload>;
+export type BridgeDeliveryRejectionCause = DeepReadonly<
+  Generated.BridgeDeliveryRejectionCause
+>;
+export type BridgeDeliveryRejectionCauseStaleMemberIncarnation = DeepReadonly<
+  Generated.BridgeDeliveryRejectionCauseStaleMemberIncarnation
+>;
+export type BridgeDeliveryRejectionCauseStaleMemberResidency = DeepReadonly<
+  Generated.BridgeDeliveryRejectionCauseStaleMemberResidency
+>;
+export type BridgeEventCursor = DeepReadonly<Generated.BridgeEventCursor>;
+export type BridgeEventCursorAt = DeepReadonly<Generated.BridgeEventCursorAt>;
+export type BridgeEventCursorTail = DeepReadonly<Generated.BridgeEventCursorTail>;
+export type BridgeMemberIncarnation = DeepReadonly<Generated.BridgeMemberIncarnation>;
+export type BridgeMobPeerOverlayHandoff = DeepReadonly<
+  Generated.BridgeMobPeerOverlayHandoff
+>;
+export type BridgeOutboundTaintTarget = DeepReadonly<Generated.BridgeOutboundTaintTarget>;
+export type BridgePeerSpec = DeepReadonly<Generated.BridgePeerSpec>;
+export type BridgePeerWiringPayload = DeepReadonly<Generated.BridgePeerWiringPayload>;
+export type BridgeProtocolVersion = Generated.BridgeProtocolVersion;
+export type BridgeHostCapabilityRequirements = DeepReadonly<
+  Generated.BridgeHostCapabilityRequirements
+>;
+export type BridgeTrackedInputCancelOutcome = DeepReadonly<
+  Generated.BridgeTrackedInputCancelOutcome
+>;
+export type BridgeTurnDirective = DeepReadonly<Generated.BridgeTurnDirective>;
+export type BridgeTurnOutcomeAck = DeepReadonly<Generated.BridgeTurnOutcomeAck>;
+export type BridgeTurnOutcomeRecord = DeepReadonly<Generated.BridgeTurnOutcomeRecord>;
+export type WireFlowFailureDetail = DeepReadonly<Generated.WireFlowFailureDetail>;
+export type WireFlowTurnOutcome = DeepReadonly<Generated.WireFlowTurnOutcome>;
+export type WireControlScope = Generated.WireControlScope;
+export type WireGrantRecord = DeepReadonly<Generated.WireGrantRecord>;
+export type MobGrantScopesParams = DeepReadonly<Generated.MobGrantScopesParams>;
+export type MobGrantScopesResult = DeepReadonly<Generated.MobGrantScopesResult>;
+export type MobRevokeScopesParams = DeepReadonly<Generated.MobRevokeScopesParams>;
+export type MobRevokeScopesResult = DeepReadonly<Generated.MobRevokeScopesResult>;
+export type MobGrantsResult = DeepReadonly<Generated.MobGrantsResult>;
+export type MobHardCancelParams = DeepReadonly<Generated.MobHardCancelParams>;
+export type MobHardCancelResult = DeepReadonly<Generated.MobHardCancelResult>;
+export type LiveOpenTransport = Generated.LiveOpenTransport;
+export type OperationId = Generated.OperationId;
+export type RunId = Generated.RunId;
 
 export interface CommsChecksumTokenPeerRequestCommand {
   kind: "peer_request";

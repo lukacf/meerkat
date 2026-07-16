@@ -19,6 +19,8 @@ pub const INTERNAL_ERROR: i32 = -32603;
 
 /// Session not found
 pub const SESSION_NOT_FOUND: i32 = meerkat_contracts::ErrorCode::SessionNotFound.jsonrpc_code();
+/// Session exists durably but has no live actor in this process.
+pub const SESSION_NOT_RUNNING: i32 = meerkat_contracts::ErrorCode::SessionNotRunning.jsonrpc_code();
 /// Schedule not found
 pub const SCHEDULE_NOT_FOUND: i32 = meerkat_contracts::ErrorCode::ScheduleNotFound.jsonrpc_code();
 /// Session is busy (turn already in progress)

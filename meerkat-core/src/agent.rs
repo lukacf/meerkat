@@ -333,6 +333,7 @@ pub struct AgentExecutionSnapshot {
     /// and must not reclassify [`TurnPhase`] locally.
     pub turn_terminal: bool,
     pub active_run_id: Option<RunId>,
+    pub terminal_run_id: Option<RunId>,
     pub primitive_kind: TurnPrimitiveKind,
     pub admitted_content_shape: Option<ContentShape>,
     pub vision_enabled: bool,
@@ -367,11 +368,25 @@ pub struct ExternalToolUpdate {
 /// Carried over the cancel-after-boundary command channel from the surface
 /// that authorized the request (e.g. `SessionService::cancel_after_boundary`)
 /// to the agent loop, which observes it at the next boundary. The agent
-/// resolves the request against its own live active run, so the command
-/// carries no run id; it is a typed edge signal, replacing the previous raw
-/// `AtomicBool` carrier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CancelAfterBoundaryCommand;
+/// resolves the request against its own live active run. The exact run witness
+/// prevents a delayed request from an old executor attachment from cancelling
+/// a successor run after same-session replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelAfterBoundaryCommand {
+    expected_run_id: RunId,
+}
+
+impl CancelAfterBoundaryCommand {
+    /// Bind a cooperative-cancel command to one exact run incarnation.
+    pub fn for_run(expected_run_id: RunId) -> Self {
+        Self { expected_run_id }
+    }
+
+    /// Exact run incarnation this command is authorized to affect.
+    pub fn expected_run_id(&self) -> &RunId {
+        &self.expected_run_id
+    }
+}
 
 /// Producer end of the cancel-after-boundary command channel.
 ///
@@ -1096,6 +1111,22 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Opaque host-acceptor registration material for reverse-lane demux
+    /// composition (the runtime's identity pubkey, its ack-signing keypair,
+    /// and its inbox sender), encoded by the concrete comms crate.
+    ///
+    /// A host that composes an acceptor demux in front of this runtime (so
+    /// remote peers can dial one shared listener and be routed to this
+    /// identity's inbox) decodes the payload where it holds the concrete
+    /// comms dependency (`meerkat_comms::HostAcceptorRegistrationMaterial`).
+    /// `None` means this runtime exposes no registration material and the
+    /// composer must fail closed (no acceptor registration). The default is
+    /// `None`; only the concrete comms runtime overrides it — the typed
+    /// trait surface itself continues to expose no signing material.
+    fn host_acceptor_registration_payload(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
     /// Register a peer for admission-only trust without listing it in the
     /// directory.
     ///
@@ -1393,6 +1424,95 @@ pub trait CommsRuntime: Send + Sync {
             "actionable_input_notify".to_string(),
         ))
     }
+
+    /// Stage a one-shot reply endpoint for a Response to a peer outside the
+    /// trust store.
+    ///
+    /// This is the legacy uncorrelated compatibility seam. It is
+    /// Response-only, one-shot, and trust-store-losing; callers may supply
+    /// only a machine-authorized endpoint already held in runtime state.
+    /// Neither a Request's `reply_endpoint` nor any decoded payload/sender
+    /// address is authority for this method. New ingress response paths use
+    /// [`Self::stage_correlated_reply_endpoint`] instead.
+    ///
+    /// Parameters are primitives because core cannot name the comms-crate
+    /// newtypes (dependency direction). Default fails typed, not no-op:
+    /// silently dropping a reply-repair staging would strand the remote
+    /// sender in a timeout with no cause. Callers decide policy — reply
+    /// drains treat `Unsupported` as "runtime has no staging capability" and
+    /// proceed, since in-proc runtimes resolve via the ingress route anyway.
+    async fn stage_declared_reply_endpoint(
+        &self,
+        _dest: PeerId,
+        _signer_pubkey: [u8; 32],
+        _declared_address: String,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "declared reply endpoint staging not supported".to_string(),
+        ))
+    }
+
+    /// Stage an authenticated one-shot endpoint for the Response correlated
+    /// to `in_reply_to` from `dest`.
+    ///
+    /// Unlike the legacy uncorrelated staging seam above, this endpoint is
+    /// keyed by both peer identity and request id and therefore takes
+    /// precedence over durable trust only for that exact Response. This is
+    /// the only Request-ingress callback seam. `signer_pubkey` must
+    /// come from a signature-verified envelope and derive `dest` in the
+    /// concrete runtime. `declared_endpoint` must be the classifier's
+    /// source-confined TCP projection: kernel-observed source IP plus the
+    /// signed, nonzero declared port. Arbitrary payload addresses,
+    /// sender-selected hosts, UDS addresses, and open-auth ingress are never
+    /// callback authority.
+    async fn stage_correlated_reply_endpoint(
+        &self,
+        _dest: PeerId,
+        _in_reply_to: crate::interaction::InteractionId,
+        _signer_pubkey: [u8; 32],
+        _declared_endpoint: crate::comms::PeerAddress,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "correlated reply endpoint staging not supported".to_string(),
+        ))
+    }
+
+    /// Idempotently discard a previously staged correlated endpoint.
+    /// Responders call this when validation or response sending fails before
+    /// the Router consumes the exact one-shot entry.
+    async fn unstage_correlated_reply_endpoint(
+        &self,
+        _dest: PeerId,
+        _in_reply_to: crate::interaction::InteractionId,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "correlated reply endpoint cleanup not supported".to_string(),
+        ))
+    }
+
+    /// One-shot reply waiter for an agent-blocking bridge request (member
+    /// upcall lane). Consulted by the comms drain BEFORE session injection: a
+    /// taken waiter receives the terminal Response candidate (typed
+    /// terminality intact) and the candidate never becomes session input.
+    ///
+    /// Returns `Some(sender)` only for a live waiter. A tombstoned (timed
+    /// out) waiter entry is consumed and `None` is returned — pair with
+    /// [`Self::has_bridge_reply_waiter`] to distinguish "tombstone consumed"
+    /// (discard the late reply) from "never registered" (ordinary session
+    /// path). Default: no registry (a query, not a capability — absence of a
+    /// waiter is the universal normal case).
+    fn take_bridge_reply_waiter(
+        &self,
+        _in_reply_to: &crate::interaction::InteractionId,
+    ) -> Option<tokio::sync::oneshot::Sender<crate::interaction::PeerInputCandidate>> {
+        None
+    }
+
+    /// True when a bridge-reply waiter entry (live or tombstoned) is
+    /// registered for `in_reply_to`. See [`Self::take_bridge_reply_waiter`].
+    fn has_bridge_reply_waiter(&self, _in_reply_to: &crate::interaction::InteractionId) -> bool {
+        false
+    }
 }
 
 /// The main Agent struct
@@ -1447,8 +1567,7 @@ where
     /// Per-interaction event tap for streaming events to subscribers.
     pub(crate) event_tap: crate::event_tap::EventTap,
     /// Shared control state for runtime system-context appends.
-    pub(crate) system_context_state:
-        Arc<std::sync::Mutex<crate::session::SessionSystemContextState>>,
+    pub(crate) system_context_state: crate::session::SystemContextStateHandle,
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
@@ -1464,6 +1583,9 @@ where
     /// `build_result` can include the actual failure message (e.g. the API
     /// error body) instead of only the generic terminal-cause description.
     pub(crate) terminal_error_detail: Option<String>,
+    /// Structured metadata captured from that concrete error before the
+    /// public result is normalized into `AgentError::TerminalFailure`.
+    pub(crate) terminal_error_metadata: Option<crate::TurnErrorMetadata>,
     /// True once the current run has accepted `RunCompleted` hooks.
     pub(crate) run_completed_hooks_applied: bool,
     /// True once the current run's public `RunCompleted` event has been
@@ -1516,6 +1638,17 @@ where
     /// Typed execution intent for the current run, when this turn is owned by
     /// the runtime control plane rather than a direct surface call.
     pub(crate) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
+    /// Exact per-call witness that the core turn machine admitted a runtime
+    /// run. A completed future alone is not sufficient evidence: preflight
+    /// failures can return before `StartConversationRun` and must never reuse
+    /// the previous turn's terminal snapshot.
+    pub(crate) runtime_started_run_id: Option<crate::lifecycle::RunId>,
+    /// Machine-terminal failure observed for the exact runtime run above.
+    /// Kept separate from the public `AgentError` so direct session surfaces
+    /// preserve their original typed errors while the runtime can commit a
+    /// failed-but-applied turn atomically.
+    pub(crate) runtime_terminal_failure_witness:
+        Option<Result<crate::TurnErrorMetadata, crate::error::AgentError>>,
     /// Stable transcript identity for the active runtime-owned turn.
     pub(crate) active_transcript_identity: Option<crate::types::TranscriptMessageIdentity>,
     /// Runtime-backed external tool-surface diagnostic handle, when provided
@@ -1680,6 +1813,34 @@ mod tests {
         let result =
             <NoopCommsRuntime as CommsRuntime>::add_private_trusted_peer(&runtime, peer).await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
+    }
+
+    /// T-12: bridge-reply waiter + declared-reply-endpoint trait defaults.
+    /// `take_bridge_reply_waiter` → None (no registry),
+    /// `has_bridge_reply_waiter` → false, and
+    /// `stage_declared_reply_endpoint` fails typed (never a silent no-op) so
+    /// a caller cannot mistake a dropped security-relevant repair for success.
+    #[tokio::test]
+    async fn test_comms_runtime_bridge_reply_defaults() {
+        let runtime = NoopCommsRuntime {
+            notify: Arc::new(Notify::new()),
+        };
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+        assert!(
+            <NoopCommsRuntime as CommsRuntime>::take_bridge_reply_waiter(&runtime, &interaction_id)
+                .is_none()
+        );
+        assert!(
+            !<NoopCommsRuntime as CommsRuntime>::has_bridge_reply_waiter(&runtime, &interaction_id)
+        );
+        let staged = <NoopCommsRuntime as CommsRuntime>::stage_declared_reply_endpoint(
+            &runtime,
+            PeerId::new(),
+            [0x11u8; 32],
+            "tcp://127.0.0.1:1".to_string(),
+        )
+        .await;
+        assert!(matches!(staged, Err(SendError::Unsupported(_))));
     }
 
     #[tokio::test]

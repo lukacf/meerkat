@@ -15,7 +15,7 @@ pub(super) enum SessionBindingPreparation {
     AuthoritativeRuntimeBinding,
     /// Only create the session-local handle bundle. A separate owner will
     /// route the authoritative binding later.
-    LocalSessionResources,
+    LocalSessionResources(LocalSessionMaterializationMode),
 }
 
 struct RuntimeCompactionCommitCoordinator {
@@ -375,6 +375,26 @@ mod compaction_coordinator_tests {
     }
 }
 
+fn release_failed_materialization_claim(
+    claim_state: &Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
+    claim_id: Option<uuid::Uuid>,
+) {
+    let Some(claim_id) = claim_id else {
+        return;
+    };
+    let changed = {
+        let mut state = claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.current != Some(claim_id) {
+            return;
+        }
+        state.phase = crate::RuntimeActorMaterializationClaimPhase::Aborting;
+        Arc::clone(&state.changed)
+    };
+    changed.notify_waiters();
+}
+
 fn visibility_authorities_for_names(
     names: &std::collections::BTreeSet<ToolName>,
     witnesses: &std::collections::BTreeMap<ToolName, meerkat_core::ToolVisibilityWitness>,
@@ -393,20 +413,297 @@ fn visibility_authorities_for_names(
 }
 
 impl MeerkatMachine {
+    /// Assemble the candidate canonical handle bundle for an already-validated
+    /// session entry without registering, reviving, or otherwise mutating
+    /// lifecycle authority. The caller publishes it into the entry exactly
+    /// once while holding the session mutation interval.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_canonical_session_runtime_bindings(
+        &self,
+        session_id: SessionId,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+        cursor_state: Arc<meerkat_core::EpochCursorState>,
+        tool_visibility_owner: Arc<MachineToolVisibilityOwner>,
+        dsl_authority_shared: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        handle_teardown_gate: Arc<crate::handles::HandleTeardownGate>,
+        compaction_runtime_binding: Option<(
+            dsl::AgentRuntimeId,
+            Option<dsl::FenceToken>,
+            Option<dsl::Generation>,
+        )>,
+        allow_late_compaction_binding: bool,
+        runtime_authority: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeDriverError> {
+        let compaction_runtime_epoch_id = dsl::RuntimeEpochId::from_domain(&epoch_id);
+        let shared_handle_authority = Arc::new(
+            crate::handles::HandleDslAuthority::from_shared_with_teardown_gate(
+                Arc::clone(&dsl_authority_shared),
+                Arc::clone(&handle_teardown_gate),
+            ),
+        );
+        let peer_comms_install = crate::handles::RuntimePeerCommsHandle::generated_install_factory(
+            Arc::clone(&shared_handle_authority),
+        )
+        .map_err(RuntimeDriverError::Internal)?;
+        let generated_visibility_owner = generated_tool_visibility_owner(Arc::clone(
+            &tool_visibility_owner,
+        )
+            as Arc<dyn meerkat_core::ToolVisibilityOwner>)
+        .map_err(RuntimeDriverError::Internal)?;
+
+        Ok(
+            meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
+                session_id.clone(),
+                epoch_id,
+                ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+                cursor_state,
+                generated_visibility_owner,
+                Arc::new(crate::handles::RuntimeTurnStateHandle::new(Arc::clone(
+                    &shared_handle_authority,
+                ))),
+                Arc::new(crate::handles::RuntimeCommsDrainHandle::new(Arc::clone(
+                    &shared_handle_authority,
+                ))),
+                Arc::new(crate::handles::RuntimeExternalToolSurfaceHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                peer_comms_install,
+                Arc::new(crate::handles::RuntimeSessionAdmissionHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                Arc::new(
+                    crate::handles::RuntimeModelRoutingHandle::new_with_visibility_owner(
+                        Arc::clone(&shared_handle_authority),
+                        Arc::clone(&tool_visibility_owner),
+                    ),
+                ),
+                Arc::new(RuntimeStickyModelFallbackCommitCoordinator {
+                    session_id: session_id.clone(),
+                    store: self.store.clone(),
+                }),
+                self.generated_auth_lease_handle(),
+                Arc::new(crate::handles::RuntimeMcpServerLifecycleHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                Arc::new(crate::handles::RuntimePeerInteractionHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                Arc::new(crate::handles::RuntimeSessionContextHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                self.session_claim_handle(),
+                Arc::new(crate::handles::RuntimeInteractionStreamHandle::new(
+                    Arc::clone(&shared_handle_authority),
+                )),
+                Arc::new(RuntimeCompactionCommitCoordinator {
+                    session_id,
+                    runtime_binding: std::sync::Mutex::new(compaction_runtime_binding),
+                    runtime_epoch_id: compaction_runtime_epoch_id,
+                    allow_late_binding: allow_late_compaction_binding,
+                    dsl_authority: shared_handle_authority,
+                    store: self.store.clone(),
+                }),
+                runtime_authority,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn canonical_session_runtime_bindings(
+        &self,
+        session_id: SessionId,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+        cursor_state: Arc<meerkat_core::EpochCursorState>,
+        tool_visibility_owner: Arc<MachineToolVisibilityOwner>,
+        dsl_authority_shared: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        handle_teardown_gate: Arc<crate::handles::HandleTeardownGate>,
+        compaction_runtime_binding: Option<(
+            dsl::AgentRuntimeId,
+            Option<dsl::FenceToken>,
+            Option<dsl::Generation>,
+        )>,
+        allow_late_compaction_binding: bool,
+        runtime_authority: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeDriverError> {
+        let cached = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(&session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            if entry.epoch_id != epoch_id
+                || !Arc::ptr_eq(&entry.ops_lifecycle, &ops_lifecycle)
+                || !Arc::ptr_eq(&entry.cursor_state, &cursor_state)
+                || !Arc::ptr_eq(&entry.tool_visibility_owner, &tool_visibility_owner)
+                || !Arc::ptr_eq(&entry.dsl_authority, &dsl_authority_shared)
+                || !Arc::ptr_eq(&entry.handle_teardown_gate, &handle_teardown_gate)
+            {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "runtime binding owner for session {session_id} changed before canonical handle lookup"
+                    ),
+                });
+            }
+            entry.canonical_runtime_bindings.clone()
+        };
+        if let Some(cached) = cached {
+            return Ok(cached.__clone_with_runtime_authority(runtime_authority));
+        }
+
+        let candidate = self.assemble_canonical_session_runtime_bindings(
+            session_id.clone(),
+            epoch_id.clone(),
+            Arc::clone(&ops_lifecycle),
+            Arc::clone(&cursor_state),
+            Arc::clone(&tool_visibility_owner),
+            Arc::clone(&dsl_authority_shared),
+            Arc::clone(&handle_teardown_gate),
+            compaction_runtime_binding,
+            allow_late_compaction_binding,
+            Arc::clone(&runtime_authority),
+        )?;
+        let canonical = candidate
+            .__clone_with_runtime_authority(Arc::new(()) as Arc<dyn std::any::Any + Send + Sync>);
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(&session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        if entry.epoch_id != epoch_id
+            || !Arc::ptr_eq(&entry.ops_lifecycle, &ops_lifecycle)
+            || !Arc::ptr_eq(&entry.cursor_state, &cursor_state)
+            || !Arc::ptr_eq(&entry.tool_visibility_owner, &tool_visibility_owner)
+            || !Arc::ptr_eq(&entry.dsl_authority, &dsl_authority_shared)
+            || !Arc::ptr_eq(&entry.handle_teardown_gate, &handle_teardown_gate)
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: format!(
+                    "runtime binding owner for session {session_id} changed before canonical handle publication"
+                ),
+            });
+        }
+        if let Some(existing) = &entry.canonical_runtime_bindings {
+            return Ok(existing.__clone_with_runtime_authority(runtime_authority));
+        }
+        entry.canonical_runtime_bindings = Some(canonical);
+        Ok(candidate)
+    }
+
+    async fn cleanup_failed_materialization_claim(
+        &self,
+        session_id: &SessionId,
+        inserted_by_call: bool,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        claim_id: Option<uuid::Uuid>,
+        claim_state: &Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
+    ) {
+        if let Some(claim_id) = claim_id {
+            if let Err(error) = self
+                .abort_prepared_session_materialization_claim(
+                    session_id,
+                    claim_id,
+                    Some(epoch_id),
+                    Some(claim_state),
+                    false,
+                )
+                .await
+            {
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "failed to clean an exact rejected materialization claim"
+                );
+            }
+        } else if inserted_by_call
+            && let Err(error) = self
+                .unregister_session_inner_if_epoch(session_id, epoch_id)
+                .await
+        {
+            tracing::warn!(
+                %session_id,
+                %error,
+                "failed to remove a rejected inserted session"
+            );
+        }
+    }
+
     async fn dispatch_user_interrupt(
         &self,
         session_id: &SessionId,
+        expected_run_id: Option<&meerkat_core::RunId>,
+        expected_member: Option<
+            &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        >,
         reason: String,
-    ) -> Result<(), RuntimeDriverError> {
-        let gate = self.session_mutation_gate(session_id).await;
-        let _gate_guard = match gate {
-            Some(g) => match Arc::clone(&g).try_lock_owned() {
-                Ok(guard) => Some(guard),
-                Err(_) if self.generated_stop_deferred(session_id).await => None,
-                Err(_) => Some(g.lock_owned().await),
-            },
+    ) -> Result<bool, RuntimeDriverError> {
+        let _member_lease = match expected_member {
+            Some(expected_member) => Some(
+                self.acquire_member_effect_authority_lease(session_id, Some(expected_member))
+                    .await?,
+            ),
             None => None,
         };
+        let _gate_guard = if let Some(lease) = &_member_lease {
+            let guard = Arc::clone(&lease.session_mutation_gate).lock_owned().await;
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: "user interrupt runtime session disappeared".to_string(),
+                });
+            };
+            if !Arc::ptr_eq(&entry.mutation_gate, &lease.session_mutation_gate) {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: "user interrupt runtime session was replaced".to_string(),
+                });
+            }
+            Some(guard)
+        } else {
+            match expected_run_id {
+                // The run-fenced bridge path must compare and stage under the SAME
+                // current gate. Session absence/replacement means the expected run
+                // is already no longer current, which is the level-triggered
+                // terminal condition rather than a cancellation error.
+                Some(_) => match self.lock_current_session_mutation_gate(session_id).await {
+                    Some(guard) => Some(guard),
+                    None => return Ok(false),
+                },
+                None => {
+                    let gate = self.session_mutation_gate(session_id).await;
+                    match gate {
+                        Some(g) => match Arc::clone(&g).try_lock_owned() {
+                            Ok(guard) => Some(guard),
+                            Err(_) if self.generated_stop_deferred(session_id).await => None,
+                            Err(_) => Some(g.lock_owned().await),
+                        },
+                        None => None,
+                    }
+                }
+            }
+        };
+
+        if let Some(expected_run_id) = expected_run_id {
+            let Ok(authority) = self.session_dsl_authority(session_id).await else {
+                return Ok(false);
+            };
+            let (phase, current_run_id) = {
+                let authority = authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+                    crate::meerkat_machine::dsl_authority::current_run_id_from_authority(
+                        &authority,
+                    ),
+                )
+            };
+            if phase != RuntimeState::Running || current_run_id.as_ref() != Some(expected_run_id) {
+                return Ok(false);
+            }
+        }
 
         let staged_interrupt = match self
             .stage_session_runtime_internal_dsl_transition(
@@ -446,7 +743,7 @@ impl MeerkatMachine {
             return Err(err);
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Classify a generated-machine rejection of a session lifecycle input.
@@ -500,11 +797,97 @@ impl MeerkatMachine {
             .runtime_stop_deferred
     }
 
+    /// Commit one exact runtime-placement tuple through the canonical
+    /// `PrepareBindings` transition, then mechanically synchronize the driver
+    /// projection. Callers own the surrounding session mutation gate and any
+    /// higher-level cleanup if the binding is rejected.
+    pub(super) async fn commit_runtime_placement_binding(
+        &self,
+        session_id: &SessionId,
+        driver_handle: &SharedDriver,
+        epoch_id: &meerkat_core::RuntimeEpochId,
+        agent_runtime_id: crate::identifiers::LogicalRuntimeId,
+        fence_token: u64,
+        generation: u64,
+    ) -> Result<(), RuntimeDriverError> {
+        let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                &agent_runtime_id,
+            ),
+            fence_token: crate::meerkat_machine::dsl::FenceToken::from(fence_token),
+            generation: Some(crate::meerkat_machine::dsl::Generation::from(generation)),
+            runtime_epoch_id: Some(crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(
+                epoch_id,
+            )),
+            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
+        };
+        let staged = self
+            .stage_session_dsl_transition(session_id, dsl_input, "PrepareBindings")
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        {
+            let mut driver = driver_handle.lock().await;
+            machine_prepare_bindings_projection(&mut driver);
+        }
+        if let Err(reason) = self
+            .commit_session_dsl_transition(session_id, staged, "PrepareBindings")
+            .await
+        {
+            driver_handle
+                .lock()
+                .await
+                .sync_control_projection_from_dsl_authority();
+            return Err(RuntimeDriverError::Internal(reason));
+        }
+        Ok(())
+    }
+
     pub(super) async fn prepare_session_runtime_bindings(
         &self,
         session_id: SessionId,
         preparation: SessionBindingPreparation,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        self.prepare_session_runtime_bindings_with_claim(
+            session_id,
+            preparation,
+            uuid::Uuid::new_v4(),
+            true,
+            None,
+        )
+        .await
+    }
+
+    async fn prepare_session_runtime_bindings_with_claim(
+        &self,
+        session_id: SessionId,
+        preparation: SessionBindingPreparation,
+        requested_claim_id: uuid::Uuid,
+        release_materialization_claim_on_drop: bool,
+        claim_state_sink: Option<
+            &Arc<
+                std::sync::Mutex<
+                    Option<Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>>,
+                >,
+            >,
+        >,
+    ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        let unique_materialization_transaction = !release_materialization_claim_on_drop;
+        let candidate_materialization_claim_state = Arc::new(std::sync::Mutex::new(
+            crate::RuntimeActorMaterializationClaimState::new(unique_materialization_transaction),
+        ));
+        if unique_materialization_transaction {
+            let mut state = candidate_materialization_claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.current = Some(requested_claim_id);
+            state.phase = crate::RuntimeActorMaterializationClaimPhase::Prepared;
+        }
+        if let Some(claim_state_sink) = claim_state_sink {
+            *claim_state_sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(Arc::clone(&candidate_materialization_claim_state));
+        }
         tracing::debug!(
             %session_id,
             ?preparation,
@@ -534,6 +917,9 @@ impl MeerkatMachine {
                         %session_id,
                         "MeerkatMachine::prepare_session_runtime_bindings found existing session"
                     );
+                    if let Some(error) = existing.registration_blocked_by_unregister(&session_id) {
+                        return Err(error);
+                    }
                     if existing.clear_dead_attachment() {
                         existing.stage_generated_executor_exit_observation().map_err(|reason| {
                             RuntimeDriverError::Internal(format!(
@@ -544,21 +930,40 @@ impl MeerkatMachine {
                     false
                 } else {
                     drop(sessions);
-                    self.register_storeless_session_inner_sync_build_step(session_id.clone())?
+                    self.register_storeless_session_inner_sync_build_step(
+                        session_id.clone(),
+                        Some(Arc::clone(&candidate_materialization_claim_state)),
+                    )?
                 }
             }
         } else {
-            Box::pin(self.register_session_inner(session_id.clone())).await?
+            Box::pin(self.register_session_inner_for_actor_materialization(
+                session_id.clone(),
+                Arc::clone(&candidate_materialization_claim_state),
+            ))
+            .await?
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let inserted_by_call = Box::pin(self.register_session_inner(session_id.clone())).await?;
-        let registration_gate_guard = self.lock_registration_gate(&session_id).await?;
+        let inserted_by_call = Box::pin(self.register_session_inner_for_actor_materialization(
+            session_id.clone(),
+            Arc::clone(&candidate_materialization_claim_state),
+        ))
+        .await?;
         tracing::debug!(
             %session_id,
             inserted_by_call,
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings registered session"
         );
+        // Serialize the full generated registration/binding transaction with
+        // executor attachment and teardown. A live idempotent binding remains a
+        // valid handle bundle, but it cannot reopen actor materialization.
+        let mutation_guard = self
+            .lock_current_session_mutation_gate(&session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
         let (
             driver_handle,
             epoch_id,
@@ -567,6 +972,8 @@ impl MeerkatMachine {
             tool_visibility_owner,
             dsl_authority_shared,
             handle_teardown_gate,
+            live_attachment,
+            materialization_claim_state,
         ) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
@@ -582,15 +989,130 @@ impl MeerkatMachine {
                 Arc::clone(&entry.tool_visibility_owner),
                 Arc::clone(&entry.dsl_authority),
                 Arc::clone(&entry.handle_teardown_gate),
+                entry.has_live_attachment(),
+                Arc::clone(&entry.materialization_claim_state),
             )
         };
-        let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
         let terminal_supervisor_cleanup_bindings = matches!(
             self.existing_session_runtime_state(&session_id).await,
             Some(RuntimeState::Destroyed)
         ) && self
             .has_terminal_supervisor_cleanup_authority(&session_id)
             .await;
+        let materialization_claim_id = if live_attachment
+            || terminal_supervisor_cleanup_bindings
+            || !unique_materialization_transaction
+        {
+            if terminal_supervisor_cleanup_bindings {
+                let mut state = materialization_claim_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.current == Some(requested_claim_id) {
+                    state.current = None;
+                    state.phase = crate::RuntimeActorMaterializationClaimPhase::Vacant;
+                }
+            }
+            None
+        } else {
+            let mut state = materialization_claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.current == Some(requested_claim_id)
+                && state.phase == crate::RuntimeActorMaterializationClaimPhase::Prepared
+            {
+                Some(requested_claim_id)
+            } else if state.current.is_some()
+                || state.phase != crate::RuntimeActorMaterializationClaimPhase::Vacant
+            {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "session {session_id} already has an active materialization owner"
+                    ),
+                });
+            } else {
+                state.current = Some(requested_claim_id);
+                state.phase = crate::RuntimeActorMaterializationClaimPhase::Prepared;
+                Some(requested_claim_id)
+            }
+        };
+        let legacy_actor_materialization_generation = {
+            let state = materialization_claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (!live_attachment
+                && !terminal_supervisor_cleanup_bindings
+                && !unique_materialization_transaction
+                && state.current.is_none()
+                && state.phase == crate::RuntimeActorMaterializationClaimPhase::Vacant)
+                .then_some(state.legacy_capability_generation)
+        };
+        if materialization_claim_id.is_some()
+            && let Some(claim_state_sink) = claim_state_sink
+        {
+            *claim_state_sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(Arc::clone(&materialization_claim_state));
+        }
+        // A newly recovered entry has no in-process executor. When its
+        // durable binding names an older runtime epoch than the recovered
+        // ops entry, that binding is a dead-process fact: preserving it makes
+        // the caller's authoritative PrepareBindings guard-reject the fresh
+        // epoch. Drive the existing generated recovery ladder instead of
+        // clearing shell fields: RuntimeExecutorExited moves the supported
+        // live phases to Stopped, then RegisterSessionResumesStopped below
+        // clears the epoch-scoped binding and re-admits the same session.
+        // Warm/idempotent registration never enters this arm.
+        let current_epoch = crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(&epoch_id);
+        let recovered_stale_bound_epoch = inserted_by_call && !live_attachment && {
+            let authority = dsl_authority_shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let phase = super::dsl_authority::runtime_phase_from_authority(&authority);
+            matches!(
+                phase,
+                RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Running
+            ) && authority
+                .state()
+                .active_runtime_epoch_id
+                .as_ref()
+                .is_some_and(|bound_epoch| bound_epoch != &current_epoch)
+        };
+        if recovered_stale_bound_epoch {
+            tracing::debug!(
+                %session_id,
+                ?current_epoch,
+                "cold recovery observed a stale bound runtime epoch; staging generated executor exit before re-registration"
+            );
+            let executor_exited = crate::meerkat_machine_types::
+                MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited;
+            if let Err(reason) = self
+                .stage_session_dsl_transition(
+                    &session_id,
+                    executor_exited.dsl_input(),
+                    executor_exited.input_variant().as_str(),
+                )
+                .await
+            {
+                release_failed_materialization_claim(
+                    &materialization_claim_state,
+                    materialization_claim_id,
+                );
+                drop(mutation_guard);
+                self.cleanup_failed_materialization_claim(
+                    &session_id,
+                    inserted_by_call,
+                    &epoch_id,
+                    materialization_claim_id,
+                    &materialization_claim_state,
+                )
+                .await;
+                return Err(RuntimeDriverError::Internal(format!(
+                    "generated MeerkatMachine rejected cold-recovery executor-exit observation: {reason}"
+                )));
+            }
+        }
+        let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
         // Stage RegisterSession unconditionally: the generated machine owns
         // the idempotence verdict (`RegisterSessionIdempotent` no-ops a
         // same-binding re-registration), the revival verdict
@@ -647,50 +1169,159 @@ impl MeerkatMachine {
                                 "{err}; additionally failed to restore generated Stopped authority after revival persistence failure"
                             ))
                         };
-                        drop(registration_gate_guard);
-                        return Err(if inserted_by_call {
-                            self.compensate_inserted_session_error(
-                                &session_id,
-                                &epoch_id,
-                                err,
-                                "failed lifecycle persistence after session revival",
-                            )
-                            .await
-                        } else {
-                            err
-                        });
+                        release_failed_materialization_claim(
+                            &materialization_claim_state,
+                            materialization_claim_id,
+                        );
+                        drop(mutation_guard);
+                        self.cleanup_failed_materialization_claim(
+                            &session_id,
+                            inserted_by_call,
+                            &epoch_id,
+                            materialization_claim_id,
+                            &materialization_claim_state,
+                        )
+                        .await;
+                        return Err(err);
                     }
+                }
+
+                // A delivery path may have already applied the machine-owned
+                // Stopped -> Idle/Queuing readmission before it asks for local
+                // bindings. In that case this RegisterSession is idempotent and
+                // emits no Recover notice, but the completed exact stop receipt
+                // still belongs to the old attachment and must be consumed.
+                // MissingLive retains its broader Attached/Active normalization
+                // below; this branch handles only the exact already-re-admitted
+                // shape shared by ordinary and MissingLive preparation.
+                let stop_residue_retirement = {
                     let mut sessions = self.sessions.write().await;
-                    let entry =
-                        sessions
-                            .get_mut(&session_id)
-                            .ok_or(RuntimeDriverError::NotReady {
-                                state: RuntimeState::Destroyed,
-                            })?;
-                    if entry.epoch_id != epoch_id || !Arc::ptr_eq(&entry.driver, &driver_handle) {
-                        return Err(RuntimeDriverError::NotReady {
+                    match sessions.get_mut(&session_id) {
+                        None => Err(RuntimeDriverError::NotReady {
                             state: RuntimeState::Destroyed,
-                        });
+                        }),
+                        Some(entry)
+                            if entry.epoch_id != epoch_id
+                                || !Arc::ptr_eq(&entry.driver, &driver_handle)
+                                || !Arc::ptr_eq(&entry.dsl_authority, &dsl_authority_shared)
+                                || !Arc::ptr_eq(
+                                    &entry.materialization_claim_state,
+                                    &materialization_claim_state,
+                                ) =>
+                        {
+                            Err(RuntimeDriverError::StaleAuthority {
+                                reason: format!(
+                                    "session {session_id} changed before completed stop residue retirement"
+                                ),
+                            })
+                        }
+                        Some(entry) => {
+                            let idle_queuing = {
+                                let authority = entry
+                                    .dsl_authority
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let state = authority.state();
+                                state.lifecycle_phase
+                                    == crate::meerkat_machine::dsl::MeerkatPhase::Idle
+                                    && state.registration_phase
+                                        == crate::meerkat_machine::dsl::RegistrationPhase::Queuing
+                            };
+                            if idle_queuing && entry.runtime_stop_cleanup_coordinator.is_some() {
+                                entry.retire_completed_runtime_stop_after_revival(&session_id)
+                            } else {
+                                Ok(())
+                            }
+                        }
                     }
-                    entry.retire_completed_runtime_stop_after_revival(&session_id)?;
+                };
+                if let Err(error) = stop_residue_retirement {
+                    release_failed_materialization_claim(
+                        &materialization_claim_state,
+                        materialization_claim_id,
+                    );
+                    drop(mutation_guard);
+                    self.cleanup_failed_materialization_claim(
+                        &session_id,
+                        inserted_by_call,
+                        &epoch_id,
+                        materialization_claim_id,
+                        &materialization_claim_state,
+                    )
+                    .await;
+                    return Err(error);
                 }
             }
             Err(reason) => {
                 let err = self
                     .classify_session_dsl_rejection(&session_id, reason)
                     .await;
-                drop(registration_gate_guard);
-                return Err(if inserted_by_call {
-                    self.compensate_inserted_session_error(
-                        &session_id,
-                        &epoch_id,
-                        err,
-                        "generated session registration rejection",
-                    )
-                    .await
-                } else {
-                    err
+                release_failed_materialization_claim(
+                    &materialization_claim_state,
+                    materialization_claim_id,
+                );
+                drop(mutation_guard);
+                self.cleanup_failed_materialization_claim(
+                    &session_id,
+                    inserted_by_call,
+                    &epoch_id,
+                    materialization_claim_id,
+                    &materialization_claim_state,
+                )
+                .await;
+                return Err(err);
+            }
+        }
+        if matches!(
+            preparation,
+            SessionBindingPreparation::LocalSessionResources(
+                LocalSessionMaterializationMode::MissingLiveRevival
+            )
+        ) {
+            let Some(exact_claim_id) = materialization_claim_id else {
+                release_failed_materialization_claim(
+                    &materialization_claim_state,
+                    materialization_claim_id,
+                );
+                drop(mutation_guard);
+                self.cleanup_failed_materialization_claim(
+                    &session_id,
+                    inserted_by_call,
+                    &epoch_id,
+                    materialization_claim_id,
+                    &materialization_claim_state,
+                )
+                .await;
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "missing-live materialization for session {session_id} did not mint an exact prepared claim"
+                    ),
                 });
+            };
+            if let Err(error) = self
+                .normalize_missing_live_session_materialization(
+                    &session_id,
+                    &epoch_id,
+                    exact_claim_id,
+                    &materialization_claim_state,
+                    &mutation_guard,
+                )
+                .await
+            {
+                release_failed_materialization_claim(
+                    &materialization_claim_state,
+                    materialization_claim_id,
+                );
+                drop(mutation_guard);
+                self.cleanup_failed_materialization_claim(
+                    &session_id,
+                    inserted_by_call,
+                    &epoch_id,
+                    materialization_claim_id,
+                    &materialization_claim_state,
+                )
+                .await;
+                return Err(error);
             }
         }
         tracing::debug!(
@@ -698,10 +1329,11 @@ impl MeerkatMachine {
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings prepared generated registration"
         );
-        let compaction_runtime_epoch_id =
-            crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(&epoch_id);
         let allow_late_compaction_binding = !terminal_supervisor_cleanup_bindings
-            && preparation == SessionBindingPreparation::LocalSessionResources;
+            && matches!(
+                preparation,
+                SessionBindingPreparation::LocalSessionResources(_)
+            );
         let compaction_runtime_binding = if terminal_supervisor_cleanup_bindings {
             tracing::debug!(
                 %session_id,
@@ -726,71 +1358,39 @@ impl MeerkatMachine {
             let agent_runtime_id =
                 crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(&runtime_id);
             let fence_token = crate::meerkat_machine::dsl::FenceToken::from(0);
-            let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
-                agent_runtime_id: agent_runtime_id.clone(),
-                fence_token,
-                generation: None,
-                runtime_epoch_id: Some(compaction_runtime_epoch_id.clone()),
-                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
-            };
-            let staged = match self
-                .stage_session_dsl_transition(&session_id, dsl_input, "PrepareBindings")
+            let generation = crate::meerkat_machine::dsl::Generation::from(0);
+            if let Err(error) = self
+                .commit_runtime_placement_binding(
+                    &session_id,
+                    &driver_handle,
+                    &epoch_id,
+                    runtime_id,
+                    0,
+                    0,
+                )
                 .await
             {
-                Ok(staged) => staged,
-                Err(reason) => {
-                    let err = RuntimeDriverError::ValidationFailed { reason };
-                    drop(registration_gate_guard);
-                    return Err(if inserted_by_call {
-                        self.compensate_inserted_session_error(
-                            &session_id,
-                            &epoch_id,
-                            err,
-                            "binding preparation rejection",
-                        )
-                        .await
-                    } else {
-                        err
-                    });
-                }
-            };
-            {
-                tracing::debug!(
-                    %session_id,
-                    ?preparation,
-                    "MeerkatMachine::prepare_session_runtime_bindings locking driver for authoritative projection"
+                release_failed_materialization_claim(
+                    &materialization_claim_state,
+                    materialization_claim_id,
                 );
-                let mut driver = driver_handle.lock().await;
-                machine_prepare_bindings_projection(&mut driver);
+                drop(mutation_guard);
+                self.cleanup_failed_materialization_claim(
+                    &session_id,
+                    inserted_by_call,
+                    &epoch_id,
+                    materialization_claim_id,
+                    &materialization_claim_state,
+                )
+                .await;
+                return Err(error);
             }
             tracing::debug!(
                 %session_id,
                 ?preparation,
                 "MeerkatMachine::prepare_session_runtime_bindings applied authoritative projection"
             );
-            if let Err(reason) = self
-                .commit_session_dsl_transition(&session_id, staged, "PrepareBindings")
-                .await
-            {
-                driver_handle
-                    .lock()
-                    .await
-                    .sync_control_projection_from_dsl_authority();
-                let err = RuntimeDriverError::Internal(reason);
-                drop(registration_gate_guard);
-                return Err(if inserted_by_call {
-                    self.compensate_inserted_session_error(
-                        &session_id,
-                        &epoch_id,
-                        err,
-                        "binding preparation commit failure",
-                    )
-                    .await
-                } else {
-                    err
-                });
-            }
-            Some((agent_runtime_id, Some(fence_token), None))
+            Some((agent_runtime_id, Some(fence_token), Some(generation)))
         } else {
             {
                 tracing::debug!(
@@ -808,93 +1408,183 @@ impl MeerkatMachine {
             );
             None
         };
-        // Share ONE HandleDslAuthority across all 5 handles so their
-        // transitions land on the session's real DSL state (same Arc
-        // as RuntimeSessionEntry.dsl_authority). Phase 5F/1-5 callsites
-        // rely on this — parallel private authorities would silently
-        // diverge from the session DSL.
-        let shared_handle_authority = Arc::new(
-            crate::handles::HandleDslAuthority::from_shared_with_teardown_gate(
-                dsl_authority_shared,
-                handle_teardown_gate,
-            ),
-        );
-        let auth_lease = self.generated_auth_lease_handle();
         let runtime_authority = match preparation {
             SessionBindingPreparation::AuthoritativeRuntimeBinding => {
-                crate::session_runtime_bindings_authority()
+                crate::session_runtime_bindings_authority(
+                    session_id.clone(),
+                    epoch_id.clone(),
+                    Arc::clone(&dsl_authority_shared),
+                    Arc::clone(&handle_teardown_gate),
+                    materialization_claim_id,
+                    Arc::clone(&materialization_claim_state),
+                    legacy_actor_materialization_generation,
+                    release_materialization_claim_on_drop,
+                )
             }
-            SessionBindingPreparation::LocalSessionResources => {
-                crate::local_session_runtime_bindings_authority()
+            SessionBindingPreparation::LocalSessionResources(_) => {
+                crate::local_session_runtime_bindings_authority(
+                    session_id.clone(),
+                    epoch_id.clone(),
+                    Arc::clone(&dsl_authority_shared),
+                    Arc::clone(&handle_teardown_gate),
+                    materialization_claim_id,
+                    Arc::clone(&materialization_claim_state),
+                    legacy_actor_materialization_generation,
+                    release_materialization_claim_on_drop,
+                )
             }
         };
-        let peer_comms_install = crate::handles::RuntimePeerCommsHandle::generated_install_factory(
-            Arc::clone(&shared_handle_authority),
-        )
-        .map_err(RuntimeDriverError::Internal)?;
 
         tracing::debug!(
             %session_id,
             ?preparation,
             "MeerkatMachine::prepare_session_runtime_bindings assembling bindings"
         );
-        Ok(MeerkatMachineCommandResult::Bindings(
-            meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
+        let bindings = match self
+            .canonical_session_runtime_bindings(
                 session_id.clone(),
-                epoch_id,
-                ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
-                cursor_state,
-                generated_tool_visibility_owner(Arc::clone(&tool_visibility_owner)
-                    as Arc<dyn meerkat_core::ToolVisibilityOwner>)
-                .map_err(RuntimeDriverError::Internal)?,
-                Arc::new(crate::handles::RuntimeTurnStateHandle::new(Arc::clone(
-                    &shared_handle_authority,
-                ))),
-                Arc::new(crate::handles::RuntimeCommsDrainHandle::new(Arc::clone(
-                    &shared_handle_authority,
-                ))),
-                Arc::new(crate::handles::RuntimeExternalToolSurfaceHandle::new(
-                    Arc::clone(&shared_handle_authority),
-                )),
-                peer_comms_install,
-                Arc::new(crate::handles::RuntimeSessionAdmissionHandle::new(
-                    Arc::clone(&shared_handle_authority),
-                )),
-                Arc::new(
-                    crate::handles::RuntimeModelRoutingHandle::new_with_visibility_owner(
-                        Arc::clone(&shared_handle_authority),
-                        Arc::clone(&tool_visibility_owner),
-                    ),
-                ),
-                Arc::new(RuntimeStickyModelFallbackCommitCoordinator {
-                    session_id: session_id.clone(),
-                    store: self.store.clone(),
-                }),
-                auth_lease,
-                Arc::new(crate::handles::RuntimeMcpServerLifecycleHandle::new(
-                    Arc::clone(&shared_handle_authority),
-                )),
-                Arc::new(crate::handles::RuntimePeerInteractionHandle::new(
-                    Arc::clone(&shared_handle_authority),
-                )),
-                Arc::new(crate::handles::RuntimeSessionContextHandle::new(
-                    Arc::clone(&shared_handle_authority),
-                )),
-                self.session_claim_handle(),
-                Arc::new(crate::handles::RuntimeInteractionStreamHandle::new(
-                    Arc::clone(&shared_handle_authority),
-                )),
-                Arc::new(RuntimeCompactionCommitCoordinator {
-                    session_id: session_id.clone(),
-                    runtime_binding: std::sync::Mutex::new(compaction_runtime_binding),
-                    runtime_epoch_id: compaction_runtime_epoch_id,
-                    allow_late_binding: allow_late_compaction_binding,
-                    dsl_authority: Arc::clone(&shared_handle_authority),
-                    store: self.store.clone(),
-                }),
+                epoch_id.clone(),
+                Arc::clone(&ops_lifecycle),
+                Arc::clone(&cursor_state),
+                Arc::clone(&tool_visibility_owner),
+                Arc::clone(&dsl_authority_shared),
+                Arc::clone(&handle_teardown_gate),
+                compaction_runtime_binding,
+                allow_late_compaction_binding,
                 runtime_authority,
-            ),
-        ))
+            )
+            .await
+        {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                release_failed_materialization_claim(
+                    &materialization_claim_state,
+                    materialization_claim_id,
+                );
+                drop(mutation_guard);
+                self.cleanup_failed_materialization_claim(
+                    &session_id,
+                    inserted_by_call,
+                    &epoch_id,
+                    materialization_claim_id,
+                    &materialization_claim_state,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        Ok(MeerkatMachineCommandResult::Bindings(bindings))
+    }
+
+    async fn prepare_session_materialization_with_mode(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        preparation: SessionBindingPreparation,
+    ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
+        let cleanup_spawner = MachineCleanupTaskSpawner::acquire().map_err(|error| {
+            RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string())
+        })?;
+        let machine = Arc::clone(self);
+        let owned_session_id = session_id.clone();
+        let (result_tx, result_rx) = crate::tokio::sync::oneshot::channel();
+        cleanup_spawner.spawn(async move {
+            let result = machine
+                .prepare_session_materialization_with_mode_owned(owned_session_id, preparation)
+                .await;
+            // The process-owned saga must reach a terminal result before an
+            // abandoned caller can drop Prepared and begin exact rollback.
+            // If the receiver disappeared after success, dropping the payload
+            // here transfers rollback to Prepared's process-owned cleanup.
+            let _ = result_tx.send(result);
+        });
+        result_rx.await.map_err(|error| {
+            RuntimeBindingsError::PrepareFailed(
+                session_id,
+                format!(
+                    "owned session materialization preparation ended without a result: {error}"
+                ),
+            )
+        })?
+    }
+
+    async fn prepare_session_materialization_with_mode_owned(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        preparation: SessionBindingPreparation,
+    ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
+        let claim_id = uuid::Uuid::new_v4();
+        let mut pending =
+            PendingPreparedMaterialization::new(Arc::clone(self), session_id.clone(), claim_id)
+                .map_err(|error| {
+                    RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string())
+                })?;
+        let claim_state_slot = pending.claim_state_slot();
+        let result = self
+            .prepare_session_runtime_bindings_with_claim(
+                session_id.clone(),
+                preparation,
+                claim_id,
+                false,
+                Some(&claim_state_slot),
+            )
+            .await
+            .map_err(|error| {
+                RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string())
+            })?;
+        let MeerkatMachineCommandResult::Bindings(bindings) = result else {
+            return Err(RuntimeBindingsError::SessionNotFound(session_id));
+        };
+        let prepared = PreparedSessionMaterialization::new(
+            Arc::clone(self),
+            bindings,
+            claim_id,
+            pending.cleanup_spawner(),
+        )
+        .map_err(|error| {
+            RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string())
+        })?;
+        pending.disarm();
+        Ok(prepared)
+    }
+
+    /// Begin one unique authoritative actor-materialization transaction.
+    /// Cloneable bindings are exposed through the returned non-clone lease.
+    pub async fn prepare_session_materialization(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
+        self.prepare_session_materialization_with_mode(
+            session_id,
+            SessionBindingPreparation::AuthoritativeRuntimeBinding,
+        )
+        .await
+    }
+
+    /// Local-resource variant used by mob hosts before authoritative placement.
+    pub async fn prepare_local_session_materialization(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
+        self.prepare_local_session_materialization_with_mode(
+            session_id,
+            LocalSessionMaterializationMode::Ordinary,
+        )
+        .await
+    }
+
+    /// Local-resource preparation with a typed machine-owned revival policy.
+    /// Only the Mob missing-live path may request the narrow normalization;
+    /// every ordinary surface uses [`Self::prepare_local_session_materialization`].
+    pub async fn prepare_local_session_materialization_with_mode(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        mode: LocalSessionMaterializationMode,
+    ) -> Result<PreparedSessionMaterialization, RuntimeBindingsError> {
+        self.prepare_session_materialization_with_mode(
+            session_id,
+            SessionBindingPreparation::LocalSessionResources(mode),
+        )
+        .await
     }
 
     /// Durable input-state witnesses for an UNREGISTERED session.
@@ -968,7 +1658,23 @@ impl MeerkatMachine {
         match command {
             MeerkatMachineCommand::RegisterSession { session_id } => {
                 let sid = session_id.clone();
-                self.register_session_inner(session_id).await?;
+                let registration = self.register_session_inner(session_id).await?;
+                if matches!(
+                    registration,
+                    super::session_management::RegisterSessionInnerOutcome::InsertedColdRecoveredDraining
+                ) {
+                    // The generated Draining image was reconstructed from the
+                    // durable unregister retry record while inserting this
+                    // entry. RegisterSession correctly rejects Draining, so
+                    // re-staging it here would turn successful mechanical
+                    // recovery into a false registration failure and strand
+                    // the canonical unregister retry. This exact insertion
+                    // witness is the only bypass: an already-resident
+                    // Draining entry still reaches the generated rejection
+                    // below, and binding/actor preparation keeps staging its
+                    // own RegisterSession input and therefore remains fenced.
+                    return Ok(MeerkatMachineCommandResult::Unit);
+                }
                 let _registration_gate_guard = self.lock_registration_gate(&sid).await?;
                 // Stage-first: the generated machine owns the legality verdict.
                 // RegisterSession is not declared from Destroyed (it is a
@@ -1045,12 +1751,19 @@ impl MeerkatMachine {
                 // Stage-first: `stop_runtime_executor_inner` stages the
                 // StopRuntimeExecutor DSL input; the machine rejects it on a
                 // Destroyed binding and the inner classification surfaces the
-                // terminal `Destroyed` truth.
+                // terminal `Destroyed` truth. The independently-owned
+                // unregister saga acquires and retains the live/lifecycle
+                // disposal lease. A caller-owned lease here would deadlock the
+                // stop result against that saga once the exact runtime-loop
+                // cleanup publishes generated Draining authority.
                 self.stop_runtime_executor_inner(&session_id, reason)
                     .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
-            MeerkatMachineCommand::CommitServiceTurnTerminalReceipt { session_id } => {
+            MeerkatMachineCommand::CommitServiceTurnTerminalReceipt {
+                session_id,
+                session_snapshot,
+            } => {
                 // Direct SessionService turns share the runtime turn-state
                 // handle, but their durable commit occurs inside
                 // `SessionService::start_turn`, not the runtime loop. After
@@ -1073,7 +1786,8 @@ impl MeerkatMachine {
                 };
                 let receipt_result = {
                     let mut driver = driver.lock().await;
-                    machine_commit_service_turn_terminal_receipt(&mut driver).await
+                    machine_commit_service_turn_terminal_receipt(&mut driver, session_snapshot)
+                        .await
                 };
                 // The driver-level receipt requires a Running machine-owned
                 // lifecycle (it rejects every other phase, including
@@ -1130,7 +1844,9 @@ impl MeerkatMachine {
             MeerkatMachineCommand::PrepareLocalSessionBindings { session_id } => {
                 Box::pin(self.prepare_session_runtime_bindings(
                     session_id,
-                    SessionBindingPreparation::LocalSessionResources,
+                    SessionBindingPreparation::LocalSessionResources(
+                        LocalSessionMaterializationMode::Ordinary,
+                    ),
                 ))
                 .await
             }
@@ -1587,8 +2303,26 @@ impl MeerkatMachine {
                 // new), holds the per-session mutation gate across the
                 // generated registration claim and shell publication, attaches
                 // the executor, and spawns the runtime loop.
-                self.ensure_session_with_executor_inner(session_id, executor)
-                    .await?;
+                // The generated registration claim, durable revival, ops
+                // wiring, loop attachment, and startup reconciliation form one
+                // owner saga. A surface caller may be cancelled at any await in
+                // that sequence; transferring the full command to an
+                // independently owned task prevents caller cancellation from
+                // dropping a staged registration or a pre-attachment executor.
+                let cleanup_spawner = MachineCleanupTaskSpawner::acquire()?;
+                let machine = Arc::clone(self);
+                cleanup_spawner
+                    .spawn(async move {
+                        machine
+                            .ensure_session_with_executor_inner(session_id, executor)
+                            .await
+                    })
+                    .await
+                    .map_err(|error| {
+                        RuntimeDriverError::Internal(format!(
+                            "owned EnsureSessionWithExecutor saga ended without a result: {error}"
+                        ))
+                    })??;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             _ => unreachable!("non-ensure-session command routed to arc session handler"),

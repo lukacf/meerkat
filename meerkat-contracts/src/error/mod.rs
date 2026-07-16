@@ -18,6 +18,7 @@ use crate::capability::CapabilityId;
     Deserialize,
     strum::EnumString,
     strum::Display,
+    strum::EnumIter,
 )]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -39,6 +40,19 @@ pub enum ErrorCode {
     InternalError,
     DuplicateInput,
     SupervisorRotationIncomplete,
+    // Multi-host mobs (§17.4 allocation table; A15 corrected to match it in
+    // the v4.1.1 errata) — exactly four console-facing codes.
+    /// Plane-(b) control-scope denial; wire detail carries
+    /// `{ required, presented }`.
+    ScopeDenied,
+    /// Member host unreachable/timeout; observation degrades typed, never
+    /// quiet.
+    HostUnavailable,
+    /// Event cursor overran an ephemeral host's buffer; reply carries the
+    /// current watermark.
+    StaleCursor,
+    /// Command carried a superseded `(generation, fence)` tuple.
+    StaleFence,
 }
 
 impl ErrorCode {
@@ -61,6 +75,10 @@ impl ErrorCode {
             Self::InternalError => -32603,
             Self::DuplicateInput => -32004,
             Self::SupervisorRotationIncomplete => -32024,
+            Self::ScopeDenied => -32025,
+            Self::HostUnavailable => -32026,
+            Self::StaleCursor => -32027,
+            Self::StaleFence => -32028,
         }
     }
 
@@ -83,6 +101,10 @@ impl ErrorCode {
             -32603 => Some(Self::InternalError),
             -32004 => Some(Self::DuplicateInput),
             -32024 => Some(Self::SupervisorRotationIncomplete),
+            -32025 => Some(Self::ScopeDenied),
+            -32026 => Some(Self::HostUnavailable),
+            -32027 => Some(Self::StaleCursor),
+            -32028 => Some(Self::StaleFence),
             _ => None,
         }
     }
@@ -94,15 +116,18 @@ impl ErrorCode {
             Self::SessionBusy
             | Self::SessionNotRunning
             | Self::DuplicateInput
-            | Self::SupervisorRotationIncomplete => 409,
+            | Self::SupervisorRotationIncomplete
+            | Self::StaleFence => 409,
             Self::RequestCancelled => 499,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
-            Self::HookDenied => 403,
+            Self::HookDenied | Self::ScopeDenied => 403,
             Self::AgentError | Self::InternalError => 500,
             Self::CapabilityUnavailable => 501,
             Self::SkillResolutionFailed => 422,
             Self::InvalidParams => 400,
+            Self::HostUnavailable => 503,
+            Self::StaleCursor => 410,
         }
     }
 
@@ -125,6 +150,10 @@ impl ErrorCode {
             Self::InternalError => 1,
             Self::DuplicateInput => 13,
             Self::SupervisorRotationIncomplete => 44,
+            Self::ScopeDenied => 45,
+            Self::HostUnavailable => 46,
+            Self::StaleCursor => 47,
+            Self::StaleFence => 48,
         }
     }
 }
@@ -162,16 +191,24 @@ impl ErrorCode {
     /// Get the category for this error code.
     pub fn category(self) -> ErrorCategory {
         match self {
+            // StaleCursor/StaleFence are conflict-class like SessionBusy;
+            // both resolve by re-reading current state and retrying.
             Self::SessionNotFound
             | Self::ScheduleNotFound
             | Self::SessionBusy
             | Self::SessionNotRunning
             | Self::DuplicateInput
-            | Self::SupervisorRotationIncomplete => ErrorCategory::Session,
+            | Self::SupervisorRotationIncomplete
+            | Self::StaleCursor
+            | Self::StaleFence => ErrorCategory::Session,
             Self::RequestCancelled => ErrorCategory::Request,
-            Self::ProviderError => ErrorCategory::Provider,
+            // Provider is the transient-upstream-failure class (502-family);
+            // an unreachable member host is the same retryable class and
+            // ErrorCategory has no host-specific grouping.
+            Self::ProviderError | Self::HostUnavailable => ErrorCategory::Provider,
             Self::BudgetExhausted => ErrorCategory::Budget,
-            Self::HookDenied => ErrorCategory::Hook,
+            // Hook is the existing 403 permission-denial class.
+            Self::HookDenied | Self::ScopeDenied => ErrorCategory::Hook,
             Self::AgentError => ErrorCategory::Agent,
             Self::CapabilityUnavailable => ErrorCategory::Capability,
             Self::SkillNotFound | Self::SkillResolutionFailed => ErrorCategory::Skill,
@@ -260,6 +297,7 @@ impl From<meerkat_core::SessionError> for WireError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -338,25 +376,10 @@ mod tests {
 
     #[test]
     fn test_error_code_projections() {
-        // Every code should have valid projections
-        for code in [
-            ErrorCode::SessionNotFound,
-            ErrorCode::ScheduleNotFound,
-            ErrorCode::SessionBusy,
-            ErrorCode::SessionNotRunning,
-            ErrorCode::RequestCancelled,
-            ErrorCode::ProviderError,
-            ErrorCode::BudgetExhausted,
-            ErrorCode::HookDenied,
-            ErrorCode::AgentError,
-            ErrorCode::CapabilityUnavailable,
-            ErrorCode::SkillNotFound,
-            ErrorCode::SkillResolutionFailed,
-            ErrorCode::InvalidParams,
-            ErrorCode::InternalError,
-            ErrorCode::DuplicateInput,
-            ErrorCode::SupervisorRotationIncomplete,
-        ] {
+        use strum::IntoEnumIterator;
+
+        // Every code (exhaustively via EnumIter) has valid projections.
+        for code in ErrorCode::iter() {
             let rpc = code.jsonrpc_code();
             let http = code.http_status();
             let cli = code.cli_exit_code();
@@ -366,6 +389,73 @@ mod tests {
                 "HTTP status should be 4xx or 5xx"
             );
             assert!(cli > 0, "CLI exit code should be positive");
+        }
+    }
+
+    /// A15/§17.4 exact-value pins for the four multi-host codes — all four
+    /// renderings each, plus JSON-RPC round-trip.
+    #[test]
+    fn multi_host_error_codes_render_exact_values() {
+        let cases: &[(ErrorCode, i32, u16, i32, ErrorCategory)] = &[
+            (ErrorCode::ScopeDenied, -32025, 403, 45, ErrorCategory::Hook),
+            (
+                ErrorCode::HostUnavailable,
+                -32026,
+                503,
+                46,
+                ErrorCategory::Provider,
+            ),
+            (
+                ErrorCode::StaleCursor,
+                -32027,
+                410,
+                47,
+                ErrorCategory::Session,
+            ),
+            (
+                ErrorCode::StaleFence,
+                -32028,
+                409,
+                48,
+                ErrorCategory::Session,
+            ),
+        ];
+        for (code, rpc, http, cli, category) in cases {
+            assert_eq!(code.jsonrpc_code(), *rpc, "{code:?} jsonrpc pin");
+            assert_eq!(code.http_status(), *http, "{code:?} http pin");
+            assert_eq!(code.cli_exit_code(), *cli, "{code:?} cli pin");
+            assert_eq!(code.category(), *category, "{code:?} category pin");
+            assert_eq!(
+                ErrorCode::from_jsonrpc_code(*rpc),
+                Some(*code),
+                "{code:?} jsonrpc round-trip pin"
+            );
+        }
+    }
+
+    /// Exhaustive uniqueness sweep: no two codes may share a JSON-RPC code
+    /// or a CLI exit code — a collision silently mis-routes SDK error
+    /// classes.
+    #[test]
+    fn error_code_projections_are_collision_free() {
+        use std::collections::HashMap;
+        use strum::IntoEnumIterator;
+
+        let mut jsonrpc: HashMap<i32, ErrorCode> = HashMap::new();
+        let mut cli: HashMap<i32, ErrorCode> = HashMap::new();
+        for code in ErrorCode::iter() {
+            if let Some(previous) = jsonrpc.insert(code.jsonrpc_code(), code) {
+                panic!(
+                    "JSON-RPC code {} claimed by both {previous:?} and {code:?}",
+                    code.jsonrpc_code()
+                );
+            }
+            if let Some(previous) = cli.insert(code.cli_exit_code(), code) {
+                panic!(
+                    "CLI exit code {} claimed by both {previous:?} and {code:?}",
+                    code.cli_exit_code()
+                );
+            }
         }
     }
 }

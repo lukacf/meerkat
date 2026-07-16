@@ -14,7 +14,7 @@ name: Cargo CI
 #                     test-only lint yield; it runs nightly)
 #   unit (x8)       — lib unit tests, nextest hash-partitioned
 #   int-heavy (x3)  — meerkat-integration-tests integration lane
-#   int-rest (x7)   — integration tests in crate-group lanes (heavy groups
+#   int-rest (x8)   — integration tests in crate-group lanes (heavy groups
 #                     also hash-partitioned); the last
 #                     group is the complement of the named ones
 #   e2e-fast        — deterministic end-to-end lane (real binaries)
@@ -320,13 +320,18 @@ jobs:
       # construction — a new crate lands there automatically.
       matrix:
         include:
-          - group: mob-1of2
-            partition: "hash:1/2"
+          - group: mob-1of3
+            partition: "hash:1/3"
             scope: >-
               -p meerkat-mob -p meerkat-mob-adaptive -p meerkat-mob-mcp
               -p meerkat-mob-pack -p meerkat-schedule -p meerkat-workgraph
-          - group: mob-2of2
-            partition: "hash:2/2"
+          - group: mob-2of3
+            partition: "hash:2/3"
+            scope: >-
+              -p meerkat-mob -p meerkat-mob-adaptive -p meerkat-mob-mcp
+              -p meerkat-mob-pack -p meerkat-schedule -p meerkat-workgraph
+          - group: mob-3of3
+            partition: "hash:3/3"
             scope: >-
               -p meerkat-mob -p meerkat-mob-adaptive -p meerkat-mob-mcp
               -p meerkat-mob-pack -p meerkat-schedule -p meerkat-workgraph
@@ -540,6 +545,9 @@ jobs:
       # A dedicated runner has no Cargo lock contention, so keep xtask under
       # the standard cached target root instead of the local /tmp isolation.
       XTASK_TARGET_DIR: ${{ github.workspace }}/target
+      # The generated adaptive composition is large enough that Java's
+      # container-selected ~3.5 GiB heap OOMs during semantic processing.
+      JAVA_TOOL_OPTIONS: -Xmx8g
     steps:
       - name: Checkout
         uses: actions/checkout@v6

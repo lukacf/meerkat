@@ -277,7 +277,10 @@ impl OperationLifecycleAction {
 pub struct OperationLifecycleSnapshot {
     pub id: OperationId,
     pub kind: OperationKind,
+    /// Immutable owner tuple from the registered operation spec.
+    pub owner_session_id: SessionId,
     pub display_name: String,
+    pub source_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_source: Option<OperationSource>,
     pub status: OperationStatus,
@@ -290,6 +293,7 @@ pub struct OperationLifecycleSnapshot {
     pub watcher_count: u32,
     pub terminal_outcome: Option<OperationTerminalOutcome>,
     pub child_session_id: Option<SessionId>,
+    pub expect_peer_channel: bool,
     /// Peer handle info (exposed when peer_ready is true).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub peer_handle: Option<OperationPeerHandle>,

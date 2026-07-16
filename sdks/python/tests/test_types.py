@@ -1,4 +1,5 @@
 import asyncio
+
 """Conformance tests for Meerkat Python SDK types and events."""
 
 import base64
@@ -20,7 +21,82 @@ def _make_member_ref(mob_id: str, agent_identity: str) -> str:
     future round-trip decode assertion would succeed without churn.
     """
     payload = json.dumps({"m": mob_id, "a": agent_identity}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(payload.encode("utf-8")).rstrip(b"=").decode("ascii")
+    return (
+        base64.urlsafe_b64encode(payload.encode("utf-8")).rstrip(b"=").decode("ascii")
+    )
+
+
+def test_runtime_host_capabilities_expose_typed_multi_host_feature_flags():
+    from meerkat.generated.types import (
+        ContractVersion,
+        RuntimeHostCapabilities,
+        RuntimeHostFeatureFlags,
+    )
+
+    capabilities_hints = get_type_hints(RuntimeHostCapabilities)
+    assert capabilities_hints["contract_version"] is ContractVersion
+    assert capabilities_hints["features"] is RuntimeHostFeatureFlags
+    version_hints = get_type_hints(ContractVersion)
+    assert version_hints == {"major": int, "minor": int, "patch": int}
+    version = ContractVersion(major=0, minor=7, patch=29)
+    flags = RuntimeHostFeatureFlags(
+        runtime_backed_sessions=True,
+        mobs=True,
+        mcp_live=True,
+        comms=True,
+        blobs=True,
+        session_events=True,
+        session_streams=True,
+        schedules=True,
+        skills=True,
+        event_replay=True,
+        artifacts=True,
+        approvals=True,
+        external_members=True,
+        secure_remote_rpc=True,
+        multi_host_mobs=True,
+    )
+    capabilities = RuntimeHostCapabilities(
+        contract_version=version,
+        features=flags,
+    )
+    assert capabilities.contract_version.patch == 29
+    assert flags.multi_host_mobs is True
+
+
+def test_multi_host_bridge_contract_types_are_public_root_exports():
+    import meerkat
+    from meerkat import types as public_types
+
+    names = (
+        "MobGrantScopesParams",
+        "MobGrantScopesResult",
+        "MobRevokeScopesParams",
+        "MobRevokeScopesResult",
+        "MobGrantsResult",
+        "MobHardCancelParams",
+        "MobHardCancelResult",
+        "WireGrantRecord",
+        "WireControlScope",
+        "BridgeCommandCancelTrackedMemberInput",
+        "BridgeCommandObserveSupervisorRotation",
+        "BridgeHostCapabilityRequirements",
+        "BridgeTurnOutcomeRecord",
+        "BridgeTrackedInputCancelOutcome",
+        "WireFlowTurnOutcome",
+        "WireFlowFailureDetail",
+        "LiveRefreshResult",
+        "LiveRefreshStatus",
+        "SessionContentBlock",
+        "SessionContentInput",
+        "TranscriptUserRole",
+        "WireTranscriptSource",
+        "WireTranscriptSourceSpoken",
+        "WireTranscriptSourceUnknown",
+    )
+    for name in names:
+        assert name in meerkat.__all__
+        assert getattr(meerkat, name) is getattr(public_types, name)
 
 
 try:
@@ -34,6 +110,8 @@ from meerkat import (
     McpAddParams,
     McpLiveOpResponse,
     MeerkatClient,
+    MobControlScope,
+    MobGrantRecord,
     RunResult,
     SchemaWarning,
     SessionAssistantBlock,
@@ -69,6 +147,7 @@ from meerkat.events import (
     ExtractionSucceeded,
     HookDenied,
     InteractionComplete,
+    InteractionFailed,
     Retrying,
     RunCompleted,
     RunFailed,
@@ -76,6 +155,7 @@ from meerkat.events import (
     SkillsResolved,
     SkillResolutionFailed,
     SkillResolutionFailureReason,
+    StreamTruncated,
     ToolConfigChanged,
     TextDelta,
     TranscriptRewriteCommitted,
@@ -99,6 +179,41 @@ def test_contract_version():
     assert len(parts) == 3
     for part in parts:
         int(part)
+
+
+def test_python_mob_grant_types_are_public_and_closed():
+    assert set(get_args(MobControlScope)) == {
+        "list",
+        "read_history",
+        "subscribe_events",
+        "send_command",
+        "cancel",
+        "retire",
+        "wire_topology",
+        "live",
+        "admin_host",
+        "admin_grants",
+    }
+    assert set(MobGrantRecord.__required_keys__) == {"principal", "scopes"}
+
+
+def test_member_progress_snapshot_is_exported_from_package_root():
+    from meerkat import WireMemberProgressSnapshot as RootMemberProgress
+    from meerkat.generated.types import (
+        WireMemberProgressSnapshot as GeneratedMemberProgress,
+    )
+    from meerkat.types import WireMemberProgressSnapshot as PublicMemberProgress
+
+    assert RootMemberProgress is PublicMemberProgress
+    assert PublicMemberProgress is GeneratedMemberProgress
+    snapshot = RootMemberProgress(
+        run_state="run_open",
+        in_flight_work=1,
+        last_progress_at_ms=1,
+        last_progress_event="execution_advanced",
+        health="healthy",
+    )
+    assert snapshot.health == "healthy"
 
 
 def test_contract_version_matches_package_version():
@@ -158,7 +273,6 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         MobSpawnParams as GeneratedMobSpawnParams,
         MobSpawnResult as GeneratedMobSpawnResult,
         MobTurnStartParams as GeneratedMobTurnStartParams,
-        WireBudgetSplitPolicy as GeneratedWireBudgetSplitPolicy,
         WireMemberLaunchMode as GeneratedWireMemberLaunchMode,
         WireMobProfile as GeneratedWireMobProfile,
         WireMobToolConfig as GeneratedWireMobToolConfig,
@@ -177,24 +291,25 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         mob_id="mob-1",
         profile="worker",
         agent_identity="worker-2",
+        placement="host-b",
         launch_mode={"mode": "fresh"},
         tool_access_policy={"type": "allow_list", "value": ["grep"]},
-        budget_split_policy={"type": "remaining"},
         inherited_tool_filter={"Allow": ["grep"]},
         override_profile=GeneratedWireMobProfile(model="claude-sonnet-4-6"),
     )
     assert spawn_with_advanced.launch_mode == {"mode": "fresh"}
+    assert spawn_with_advanced.placement == "host-b"
     spawn_hints = get_type_hints(GeneratedMobSpawnParams)
     assert "Any" not in str(spawn_hints["launch_mode"])
     assert "Any" not in str(spawn_hints["tool_access_policy"])
-    assert "Any" not in str(spawn_hints["budget_split_policy"])
     assert "Any" not in str(spawn_hints["inherited_tool_filter"])
     assert "WireMobProfile" in str(spawn_hints["override_profile"])
+    # Deleted multi-host O4 vocabulary must stay deleted.
+    assert "budget_split_policy" not in spawn_hints
     tool_config_hints = get_type_hints(GeneratedWireMobToolConfig)
     assert "rust_bundles" not in tool_config_hints
     assert GeneratedWireMemberLaunchMode is not None
     assert GeneratedWireToolAccessPolicy is not None
-    assert GeneratedWireBudgetSplitPolicy is not None
     assert GeneratedWireToolFilter is not None
 
     turn = GeneratedMobTurnStartParams(
@@ -225,6 +340,371 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
     assert status.member_ref == "opaque-member-ref"
 
 
+def test_generated_multi_host_mob_nested_contracts_stay_typed():
+    from meerkat.generated.types import (
+        MobBindHostResult,
+        MobGrantScopesResult,
+        MobGrantsResult,
+        MobHostsResult,
+        MobHostStatus,
+        MobMemberHistoryResult,
+        MobRouteInstallsResult,
+        WireGrantRecord,
+        WireHistoryRow,
+        WireHostCapabilityFlags,
+        WireHostBindingDescriptor,
+        WireMemberHistoryPageBody,
+        WirePeerConnectivitySnapshot,
+        WireRouteInstallObligation,
+        WireUnreachablePeer,
+    )
+
+    history_hints = get_type_hints(MobMemberHistoryResult)
+    hosts_hints = get_type_hints(MobHostsResult)
+    bind_hints = get_type_hints(MobBindHostResult)
+    routes_hints = get_type_hints(MobRouteInstallsResult)
+    grant_hints = get_type_hints(MobGrantScopesResult)
+    grants_hints = get_type_hints(MobGrantsResult)
+    history_page_hints = get_type_hints(WireMemberHistoryPageBody)
+    connectivity_hints = get_type_hints(WirePeerConnectivitySnapshot)
+
+    assert history_hints["page"] is WireMemberHistoryPageBody
+    assert get_args(history_page_hints["messages"])[0] is WireHistoryRow
+    unreachable_list = next(
+        candidate
+        for candidate in get_args(connectivity_hints["unreachable_peers"])
+        if get_origin(candidate) is list
+    )
+    assert get_args(unreachable_list)[0] is WireUnreachablePeer
+    assert get_args(hosts_hints["hosts"])[0] is MobHostStatus
+    assert bind_hints["capabilities"] is WireHostCapabilityFlags
+    assert get_args(routes_hints["outstanding"])[0] is WireRouteInstallObligation
+    assert grant_hints["record"] is WireGrantRecord
+    assert get_args(grants_hints["grants"])[0] is WireGrantRecord
+
+
+def test_generated_supervisor_bridge_nested_contracts_stay_typed():
+    import meerkat.generated.types as generated_types
+    from meerkat.generated.types import (
+        BridgeCommandDeliverMemberInput,
+        BridgeCommandDeclareMemberOutboundTaint,
+        BridgeCommandHardCancelMember,
+        BridgeCommandOpenMemberLiveChannel,
+        BridgeCommandPollMemberEvents,
+        BridgeCommandWireMember,
+        BridgeDeliveryPayload,
+        BridgeDeliveryRejectionCauseStaleMemberIncarnation,
+        BridgeDeliveryRejectionCauseStaleMemberResidency,
+        BridgeEventCursor,
+        BridgeMemberIncarnation,
+        BridgeMobPeerOverlayHandoff,
+        BridgeOutboundTaintTarget,
+        BridgeOutboundTaintTargetPlaced,
+        BridgePeerWiringPayload,
+        BridgeRejectionCauseMaterializeBuildRejectedPayload,
+        BridgeRejectionCauseScopeDeniedPayload,
+        BridgeTurnDirective,
+        BridgeTurnOutcomeAck,
+        LiveOpenTransport,
+        MemberBuildRejection,
+        OperationId,
+        RunId,
+        WireControlScope,
+    )
+
+    def nullable_members(hint):
+        members = set(get_args(hint))
+        assert type(None) in members
+        members.remove(type(None))
+        return members
+
+    delivery_hints = get_type_hints(BridgeDeliveryPayload)
+    assert BridgeMemberIncarnation in get_args(delivery_hints["expected_member"])
+    assert BridgeTurnDirective in get_args(delivery_hints["turn"])
+
+    deliver_hints = get_type_hints(BridgeCommandDeliverMemberInput)
+    outbound_taint_hints = get_type_hints(BridgeCommandDeclareMemberOutboundTaint)
+    hard_cancel_hints = get_type_hints(BridgeCommandHardCancelMember)
+    poll_hints = get_type_hints(BridgeCommandPollMemberEvents)
+    live_open_hints = get_type_hints(BridgeCommandOpenMemberLiveChannel)
+    wire_hints = get_type_hints(BridgeCommandWireMember)
+    peer_wiring_hints = get_type_hints(BridgePeerWiringPayload)
+    stale_member_hints = get_type_hints(
+        BridgeDeliveryRejectionCauseStaleMemberIncarnation
+    )
+    stale_residency_hints = get_type_hints(
+        BridgeDeliveryRejectionCauseStaleMemberResidency
+    )
+
+    assert nullable_members(deliver_hints["expected_member"]) == {
+        BridgeMemberIncarnation
+    }
+    assert nullable_members(deliver_hints["objective_id"]) == {str}
+    assert nullable_members(deliver_hints["turn"]) == {BridgeTurnDirective}
+    assert set(get_args(BridgeOutboundTaintTarget)).issubset(
+        nullable_members(outbound_taint_hints["target"])
+    )
+    assert BridgeOutboundTaintTargetPlaced in get_args(BridgeOutboundTaintTarget)
+    placed_taint_hints = get_type_hints(BridgeOutboundTaintTargetPlaced)
+    assert placed_taint_hints["placed"] is BridgeMemberIncarnation
+    # Generated modules postpone annotations, so TypedDict's runtime
+    # `__required_keys__` cannot see Required[...] reliably. Pin the emitted
+    # qualifier directly, matching the other generated-TypedDict checks.
+    assert "Required" in str(BridgeOutboundTaintTargetPlaced.__annotations__["placed"])
+    assert hard_cancel_hints["expected_run_id"] is RunId
+    assert hard_cancel_hints["operation_id"] is OperationId
+    assert poll_hints["cursor"] == BridgeEventCursor
+    assert get_args(poll_hints["outcome_acks"])[0] is BridgeTurnOutcomeAck
+    assert nullable_members(live_open_hints["transport"]) == {LiveOpenTransport}
+    assert nullable_members(wire_hints["mob_peer_overlay"]) == {
+        BridgeMobPeerOverlayHandoff
+    }
+    assert BridgeMobPeerOverlayHandoff in nullable_members(
+        peer_wiring_hints["mob_peer_overlay"]
+    )
+    assert stale_member_hints["current"] is BridgeMemberIncarnation
+    assert (
+        "current" in BridgeDeliveryRejectionCauseStaleMemberResidency.__optional_keys__
+    )
+    assert nullable_members(stale_residency_hints["current"]) == {
+        BridgeMemberIncarnation
+    }
+
+    materialize_rejection_hints = get_type_hints(
+        BridgeRejectionCauseMaterializeBuildRejectedPayload
+    )
+    scope_rejection_hints = get_type_hints(BridgeRejectionCauseScopeDeniedPayload)
+    assert materialize_rejection_hints["cause"] == MemberBuildRejection
+    assert get_args(scope_rejection_hints["presented"])[0] == WireControlScope
+    assert scope_rejection_hints["required"] == WireControlScope
+
+    # Every externally tagged bridge rejection payload is generated as a
+    # closed TypedDict. A new typed Rust payload must never silently degrade
+    # to `Any` while codegen freshness still passes.
+    payload_types = [
+        value
+        for name, value in vars(generated_types).items()
+        if name.endswith("Payload")
+        and name.startswith(("BridgeRejectionCause", "MemberBuildRejection"))
+    ]
+    assert payload_types
+    for payload_type in payload_types:
+        assert "Any" not in str(get_type_hints(payload_type))
+
+
+def test_generated_system_notice_typed_payloads_do_not_widen():
+    from meerkat.generated.types import (
+        DeferredCatalogDelta,
+        SystemNoticeBlockComms,
+        SystemNoticeBlockToolConfig,
+        SystemNoticePeer,
+        ToolConfigChangedPayload,
+        ToolConfigChangeStatus,
+    )
+
+    comms_hints = get_type_hints(SystemNoticeBlockComms)
+    tool_config_block_hints = get_type_hints(SystemNoticeBlockToolConfig)
+    tool_config_hints = get_type_hints(ToolConfigChangedPayload)
+
+    assert set(get_args(comms_hints["peer"])) == {SystemNoticePeer, type(None)}
+    assert tool_config_block_hints["payload"] is ToolConfigChangedPayload
+    assert tool_config_hints["status_info"] == ToolConfigChangeStatus
+    assert DeferredCatalogDelta in get_args(tool_config_hints["deferred_catalog_delta"])
+    assert "Any" not in str(get_type_hints(SystemNoticePeer))
+    assert "Any" not in str(tool_config_hints)
+
+
+def test_multi_host_contracts_and_member_live_types_are_public_and_closed():
+    import meerkat as public_sdk
+    from meerkat import (
+        BridgeBootstrapToken,
+        BridgeLiveControlOutcome,
+        BridgeLiveControlOutcomeCommitInput,
+        BridgeLiveControlOutcomeInterrupt,
+        BridgeLiveControlOutcomeRefresh,
+        BridgeLiveControlOutcomeTruncate,
+        BridgeLiveControlVerb,
+        BridgeLiveControlVerbCommitInput,
+        BridgeLiveControlVerbInterrupt,
+        BridgeLiveControlVerbRefresh,
+        BridgeLiveControlVerbTruncate,
+        LiveCloseResult,
+        LiveOpenResult,
+        LiveStatusResult,
+        Mob,
+        MobBindHostParams,
+        MobBindHostResult,
+        MobHostStatus,
+        MobHostsResult,
+        MobMemberHistoryParams,
+        MobMemberHistoryResult,
+        MobMemberLiveChannelParams,
+        MobMemberLiveControlParams,
+        MobMemberLiveOpenParams,
+        MobMemberLiveStatusParams,
+        MobMemberLiveTransport,
+        MobRevokeHostParams,
+        MobRevokeHostResult,
+        MobRouteInstallsResult,
+        RealtimeTurningMode,
+        WireHistoryRow,
+        WireHostBindPhase,
+        WireHostBindingDescriptor,
+        WireHostBindingDescriptorKind,
+        WireHostCapabilityFlags,
+        WireHostRef,
+        WireMemberHistoryPageBody,
+        WireMemberLifecycleCapabilities,
+        WireNonPortableResourceKind,
+        WireProjectionProvenance,
+        WireReachability,
+        WireRouteInstallObligation,
+        WireTrustedPeerIdentity,
+        WireTrustedPeerIdentityEd25519PublicKey,
+    )
+    from meerkat.generated.types import (
+        WireSessionMessage,
+        WireSessionMessageBlockAssistant,
+        WireSessionMessageSystem,
+        WireSessionMessageSystemNotice,
+        WireSessionMessageToolResults,
+        WireSessionMessageUser,
+        WireAssistantBlock,
+        WireToolResult,
+        SystemNoticeBlock,
+    )
+
+    public_contracts = {
+        "BridgeBootstrapToken": BridgeBootstrapToken,
+        "BridgeLiveControlOutcome": BridgeLiveControlOutcome,
+        "BridgeLiveControlOutcomeCommitInput": BridgeLiveControlOutcomeCommitInput,
+        "BridgeLiveControlOutcomeInterrupt": BridgeLiveControlOutcomeInterrupt,
+        "BridgeLiveControlOutcomeRefresh": BridgeLiveControlOutcomeRefresh,
+        "BridgeLiveControlOutcomeTruncate": BridgeLiveControlOutcomeTruncate,
+        "BridgeLiveControlVerb": BridgeLiveControlVerb,
+        "BridgeLiveControlVerbCommitInput": BridgeLiveControlVerbCommitInput,
+        "BridgeLiveControlVerbInterrupt": BridgeLiveControlVerbInterrupt,
+        "BridgeLiveControlVerbRefresh": BridgeLiveControlVerbRefresh,
+        "BridgeLiveControlVerbTruncate": BridgeLiveControlVerbTruncate,
+        "LiveCloseResult": LiveCloseResult,
+        "MobBindHostParams": MobBindHostParams,
+        "MobBindHostResult": MobBindHostResult,
+        "MobHostStatus": MobHostStatus,
+        "MobHostsResult": MobHostsResult,
+        "MobMemberHistoryParams": MobMemberHistoryParams,
+        "MobMemberHistoryResult": MobMemberHistoryResult,
+        "MobMemberLiveChannelParams": MobMemberLiveChannelParams,
+        "MobMemberLiveControlParams": MobMemberLiveControlParams,
+        "MobMemberLiveOpenParams": MobMemberLiveOpenParams,
+        "MobMemberLiveStatusParams": MobMemberLiveStatusParams,
+        "MobMemberLiveTransport": MobMemberLiveTransport,
+        "MobRevokeHostParams": MobRevokeHostParams,
+        "MobRevokeHostResult": MobRevokeHostResult,
+        "MobRouteInstallsResult": MobRouteInstallsResult,
+        "WireHistoryRow": WireHistoryRow,
+        "WireHostBindPhase": WireHostBindPhase,
+        "WireHostBindingDescriptor": WireHostBindingDescriptor,
+        "WireHostBindingDescriptorKind": WireHostBindingDescriptorKind,
+        "WireHostCapabilityFlags": WireHostCapabilityFlags,
+        "WireHostRef": WireHostRef,
+        "WireMemberHistoryPageBody": WireMemberHistoryPageBody,
+        "WireMemberLifecycleCapabilities": WireMemberLifecycleCapabilities,
+        "WireNonPortableResourceKind": WireNonPortableResourceKind,
+        "WireProjectionProvenance": WireProjectionProvenance,
+        "WireReachability": WireReachability,
+        "WireRouteInstallObligation": WireRouteInstallObligation,
+        "WireTrustedPeerIdentity": WireTrustedPeerIdentity,
+        "WireTrustedPeerIdentityEd25519PublicKey": WireTrustedPeerIdentityEd25519PublicKey,
+    }
+    assert public_contracts.keys() <= set(public_sdk.__all__)
+    for name, contract in public_contracts.items():
+        assert getattr(public_sdk, name) is contract
+    assert WireHistoryRow is WireSessionMessage
+    assert set(get_args(WireSessionMessage)) == {
+        WireSessionMessageSystem,
+        WireSessionMessageSystemNotice,
+        WireSessionMessageUser,
+        WireSessionMessageBlockAssistant,
+        WireSessionMessageToolResults,
+    }
+    assert "transcript_role" in WireSessionMessageUser.__annotations__
+    assistant_hints = get_type_hints(
+        WireSessionMessageBlockAssistant, include_extras=True
+    )
+    tool_result_hints = get_type_hints(
+        WireSessionMessageToolResults, include_extras=True
+    )
+    system_notice_hints = get_type_hints(
+        WireSessionMessageSystemNotice, include_extras=True
+    )
+    assert "WireAssistantBlock" in str(assistant_hints["blocks"])
+    assert "WireToolResult" in str(tool_result_hints["results"])
+    assert "SystemNoticeBlock" in str(system_notice_hints["blocks"])
+    assert WireAssistantBlock is not dict
+    assert WireToolResult is not dict
+    assert SystemNoticeBlock is not dict
+
+    def optional_literal_values(annotation):
+        literal = next(
+            candidate
+            for candidate in get_args(annotation)
+            if get_origin(candidate) is Literal
+        )
+        return set(get_args(literal))
+
+    generated_open_hints = get_type_hints(MobMemberLiveOpenParams)
+    client_open_hints = get_type_hints(MeerkatClient.open_mob_member_live)
+    mob_open_hints = get_type_hints(Mob.member_live_open)
+    expected_turning_modes = {"provider_managed", "explicit_commit"}
+    expected_transports = {"websocket", "webrtc"}
+
+    assert (
+        optional_literal_values(client_open_hints["turning_mode"])
+        == expected_turning_modes
+    )
+    assert (
+        optional_literal_values(mob_open_hints["turning_mode"])
+        == expected_turning_modes
+    )
+    assert (
+        optional_literal_values(client_open_hints["transport"]) == expected_transports
+    )
+    assert optional_literal_values(mob_open_hints["transport"]) == expected_transports
+    assert (
+        optional_literal_values(generated_open_hints["transport"])
+        == expected_transports
+    )
+    assert set(get_args(MobMemberLiveTransport)) == expected_transports
+    assert set(get_args(RealtimeTurningMode)) == expected_turning_modes
+    assert "automatic" not in expected_turning_modes
+    assert "sse" not in expected_transports
+
+    assert client_open_hints["return"] is LiveOpenResult
+    assert mob_open_hints["return"] is LiveOpenResult
+    assert (
+        get_type_hints(MeerkatClient.close_mob_member_live)["return"] is LiveCloseResult
+    )
+    assert get_type_hints(Mob.member_live_close)["return"] is LiveCloseResult
+    assert (
+        get_type_hints(MeerkatClient.mob_member_live_status)["return"]
+        is LiveStatusResult
+    )
+    assert get_type_hints(Mob.member_live_status)["return"] is LiveStatusResult
+
+    client_control_hints = get_type_hints(MeerkatClient.control_mob_member_live)
+    mob_control_hints = get_type_hints(Mob.member_live_control)
+    assert client_control_hints["verb"] == BridgeLiveControlVerb
+    assert mob_control_hints["verb"] == BridgeLiveControlVerb
+    assert client_control_hints["return"] == BridgeLiveControlOutcome
+    assert mob_control_hints["return"] == BridgeLiveControlOutcome
+    control_verbs = {
+        get_args(get_type_hints(variant)["verb"])[0]
+        for variant in get_args(BridgeLiveControlVerb)
+    }
+    assert control_verbs == {"commit_input", "interrupt", "truncate", "refresh"}
+    assert "pause" not in control_verbs
+
+
 def test_generated_mob_spawn_many_preserves_nested_contract_types():
     from meerkat.generated.types import (
         MobSpawnManyFailedResult as GeneratedMobSpawnManyFailedResult,
@@ -243,6 +723,7 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     spec_hints = get_type_hints(GeneratedMobSpawnSpecParams)
     assert "Any" not in str(spec_hints["initial_message"])
     assert "Any" not in str(spec_hints["backend"])
+    assert str in get_args(spec_hints["placement"])
     assert "WireAuthBindingRef" in str(spec_hints["auth_binding"])
 
     result_hints = get_type_hints(GeneratedMobSpawnManyResult)
@@ -259,15 +740,18 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     failure_hints = get_type_hints(GeneratedMobSpawnManyFailedResult)
     assert get_origin(failure_hints["cause"]) is Literal
     assert "profile_not_found" in get_args(failure_hints["cause"])
+    assert "missing_member_capability" in get_args(failure_hints["cause"])
     assert GeneratedMobSpawnManyFailureCause == failure_hints["cause"]
 
     spec = GeneratedMobSpawnSpecParams(
         profile="worker",
         agent_identity="worker-1",
         initial_message="hello",
+        placement="host-b-peer",
     )
     params = GeneratedMobSpawnManyParams(mob_id="mob-1", specs=[spec])
     assert params.specs[0].agent_identity == "worker-1"
+    assert params.specs[0].placement == "host-b-peer"
 
     entry = GeneratedMobSpawnManyResultEntry(
         status="spawned",
@@ -303,7 +787,9 @@ def test_generated_mob_wire_members_batch_preserves_report_types():
     report_hints = get_type_hints(GeneratedMobWireMembersBatchResult)
     assert report_hints["requested"] is int
     assert get_args(report_hints["wired"]) == (GeneratedMobWireMembersBatchEdge,)
-    assert get_args(report_hints["already_wired"]) == (GeneratedMobWireMembersBatchEdge,)
+    assert get_args(report_hints["already_wired"]) == (
+        GeneratedMobWireMembersBatchEdge,
+    )
 
     report = GeneratedMobWireMembersBatchResult(
         requested=2,
@@ -318,7 +804,9 @@ def test_generated_mob_wire_members_batch_preserves_report_types():
 async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
     from meerkat import MobSpawnManyResult as PublicMobSpawnManyResult
     from meerkat import MobSpawnManyResultEntry as PublicMobSpawnManyResultEntry
-    from meerkat.generated.types import MobSpawnManyResult as GeneratedMobSpawnManyResult
+    from meerkat.generated.types import (
+        MobSpawnManyResult as GeneratedMobSpawnManyResult,
+    )
     from meerkat.generated.types import (
         MobSpawnManyResultEntry as GeneratedMobSpawnManyResultEntry,
     )
@@ -332,7 +820,13 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
         assert method == "mob/spawn_many"
         assert params == {
             "mob_id": "mob-1",
-            "specs": [{"profile": "worker", "agent_identity": "worker-1"}],
+            "specs": [
+                {
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "placement": "host-b-peer",
+                }
+            ],
         }
         return {
             "results": [
@@ -346,8 +840,8 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
                 {
                     "status": "failed",
                     "result": {
-                        "cause": "profile_not_found",
-                        "message": "profile missing",
+                        "cause": "missing_member_capability",
+                        "message": "host lacks tracked input cancellation",
                     },
                 },
             ]
@@ -357,15 +851,21 @@ async def test_spawn_mob_members_preserves_generated_result_envelope_failures():
 
     result = await client.spawn_mob_members(
         "mob-1",
-        [{"profile": "worker", "agent_identity": "worker-1"}],
+        [
+            {
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "placement": "host-b-peer",
+            }
+        ],
     )
 
     assert isinstance(result, GeneratedMobSpawnManyResult)
     assert [entry.status for entry in result.results] == ["spawned", "failed"]
     assert result.results[0].result.agent_identity == "worker-1"
     assert result.results[0].result.member_ref == _make_member_ref("mob-1", "worker-1")
-    assert result.results[1].result.cause == "profile_not_found"
-    assert result.results[1].result.message == "profile missing"
+    assert result.results[1].result.cause == "missing_member_capability"
+    assert result.results[1].result.message == "host lacks tracked input cancellation"
 
 
 @pytest.mark.asyncio
@@ -456,13 +956,20 @@ async def test_mob_wire_members_batch_rejects_malformed_report():
 @pytest.mark.asyncio
 async def test_spawn_mob_members_rejects_malformed_result_envelopes():
     malformed_responses = [
-        {"results": [{"ok": True, "agent_identity": "worker-1", "member_ref": "ref-worker-1"}]},
+        {
+            "results": [
+                {"ok": True, "agent_identity": "worker-1", "member_ref": "ref-worker-1"}
+            ]
+        },
         {"results": [{"status": "spawned"}]},
         {
             "results": [
                 {
                     "status": "ok",
-                    "result": {"agent_identity": "worker-1", "member_ref": "ref-worker-1"},
+                    "result": {
+                        "agent_identity": "worker-1",
+                        "member_ref": "ref-worker-1",
+                    },
                 }
             ]
         },
@@ -493,7 +1000,10 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
             "results": [
                 {
                     "status": "failed",
-                    "result": {"cause": "profile_not_found", "message": "profile missing"},
+                    "result": {
+                        "cause": "profile_not_found",
+                        "message": "profile missing",
+                    },
                     "error": "legacy profile missing",
                 }
             ]
@@ -528,7 +1038,9 @@ async def test_spawn_mob_members_rejects_malformed_result_envelopes():
     for response in malformed_responses:
         client = MeerkatClient()
 
-        async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        async def fake_request(
+            method: str, params: dict[str, object]
+        ) -> dict[str, object]:
             assert method == "mob/spawn_many"
             return response
 
@@ -643,6 +1155,7 @@ def test_generated_mob_member_result_helpers_preserve_schema_types():
 # ---------------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------------
+
 
 def test_usage_defaults():
     usage = Usage()
@@ -911,7 +1424,11 @@ def test_parse_session_history():
         "limit": 2,
         "has_more": True,
         "messages": [
-            {"role": "system", "content": "rules", "created_at": "2026-05-26T10:00:00Z"},
+            {
+                "role": "system",
+                "content": "rules",
+                "created_at": "2026-05-26T10:00:00Z",
+            },
             {
                 "role": "block_assistant",
                 "interaction_id": "019405c8-1234-7000-8000-000000000001",
@@ -929,7 +1446,9 @@ def test_parse_session_history():
                 "role": "tool_results",
                 "interaction_id": None,
                 "run_id": None,
-                "results": [{"tool_use_id": "tc_1", "content": "done", "is_error": False}],
+                "results": [
+                    {"tool_use_id": "tc_1", "content": "done", "is_error": False}
+                ],
                 "created_at": "2026-05-26T10:00:02Z",
             },
         ],
@@ -969,10 +1488,14 @@ def test_parse_session_history_preserves_assistant_image_blocks():
                                 "width": 1024,
                                 "height": 1536,
                                 "revised_prompt": {"disposition": "not_requested"},
-                                "meta": {"provider": "open_ai", "target_model": "gpt-image-1"},
+                                "meta": {
+                                    "provider": "openai",
+                                    "target_model": "gpt-image-1",
+                                },
                             },
                         }
                     ],
+                    "stop_reason": "end_turn",
                     "created_at": "2026-05-26T10:00:00Z",
                 }
             ],
@@ -987,7 +1510,130 @@ def test_parse_session_history_preserves_assistant_image_blocks():
     assert block.width == 1024
     assert block.height == 1536
     assert block.revised_prompt == {"disposition": "not_requested"}
-    assert block.meta == {"provider": "open_ai", "target_model": "gpt-image-1"}
+    assert block.meta == {"provider": "openai", "target_model": "gpt-image-1"}
+
+
+@pytest.mark.parametrize("raw", [None, [], 1, "history"])
+def test_parse_session_history_rejects_non_object_result(raw: object) -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_history(raw)
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("message_count", -1),
+        ("message_count", 1.5),
+        ("message_count", True),
+        ("offset", -1),
+        ("offset", 1.5),
+        ("offset", False),
+        ("limit", -1),
+        ("limit", 1.5),
+        ("limit", True),
+    ],
+)
+def test_parse_session_history_rejects_non_unsigned_paging_fields(
+    field: str,
+    value: object,
+) -> None:
+    raw: dict[str, object] = {
+        "session_id": "s1",
+        "message_count": 0,
+        "offset": 0,
+        "limit": None,
+        "has_more": False,
+        "messages": [],
+    }
+    raw[field] = value
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_history(raw)
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+def test_parse_session_history_requires_messages_field() -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_history(
+            {
+                "session_id": "s1",
+                "message_count": 0,
+                "offset": 0,
+                "has_more": False,
+            }
+        )
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("message_count", -1),
+        ("message_count", 1.5),
+        ("offset", True),
+        ("limit", -1),
+    ],
+)
+def test_parse_session_transcript_revision_rejects_non_unsigned_paging_fields(
+    field: str,
+    value: object,
+) -> None:
+    raw: dict[str, object] = {
+        "session_id": "s1",
+        "revision": "r1",
+        "head_revision": "r1",
+        "message_count": 0,
+        "offset": 0,
+        "limit": None,
+        "has_more": False,
+        "messages": [],
+    }
+    raw[field] = value
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_transcript_revision(raw)
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+def test_parse_session_transcript_revision_requires_messages_field() -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_transcript_revision(
+            {
+                "session_id": "s1",
+                "revision": "r1",
+                "head_revision": "r1",
+                "message_count": 0,
+                "offset": 0,
+                "has_more": False,
+            }
+        )
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+def test_parse_session_transcript_revision_list_requires_entries_field() -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_transcript_revision_list({"head_revision": "r1"})
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("committed_at", [-1, 1.5, True])
+def test_parse_session_transcript_revision_list_rejects_non_unsigned_timestamp(
+    committed_at: object,
+) -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_transcript_revision_list(
+            {
+                "head_revision": "r1",
+                "entries": [
+                    {
+                        "revision": "r1",
+                        "parent_revision": "root",
+                        "reason": "edit",
+                        "committed_at": committed_at,
+                    }
+                ],
+            }
+        )
+    assert exc_info.value.code == "INVALID_RESPONSE"
 
 
 def test_parse_session_message_fails_closed_on_missing_identity_facts():
@@ -999,7 +1645,9 @@ def test_parse_session_message_fails_closed_on_missing_identity_facts():
     assert excinfo.value.code == "INVALID_RESPONSE"
 
     with pytest.raises(MeerkatError) as excinfo:
-        MeerkatClient._parse_session_message({"role": "user", "content": "no created_at"})
+        MeerkatClient._parse_session_message(
+            {"role": "user", "content": "no created_at"}
+        )
     assert excinfo.value.code == "INVALID_RESPONSE"
 
     with pytest.raises(MeerkatError) as excinfo:
@@ -1059,10 +1707,173 @@ def test_parse_session_message_fails_closed_on_missing_identity_facts():
     assert excinfo.value.code == "INVALID_RESPONSE"
 
 
+def _valid_session_transcript_rewrite_result() -> dict[str, object]:
+    return {
+        "session_id": "s1",
+        "revision": "r2",
+        "parent_revision": "r1",
+        "message_count": 1,
+        "commit": {
+            "parent_revision": "r1",
+            "revision": "r2",
+            "selection": {"type": "message_range", "start": 0, "end": 1},
+            "original_span_digest": "sha256:original",
+            "replacement_digest": "sha256:replacement",
+            "messages_before": 2,
+            "messages_after": 1,
+            "reason": {"kind": "edit", "note": None},
+            "actor": None,
+            "committed_at": {
+                "secs_since_epoch": 1_768_737_600,
+                "nanos_since_epoch": 123,
+            },
+        },
+    }
+
+
+def test_parse_session_transcript_rewrite_result_accepts_schema_nullable_fields():
+    raw = _valid_session_transcript_rewrite_result()
+
+    result = MeerkatClient._parse_session_transcript_rewrite_result(raw)
+
+    assert result.message_count == 1
+    assert result.commit == raw["commit"]
+
+
+@pytest.mark.parametrize("raw", [None, [], 1, "rewrite"])
+def test_parse_session_transcript_rewrite_result_rejects_non_object_envelope(
+    raw: object,
+) -> None:
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("message_count", [-1, 1.5, True])
+def test_parse_session_transcript_rewrite_result_rejects_non_unsigned_count(
+    message_count: object,
+) -> None:
+    raw = _valid_session_transcript_rewrite_result()
+    raw["message_count"] = message_count
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "parent_revision",
+        "revision",
+        "selection",
+        "original_span_digest",
+        "replacement_digest",
+        "messages_before",
+        "messages_after",
+        "reason",
+        "committed_at",
+    ],
+)
+def test_parse_session_transcript_rewrite_result_requires_commit_fields(
+    field: str,
+) -> None:
+    raw = _valid_session_transcript_rewrite_result()
+    commit = raw["commit"]
+    assert isinstance(commit, dict)
+    del commit[field]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "messages_before",
+        "messages_after",
+        "selection.start",
+        "selection.end",
+        "committed_at.secs_since_epoch",
+        "committed_at.nanos_since_epoch",
+    ],
+)
+def test_parse_session_transcript_rewrite_result_rejects_non_unsigned_commit_fields(
+    field: str,
+    value: object,
+) -> None:
+    raw = _valid_session_transcript_rewrite_result()
+    commit = raw["commit"]
+    assert isinstance(commit, dict)
+    if "." not in field:
+        commit[field] = value
+    else:
+        owner_name, child_name = field.split(".")
+        owner = commit[owner_name]
+        assert isinstance(owner, dict)
+        owner[child_name] = value
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("field", ["actor", "reason.note"])
+@pytest.mark.parametrize("value", [False, 1, [], {}])
+def test_parse_session_transcript_rewrite_result_rejects_malformed_nullable_strings(
+    field: str,
+    value: object,
+) -> None:
+    raw = _valid_session_transcript_rewrite_result()
+    commit = raw["commit"]
+    assert isinstance(commit, dict)
+    if field == "actor":
+        commit[field] = value
+    else:
+        reason = commit["reason"]
+        assert isinstance(reason, dict)
+        reason["note"] = value
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_session_transcript_rewrite_result(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"type": "message_range", "start": 0, "end": 1},
+        {"type": "edit_message_range", "range": {"start": 0, "end": 1}},
+        {
+            "type": "compaction_message_range",
+            "range": {"start": 0, "end": 1},
+        },
+    ],
+)
+def test_parse_session_transcript_rewrite_result_accepts_all_selection_arms(
+    selection: dict[str, object],
+) -> None:
+    raw = _valid_session_transcript_rewrite_result()
+    commit = raw["commit"]
+    assert isinstance(commit, dict)
+    commit["selection"] = selection
+
+    result = MeerkatClient._parse_session_transcript_rewrite_result(raw)
+
+    assert result.commit["selection"] == selection
+
+
 def test_parse_session_transcript_rewrite_result_fails_closed():
     with pytest.raises(MeerkatError) as excinfo:
         MeerkatClient._parse_session_transcript_rewrite_result(
-            {"revision": "r2", "parent_revision": "r1", "message_count": 1, "commit": {}}
+            {
+                "revision": "r2",
+                "parent_revision": "r1",
+                "message_count": 1,
+                "commit": {},
+            }
         )
     assert excinfo.value.code == "INVALID_RESPONSE"
 
@@ -1076,6 +1887,24 @@ def test_parse_session_transcript_rewrite_result_fails_closed():
             }
         )
     assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+def test_transcript_rewrite_public_types_preserve_schema_nullability():
+    from meerkat.types import (
+        TranscriptRewriteReason,
+        TranscriptRewriteSystemNoticeMessage,
+    )
+
+    reason_hints = get_type_hints(TranscriptRewriteReason, include_extras=True)
+    notice_hints = get_type_hints(
+        TranscriptRewriteSystemNoticeMessage,
+        include_extras=True,
+    )
+
+    reason_note = get_args(reason_hints["note"])[0]
+    notice_body = get_args(notice_hints["body"])[0]
+    assert set(get_args(reason_note)) == {str, type(None)}
+    assert set(get_args(notice_body)) == {str, type(None)}
 
 
 def test_transcript_rewrite_serializes_edited_parsed_message_over_raw_payload():
@@ -1111,6 +1940,7 @@ def test_transcript_rewrite_serializes_block_assistant_blocks_to_wire_shape():
                     "provider_block_id": "block-1",
                 }
             ],
+            "stop_reason": "end_turn",
         }
     )
 
@@ -1123,6 +1953,7 @@ def test_transcript_rewrite_serializes_block_assistant_blocks_to_wire_shape():
     assert serialized == {
         "role": "block_assistant",
         "created_at": "2026-05-26T10:00:00Z",
+        "stop_reason": "end_turn",
         "blocks": [
             {
                 "block_type": "text",
@@ -1152,6 +1983,88 @@ def test_transcript_rewrite_serializes_system_notice_with_one_body_alias():
         "created_at": "2026-05-26T10:00:00Z",
     }
     assert "content" not in serialized
+
+
+def test_session_history_rewrite_round_trip_preserves_wire_content_and_provenance():
+    rows = [
+        {
+            "role": "user",
+            "created_at": "2026-07-12T10:00:00Z",
+            "transcript_role": "injected_context",
+            "content": [
+                {"type": "structured", "data": {"answer": 42}},
+                {"type": "unknown"},
+                {
+                    "type": "video",
+                    "media_type": "video/mp4",
+                    "duration_ms": 1200,
+                    "source": "uri",
+                    "uri": "gs://bucket/clip.mp4",
+                },
+            ],
+        },
+        {
+            "role": "system_notice",
+            "kind": "comms",
+            "body": "peer update",
+            "blocks": [
+                {
+                    "type": "comms",
+                    "direction": "incoming",
+                    "kind": "message",
+                    "content": [{"type": "structured", "data": {"peer": "worker"}}],
+                }
+            ],
+            "created_at": "2026-07-12T10:00:01Z",
+        },
+        {
+            "role": "block_assistant",
+            "blocks": [
+                {
+                    "block_type": "transcript",
+                    "data": {
+                        "text": "spoken text",
+                        "source": {"kind": "unknown", "debug": "future_lane"},
+                    },
+                },
+                {"block_type": "unknown"},
+            ],
+            "stop_reason": "end_turn",
+            "created_at": "2026-07-12T10:00:02Z",
+        },
+        {
+            "role": "tool_results",
+            "results": [
+                {
+                    "tool_use_id": "tool-1",
+                    "content": [
+                        {
+                            "type": "image",
+                            "media_type": "image/png",
+                            "source": "blob",
+                            "blob_id": "blob-1",
+                        },
+                        {"type": "structured", "data": [1, 2, 3]},
+                    ],
+                    "is_error": False,
+                }
+            ],
+            "created_at": "2026-07-12T10:00:03Z",
+        },
+    ]
+
+    parsed = [MeerkatClient._parse_session_message(row) for row in rows]
+    assert parsed[0].transcript_role == "injected_context"
+    assert parsed[1].blocks == []
+    assert parsed[2].blocks[0].source == {
+        "kind": "unknown",
+        "debug": "future_lane",
+    }
+    assert parsed[3].results[0].content == rows[3]["results"][0]["content"]
+    assert [
+        MeerkatClient._serialize_transcript_rewrite_message(message)
+        for message in parsed
+    ] == rows
 
 
 def test_skill_key_export():
@@ -1237,7 +2150,9 @@ async def test_session_history_convenience_method_uses_client() -> None:
     )
 
     class StubClient:
-        async def read_session_history(self, session_id: str, *, offset: int = 0, limit: int | None = None) -> SessionHistory:
+        async def read_session_history(
+            self, session_id: str, *, offset: int = 0, limit: int | None = None
+        ) -> SessionHistory:
             assert session_id == "abc"
             assert offset == 2
             assert limit == 5
@@ -1292,7 +2207,9 @@ async def test_deferred_session_history_convenience_method_uses_client() -> None
     )
 
     class StubClient:
-        async def read_session_history(self, session_id: str, *, offset: int = 0, limit: int | None = None) -> SessionHistory:
+        async def read_session_history(
+            self, session_id: str, *, offset: int = 0, limit: int | None = None
+        ) -> SessionHistory:
             assert session_id == "def"
             assert offset == 1
             assert limit is None
@@ -1304,7 +2221,9 @@ async def test_deferred_session_history_convenience_method_uses_client() -> None
 
 
 @pytest.mark.asyncio
-async def test_create_deferred_session_returns_runtime_backed_deferred_wrapper() -> None:
+async def test_create_deferred_session_returns_runtime_backed_deferred_wrapper() -> (
+    None
+):
     client = MeerkatClient()
     seen: list[tuple[str, dict[str, object]]] = []
 
@@ -1418,8 +2337,7 @@ def test_capability_available():
 # SITE 1 — capabilities status: externally-tagged CapabilityStatus enum.
 def test_parse_wire_capability_status_accepts_bare_string():
     assert (
-        MeerkatClient._parse_wire_capability_status("Available", "ctx")
-        == "Available"
+        MeerkatClient._parse_wire_capability_status("Available", "ctx") == "Available"
     )
 
 
@@ -1432,9 +2350,7 @@ def test_parse_wire_capability_status_accepts_externally_tagged_enum():
         == "DisabledByPolicy"
     )
     assert (
-        MeerkatClient._parse_wire_capability_status(
-            {"SomeFutureVariant": {}}, "ctx"
-        )
+        MeerkatClient._parse_wire_capability_status({"SomeFutureVariant": {}}, "ctx")
         == "SomeFutureVariant"
     )
 
@@ -1530,14 +2446,9 @@ def test_member_send_returns_runtime_handling_mode():
 
 # SITE 3 — mob/respawn outcome.
 def test_parse_wire_respawn_outcome_accepts_valid():
+    assert MeerkatClient._parse_wire_respawn_outcome("completed", "ctx") == "completed"
     assert (
-        MeerkatClient._parse_wire_respawn_outcome("completed", "ctx")
-        == "completed"
-    )
-    assert (
-        MeerkatClient._parse_wire_respawn_outcome(
-            "topology_restore_failed", "ctx"
-        )
+        MeerkatClient._parse_wire_respawn_outcome("topology_restore_failed", "ctx")
         == "topology_restore_failed"
     )
 
@@ -1560,9 +2471,7 @@ def test_parse_wire_append_system_context_status_accepts_valid():
         == "staged"
     )
     assert (
-        MeerkatClient._parse_wire_append_system_context_status(
-            "duplicate", "ctx"
-        )
+        MeerkatClient._parse_wire_append_system_context_status("duplicate", "ctx")
         == "duplicate"
     )
 
@@ -1583,6 +2492,7 @@ def test_parse_wire_append_system_context_status_fails_closed(raw):
 # Error hierarchy
 # ---------------------------------------------------------------------------
 
+
 def test_error_hierarchy():
     assert issubclass(CapabilityUnavailableError, MeerkatError)
     assert issubclass(SessionNotFoundError, MeerkatError)
@@ -1600,6 +2510,7 @@ def test_error_fields():
 # ---------------------------------------------------------------------------
 # Typed events
 # ---------------------------------------------------------------------------
+
 
 def test_text_delta_is_event():
     td = TextDelta(delta="hello")
@@ -1635,17 +2546,27 @@ def test_budget_warning():
 
 
 def test_hook_denied_optional_payload():
-    hd = HookDenied(hook_id="h1", point="pre_tool_execution",
-                     reason_code="policy_violation", message="blocked")
+    hd = HookDenied(
+        hook_id="h1",
+        point="pre_tool_execution",
+        reason_code="policy_violation",
+        message="blocked",
+    )
     assert hd.payload is None
-    hd2 = HookDenied(hook_id="h1", point="pre_tool_execution",
-                      reason_code="safety", message="bad", payload={"detail": "x"})
+    hd2 = HookDenied(
+        hook_id="h1",
+        point="pre_tool_execution",
+        reason_code="safety",
+        message="bad",
+        payload={"detail": "x"},
+    )
     assert hd2.payload == {"detail": "x"}
 
 
 # ---------------------------------------------------------------------------
 # Event parser
 # ---------------------------------------------------------------------------
+
 
 def test_parse_text_delta():
     raw = {"type": "text_delta", "delta": "Hello"}
@@ -1665,7 +2586,7 @@ def test_parse_interaction_complete_structured_output():
     raw = {
         "type": "interaction_complete",
         "interaction_id": "i1",
-        "result": "{\"answer\":42}",
+        "result": '{"answer":42}',
         "structured_output": {"answer": 42},
     }
     event = parse_event(raw)
@@ -1963,11 +2884,13 @@ def test_parse_transcript_rewrite_committed_exposes_record():
         "parent_body": {"revision": "rev-parent"},
         "revision_body": {"revision": "rev-next"},
     }
-    event = parse_event({
-        "type": "transcript_rewrite_committed",
-        "session_id": "session-123",
-        "record": record,
-    })
+    event = parse_event(
+        {
+            "type": "transcript_rewrite_committed",
+            "session_id": "session-123",
+            "record": record,
+        }
+    )
 
     assert isinstance(event, TranscriptRewriteCommitted)
     assert event.session_id == "session-123"
@@ -2057,7 +2980,10 @@ def test_parse_run_failed_does_not_infer_terminal_cause_from_display_fields():
 def test_parse_malformed_known_events_preserves_raw_payload():
     cases = [
         (
-            {"type": "turn_completed", "usage": {"input_tokens": 50, "output_tokens": 20}},
+            {
+                "type": "turn_completed",
+                "usage": {"input_tokens": 50, "output_tokens": 20},
+            },
             "missing stop_reason must not become end_turn",
         ),
         (
@@ -2200,40 +3126,44 @@ def test_parse_run_failed_does_not_promote_string_only_hook_id_mirrors():
     assert "hook_id" not in reason
     assert "hook_id_string" not in reason
 
-    malformed = parse_event({
-        "type": "run_failed",
-        "session_id": "session-1",
-        "error_class": "hook",
-        "error": "denied",
-        "error_report": {
-            "class": "hook",
-            "message": "denied",
-            "reason": {
-                "reason_type": "hook_denied",
-                "hook_id": {"value": "policy-gate"},
-                "point": "pre_tool_execution",
-                "reason_code": "policy",
+    malformed = parse_event(
+        {
+            "type": "run_failed",
+            "session_id": "session-1",
+            "error_class": "hook",
+            "error": "denied",
+            "error_report": {
+                "class": "hook",
+                "message": "denied",
+                "reason": {
+                    "reason_type": "hook_denied",
+                    "hook_id": {"value": "policy-gate"},
+                    "point": "pre_tool_execution",
+                    "reason_code": "policy",
+                },
             },
-        },
-    })
+        }
+    )
     assert isinstance(malformed, UnknownEvent)
     assert malformed.type == "malformed_event"
 
-    timeout_string_mirror = parse_event({
-        "type": "run_failed",
-        "session_id": "session-1",
-        "error_class": "hook",
-        "error": "timeout",
-        "error_report": {
-            "class": "hook",
-            "message": "timeout",
-            "reason": {
-                "reason_type": "hook_timeout",
-                "hook_id_string": "legacy-policy-gate",
-                "timeout_ms": 100,
+    timeout_string_mirror = parse_event(
+        {
+            "type": "run_failed",
+            "session_id": "session-1",
+            "error_class": "hook",
+            "error": "timeout",
+            "error_report": {
+                "class": "hook",
+                "message": "timeout",
+                "reason": {
+                    "reason_type": "hook_timeout",
+                    "hook_id_string": "legacy-policy-gate",
+                    "timeout_ms": 100,
+                },
             },
-        },
-    })
+        }
+    )
     assert isinstance(timeout_string_mirror, UnknownEvent)
     assert timeout_string_mirror.type == "malformed_event"
 
@@ -2245,7 +3175,12 @@ def test_parse_tool_execution_completed():
         "name": "search",
         "content": [
             {"type": "text", "text": "found it"},
-            {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
+            {
+                "type": "image",
+                "media_type": "image/png",
+                "source": "inline",
+                "data": "AAAA",
+            },
         ],
         "is_error": False,
         "duration_ms": 42,
@@ -2257,7 +3192,12 @@ def test_parse_tool_execution_completed():
     assert event.is_error is False
     assert event.content == [
         {"type": "text", "text": "found it"},
-        {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
+        {
+            "type": "image",
+            "media_type": "image/png",
+            "source": "inline",
+            "data": "AAAA",
+        },
     ]
 
 
@@ -2291,19 +3231,23 @@ def test_parse_tool_execution_completed_preserves_malformed_content_blocks():
 
 
 def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_error():
-    missing = parse_event({
-        "type": "tool_execution_completed",
-        "id": "t1",
-        "name": "search",
-        "content": [{"type": "text", "text": "found it"}],
-    })
-    malformed = parse_event({
-        "type": "tool_execution_completed",
-        "id": "t1",
-        "name": "search",
-        "content": [{"type": "text", "text": "found it"}],
-        "is_error": "false",
-    })
+    missing = parse_event(
+        {
+            "type": "tool_execution_completed",
+            "id": "t1",
+            "name": "search",
+            "content": [{"type": "text", "text": "found it"}],
+        }
+    )
+    malformed = parse_event(
+        {
+            "type": "tool_execution_completed",
+            "id": "t1",
+            "name": "search",
+            "content": [{"type": "text", "text": "found it"}],
+            "is_error": "false",
+        }
+    )
     assert isinstance(missing, ToolExecutionCompleted)
     assert isinstance(malformed, ToolExecutionCompleted)
     assert missing.is_error is None
@@ -2335,8 +3279,12 @@ def test_parse_missing_type():
 
 
 def test_parse_compaction_started():
-    raw = {"type": "compaction_started", "input_tokens": 5000,
-           "estimated_history_tokens": 4000, "message_count": 12}
+    raw = {
+        "type": "compaction_started",
+        "input_tokens": 5000,
+        "estimated_history_tokens": 4000,
+        "message_count": 12,
+    }
     event = parse_event(raw)
     assert isinstance(event, CompactionStarted)
     assert event.input_tokens == 5000
@@ -2344,8 +3292,13 @@ def test_parse_compaction_started():
 
 
 def test_parse_retrying():
-    raw = {"type": "retrying", "attempt": 2, "max_attempts": 3,
-           "error": "rate limit", "delay_ms": 2000}
+    raw = {
+        "type": "retrying",
+        "attempt": 2,
+        "max_attempts": 3,
+        "error": "rate limit",
+        "delay_ms": 2000,
+    }
     event = parse_event(raw)
     assert isinstance(event, Retrying)
     assert event.attempt == 2
@@ -2522,7 +3475,12 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
 
     blocks = [
         {"type": "text", "text": "hello"},
-        {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
+        {
+            "type": "image",
+            "media_type": "image/png",
+            "source": "inline",
+            "data": "AAAA",
+        },
     ]
     send_receipt = await client.send(
         "s1",
@@ -2586,7 +3544,11 @@ async def test_client_read_session_history_calls_expected_rpc_method():
             "limit": params.get("limit"),
             "has_more": False,
             "messages": [
-                {"role": "user", "content": "hello", "created_at": "2026-05-26T10:00:00Z"},
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "created_at": "2026-05-26T10:00:00Z",
+                },
                 {
                     "role": "block_assistant",
                     "blocks": [{"block_type": "text", "data": {"text": "ok"}}],
@@ -3004,7 +3966,9 @@ async def test_schedule_wrappers_reject_missing_or_malformed_required_results():
     for method, response in cases:
         client = MeerkatClient()
 
-        async def fake_request(request_method, params, response=response, method=method):
+        async def fake_request(
+            request_method, params, response=response, method=method
+        ):
             assert request_method == method
             return response
 
@@ -3094,6 +4058,7 @@ async def test_client_workgraph_wrappers_use_expected_rpc_methods():
         "created_at": timestamp,
         "updated_at": timestamp,
     }
+
     async def fake_request(method, params):
         calls.append((method, params))
         if method == "workgraph/get":
@@ -3459,6 +4424,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
 # Pattern matching
 # ---------------------------------------------------------------------------
 
+
 def test_match_case_text_delta():
     event = parse_event({"type": "text_delta", "delta": "hi"})
     match event:
@@ -3555,9 +4521,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                     "snapshot": {
                         "reachable_peer_count": 2,
                         "unknown_peer_count": 1,
-                        "unreachable_peers": [
-                            {"peer": "agent-b", "reason": "timeout"}
-                        ],
+                        "unreachable_peers": [{"peer": "agent-b", "reason": "timeout"}],
                     },
                 },
                 "resolved_capabilities": {
@@ -3619,7 +4583,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     client._request = fake_request  # type: ignore[method-assign]
     client.require_capability = lambda _cap: None  # type: ignore[method-assign]
 
-    mob = await client.create_mob(definition={"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}})
+    mob = await client.create_mob(
+        definition={
+            "id": "mob-1",
+            "profiles": {"worker": {"model": "claude-sonnet-4-6"}},
+        }
+    )
     assert mob.id == "mob-1"
     assert await client.list_mobs() == [{"mob_id": "mob-1"}]
     assert await client.mob_status("mob-1") == {"mob_id": "mob-1", "status": "running"}
@@ -3641,12 +4610,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         labels={"role": "planner"},
         context={"ticket": "LUC-134"},
         additional_instructions=["stay focused"],
+        placement="host-b",
         binding={"kind": "session"},
         shell_env={"TEST_MODE": "1"},
         auto_wire_parent=True,
         launch_mode={"mode": "fresh"},
         tool_access_policy={"type": "allow_list", "value": ["grep"]},
-        budget_split_policy={"type": "remaining"},
         inherited_tool_filter={"Allow": ["grep"]},
         override_profile={
             "model": "claude-sonnet-4-6",
@@ -3714,7 +4683,9 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     scoped_ready_members = await mob_handle.wait_for_ready(timeout_ms=88)
     assert scoped_ready_members[0]["agent_identity"] == "agent-a"
 
-    append_result = await client.append_mob_system_context("mob-1", "agent-a", "context")
+    append_result = await client.append_mob_system_context(
+        "mob-1", "agent-a", "context"
+    )
     assert append_result == {
         "mob_id": "mob-1",
         "agent_identity": "agent-a",
@@ -3785,12 +4756,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "labels": {"role": "planner"},
         "context": {"ticket": "LUC-134"},
         "additional_instructions": ["stay focused"],
+        "placement": "host-b",
         "binding": {"kind": "session"},
         "shell_env": {"TEST_MODE": "1"},
         "auto_wire_parent": True,
         "launch_mode": {"mode": "fresh"},
         "tool_access_policy": {"type": "allow_list", "value": ["grep"]},
-        "budget_split_policy": {"type": "remaining"},
         "inherited_tool_filter": {"Allow": ["grep"]},
         "override_profile": {
             "model": "claude-sonnet-4-6",
@@ -3848,7 +4819,9 @@ async def test_client_mob_wrappers_reject_malformed_success_responses():
 async def test_spawn_mob_member_rejects_missing_runtime_mob_id() -> None:
     client = MeerkatClient()
 
-    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+    async def fake_request(
+        _method: str, _params: dict[str, object]
+    ) -> dict[str, object]:
         return {
             "agent_identity": "agent-a",
             "member_ref": _make_member_ref("mob-1", "agent-a"),
@@ -4308,7 +5281,9 @@ async def test_mob_helper_and_respawn_paths_use_identity_native_receipts() -> No
     client._request = fake_request  # type: ignore[method-assign]
 
     helper = await client.spawn_mob_helper("mob-1", "help", role_name="worker")
-    forked = await client.fork_mob_helper("mob-1", "agent-a", "help", role_name="worker")
+    forked = await client.fork_mob_helper(
+        "mob-1", "agent-a", "help", role_name="worker"
+    )
     respawned = await client.respawn_mob_member("mob-1", "agent-a")
 
     # App-facing receipts expose only `member_ref`; binding-era
@@ -4382,7 +5357,9 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
 async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
     client = MeerkatClient()
 
-    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+    async def fake_request(
+        _method: str, _params: dict[str, object]
+    ) -> dict[str, object]:
         return {"handling_mode": "queue"}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -4395,7 +5372,9 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
 async def test_send_mob_member_content_rejects_missing_runtime_identity() -> None:
     client = MeerkatClient()
 
-    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+    async def fake_request(
+        _method: str, _params: dict[str, object]
+    ) -> dict[str, object]:
         return {
             "mob_id": "mob-1",
             "member_ref": _make_member_ref("mob-1", "agent-a"),
@@ -4412,7 +5391,9 @@ async def test_send_mob_member_content_rejects_missing_runtime_identity() -> Non
 async def test_send_mob_member_content_rejects_missing_runtime_mob_id() -> None:
     client = MeerkatClient()
 
-    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+    async def fake_request(
+        _method: str, _params: dict[str, object]
+    ) -> dict[str, object]:
         return {
             "agent_identity": "agent-a",
             "member_ref": _make_member_ref("mob-1", "agent-a"),
@@ -4429,7 +5410,9 @@ async def test_send_mob_member_content_rejects_missing_runtime_mob_id() -> None:
 async def test_send_mob_member_content_rejects_mismatched_runtime_mob_id() -> None:
     client = MeerkatClient()
 
-    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+    async def fake_request(
+        _method: str, _params: dict[str, object]
+    ) -> dict[str, object]:
         return {
             "mob_id": "mob-2",
             "agent_identity": "agent-a",
@@ -4488,8 +5471,7 @@ def test_generated_wire_live_channel_capabilities_exposes_typed_booleans():
     }
     for f in fields(WireLiveChannelCapabilities):
         assert f.type in {"bool", bool}, (
-            f"WireLiveChannelCapabilities.{f.name} must be typed `bool`, "
-            f"got {f.type!r}"
+            f"WireLiveChannelCapabilities.{f.name} must be typed `bool`, got {f.type!r}"
         )
 
 
@@ -4875,12 +5857,36 @@ def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():
     # NOT `dict[str, Any]`. The string check pins the typed reference so
     # a regression to the opaque shape fails this test loudly.
     variants_with_data = [
-        (WireAssistantBlockText, WireAssistantBlockTextData, "WireAssistantBlockTextData"),
-        (WireAssistantBlockTranscript, WireAssistantBlockTranscriptData, "WireAssistantBlockTranscriptData"),
-        (WireAssistantBlockReasoning, WireAssistantBlockReasoningData, "WireAssistantBlockReasoningData"),
-        (WireAssistantBlockToolUse, WireAssistantBlockToolUseData, "WireAssistantBlockToolUseData"),
-        (WireAssistantBlockServerToolContent, WireAssistantBlockServerToolContentData, "WireAssistantBlockServerToolContentData"),
-        (WireAssistantBlockImage, WireAssistantBlockImageData, "WireAssistantBlockImageData"),
+        (
+            WireAssistantBlockText,
+            WireAssistantBlockTextData,
+            "WireAssistantBlockTextData",
+        ),
+        (
+            WireAssistantBlockTranscript,
+            WireAssistantBlockTranscriptData,
+            "WireAssistantBlockTranscriptData",
+        ),
+        (
+            WireAssistantBlockReasoning,
+            WireAssistantBlockReasoningData,
+            "WireAssistantBlockReasoningData",
+        ),
+        (
+            WireAssistantBlockToolUse,
+            WireAssistantBlockToolUseData,
+            "WireAssistantBlockToolUseData",
+        ),
+        (
+            WireAssistantBlockServerToolContent,
+            WireAssistantBlockServerToolContentData,
+            "WireAssistantBlockServerToolContentData",
+        ),
+        (
+            WireAssistantBlockImage,
+            WireAssistantBlockImageData,
+            "WireAssistantBlockImageData",
+        ),
     ]
     for variant_td, data_td, data_name in variants_with_data:
         hints = get_type_hints(variant_td, include_extras=True)
@@ -5278,6 +6284,102 @@ async def test_fork_session_parses_valid_result() -> None:
     assert result.source_session_id == "src-1"
     assert result.session_id == "fork-1"
     assert result.message_count == 7
+
+
+@pytest.mark.parametrize("session_ref", [1, False, {}, []])
+def test_fork_session_rejects_non_string_non_null_session_ref(
+    session_ref: object,
+) -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_fork_result(
+            {
+                "source_session_id": "src-1",
+                "session_id": "fork-1",
+                "session_ref": session_ref,
+                "message_count": 7,
+            }
+        )
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("raw", [None, [], 1, "fork"])
+def test_fork_session_rejects_non_object_result(raw: object) -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_fork_result(raw)
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("message_count", [-1, 1.5, True])
+def test_fork_session_rejects_non_unsigned_message_count(
+    message_count: object,
+) -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._parse_session_fork_result(
+            {
+                "source_session_id": "src-1",
+                "session_id": "fork-1",
+                "message_count": message_count,
+            }
+        )
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_deferred_session_forks_forward_tool_access_policy() -> None:
+    client = MeerkatClient()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {
+            "source_session_id": "src-1",
+            "session_id": "fork-1",
+            "message_count": 1,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+    session = DeferredSession(client, "src-1")
+    policy = {"type": "allow_list", "value": ["search"]}
+
+    await session.fork_at(
+        1,
+        running_behavior="reject",
+        tool_access_policy=policy,
+    )
+    await session.fork_replace(
+        1,
+        {
+            "type": "user_content_block",
+            "block_index": 0,
+            "block": {"type": "text", "text": "replacement"},
+        },
+        tool_access_policy=policy,
+    )
+
+    assert calls == [
+        (
+            "session/fork_at",
+            {
+                "session_id": "src-1",
+                "message_index": 1,
+                "running_behavior": "reject",
+                "tool_access_policy": policy,
+            },
+        ),
+        (
+            "session/fork_replace",
+            {
+                "session_id": "src-1",
+                "message_index": 1,
+                "replacement": {
+                    "type": "user_content_block",
+                    "block_index": 0,
+                    "block": {"type": "text", "text": "replacement"},
+                },
+                "tool_access_policy": policy,
+            },
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------

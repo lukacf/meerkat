@@ -344,8 +344,7 @@ impl RuntimeStore for FailPersistInputStore {
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &LogicalRuntimeId,
-        commit: meerkat_runtime::store::MachineLifecycleCommit,
-        input_states: &[InputStatePersistenceRecord],
+        finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
     ) -> Result<(), RuntimeStoreError> {
         if self
             .fail_commit_machine_lifecycle
@@ -356,7 +355,7 @@ impl RuntimeStore for FailPersistInputStore {
             ));
         }
         self.inner
-            .commit_unregister_finalization(runtime_id, commit, input_states)
+            .commit_unregister_finalization(runtime_id, finalization)
             .await
     }
 
@@ -366,6 +365,16 @@ impl RuntimeStore for FailPersistInputStore {
         snapshot: &meerkat_runtime::PersistedOpsSnapshot,
     ) -> Result<(), RuntimeStoreError> {
         self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+    }
+
+    async fn initialize_ops_lifecycle_if_absent(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        candidate: &meerkat_runtime::PersistedOpsSnapshot,
+    ) -> Result<meerkat_runtime::PersistedOpsSnapshot, RuntimeStoreError> {
+        self.inner
+            .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+            .await
     }
 
     async fn load_ops_lifecycle(

@@ -223,8 +223,8 @@ fn unregister_session_rejected_until_all_drain_obligations_closed() {
     assert_eq!(state.session_id, None, "unregister must clear the session");
     assert_eq!(
         state.registration_phase,
-        mm_dsl::RegistrationPhase::Queuing,
-        "the drain window closes with the teardown commit"
+        mm_dsl::RegistrationPhase::Draining,
+        "the terminal cleanup tombstone must remain until exact entry removal"
     );
     assert!(!state.unregister_runtime_loop_drain_pending);
     assert!(!state.unregister_comms_drain_exit_pending);

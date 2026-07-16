@@ -281,6 +281,7 @@ test('Mob.spawn rejects typed failed rows instead of projecting success', async 
         {
           status: 'failed',
           result: {
+            cause: 'profile_not_found',
             message: 'profile missing',
           },
         },
@@ -290,7 +291,7 @@ test('Mob.spawn rejects typed failed rows instead of projecting success', async 
 
   await assert.rejects(
     () => mob.spawn([{ profile: 'worker', agent_identity: 'worker-1' }]),
-    /Mob spawn failed: profile missing/,
+    /Mob spawn failed \(profile_not_found\): profile missing/,
   );
 });
 

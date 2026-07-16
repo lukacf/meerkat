@@ -802,6 +802,9 @@ impl TurnStateHandle for TestTurnStateHandle {
                     ("tool_count", KernelValue::U64(u64::from(tool_count))),
                 ],
             ),
+            TurnExecutionInput::CallbackPending { run_id } => {
+                input("CallbackPending", [("run_id", run_id_value(&run_id))])
+            }
             TurnExecutionInput::LlmReturnedTerminal { run_id } => {
                 input("LlmReturnedTerminal", [("run_id", run_id_value(&run_id))])
             }
@@ -1350,6 +1353,14 @@ impl TurnStateHandle for TestTurnStateHandle {
 
             Ok(TurnStateSnapshot {
                 active_run_id,
+                terminal_run_id: option_named_string(
+                    &state,
+                    "turn_terminal_run_id",
+                    "RunId",
+                    CONTEXT,
+                )?
+                .map(|id| parse_run_id(&id, "turn_terminal_run_id", CONTEXT))
+                .transpose()?,
                 loop_state: loop_state_from_turn_phase(turn_phase),
                 turn_phase,
                 turn_terminal,

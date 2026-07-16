@@ -72,9 +72,13 @@ fn slim_cli_does_not_enable_openai_realtime_unconditionally() -> Result<(), Stri
         vec![
             "openai",
             "meerkat/openai-realtime",
+            "meerkat/live",
+            "dep:meerkat-live",
             "meerkat-rpc?/openai-realtime"
         ],
-        "the CLI realtime feature should be explicit and forward only through the facade"
+        "the CLI realtime feature is explicit; `rkat mob host` composes the live \
+         plane (LiveAdapterHost) under it per multi-host §16.5/§21.4, so slim \
+         builds that drop openai-realtime also drop meerkat-live"
     );
 
     let meerkat_dependency = dependency_table(&cli_manifest, "meerkat")?;

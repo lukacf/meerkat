@@ -415,6 +415,66 @@ mod tests {
     }
 
     #[test]
+    fn recover_authority_from_runtime_observation_normalizes_cold_running_to_idle() {
+        let session_id = SessionId::from_uuid(uuid::Uuid::nil());
+
+        let authority = recover_authority_from_runtime_observation(
+            &session_id,
+            RuntimeState::Running,
+            None,
+            None,
+            None,
+            BTreeSet::from(["silent".to_string()]),
+            None,
+            None,
+            None,
+        )
+        .expect("cold Running authority without a durable run witness must recover");
+
+        assert_eq!(
+            authority.state().lifecycle_phase,
+            mm_dsl::MeerkatPhase::Idle,
+            "a process-local executor cannot survive cold recovery"
+        );
+        assert_eq!(
+            authority.state().session_id,
+            Some(mm_dsl::SessionId::from_domain(&session_id))
+        );
+        assert!(authority.state().current_run_id.is_none());
+        assert!(authority.state().pre_run_phase.is_none());
+        assert!(authority.state().silent_intent_overrides.contains("silent"));
+    }
+
+    #[test]
+    fn recover_authority_from_runtime_observation_retains_complete_running_witness() {
+        let session_id = SessionId::from_uuid(uuid::Uuid::nil());
+        let run_id = RunId::new();
+
+        let authority = recover_authority_from_runtime_observation(
+            &session_id,
+            RuntimeState::Running,
+            None,
+            Some(&run_id),
+            Some(RuntimeState::Retired),
+            BTreeSet::new(),
+            None,
+            None,
+            None,
+        )
+        .expect("complete live run witness should retain Running authority");
+
+        assert_eq!(
+            authority.state().lifecycle_phase,
+            mm_dsl::MeerkatPhase::Running
+        );
+        assert_eq!(current_run_id_from_authority(&authority), Some(run_id));
+        assert_eq!(
+            pre_run_phase_from_authority(&authority),
+            Some(RuntimeState::Retired)
+        );
+    }
+
+    #[test]
     fn map_error_includes_context() {
         let err = mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition {
             phase: mm_dsl::MeerkatPhase::Idle,

@@ -185,6 +185,19 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
         let mut inner = self.inner.lock().await;
         ensure_compaction_intents_already_outboxed(&inner, runtime_id, &incoming)?;
+        if inner.sessions.get(&runtime_id.0).is_some_and(|snapshot| {
+            snapshot.as_slice() == session_delta.session_snapshot.as_slice()
+        }) {
+            // The incoming document still crossed typed Session validation
+            // and compaction-intent authority above. Exact byte identity now
+            // proves there is no prior Session to parse or map value to
+            // replace. The self-guard preserves live-head coherence and every
+            // fail-closed save invariant before the fast return.
+            meerkat_core::session_store::run_boundary_snapshot_head_coherence_guard(&incoming)
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            inner.projection_quarantine.remove(&runtime_id.0);
+            return Ok(());
+        }
         let previous = inner
             .sessions
             .get(&runtime_id.0)

@@ -11605,6 +11605,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyRuntimeLifecycleDurability {
         pub state: RuntimeLifecycleObservedState,
+        pub pre_run_phase: Option<PreRunPhase>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyRuntimeLoopQueueAdmission {
@@ -15671,6 +15672,7 @@ pub enum TransitionId {
     RecoverRuntimeAuthorityInitializing,
     RecoverRuntimeAuthorityIdle,
     RecoverRuntimeAuthorityAttached,
+    RecoverRuntimeAuthorityColdRunning,
     RecoverRuntimeAuthorityRunning,
     RecoverRuntimeAuthorityRetired,
     RecoverRuntimeAuthorityStopped,
@@ -15852,7 +15854,8 @@ pub enum TransitionId {
     ClassifyRuntimeDurabilityInitializingIdle,
     ClassifyRuntimeDurabilityIdleIdle,
     ClassifyRuntimeDurabilityAttachedIdle,
-    ClassifyRuntimeDurabilityRunningIdle,
+    ClassifyRuntimeDurabilityRunningToIdleIdle,
+    ClassifyRuntimeDurabilityRunningToRetiredIdle,
     ClassifyRuntimeDurabilityRetiredIdle,
     ClassifyRuntimeDurabilityStoppedIdle,
     ClassifyRuntimeDurabilityDestroyedIdle,

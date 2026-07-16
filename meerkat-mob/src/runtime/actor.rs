@@ -1115,6 +1115,185 @@ pub(super) struct PendingSpawn {
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
 
+/// Provisioning material that is cheap enough to prepare while the actor owns
+/// command execution, or a durable-resume recipe whose snapshot load and agent
+/// config build must run after the machine has reserved the pending spawn.
+///
+/// The deferred variant is intentionally session-backed only. External
+/// bindings establish recipient-trust obligations before provisioning, so
+/// widening their pre-provision cancellation window needs separate machine
+/// semantics rather than sharing this optimization implicitly.
+enum SpawnProvisionInput {
+    Ready(ProvisionMemberRequest),
+    DeferredResume(Box<DeferredResumeProvision>),
+}
+
+struct DeferredResumeProvision {
+    definition: Arc<MobDefinition>,
+    profile_name: ProfileName,
+    agent_identity: AgentIdentity,
+    profile: crate::profile::Profile,
+    external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    context: Option<serde_json::Value>,
+    labels: Option<std::collections::BTreeMap<String, String>>,
+    additional_instructions: Option<Vec<String>>,
+    shell_env: Option<std::collections::HashMap<String, String>>,
+    inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
+    tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    system_prompt_override: Option<super::handle::SpawnSystemPromptOverride>,
+    resume_id: SessionId,
+    prompt: ContentInput,
+    budget_limits: Option<meerkat_core::BudgetLimits>,
+    keep_alive: bool,
+    default_llm_client: Option<Arc<dyn LlmClient>>,
+    binding: crate::RuntimeBinding,
+    peer_name: String,
+    owner_bridge_session_id: Option<SessionId>,
+    ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
+    generated_self_owned_operation_owner: Option<SessionId>,
+}
+
+impl SpawnProvisionInput {
+    fn binding(&self) -> &crate::RuntimeBinding {
+        match self {
+            Self::Ready(request) => &request.binding,
+            Self::DeferredResume(deferred) => &deferred.binding,
+        }
+    }
+
+    fn admitted_bridge_session_id(&mut self) -> SessionId {
+        match self {
+            Self::Ready(request) => admit_bridge_session_for_spawn(&mut request.create_session),
+            Self::DeferredResume(deferred) => deferred.resume_id.clone(),
+        }
+    }
+
+    fn install_generated_self_owned_operation_owner(
+        &mut self,
+        generated_owner: &AuthorizedMobSpawnStart,
+    ) -> Result<(), MobError> {
+        match self {
+            Self::Ready(request) => {
+                MobActor::apply_generated_self_owned_operation_owner(request, generated_owner)
+            }
+            Self::DeferredResume(deferred) => {
+                if matches!(deferred.binding, crate::RuntimeBinding::Session)
+                    && deferred.owner_bridge_session_id.is_none()
+                    && deferred.ops_registry.is_none()
+                {
+                    deferred.generated_self_owned_operation_owner =
+                        Some(generated_owner.owner_session_id().clone());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn into_request(
+        self,
+        session_service: Arc<dyn MobSessionService>,
+    ) -> Result<ProvisionMemberRequest, MobError> {
+        match self {
+            Self::Ready(request) => Ok(request),
+            Self::DeferredResume(deferred) => deferred.into_request(session_service).await,
+        }
+    }
+}
+
+impl DeferredResumeProvision {
+    async fn into_request(
+        self: Box<Self>,
+        session_service: Arc<dyn MobSessionService>,
+    ) -> Result<ProvisionMemberRequest, MobError> {
+        let Self {
+            definition,
+            profile_name,
+            agent_identity,
+            profile,
+            external_tools,
+            context,
+            labels,
+            additional_instructions,
+            shell_env,
+            inherited_tool_filter,
+            tool_access_policy,
+            system_prompt_override,
+            resume_id,
+            prompt,
+            budget_limits,
+            keep_alive,
+            default_llm_client,
+            binding,
+            peer_name,
+            owner_bridge_session_id,
+            ops_registry,
+            generated_self_owned_operation_owner,
+        } = *self;
+
+        let stored_session = match session_service
+            .load_persisted_session(&resume_id)
+            .await
+            .map_err(MobError::from)?
+        {
+            Some(session) => session,
+            None => session_service
+                .load_revivable_retired_session(&resume_id)
+                .await
+                .map_err(MobError::from)?
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "missing durable session snapshot for '{resume_id}'"
+                    ))
+                })?,
+        };
+
+        let mut config = build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
+            base: build::BuildAgentConfigParams {
+                mob_id: &definition.id,
+                profile_name: &profile_name,
+                agent_identity: &agent_identity,
+                profile: &profile,
+                definition: &definition,
+                external_tools,
+                context,
+                labels,
+                additional_instructions,
+                shell_env,
+                mob_tool_authority_context: None,
+                inherited_tool_filter,
+                tool_access_policy,
+                system_prompt_override,
+            },
+            expected_session_id: &resume_id,
+            resumed_session: stored_session,
+        })
+        .await?;
+        config.keep_alive = keep_alive;
+        if let Some(client) = default_llm_client {
+            config.llm_client_override = Some(client);
+        }
+
+        let create_session = build::to_create_session_request(&config, prompt);
+        let mut request = ProvisionMemberRequest {
+            create_session: with_spawn_budget_limits(create_session, budget_limits),
+            session_origin: super::provisioner::ProvisionSessionOrigin::ResumedDurable,
+            binding,
+            peer_name,
+            owner_bridge_session_id,
+            ops_registry,
+            generated_self_owned_operation_owner,
+            runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
+        };
+        let materialized_session_id = admit_bridge_session_for_spawn(&mut request.create_session);
+        if materialized_session_id != resume_id {
+            return Err(MobError::Internal(format!(
+                "durable resume preparation changed session id from '{resume_id}' to '{materialized_session_id}'"
+            )));
+        }
+        Ok(request)
+    }
+}
+
 /// Incarnation-scoped MobMachine verdict for the pending-spawn mechanics of a
 /// public retire request. This is a local mirror of exactly one generated
 /// structural effect; it carries no independently derived roster truth.
@@ -10194,6 +10373,81 @@ impl MobActor {
                 }
 
                 if self.session_service.supports_persistent_sessions() {
+                    let selected_binding = resolve_binding(
+                        binding.clone(),
+                        backend,
+                        profile.backend,
+                        self.definition.backend.default,
+                        &agent_identity,
+                    )?;
+                    let selected_runtime_mode =
+                        normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
+                    let prompt = initial_message.clone().unwrap_or_else(|| {
+                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
+                    });
+                    let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
+                    let resolved_labels = labels.clone().unwrap_or_default();
+                    let peer_name = render_member_comms_name(
+                        self.definition.id.as_str(),
+                        profile_name.as_str(),
+                        agent_identity.as_str(),
+                    )?;
+
+                    if matches!(&selected_binding, crate::RuntimeBinding::Session) {
+                        let external_tools = self.external_tools_for_profile(
+                            &profile,
+                            per_spawn_external_tools.clone(),
+                        )?;
+                        let deferred = DeferredResumeProvision {
+                            definition: self.definition.clone(),
+                            profile_name: profile_name.clone(),
+                            agent_identity: agent_identity.clone(),
+                            profile,
+                            external_tools,
+                            context,
+                            labels: labels.clone(),
+                            additional_instructions,
+                            shell_env,
+                            inherited_tool_filter: inherited_tool_filter.clone(),
+                            tool_access_policy: tool_access_policy.clone(),
+                            system_prompt_override: system_prompt_override.clone(),
+                            resume_id,
+                            prompt: prompt.clone(),
+                            budget_limits: budget_limits.clone(),
+                            keep_alive: selected_runtime_mode
+                                == crate::MobRuntimeMode::AutonomousHost,
+                            default_llm_client: self.default_llm_client.clone(),
+                            binding: selected_binding,
+                            peer_name,
+                            owner_bridge_session_id: owner_bridge_session_id.clone(),
+                            ops_registry: ops_registry.clone(),
+                            generated_self_owned_operation_owner: None,
+                        };
+                        return Ok((
+                            profile_name,
+                            agent_identity,
+                            prompt,
+                            initial_turn_prompt,
+                            selected_runtime_mode,
+                            profile_external_addressable,
+                            resolved_labels,
+                            None::<MemberRef>,
+                            Some(SpawnProvisionInput::DeferredResume(Box::new(deferred))),
+                            owner_bridge_session_id.clone(),
+                            auto_wire_parent,
+                            effective_profile_override.clone(),
+                            effective_model_override.clone(),
+                            objective_id,
+                            per_spawn_external_tools.clone(),
+                            authorized_profile_material.clone(),
+                            continuity_intent.clone(),
+                        ));
+                    }
+
+                    // External durable resumes retain the existing actor-owned
+                    // preparation order. Their provision opens a machine-owned
+                    // recipient-trust obligation, whose cancellation semantics
+                    // are deliberately not widened by the session optimization.
                     let stored_session = match self
                         .session_service
                         .load_persisted_session(&resume_id)
@@ -10213,8 +10467,10 @@ impl MobActor {
                             })?,
                     };
 
-                    let external_tools =
-                        self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
+                    let external_tools = self.external_tools_for_profile(
+                        &profile,
+                        per_spawn_external_tools.clone(),
+                    )?;
                     let mut config = build::build_resumed_agent_config(
                         build::BuildResumedAgentConfigParams {
                             base: build::BuildAgentConfigParams {
@@ -10244,26 +10500,8 @@ impl MobActor {
                         config.llm_client_override = Some(client.clone());
                     }
 
-                    let prompt = initial_message.clone().unwrap_or_else(|| {
-                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
-                    });
-                    let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
                     let req = build::to_create_session_request(&config, prompt.clone());
                     let req = with_spawn_budget_limits(req, budget_limits.clone());
-                    let selected_binding = resolve_binding(
-                        binding.clone(),
-                        backend,
-                        profile.backend,
-                        self.definition.backend.default,
-                        &agent_identity,
-                    )?;
-                    let selected_runtime_mode =
-                        normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
-                    let peer_name = render_member_comms_name(
-                        self.definition.id.as_str(),
-                        profile_name.as_str(),
-                        agent_identity.as_str(),
-                    )?;
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
                         session_origin:
@@ -10286,7 +10524,7 @@ impl MobActor {
                         profile_external_addressable,
                         resolved_labels,
                         None::<MemberRef>,
-                        Some(provision_request),
+                        Some(SpawnProvisionInput::Ready(provision_request)),
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
@@ -10456,7 +10694,7 @@ impl MobActor {
                 profile_external_addressable,
                 resolved_labels,
                 None::<MemberRef>,
-                Some(provision_request),
+                Some(SpawnProvisionInput::Ready(provision_request)),
                 owner_bridge_session_id.clone(),
                 auto_wire_parent,
                 effective_profile_override,
@@ -10478,7 +10716,7 @@ impl MobActor {
             _external_addressable,
             resolved_labels,
             resume_member_ref,
-            maybe_provision_request,
+            maybe_provision_input,
             spawn_owner_bridge_session_id,
             auto_wire_parent,
             effective_profile_override,
@@ -10574,15 +10812,14 @@ impl MobActor {
         }
 
         // Normal provisioning path — resume path already returned above.
-        let Some(mut provision_request) = maybe_provision_request else {
+        let Some(mut provision_input) = maybe_provision_input else {
             let _ = reply_tx.send(Err(MobError::Internal(
-                "provision_request missing for normal spawn path".into(),
+                "provision input missing for normal spawn path".into(),
             )));
             return;
         };
-        let admitted_bridge_session_id =
-            admit_bridge_session_for_spawn(&mut provision_request.create_session);
-        let spawn_bridge_session_id = match &provision_request.binding {
+        let admitted_bridge_session_id = provision_input.admitted_bridge_session_id();
+        let spawn_bridge_session_id = match provision_input.binding() {
             crate::RuntimeBinding::Session => Some(&admitted_bridge_session_id),
             crate::RuntimeBinding::External { .. } => None,
         };
@@ -10611,10 +10848,9 @@ impl MobActor {
                     return;
                 }
             };
-        if let Err(error) = Self::apply_generated_self_owned_operation_owner(
-            &mut provision_request,
-            &generated_self_owned_operation_owner,
-        ) {
+        if let Err(error) = provision_input
+            .install_generated_self_owned_operation_owner(&generated_self_owned_operation_owner)
+        {
             let _ = reply_tx.send(Err(error));
             return;
         }
@@ -10625,7 +10861,7 @@ impl MobActor {
         // `pending_recipient_trust` obligation before the provisioning task
         // starts; `handle_spawn_provisioned_batch` resolves or rolls it back
         // when the provision result lands.
-        let pending_recipient_trust_peer_id = match &provision_request.binding {
+        let pending_recipient_trust_peer_id = match provision_input.binding() {
             crate::RuntimeBinding::External { peer_id, .. } => Some(peer_id.clone()),
             crate::RuntimeBinding::Session => None,
         };
@@ -10660,13 +10896,22 @@ impl MobActor {
             pending_recipient_trust_peer_id,
             reply_tx,
         };
+        let spawn_started = match generated_self_owned_operation_owner.start(&pending) {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = pending.reply_tx.send(Err(error));
+                return;
+            }
+        };
         // Treat pending spawn lifecycle as a single keyed table: pending intent
         // and async task handle must be inserted/removed together.
         let provisioner = self.provisioner.clone();
+        let session_service = self.session_service.clone();
         let command_tx = self.command_tx.clone();
         let task = tokio::spawn(async move {
             let panic_member_identity = spawn_member_identity.clone();
             let provision_result = std::panic::AssertUnwindSafe(async {
+                let provision_request = provision_input.into_request(session_service).await?;
                 let spawn_receipt = provisioner.provision_member(provision_request).await?;
                 if let Some(bridge_session_id) =
                     spawn_receipt.member_ref.bridge_session_id().cloned()
@@ -10736,14 +10981,6 @@ impl MobActor {
                 );
             }
         });
-        let spawn_started = match generated_self_owned_operation_owner.start(&pending) {
-            Ok(started) => started,
-            Err(error) => {
-                let _ = pending.reply_tx.send(Err(error));
-                task.abort();
-                return;
-            }
-        };
         self.insert_pending_spawn(spawn_ticket, pending, task, spawn_started);
         if let Err(error) = self.ensure_pending_spawn_alignment("enqueue_spawn post-insert") {
             tracing::error!(

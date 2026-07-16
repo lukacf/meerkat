@@ -4465,6 +4465,35 @@ mod recovery_tests {
     }
 
     #[tokio::test]
+    async fn persistent_recovery_normalizes_cold_running_lifecycle_to_idle() {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("cold-running-without-run-witness");
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        store
+            .commit_machine_lifecycle(
+                &runtime_id,
+                crate::store::MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Running,
+                    crate::store::MachineLifecycleBindingFacts::new(None, None, None, None),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                &[],
+            )
+            .await
+            .expect("persist cold Running lifecycle fixture");
+
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
+        machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+            .await
+            .expect("cold Running lifecycle should normalize through generated authority");
+
+        assert_eq!(driver.phase(), RuntimeState::Idle);
+        assert!(driver.current_run_id().is_none());
+        assert!(driver.pre_run_phase().is_none());
+    }
+
+    #[tokio::test]
     async fn persistent_recovery_rejects_state_without_persisted_input_content_shape() {
         use crate::store::RuntimeStore;
 

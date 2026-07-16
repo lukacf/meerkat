@@ -596,6 +596,33 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 ensure_compaction_intents_already_outboxed(&tx, &runtime_id, &incoming)?;
+                let snapshot_is_unchanged = tx
+                    .query_row(
+                        "SELECT 1 FROM runtime_session_snapshots WHERE runtime_id = ?1 AND session_snapshot = ?2",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            session_delta.session_snapshot.as_slice()
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                    .is_some();
+                if snapshot_is_unchanged {
+                    // Incoming bytes already crossed typed Session validation
+                    // and compaction-intent authority. Exact identity means
+                    // there is no prior BLOB to allocate/parse and no snapshot
+                    // write. The self-guard preserves live-head coherence and
+                    // every fail-closed save invariant before the fast return.
+                    meerkat_core::session_store::run_boundary_snapshot_head_coherence_guard(
+                        &incoming,
+                    )
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    clear_runtime_projection_quarantine(&tx, &runtime_id)?;
+                    tx.commit()
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    return Ok(());
+                }
                 let previous = tx
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
@@ -2101,6 +2128,62 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
                     .await
                     .unwrap()
                     .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn commit_session_snapshot_identical_bytes_does_not_update_snapshot_row() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::text("before".to_string())));
+            session
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                    vec![Message::User(UserMessage::text("after".to_string()))],
+                    TranscriptRewriteReason::new("unit-test-edit"),
+                    Some("unit-test".to_string()),
+                    None,
+                )
+                .unwrap();
+            let snapshot = serde_json::to_vec(&session).unwrap();
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let conn = open_runtime_connection(store.path()).unwrap();
+            conn.execute_batch(
+                r"
+                CREATE TRIGGER reject_runtime_snapshot_update
+                BEFORE UPDATE ON runtime_session_snapshots
+                BEGIN
+                    SELECT RAISE(ABORT, 'identical runtime snapshot was rewritten');
+                END;
+                ",
+            )
+            .unwrap();
+            drop(conn);
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: snapshot.clone(),
+                    },
+                )
+                .await
+                .expect("identical validated snapshot should bypass the UPDATE path");
+
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(snapshot)
             );
         }
 

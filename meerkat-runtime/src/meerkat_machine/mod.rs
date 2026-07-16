@@ -393,12 +393,24 @@ pub fn classify_runtime_lifecycle_state(
 pub fn classify_runtime_lifecycle_durable_state(
     state: RuntimeState,
 ) -> Result<RuntimeState, String> {
+    classify_runtime_lifecycle_durable_state_with_pre_run_phase(state, None)
+}
+
+/// Classify the durable lifecycle while retaining the live run's coarse
+/// pre-run phase. Running itself is process-local, but a run admitted from a
+/// retired runtime must remain durably retired after cold recovery.
+pub(crate) fn classify_runtime_lifecycle_durable_state_with_pre_run_phase(
+    state: RuntimeState,
+    pre_run_phase: Option<RuntimeState>,
+) -> Result<RuntimeState, String> {
     let observed_state = dsl_authority::observed_runtime_lifecycle_state(state);
+    let pre_run_phase = pre_run_phase.and_then(dsl_authority::pre_run_phase_from_runtime_state);
     let mut authority = projection_authority();
     let transition = dsl::MeerkatMachineMutator::apply(
         &mut authority,
         dsl::MeerkatMachineInput::ClassifyRuntimeLifecycleDurability {
             state: observed_state,
+            pre_run_phase,
         },
     )
     .map_err(|err| {

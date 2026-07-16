@@ -1364,6 +1364,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverRuntimeAuthorityAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecoverRuntimeAuthorityColdRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRuntimeAuthorityRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1907,7 +1910,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyRuntimeDurabilityAttachedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ClassifyRuntimeDurabilityRunningIdle`
+- `ClassifyRuntimeDurabilityRunningToIdleIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRuntimeDurabilityRunningToRetiredIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyRuntimeDurabilityRetiredIdle`

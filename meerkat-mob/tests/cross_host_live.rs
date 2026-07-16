@@ -24,7 +24,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use futures::SinkExt as _;
+use futures::{SinkExt as _, StreamExt as _};
 use meerkat_mob::runtime::bridge_protocol::{
     BridgeLiveControlOutcome, BridgeLiveControlVerb, BridgeRejectionCause, BridgeReply,
     LiveCloseStatus, LiveOpenResult, LiveOpenTransport, WireLiveAdapterStatus,
@@ -196,6 +196,33 @@ async fn direct_ws_connect_drives_text_input_end_to_end() {
     let (mut ws, _response) = tokio_tungstenite::connect_async(url.as_str())
         .await
         .expect("direct WS connect to the member-host live listener");
+
+    // `live/open` returns once the adapter is attached, while the public
+    // channel remains Opening until the WS observation pump consumes the
+    // provider's Ready transition. A real client must observe that transition
+    // before sending input; otherwise its first frame may correctly lose the
+    // fair server-side select race and receive ChannelNotReady. Pin that public
+    // handshake here instead of relying on scheduler timing.
+    let ready_frame = tokio::time::timeout(Duration::from_secs(15), ws.next())
+        .await
+        .expect("member-host WS publishes the adapter Ready transition")
+        .expect("member-host WS remains connected through Ready")
+        .expect("member-host WS Ready frame is readable");
+    let tokio_tungstenite::tungstenite::Message::Text(ready_json) = ready_frame else {
+        panic!("expected a text Ready observation, got {ready_frame:?}");
+    };
+    let ready: meerkat_contracts::wire::WireLiveAdapterObservation =
+        serde_json::from_str(&ready_json).expect("decode the public Ready observation");
+    assert!(
+        matches!(
+            &ready,
+            meerkat_contracts::wire::WireLiveAdapterObservation::StatusChanged {
+                status: WireLiveAdapterStatus::Ready,
+            }
+        ),
+        "the first scripted-adapter observation must make the channel Ready, got {ready:?}"
+    );
+
     let chunk = meerkat_contracts::wire::LiveInputChunkWire::Text {
         text: "live text over the direct plane".to_string(),
     };

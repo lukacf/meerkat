@@ -22532,11 +22532,11 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         .expect_err("peer-only delivery must not silently drop runtime metadata");
     assert!(matches!(
         metadata_error,
-        MobError::MissingMemberCapability {
-            ref member_id,
-            capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
-            context: "member turn LLM identity override",
-        } if member_id == &AgentIdentity::from("w-ext")
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            ref reason,
+        } if reason.contains("tracked turn event streams are not supported")
+            && reason.contains("peer-only")
     ));
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
     let event_error = peer_member

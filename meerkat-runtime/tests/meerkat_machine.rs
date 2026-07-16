@@ -1793,7 +1793,13 @@ async fn accept_with_executor_triggers_loop() {
 
     // After processing, the input should be consumed and the runtime back to Attached
     // (executor is still connected, so Attached not Idle).
-    let state = adapter.runtime_state(&sid).await.unwrap();
+    let state = wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Attached,
+        "RuntimeLoop should settle back to Attached after committing the executor output",
+    )
+    .await;
     assert_eq!(state, RuntimeState::Attached);
 
     // The input should be consumed (terminal)

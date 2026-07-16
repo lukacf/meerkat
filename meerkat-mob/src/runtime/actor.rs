@@ -39976,10 +39976,9 @@ impl MobActor {
             entry.fence_token
         };
 
-        // Per-turn LLM identity fields require a runtime-owned executor
-        // boundary. Capability is checked against the exact resolved member;
-        // actor-global adapter presence is not evidence that a direct,
-        // peer-only, or remotely hosted backend can realize the override.
+        // Per-turn LLM identity fields require a queued executor boundary.
+        // Reject Steer explicitly before the more general carrier and host
+        // capability checks below.
         let requests_llm_reconfigure = turn_metadata.as_ref().is_some_and(|metadata| {
             metadata.model.is_some()
                 || metadata.provider.is_some()
@@ -39994,18 +39993,6 @@ impl MobActor {
                     .to_string(),
             });
         }
-        if requests_llm_reconfigure
-            && !self
-                .provisioner
-                .supports_member_turn_llm_reconfigure(&entry.member_ref)
-        {
-            return Err(MobError::MissingMemberCapability {
-                member_id: AgentIdentity::from(runtime_id.identity.as_str()),
-                capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
-                context: "member turn LLM identity override",
-            });
-        }
-
         // Merge actor-owned WorkSpec causality into the caller's typed carrier
         // before admission. Any conflict or carrier that cannot be realized
         // on this exact placement/backend is rejected before MobMachine emits
@@ -40021,6 +40008,23 @@ impl MobActor {
             event_tx.is_some(),
             completion_tx.is_some(),
         )?;
+
+        // Only representable carriers reach the concrete executor capability
+        // check. Actor-global adapter presence is not evidence that a direct,
+        // peer-only, or remotely hosted backend can realize an override, but
+        // a missing host capability must not shadow a path-level
+        // UnsupportedForMode rejection.
+        if requests_llm_reconfigure
+            && !self
+                .provisioner
+                .supports_member_turn_llm_reconfigure(&entry.member_ref)
+        {
+            return Err(MobError::MissingMemberCapability {
+                member_id: AgentIdentity::from(runtime_id.identity.as_str()),
+                capability: crate::error::MobMemberCapability::SessionLlmReconfigure,
+                context: "member turn LLM identity override",
+            });
+        }
         let interaction_id = turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.transcript_identity.interaction_id);

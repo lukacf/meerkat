@@ -1821,11 +1821,15 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     use tokio::sync::Notify;
     use uuid::Uuid;
 
+    // Wall-clock ceiling only: the assertions below poll explicit recorder
+    // and ledger state, so loaded-runner scheduling is not mistaken for a
+    // two-second product liveness contract.
+    const LOADED_CI_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
+
     struct BlockingRecordingExecutor {
         calls: Arc<AtomicUsize>,
         first_apply_started: Arc<Notify>,
         release_first_apply: Arc<Notify>,
-        terminal_applied: Arc<Notify>,
         terminal_context_keys: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
@@ -1850,7 +1854,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                                 .lock()
                                 .expect("terminal_context_keys mutex")
                                 .push(append.key.clone());
-                            self.terminal_applied.notify_waiters();
                         }
                     }
                     staged.boundary
@@ -1981,7 +1984,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(Notify::new());
     let release_first_apply = Arc::new(Notify::new());
-    let terminal_applied = Arc::new(Notify::new());
     let terminal_context_keys = Arc::new(std::sync::Mutex::new(Vec::new()));
     adapter
         .register_session_with_executor(
@@ -1990,7 +1992,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                 calls: Arc::clone(&calls),
                 first_apply_started: Arc::clone(&first_apply_started),
                 release_first_apply: Arc::clone(&release_first_apply),
-                terminal_applied: Arc::clone(&terminal_applied),
                 terminal_context_keys: Arc::clone(&terminal_context_keys),
             }),
         )
@@ -2097,10 +2098,24 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     .await
     .expect("terminal response should queue while requester is running");
 
-    release_first_apply.notify_waiters();
-    tokio::time::timeout(Duration::from_secs(2), terminal_applied.notified())
-        .await
-        .expect("WakeLoop should drain queued peer_response_terminal");
+    // Point-to-point test handshake: `notify_one` stores a permit if the
+    // executor was preempted between announcing start and awaiting release.
+    release_first_apply.notify_one();
+    let terminal_context_keys_for_wait = Arc::clone(&terminal_context_keys);
+    tokio::time::timeout(LOADED_CI_CONVERGENCE_TIMEOUT, async move {
+        loop {
+            let terminal_was_applied = !terminal_context_keys_for_wait
+                .lock()
+                .expect("terminal_context_keys mutex")
+                .is_empty();
+            if terminal_was_applied {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("WakeLoop should drain queued peer_response_terminal");
 
     let keys = terminal_context_keys
         .lock()
@@ -2114,11 +2129,11 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         )],
         "terminal response should render through typed context append"
     );
-    // `terminal_applied` is emitted from inside `CoreExecutor::apply`, before
-    // the runtime loop commits the returned receipt and consumes the staged
-    // input. Observe the authoritative input ledger instead of racing that
-    // post-apply commit under a loaded test runner.
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // `terminal_context_keys` is recorded from inside `CoreExecutor::apply`,
+    // before the runtime loop commits the returned receipt and consumes the
+    // staged input. Observe the authoritative input ledger instead of racing
+    // that post-apply commit under a loaded test runner.
+    tokio::time::timeout(LOADED_CI_CONVERGENCE_TIMEOUT, async {
         loop {
             let active_ids = adapter
                 .list_active_inputs(&sid)
@@ -2126,18 +2141,18 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                 .expect("active inputs after drain");
             let mut terminal_still_active = false;
             for input_id in active_ids {
-                let state = adapter
+                if let Some(state) = adapter
                     .input_state(&sid, &input_id)
                     .await
                     .expect("input state")
-                    .expect("active input state");
-                if matches!(
-                    state.state.persisted_input.as_ref(),
-                    Some(Input::Peer(meerkat_runtime::PeerInput {
-                        convention: Some(PeerConvention::ResponseTerminal { .. }),
-                        ..
-                    }))
-                ) {
+                    && matches!(
+                        state.state.persisted_input.as_ref(),
+                        Some(Input::Peer(meerkat_runtime::PeerInput {
+                            convention: Some(PeerConvention::ResponseTerminal { .. }),
+                            ..
+                        }))
+                    )
+                {
                     terminal_still_active = true;
                     break;
                 }

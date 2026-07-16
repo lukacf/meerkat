@@ -1947,6 +1947,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//meerkat-mob:tests/support/probe.rs",
     ],
     srcs = [
         "tests/system_mob_host_daemon.rs",
@@ -2047,6 +2049,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//meerkat-mob:tests/support/probe.rs",
     ],
     srcs = [
         "tests/system_mob_host_daemon.rs",

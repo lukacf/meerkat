@@ -396,6 +396,10 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-mob:tests/support/live_plane.rs",
+        "//meerkat-mob:tests/support/mod.rs",
+        "//meerkat-mob:tests/support/probe.rs",
     ],
     srcs = [
         "tests/e2e_fast/cross_host_live_member.rs",

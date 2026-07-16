@@ -177,16 +177,14 @@ export function moduleReferences(source) {
 }
 
 export function testSourcePaths(target, pkg) {
-  const packageRoot = dirname(pkg.manifest_path);
   const seen = new Set();
   const paths = new Set();
 
   function visit(file) {
     if (seen.has(file) || !existsSync(file)) return;
     seen.add(file);
-    if (!file.startsWith(`${packageRoot}/`)) return;
     const rel = normalizePath(relative(root, file));
-    if (!rel || rel.startsWith("..")) return;
+    if (!rel || rel === ".." || rel.startsWith("../")) return;
     paths.add(rel);
 
     const source = readFileSync(file, "utf8");

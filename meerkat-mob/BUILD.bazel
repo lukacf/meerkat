@@ -28,6 +28,23 @@ filegroup(
 
 
 
+exports_files(
+
+    [
+        "tests/support/live_plane.rs",
+        "tests/support/mod.rs",
+        "tests/support/probe.rs",
+    ],
+
+    visibility = [
+        "//meerkat-cli:__pkg__",
+        "//tests/integration:__pkg__",
+    ],
+
+)
+
+
+
 rust_library(
     name = "meerkat_mob",
     aliases = aliases(package_name = "meerkat-mob"),

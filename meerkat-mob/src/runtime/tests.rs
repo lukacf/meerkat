@@ -31423,8 +31423,16 @@ async fn test_flow_dispatch_turn_driven_mode_uses_machine_bound_session() {
         .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
         .await
         .expect("machine binding for turn-driven worker");
-    let baseline_start_turn = service.start_turn_call_count();
-    let baseline_prompt_count = service.recorded_start_turn_prompts().await.len();
+    // The autonomous lead's keep-alive turn is admitted in the background and
+    // may race this snapshot under suite load. Scope the assertion to the
+    // worker binding so it detects duplicate flow dispatches, not unrelated
+    // kickoff scheduling.
+    let baseline_machine_session_turns = service
+        .recorded_start_turn_prompts()
+        .await
+        .iter()
+        .filter(|(session_id, _)| session_id == &machine_session)
+        .count();
 
     let run_id = handle
         .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
@@ -31438,18 +31446,14 @@ async fn test_flow_dispatch_turn_driven_mode_uses_machine_bound_session() {
         terminal.failure_ledger,
         terminal.step_ledger
     );
-    assert_eq!(
-        service.start_turn_call_count(),
-        baseline_start_turn + 1,
-        "turn-driven flow dispatch should issue one start_turn"
-    );
     let prompts = service.recorded_start_turn_prompts().await;
     assert_eq!(
         prompts
-            .get(baseline_prompt_count)
-            .map(|(session_id, _)| session_id),
-        Some(&machine_session),
-        "turn-driven flow dispatch must realize through the MobMachine session binding"
+            .iter()
+            .filter(|(session_id, _)| session_id == &machine_session)
+            .count(),
+        baseline_machine_session_turns + 1,
+        "turn-driven flow dispatch must issue exactly one start_turn through the MobMachine session binding"
     );
 }
 

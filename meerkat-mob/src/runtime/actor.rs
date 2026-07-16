@@ -19063,6 +19063,7 @@ impl MobActor {
                             per_spawn_external_tools.clone(),
                             authorized_profile_material.clone(),
                             continuity_intent.clone(),
+                            observations.clone(),
                         ));
                     }
 

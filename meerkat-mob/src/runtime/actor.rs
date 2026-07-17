@@ -39126,7 +39126,7 @@ impl MobActor {
                     protocol_version: next.protocol_version,
                 });
             let observation_window = if cfg!(test) {
-                std::time::Duration::from_millis(300)
+                std::time::Duration::from_secs(1)
             } else {
                 std::time::Duration::from_secs(5)
             };

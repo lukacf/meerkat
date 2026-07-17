@@ -1488,13 +1488,15 @@ mod tests {
         let current = crate::store::SupervisorAuthorityRecord::generate(
             super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         );
-        let bridge = super::super::supervisor_bridge::MobSupervisorBridge::new(
-            &crate::MobId::from(format!("upcall-runtime-reresolve-{}", uuid::Uuid::new_v4())),
-            current.clone(),
-            None,
-        )
-        .await
-        .expect("supervisor bridge should build");
+        let bridge = Arc::new(
+            super::super::supervisor_bridge::MobSupervisorBridge::new(
+                &crate::MobId::from(format!("upcall-runtime-reresolve-{}", uuid::Uuid::new_v4())),
+                current.clone(),
+                None,
+            )
+            .await
+            .expect("supervisor bridge should build"),
+        );
         let observed = bridge.runtime_core().await;
         let intake_notify = bridge.intake_notify();
         // Model the exact lost-wake window: the responder resolved the old

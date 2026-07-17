@@ -92,6 +92,22 @@ impl RegistrationOutcome {
     }
 }
 
+/// Why publishing an exact inproc runtime replacement failed before mutation.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InprocPublicationError {
+    #[error("the prepared and current runtimes do not have the same namespace and name")]
+    IdentityMismatch,
+    #[error("the current runtime has no published inproc generation")]
+    CurrentRuntimeUnpublished,
+    #[error("the replacement runtime has an invalid zero public key")]
+    ZeroPubkey,
+    #[error("the expected current inproc generation is no longer published")]
+    ExpectedGenerationNotCurrent,
+    #[error("the replacement public key is already occupied")]
+    ReplacementPubkeyOccupied,
+}
+
 /// Global inproc registry instance.
 static GLOBAL_REGISTRY: OnceLock<InprocRegistry> = OnceLock::new();
 
@@ -262,6 +278,60 @@ impl InprocRegistry {
         }
     }
 
+    /// Atomically replace one exact inbox generation.
+    ///
+    /// All checks happen under the registry write lock. A stale predecessor or
+    /// occupied replacement key therefore leaves the live route unchanged.
+    pub(crate) fn replace_sender_in_namespace(
+        &self,
+        namespace: &str,
+        name: &str,
+        current: (&PubKey, &InboxSender),
+        replacement_pubkey: PubKey,
+        replacement_sender: InboxSender,
+    ) -> Result<(), InprocPublicationError> {
+        let (current_pubkey, current_sender) = current;
+        if replacement_pubkey.is_zero() {
+            return Err(InprocPublicationError::ZeroPubkey);
+        }
+
+        let mut state = self.state.write();
+        let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
+            return Err(InprocPublicationError::ExpectedGenerationNotCurrent);
+        };
+        let current_meta = namespace_state
+            .peers
+            .get(current_pubkey)
+            .filter(|peer| peer.name == name && peer.sender.same_inbox(current_sender))
+            .map(|peer| peer.meta.clone());
+        if namespace_state.names.get(name) != Some(current_pubkey) {
+            return Err(InprocPublicationError::ExpectedGenerationNotCurrent);
+        }
+        let Some(current_meta) = current_meta else {
+            return Err(InprocPublicationError::ExpectedGenerationNotCurrent);
+        };
+        if replacement_pubkey != *current_pubkey
+            && namespace_state.peers.contains_key(&replacement_pubkey)
+        {
+            return Err(InprocPublicationError::ReplacementPubkeyOccupied);
+        }
+
+        namespace_state.peers.remove(current_pubkey);
+        namespace_state.peers.insert(
+            replacement_pubkey,
+            InprocPeer {
+                name: name.to_string(),
+                pubkey: replacement_pubkey,
+                sender: replacement_sender,
+                meta: current_meta,
+            },
+        );
+        namespace_state
+            .names
+            .insert(name.to_string(), replacement_pubkey);
+        Ok(())
+    }
+
     /// Unregister an agent by pubkey.
     ///
     /// Returns true if the agent was found and removed.
@@ -279,6 +349,59 @@ impl InprocRegistry {
             return true;
         }
         false
+    }
+
+    /// Remove a route only when its exact inbox generation is still current.
+    pub(crate) fn unregister_sender_in_namespace(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+        sender: &InboxSender,
+    ) -> bool {
+        let mut state = self.state.write();
+        let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
+            return false;
+        };
+        if !namespace_state
+            .peers
+            .get(pubkey)
+            .is_some_and(|peer| peer.sender.same_inbox(sender))
+        {
+            return false;
+        }
+        let Some(peer) = namespace_state.peers.remove(pubkey) else {
+            return false;
+        };
+        if namespace_state.names.get(&peer.name) == Some(pubkey) {
+            namespace_state.names.remove(&peer.name);
+        }
+        true
+    }
+
+    /// Update metadata only when the exact inbox generation is still current.
+    pub(crate) fn update_meta_for_sender_in_namespace(
+        &self,
+        namespace: &str,
+        name: &str,
+        pubkey: &PubKey,
+        sender: &InboxSender,
+        meta: PeerMeta,
+    ) -> bool {
+        let mut state = self.state.write();
+        let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
+            return false;
+        };
+        let Some(peer) = namespace_state.peers.get_mut(pubkey) else {
+            return false;
+        };
+        if peer.name != name
+            || !peer.sender.same_inbox(sender)
+            || namespace_state.names.get(name) != Some(pubkey)
+        {
+            return false;
+        }
+        peer.meta = meta;
+        true
     }
 
     /// Look up an inproc peer by pubkey.

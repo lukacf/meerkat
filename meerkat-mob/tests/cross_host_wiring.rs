@@ -1081,6 +1081,16 @@ async fn members_unwired_no_write_restart_repairs_routes_on_authenticated_host_s
         probe,
         host_id: _,
     } = scenario;
+    let pre_restart_supervisor = controlling
+        .handle
+        .routable_supervisor_peer()
+        .await
+        .expect("read the live controller callback before inducing fail-stop");
+    assert_eq!(
+        pre_restart_supervisor.address.transport(),
+        meerkat_core::comms::PeerTransport::Tcp,
+        "the host must retain a stale TCP callback for this recovery test"
+    );
     let installs_before = scripted.install_peer_trust_count();
     let removes_before = scripted.remove_peer_trust_count();
     controlling
@@ -1125,7 +1135,28 @@ async fn members_unwired_no_write_restart_repairs_routes_on_authenticated_host_s
     );
 
     let status_count_before_restart = scripted.host_status_count();
-    let controlling = controlling.restart_after_actor_fail_stop().await;
+    let controlling = controlling
+        .restart_after_actor_fail_stop_with_distinct_callback(
+            pre_restart_supervisor.address.clone(),
+        )
+        .await;
+    let post_restart_supervisor = controlling
+        .handle
+        .routable_supervisor_peer()
+        .await
+        .expect("read the replacement controller callback after cold restart");
+    assert_eq!(
+        post_restart_supervisor.peer_id, pre_restart_supervisor.peer_id,
+        "cold restart must retain the durable supervisor identity"
+    );
+    assert_eq!(
+        post_restart_supervisor.pubkey, pre_restart_supervisor.pubkey,
+        "cold restart must retain the durable supervisor signing key"
+    );
+    assert_ne!(
+        post_restart_supervisor.address, pre_restart_supervisor.address,
+        "the replacement callback must be provably fresh so stale host trust cannot answer HostStatus"
+    );
     let a1 = controlling
         .handle
         .get_member(&identity("a1"))

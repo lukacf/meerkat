@@ -111,6 +111,7 @@ struct HostAcceptorIdentityRegistryState {
     identities: HashMap<PubKey, RegisteredAcceptorIdentity>,
     owner: Option<Arc<dyn Any + Send + Sync>>,
     reservation: Option<ReservedAcceptorIdentity>,
+    replacement_reservation: Option<ReservedAcceptorIdentityReplacement>,
 }
 
 struct ReservedAcceptorIdentity {
@@ -118,6 +119,15 @@ struct ReservedAcceptorIdentity {
     owner: Arc<dyn Any + Send + Sync>,
     pubkey: PubKey,
     keypair: Arc<Keypair>,
+}
+
+struct ReservedAcceptorIdentityReplacement {
+    token: Arc<()>,
+    owner: Arc<dyn Any + Send + Sync>,
+    current_pubkey: PubKey,
+    current_sender: InboxSender,
+    replacement_pubkey: PubKey,
+    replacement_keypair: Arc<Keypair>,
 }
 
 /// Reversible reservation of the once-only registry owner and one identity.
@@ -133,6 +143,21 @@ pub struct HostAcceptorIdentityReservation {
     owner: Arc<dyn Any + Send + Sync>,
     token: Arc<()>,
     installed_owner: bool,
+    committed: bool,
+}
+
+/// Prepared exact replacement of one registered acceptor identity.
+///
+/// Reserving validates the installed owner, the exact current inbox
+/// generation, and the replacement key without changing the live route.
+/// Dropping the reservation is therefore inert. [`Self::commit`] performs the
+/// old-remove/new-install mutation under one registry write lock and has no
+/// fallible path after an enclosing transaction has published related state.
+#[must_use = "a host acceptor identity replacement must be committed or dropped"]
+pub struct HostAcceptorIdentityReplacementReservation {
+    registry: Arc<HostAcceptorIdentityRegistry>,
+    owner: Arc<dyn Any + Send + Sync>,
+    token: Arc<()>,
     committed: bool,
 }
 
@@ -198,6 +223,70 @@ impl Drop for HostAcceptorIdentityReservation {
     }
 }
 
+impl HostAcceptorIdentityReplacementReservation {
+    /// Atomically fence the exact current identity and install its replacement.
+    pub fn commit(mut self, replacement_sender: InboxSender) {
+        let mut state = self.registry.state.write();
+        let reservation_is_exact =
+            state
+                .replacement_reservation
+                .as_ref()
+                .is_some_and(|reservation| {
+                    Arc::ptr_eq(&reservation.token, &self.token)
+                        && Arc::ptr_eq(&reservation.owner, &self.owner)
+                });
+        if !reservation_is_exact {
+            std::process::abort();
+        }
+        let Some(reservation) = state.replacement_reservation.take() else {
+            std::process::abort();
+        };
+        let current_is_exact = state
+            .identities
+            .get(&reservation.current_pubkey)
+            .is_some_and(|identity| {
+                identity
+                    .inbox_sender
+                    .same_inbox(&reservation.current_sender)
+            });
+        if !current_is_exact
+            || (reservation.replacement_pubkey != reservation.current_pubkey
+                && state
+                    .identities
+                    .contains_key(&reservation.replacement_pubkey))
+        {
+            // A reservation excludes every registry mutation. Reaching this
+            // branch means the in-process ownership invariant was corrupted.
+            std::process::abort();
+        }
+        state.identities.remove(&reservation.current_pubkey);
+        state.identities.insert(
+            reservation.replacement_pubkey,
+            RegisteredAcceptorIdentity {
+                keypair: reservation.replacement_keypair,
+                inbox_sender: replacement_sender,
+            },
+        );
+        self.committed = true;
+    }
+}
+
+impl Drop for HostAcceptorIdentityReplacementReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut state = self.registry.state.write();
+        if state
+            .replacement_reservation
+            .as_ref()
+            .is_some_and(|reservation| Arc::ptr_eq(&reservation.token, &self.token))
+        {
+            state.replacement_reservation = None;
+        }
+    }
+}
+
 struct RegisteredAcceptorIdentity {
     keypair: Arc<Keypair>,
     inbox_sender: InboxSender,
@@ -210,8 +299,13 @@ impl HostAcceptorIdentityRegistry {
                 identities: HashMap::new(),
                 owner: None,
                 reservation: None,
+                replacement_reservation: None,
             }),
         }
+    }
+
+    fn reservation_in_progress(state: &HostAcceptorIdentityRegistryState) -> bool {
+        state.reservation.is_some() || state.replacement_reservation.is_some()
     }
 
     /// Reserve the once-only owner plus one inbound identity without exposing
@@ -233,7 +327,7 @@ impl HostAcceptorIdentityRegistry {
             });
         }
         let mut state = self.state.write();
-        if state.reservation.is_some() {
+        if Self::reservation_in_progress(&state) {
             return Err(HostAcceptorError::RegistryReservationInProgress);
         }
         let installed_owner = match state.owner.as_ref() {
@@ -266,6 +360,65 @@ impl HostAcceptorIdentityRegistry {
         })
     }
 
+    /// Reserve an exact live-identity replacement without changing routing.
+    ///
+    /// The current sender is the generation witness: participant names and
+    /// signing keys may be reused, while an inbox is minted once per runtime.
+    /// All conflicts are checked before the reservation is returned. While it
+    /// is live, ordinary registry mutations are refused; `resolve` continues to
+    /// expose only the current identity until commit.
+    pub fn reserve_identity_replacement(
+        self: &Arc<Self>,
+        owner: Arc<dyn Any + Send + Sync>,
+        current_pubkey: PubKey,
+        current_sender: &InboxSender,
+        replacement_pubkey: PubKey,
+        replacement_keypair: Arc<Keypair>,
+    ) -> Result<HostAcceptorIdentityReplacementReservation, HostAcceptorError> {
+        if replacement_keypair.public_key() != replacement_pubkey {
+            return Err(HostAcceptorError::IdentityKeypairMismatch {
+                pubkey: replacement_pubkey.to_pubkey_string(),
+            });
+        }
+        let mut state = self.state.write();
+        if Self::reservation_in_progress(&state) {
+            return Err(HostAcceptorError::RegistryReservationInProgress);
+        }
+        Self::validate_owner_state(&state, &owner)?;
+        if !state
+            .identities
+            .get(&current_pubkey)
+            .is_some_and(|identity| identity.inbox_sender.same_inbox(current_sender))
+        {
+            return Err(HostAcceptorError::ExpectedIdentityGenerationNotCurrent {
+                pubkey: current_pubkey.to_pubkey_string(),
+            });
+        }
+        if replacement_pubkey != current_pubkey
+            && state.identities.contains_key(&replacement_pubkey)
+        {
+            return Err(HostAcceptorError::IdentityAlreadyRegistered {
+                pubkey: replacement_pubkey.to_pubkey_string(),
+            });
+        }
+        let token = Arc::new(());
+        state.replacement_reservation = Some(ReservedAcceptorIdentityReplacement {
+            token: Arc::clone(&token),
+            owner: Arc::clone(&owner),
+            current_pubkey,
+            current_sender: current_sender.clone(),
+            replacement_pubkey,
+            replacement_keypair,
+        });
+        drop(state);
+        Ok(HostAcceptorIdentityReplacementReservation {
+            registry: Arc::clone(self),
+            owner,
+            token,
+            committed: false,
+        })
+    }
+
     /// Once-only owner install: re-installing the SAME owner (Arc-ptr
     /// equality) is idempotent; rebinding to a different owner is refused.
     pub fn install_owner(
@@ -273,7 +426,7 @@ impl HostAcceptorIdentityRegistry {
         owner: Arc<dyn Any + Send + Sync>,
     ) -> Result<(), HostAcceptorError> {
         let mut state = self.state.write();
-        if state.reservation.is_some() {
+        if Self::reservation_in_progress(&state) {
             return Err(HostAcceptorError::RegistryReservationInProgress);
         }
         if let Some(existing) = state.owner.as_ref() {
@@ -304,7 +457,7 @@ impl HostAcceptorIdentityRegistry {
             });
         }
         let mut state = self.state.write();
-        if state.reservation.is_some() {
+        if Self::reservation_in_progress(&state) {
             return Err(HostAcceptorError::RegistryReservationInProgress);
         }
         Self::validate_owner_state(&state, owner)?;
@@ -331,7 +484,7 @@ impl HostAcceptorIdentityRegistry {
         pubkey: &PubKey,
     ) -> Result<bool, HostAcceptorError> {
         let mut state = self.state.write();
-        if state.reservation.is_some() {
+        if Self::reservation_in_progress(&state) {
             return Err(HostAcceptorError::RegistryReservationInProgress);
         }
         Self::validate_owner_state(&state, owner)?;
@@ -520,6 +673,8 @@ pub enum HostAcceptorError {
     RegistryReservationInProgress,
     #[error("identity {pubkey} is already registered on the host acceptor")]
     IdentityAlreadyRegistered { pubkey: String },
+    #[error("expected current host acceptor identity generation {pubkey} is no longer installed")]
+    ExpectedIdentityGenerationNotCurrent { pubkey: String },
     #[error("registered identity pubkey {pubkey} does not match the supplied keypair")]
     IdentityKeypairMismatch { pubkey: String },
     #[error("invalid host pairing secret: {reason}")]
@@ -1136,6 +1291,101 @@ mod tests {
                 .is_some(),
             "reservation commit makes the exact identity resolvable"
         );
+    }
+
+    #[test]
+    fn identity_replacement_reservation_is_inert_until_atomic_commit() {
+        let registry = Arc::new(HostAcceptorIdentityRegistry::new());
+        let owner: Arc<dyn Any + Send + Sync> = Arc::new(());
+        registry
+            .install_owner(Arc::clone(&owner))
+            .expect("owner install");
+        let current = Arc::new(Keypair::generate());
+        let replacement = Arc::new(Keypair::generate());
+        let (_current_inbox, current_sender) = Inbox::new();
+        let (_replacement_inbox, replacement_sender) = Inbox::new();
+        registry
+            .register_identity(
+                &owner,
+                current.public_key(),
+                Arc::clone(&current),
+                current_sender.clone(),
+            )
+            .expect("current identity registration");
+
+        let prepared = registry
+            .reserve_identity_replacement(
+                Arc::clone(&owner),
+                current.public_key(),
+                &current_sender,
+                replacement.public_key(),
+                Arc::clone(&replacement),
+            )
+            .expect("prepare exact replacement");
+        let still_current = registry
+            .resolve(&current.public_key())
+            .expect("current route remains sole route while prepared");
+        assert!(still_current.1.same_inbox(&current_sender));
+        assert!(registry.resolve(&replacement.public_key()).is_none());
+        drop(prepared);
+
+        let after_drop = registry
+            .resolve(&current.public_key())
+            .expect("dropping preparation leaves current route intact");
+        assert!(after_drop.1.same_inbox(&current_sender));
+        assert!(registry.resolve(&replacement.public_key()).is_none());
+
+        registry
+            .reserve_identity_replacement(
+                Arc::clone(&owner),
+                current.public_key(),
+                &current_sender,
+                replacement.public_key(),
+                Arc::clone(&replacement),
+            )
+            .expect("prepare committed replacement")
+            .commit(replacement_sender.clone());
+        assert!(registry.resolve(&current.public_key()).is_none());
+        let committed = registry
+            .resolve(&replacement.public_key())
+            .expect("replacement route becomes visible at commit");
+        assert!(committed.1.same_inbox(&replacement_sender));
+    }
+
+    #[test]
+    fn identity_replacement_rejects_stale_generation_without_mutation() {
+        let registry = Arc::new(HostAcceptorIdentityRegistry::new());
+        let owner: Arc<dyn Any + Send + Sync> = Arc::new(());
+        registry
+            .install_owner(Arc::clone(&owner))
+            .expect("owner install");
+        let current = Arc::new(Keypair::generate());
+        let replacement = Arc::new(Keypair::generate());
+        let (_current_inbox, current_sender) = Inbox::new();
+        let (_stale_inbox, stale_sender) = Inbox::new();
+        registry
+            .register_identity(
+                &owner,
+                current.public_key(),
+                Arc::clone(&current),
+                current_sender.clone(),
+            )
+            .expect("current identity registration");
+
+        assert!(matches!(
+            registry.reserve_identity_replacement(
+                Arc::clone(&owner),
+                current.public_key(),
+                &stale_sender,
+                replacement.public_key(),
+                replacement,
+            ),
+            Err(HostAcceptorError::ExpectedIdentityGenerationNotCurrent { .. })
+        ));
+        let retained = registry
+            .resolve(&current.public_key())
+            .expect("stale reservation must retain current route");
+        assert!(retained.1.same_inbox(&current_sender));
     }
 
     #[test]

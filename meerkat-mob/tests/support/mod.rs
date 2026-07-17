@@ -2722,6 +2722,28 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                 let Some(route) = reply_route else {
                     continue;
                 };
+                // Mirror `MobHostActor::send_reply`: a restarted controller
+                // retains its signing identity but publishes a fresh TCP
+                // callback. The authenticated request envelope is the sole
+                // authority for routing this exact correlated response; a
+                // payload-declared supervisor address must never mint that
+                // authority. The correlated endpoint intentionally overrides
+                // any stale durable trust row for only this response.
+                if let (Some(sender_peer_id), Some(signing_pubkey), Some(reply_endpoint)) = (
+                    candidate.ingress.canonical_peer_id,
+                    candidate.ingress.signing_pubkey,
+                    candidate.ingress.declared_reply_endpoint.clone(),
+                ) {
+                    runtime
+                        .stage_correlated_reply_endpoint(
+                            sender_peer_id,
+                            candidate.interaction.id,
+                            signing_pubkey,
+                            reply_endpoint,
+                        )
+                        .await
+                        .expect("scripted host stages authenticated correlated reply endpoint");
+                }
                 let _ = runtime
                     .send(CommsCommand::PeerResponse {
                         to: route,
@@ -3367,7 +3389,7 @@ impl ControllingMob {
     /// Drop the running mob and rebuild it over the SAME storage handles —
     /// the controlling cold-restart idiom (`MobBuilder::for_resume`).
     pub async fn restart(self) -> ControllingMob {
-        self.restart_inner(ControllingMobRestartMode::Graceful)
+        self.restart_inner(ControllingMobRestartMode::Graceful, None)
             .await
     }
 
@@ -3376,7 +3398,7 @@ impl ControllingMob {
     /// and private remote-turn custody as a process crash would.
     #[cfg(feature = "test-support")]
     pub async fn crash_restart(self) -> ControllingMob {
-        self.restart_inner(ControllingMobRestartMode::CrashCommand)
+        self.restart_inner(ControllingMobRestartMode::CrashCommand, None)
             .await
     }
 
@@ -3384,11 +3406,30 @@ impl ControllingMob {
     /// crash-quiesced and terminated the actor. No second stop command is
     /// possible or desirable; the same stores are replayed directly.
     pub async fn restart_after_actor_fail_stop(self) -> ControllingMob {
-        self.restart_inner(ControllingMobRestartMode::ActorAlreadyFailStopped)
+        self.restart_inner(ControllingMobRestartMode::ActorAlreadyFailStopped, None)
             .await
     }
 
-    async fn restart_inner(self, mode: ControllingMobRestartMode) -> ControllingMob {
+    /// Cold-restart a fail-stopped controller away from the callback captured
+    /// while its previous listener was live. Temporarily reserving that stale
+    /// port before selecting the replacement makes address inequality
+    /// deterministic instead of relying on port-0 allocation behavior.
+    pub async fn restart_after_actor_fail_stop_with_distinct_callback(
+        self,
+        previous_callback: meerkat_core::comms::PeerAddress,
+    ) -> ControllingMob {
+        self.restart_inner(
+            ControllingMobRestartMode::ActorAlreadyFailStopped,
+            Some(previous_callback),
+        )
+        .await
+    }
+
+    async fn restart_inner(
+        self,
+        mode: ControllingMobRestartMode,
+        distinct_from_callback: Option<meerkat_core::comms::PeerAddress>,
+    ) -> ControllingMob {
         let ControllingMob {
             handle,
             service,
@@ -3401,6 +3442,24 @@ impl ControllingMob {
             storage_events_in_memory,
             member_live_host,
         } = self;
+        let distinct_from_callback = distinct_from_callback.map(|address| {
+            assert_eq!(
+                address.transport(),
+                meerkat_core::comms::PeerTransport::Tcp,
+                "pre-failure supervisor callback must use TCP"
+            );
+            let previous_endpoint = address.endpoint().to_string();
+            previous_endpoint
+                .split('?')
+                .next()
+                .expect("pre-restart supervisor callback endpoint")
+                .parse::<std::net::SocketAddr>()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "pre-restart supervisor callback {previous_endpoint:?} is not a socket address: {error}"
+                    )
+                })
+        });
         match mode {
             ControllingMobRestartMode::Graceful => {
                 handle.shutdown().await.expect("shutdown controlling mob");
@@ -3417,6 +3476,42 @@ impl ControllingMob {
             ControllingMobRestartMode::ActorAlreadyFailStopped => {}
         }
         drop(handle);
+
+        let distinct_callback_reservation = if let Some(previous) = distinct_from_callback {
+            // Occupy the stale callback after teardown before asking the kernel
+            // for the replacement. This makes a port-0 recycle impossible,
+            // even when the old process releases its listener immediately.
+            let stale_reservation =
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        match std::net::TcpListener::bind(previous) {
+                            Ok(listener) => break listener,
+                            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
+                            Err(error) => {
+                                panic!("reserve stale pre-restart supervisor callback: {error}")
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("pre-restart supervisor callback should be released after handle teardown");
+            let reservation =
+                std::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+                    .expect("reserve distinct post-restart supervisor callback");
+            let replacement = reservation
+                .local_addr()
+                .expect("reserved post-restart supervisor callback address");
+            assert_ne!(
+                replacement, previous,
+                "replacement callback reservation must differ while the old listener is live"
+            );
+            drop(stale_reservation);
+            Some((previous, replacement, reservation))
+        } else {
+            None
+        };
 
         // A production cold restart creates a fresh session/runtime process
         // over the same durable stores. Reusing `service` here retained the
@@ -3444,8 +3539,12 @@ impl ControllingMob {
         let runtime_adapter = mob_service
             .runtime_adapter()
             .expect("persistent service exposes a runtime adapter");
+        let controlling_acceptor_address = distinct_callback_reservation.as_ref().map_or_else(
+            || "127.0.0.1:0".parse().expect("loopback acceptor address"),
+            |(_, replacement, _)| *replacement,
+        );
         let controlling_acceptor = meerkat_mob::ControllingAcceptorConfig::for_session_service(
-            "127.0.0.1:0".parse().expect("loopback acceptor address"),
+            controlling_acceptor_address,
             None,
             Arc::clone(&mob_service),
         );
@@ -3463,10 +3562,41 @@ impl ControllingMob {
             Some(live_host) => builder.with_member_live_host(Arc::clone(live_host)),
             None => builder,
         };
+        let forced_callback_addresses = distinct_callback_reservation
+            .as_ref()
+            .map(|(previous, replacement, _)| (*previous, *replacement));
+        drop(distinct_callback_reservation);
         let handle = builder
             .resume()
             .await
             .expect("resume controlling mob over durable truth");
+        if let Some((previous, expected)) = forced_callback_addresses {
+            let actual_endpoint = handle
+                .routable_supervisor_peer()
+                .await
+                .expect("read post-restart routable supervisor callback")
+                .address
+                .endpoint()
+                .to_string();
+            let actual = actual_endpoint
+                .split('?')
+                .next()
+                .expect("post-restart supervisor callback endpoint")
+                .parse::<std::net::SocketAddr>()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "post-restart supervisor callback {actual_endpoint:?} is not a socket address: {error}"
+                    )
+                });
+            assert_eq!(
+                actual, expected,
+                "restart must bind the exact callback address reserved before teardown"
+            );
+            assert_ne!(
+                actual, previous,
+                "restart must not recycle the stale durable callback address"
+            );
+        }
 
         ControllingMob {
             handle,

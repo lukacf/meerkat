@@ -54,6 +54,32 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct ListenerStartFault {
+    participant_name: String,
+    observed_tcp_address: Option<std::net::SocketAddr>,
+    armed: bool,
+}
+
+/// Deterministic test-only failure after the signed TCP listener has bound but
+/// before any staged handle is committed to the runtime.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+static LISTENER_START_FAULT_AFTER_SIGNED_TCP: std::sync::Mutex<Option<ListenerStartFault>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct ListenerStartPause {
+    participant_name: String,
+    reached: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
+    release: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+/// Deterministic test-only pause after the signed TCP listener has bound and
+/// its handle has entered the cancellation-safe staging guard.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+static LISTENER_START_PAUSE_AFTER_SIGNED_TCP: std::sync::Mutex<Option<ListenerStartPause>> =
+    std::sync::Mutex::new(None);
+
 /// Default reservation TTL (time from `Reserved` to `Expired` if not attached).
 const RESERVATION_TTL: meerkat_core::time_compat::Duration =
     meerkat_core::time_compat::Duration::from_secs(30);
@@ -1613,6 +1639,8 @@ pub enum CommsRuntimeError {
     UnsafeBinding(String),
     #[error("Inproc registration rejected: {0:?}")]
     InprocRegistrationRejected(crate::RegistrationRejection),
+    #[error("Inproc publication failed: {0}")]
+    InprocPublication(#[from] crate::InprocPublicationError),
 }
 
 /// Observe a constructor-time inproc registration outcome and fail closed on
@@ -1747,6 +1775,10 @@ pub struct CommsRuntime {
     router: Arc<Router>,
     trusted_peers: Arc<parking_lot::RwLock<TrustStore>>,
     inbox: Arc<AsyncMutex<crate::Inbox>>,
+    /// Exact inbox generation published by this runtime. A prepared runtime
+    /// carries `None`; publication stores one sender clone for compare-replace
+    /// and compare-remove operations in the process-global registry.
+    inproc_sender: Option<crate::InboxSender>,
     inbox_notify: Arc<tokio::sync::Notify>,
     #[cfg(not(target_arch = "wasm32"))]
     config: ResolvedCommsConfig,
@@ -1808,7 +1840,105 @@ pub struct CommsRuntime {
     bridge_reply_waiters: Mutex<HashMap<Uuid, BridgeReplyWaiterEntry>>,
 }
 
+/// Fully constructed comms runtime whose inproc route is still dormant.
+///
+/// The wrapper is deliberately non-`Clone`. Callers may configure listeners
+/// and install generated authorities through `runtime_mut`/`runtime`, then
+/// consume the wrapper with `publish` or `publish_replacing`. Dropping it has
+/// no registry effect.
+#[must_use = "a prepared comms runtime must be published or deliberately dropped"]
+pub struct PreparedCommsRuntime {
+    runtime: CommsRuntime,
+}
+
+impl PreparedCommsRuntime {
+    pub fn runtime(&self) -> &CommsRuntime {
+        &self.runtime
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut CommsRuntime {
+        &mut self.runtime
+    }
+
+    /// Publish this runtime using ordinary inproc registration semantics.
+    pub fn publish(mut self) -> Result<CommsRuntime, CommsRuntimeError> {
+        self.runtime.publish_prepared_inproc(None)?;
+        Ok(self.runtime)
+    }
+
+    /// Atomically replace the exact inproc generation owned by `current`.
+    ///
+    /// Namespace and participant name must match. Any stale-current or
+    /// replacement-key conflict is reported before registry mutation.
+    pub fn publish_replacing(
+        self,
+        current: &CommsRuntime,
+    ) -> Result<CommsRuntime, CommsRuntimeError> {
+        self.publish_replacing_recoverable(current)
+            .map_err(|(_prepared, error)| error)
+    }
+
+    /// Recoverable form of [`Self::publish_replacing`].
+    ///
+    /// A failed exact publication leaves the registry unchanged and returns
+    /// ownership of the still-dormant candidate so callers can await listener
+    /// teardown before rebinding a fixed endpoint.
+    pub fn publish_replacing_recoverable(
+        mut self,
+        current: &CommsRuntime,
+    ) -> Result<CommsRuntime, (Box<Self>, CommsRuntimeError)> {
+        match self.runtime.publish_prepared_inproc(Some(current)) {
+            Ok(()) => Ok(self.runtime),
+            Err(error) => Err((Box::new(self), error)),
+        }
+    }
+}
+
 impl CommsRuntime {
+    fn publish_prepared_inproc(
+        &mut self,
+        current: Option<&CommsRuntime>,
+    ) -> Result<(), CommsRuntimeError> {
+        debug_assert!(self.inproc_sender.is_none());
+        let namespace = self.inproc_namespace().unwrap_or("").to_string();
+        let name = self.participant_name().to_string();
+        let sender = self.router.inbox_sender().clone();
+        if let Some(current) = current
+            && (current.inproc_namespace().unwrap_or("") != namespace
+                || current.participant_name() != name)
+        {
+            return Err(crate::InprocPublicationError::IdentityMismatch.into());
+        }
+        let outcome = if let Some(current) = current {
+            let current_sender = current.inproc_sender.as_ref().ok_or({
+                CommsRuntimeError::InprocPublication(
+                    crate::InprocPublicationError::CurrentRuntimeUnpublished,
+                )
+            })?;
+            InprocRegistry::global()
+                .replace_sender_in_namespace(
+                    &namespace,
+                    &name,
+                    (&current.public_key, current_sender),
+                    self.public_key,
+                    sender.clone(),
+                )
+                .map_err(CommsRuntimeError::InprocPublication)?;
+            crate::RegistrationOutcome::Registered
+        } else {
+            InprocRegistry::global().register_with_meta_in_namespace(
+                &namespace,
+                &name,
+                self.public_key,
+                sender.clone(),
+                crate::PeerMeta::default(),
+            )
+        };
+        observe_inproc_registration(&namespace, &name, outcome)?;
+        self.inproc_sender = Some(sender);
+        Ok(())
+    }
+
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
         let mut digest = Sha256::new();
         digest.update(b"meerkat.supervisor-bridge.bootstrap-token.v1");
@@ -1902,7 +2032,7 @@ impl CommsRuntime {
             keypair.clone(),
             trusted_peers.clone(),
             config.comms_config.clone(),
-            inbox_sender.clone(),
+            inbox_sender,
             config.require_peer_auth,
         )
         .with_inproc_namespace(config.inproc_namespace.clone());
@@ -1913,6 +2043,7 @@ impl CommsRuntime {
             router: Arc::new(router),
             trusted_peers,
             inbox: Arc::new(AsyncMutex::new(inbox)),
+            inproc_sender: None,
             inbox_notify,
             config: config.clone(),
             listener_handles: Mutex::new(Vec::new()),
@@ -1934,16 +2065,8 @@ impl CommsRuntime {
             interaction_stream_handle: parking_lot::RwLock::new(None),
             bridge_reply_waiters: Mutex::new(HashMap::new()),
         };
-        let namespace = config.inproc_namespace.clone().unwrap_or_default();
-        let name = config.name.clone();
-        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
-            &namespace,
-            &name,
-            runtime.public_key,
-            inbox_sender,
-            crate::PeerMeta::default(),
-        );
-        observe_inproc_registration(&namespace, &name, outcome)?;
+        let mut runtime = runtime;
+        runtime.publish_prepared_inproc(None)?;
         Ok(runtime)
     }
 
@@ -1971,8 +2094,26 @@ impl CommsRuntime {
         name: &str,
         namespace: Option<String>,
         keypair: Keypair,
-        _silent_intents: Arc<HashSet<String>>,
+        silent_intents: Arc<HashSet<String>>,
     ) -> Result<Self, CommsRuntimeError> {
+        Self::prepare_inproc_only_with_keypair_and_silent_intents(
+            name,
+            namespace,
+            keypair,
+            silent_intents,
+        )?
+        .publish()
+    }
+
+    /// Construct a complete inproc runtime without publishing its global
+    /// route. This is the two-phase seam for cancellation-safe supervisor
+    /// rotation and other exact runtime replacement.
+    pub fn prepare_inproc_only_with_keypair_and_silent_intents(
+        name: &str,
+        namespace: Option<String>,
+        keypair: Keypair,
+        _silent_intents: Arc<HashSet<String>>,
+    ) -> Result<PreparedCommsRuntime, CommsRuntimeError> {
         let public_key = keypair.public_key();
         // Single source of truth — same Arc shared by Router, classification, and callers.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustStore::new()));
@@ -2008,27 +2149,30 @@ impl CommsRuntime {
             allow_external_unauthenticated: false,
             pairing_password: None,
         };
+        #[cfg(target_arch = "wasm32")]
+        let runtime_namespace = namespace.clone();
         let router = Router::with_shared_peers(
             keypair.clone(),
             trusted_peers.clone(),
             comms_config,
-            inbox_sender.clone(),
+            inbox_sender,
             true,
         )
-        .with_inproc_namespace(namespace.clone());
+        .with_inproc_namespace(namespace);
         let runtime = Self {
             public_key,
             peer_id: public_key.to_peer_id(),
             router: Arc::new(router),
             trusted_peers,
             inbox: Arc::new(AsyncMutex::new(inbox)),
+            inproc_sender: None,
             inbox_notify,
             #[cfg(not(target_arch = "wasm32"))]
             config,
             #[cfg(target_arch = "wasm32")]
             name: name.to_string(),
             #[cfg(target_arch = "wasm32")]
-            inproc_namespace: namespace.clone(),
+            inproc_namespace: runtime_namespace,
             #[cfg(not(target_arch = "wasm32"))]
             listener_handles: Mutex::new(Vec::new()),
             #[cfg(not(target_arch = "wasm32"))]
@@ -2051,16 +2195,7 @@ impl CommsRuntime {
             interaction_stream_handle: parking_lot::RwLock::new(None),
             bridge_reply_waiters: Mutex::new(HashMap::new()),
         };
-        let namespace_ref = namespace.as_deref().unwrap_or("");
-        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
-            namespace_ref,
-            name,
-            runtime.public_key,
-            inbox_sender,
-            crate::PeerMeta::default(),
-        );
-        observe_inproc_registration(namespace_ref, name, outcome)?;
-        Ok(runtime)
+        Ok(PreparedCommsRuntime { runtime })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2140,16 +2275,17 @@ impl CommsRuntime {
             keypair.clone(),
             trusted_peers.clone(),
             comms_config,
-            inbox_sender.clone(),
+            inbox_sender,
             true,
         )
-        .with_inproc_namespace(namespace.clone());
+        .with_inproc_namespace(namespace);
         let runtime = Self {
             public_key,
             peer_id: public_key.to_peer_id(),
             router: Arc::new(router),
             trusted_peers,
             inbox: Arc::new(AsyncMutex::new(inbox)),
+            inproc_sender: None,
             inbox_notify,
             config,
             listener_handles: Mutex::new(Vec::new()),
@@ -2171,15 +2307,8 @@ impl CommsRuntime {
             interaction_stream_handle: parking_lot::RwLock::new(None),
             bridge_reply_waiters: Mutex::new(HashMap::new()),
         };
-        let namespace_ref = namespace.as_deref().unwrap_or("");
-        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
-            namespace_ref,
-            name,
-            runtime.public_key,
-            inbox_sender,
-            crate::PeerMeta::default(),
-        );
-        observe_inproc_registration(namespace_ref, name, outcome)?;
+        let mut runtime = runtime;
+        runtime.publish_prepared_inproc(None)?;
         Ok(runtime)
     }
 
@@ -2504,30 +2633,124 @@ impl CommsRuntime {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn validate_listener_start_config(&self) -> Result<(), CommsRuntimeError> {
+        if let Some(listen_tcp) = self.config.listen_tcp {
+            if let Some(secret) = self.config.pairing_password.as_deref() {
+                validate_pairing_secret(secret)?;
+            }
+            if let Some(advertise_address) = self.config.advertise_address.as_deref() {
+                parse_peer_address(advertise_address).map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid comms advertised address '{advertise_address}': {error}"),
+                    )
+                })?;
+            } else if listen_tcp.ip().is_unspecified() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "signed comms listener bound to a wildcard address requires an explicit advertised address",
+                )
+                .into());
+            }
+        }
+
+        if self.config.auth == meerkat_core::CommsAuthMode::Open
+            && let Some(addr) = &self.config.event_listen_tcp
+            && !addr.ip().is_loopback()
+            && !self.config.allow_external_unauthenticated
+        {
+            return Err(CommsRuntimeError::UnsafeBinding(
+                "Plain event listener on non-loopback address is a prompt injection \
+                 vector; set allow_external_unauthenticated=true to override"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn inject_listener_start_failure_after_signed_tcp(
+        &self,
+        observed_tcp_address: Option<std::net::SocketAddr>,
+    ) -> bool {
+        let mut slot = LISTENER_START_FAULT_AFTER_SIGNED_TCP
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(fault) = slot.as_mut() else {
+            return false;
+        };
+        if !fault.armed || fault.participant_name != self.config.name {
+            return false;
+        }
+        fault.armed = false;
+        fault.observed_tcp_address = observed_tcp_address;
+        true
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    async fn pause_listener_start_after_signed_tcp(
+        &self,
+        observed_tcp_address: std::net::SocketAddr,
+    ) {
+        let pause = {
+            let mut slot = LISTENER_START_PAUSE_AFTER_SIGNED_TCP
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot
+                .as_ref()
+                .is_some_and(|pause| pause.participant_name == self.config.name)
+            {
+                slot.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(mut pause) = pause {
+            if let Some(reached) = pause.reached.take() {
+                let _ = reached.send(observed_tcp_address);
+            }
+            if let Some(release) = pause.release.take() {
+                let _ = release.await;
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn start_listeners(&mut self) -> Result<(), CommsRuntimeError> {
         if self.listeners_started {
             return Err(CommsRuntimeError::AlreadyStarted);
         }
+        self.validate_listener_start_config()?;
 
         let inbox_sender = self.router.inbox_sender().clone();
         let router = self.router.clone();
         let max_line_length = self.config.comms_config.max_message_bytes as usize;
+        let mut staged = StagedListenerHandles::new();
+        let mut resolved_listen_tcp = self.config.listen_tcp;
 
         // === Signed (Ed25519) listeners — ALWAYS run for agent-to-agent comms ===
         #[cfg(unix)]
         if let Some(ref path) = self.config.listen_uds {
-            let handle = spawn_uds_listener(
+            let handle = match spawn_uds_listener(
                 path,
                 self.keypair.clone(),
                 self.require_peer_auth,
                 inbox_sender.clone(),
             )
-            .await?;
-            self.listener_handles.lock().push(handle);
+            .await
+            {
+                Ok(handle) => handle,
+                Err(error) => {
+                    staged.abort_and_wait().await;
+                    return Err(error.into());
+                }
+            };
+            staged.push(handle);
         }
 
         if let Some(ref addr) = self.config.listen_tcp {
-            let handle = spawn_tcp_listener(TcpListenerConfig {
+            let handle = match spawn_tcp_listener(TcpListenerConfig {
                 addr: addr.to_string(),
                 keypair: self.keypair.clone(),
                 router,
@@ -2540,45 +2763,72 @@ impl CommsRuntime {
                 participant_name: self.config.name.clone(),
                 bridge_bootstrap_token: self.bridge_bootstrap_token.clone(),
             })
-            .await?;
+            .await
+            {
+                Ok(handle) => handle,
+                Err(error) => {
+                    staged.abort_and_wait().await;
+                    return Err(error.into());
+                }
+            };
             if let Some(local_addr) = handle.local_addr {
-                self.config.listen_tcp = Some(local_addr);
+                resolved_listen_tcp = Some(local_addr);
             }
-            self.listener_handles.lock().push(handle);
+            staged.push(handle);
+
+            #[cfg(test)]
+            if let Some(resolved_listen_tcp) = resolved_listen_tcp {
+                self.pause_listener_start_after_signed_tcp(resolved_listen_tcp)
+                    .await;
+            }
+
+            #[cfg(test)]
+            if self.inject_listener_start_failure_after_signed_tcp(resolved_listen_tcp) {
+                staged.abort_and_wait().await;
+                return Err(std::io::Error::other(
+                    "fault-injected listener startup failure after signed TCP bind",
+                )
+                .into());
+            }
         }
 
         // === Plain event listeners — run ADDITIONALLY when auth=Open ===
         if self.config.auth == meerkat_core::CommsAuthMode::Open {
-            // Enforce loopback-only on plain TCP listener unless explicitly overridden
-            if let Some(addr) = &self.config.event_listen_tcp
-                && !addr.ip().is_loopback()
-                && !self.config.allow_external_unauthenticated
-            {
-                return Err(CommsRuntimeError::UnsafeBinding(
-                    "Plain event listener on non-loopback address is a prompt injection \
-                     vector; set allow_external_unauthenticated=true to override"
-                        .to_string(),
-                ));
-            }
-
             if let Some(ref addr) = self.config.event_listen_tcp {
-                let handle = spawn_plain_tcp_listener(
+                let handle = match spawn_plain_tcp_listener(
                     &addr.to_string(),
                     inbox_sender.clone(),
                     max_line_length,
                 )
-                .await?;
-                self.listener_handles.lock().push(handle);
+                .await
+                {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        staged.abort_and_wait().await;
+                        return Err(error.into());
+                    }
+                };
+                staged.push(handle);
             }
 
             #[cfg(unix)]
             if let Some(ref path) = self.config.event_listen_uds {
                 let handle =
-                    spawn_plain_uds_listener(path, inbox_sender.clone(), max_line_length).await?;
-                self.listener_handles.lock().push(handle);
+                    match spawn_plain_uds_listener(path, inbox_sender.clone(), max_line_length)
+                        .await
+                    {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            staged.abort_and_wait().await;
+                            return Err(error.into());
+                        }
+                    };
+                staged.push(handle);
             }
         }
 
+        self.config.listen_tcp = resolved_listen_tcp;
+        self.listener_handles.lock().extend(staged.commit());
         self.listeners_started = true;
         Ok(())
     }
@@ -2726,40 +2976,26 @@ impl CommsRuntime {
 
     /// Update the inproc registry entry with friendly metadata.
     ///
-    /// Call this after construction to advertise [`PeerMeta`] to other
-    /// in-process agents via [`InprocRegistry::peers()`].
-    ///
-    /// Internally re-registers with [`InprocRegistry::register_with_meta`],
-    /// which replaces the full entry (including inbox sender). This is safe
-    /// because the sender is cloned from the same router and pending
-    /// deliveries are unaffected.
+    /// This is a published-runtime operation. The exact publication lease
+    /// updates metadata in place; it never re-registers the route or changes
+    /// the inbox generation owned by Drop.
     pub fn set_peer_meta(&self, meta: crate::PeerMeta) {
         let namespace = self.inproc_namespace().unwrap_or("");
         let name = self.participant_name();
-        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
+        let Some(sender) = self.inproc_sender.as_ref() else {
+            return;
+        };
+        if !InprocRegistry::global().update_meta_for_sender_in_namespace(
             namespace,
             name,
-            self.public_key,
-            self.router.inbox_sender().clone(),
+            &self.public_key,
+            sender,
             meta,
-        );
-        // A metadata refresh re-registers the same name+pubkey and expects a
-        // clean `Registered`. Surface anything else explicitly rather than
-        // assuming success — a rejection means the meta update never landed,
-        // and a displacement means we clobbered an unexpected route.
-        if outcome.is_rejected() {
+        ) {
             tracing::warn!(
                 inproc_namespace = %namespace,
                 peer_name = %name,
-                ?outcome,
-                "inproc metadata refresh rejected; peer meta was not updated"
-            );
-        } else if outcome.displaced_existing() {
-            tracing::warn!(
-                inproc_namespace = %namespace,
-                peer_name = %name,
-                ?outcome,
-                "inproc metadata refresh displaced an unexpected route"
+                "inproc metadata refresh lost its exact inbox generation"
             );
         }
     }
@@ -3632,8 +3868,13 @@ impl meerkat_core::handles::InteractionStreamCleanupObserver for CommsRuntime {
 impl Drop for CommsRuntime {
     fn drop(&mut self) {
         self.shutdown();
-        InprocRegistry::global()
-            .unregister_in_namespace(self.inproc_namespace().unwrap_or(""), &self.public_key);
+        if let Some(sender) = self.inproc_sender.as_ref() {
+            InprocRegistry::global().unregister_sender_in_namespace(
+                self.inproc_namespace().unwrap_or(""),
+                &self.public_key,
+                sender,
+            );
+        }
     }
 }
 
@@ -3641,6 +3882,49 @@ impl Drop for CommsRuntime {
 pub struct ListenerHandle {
     handle: JoinHandle<()>,
     local_addr: Option<std::net::SocketAddr>,
+}
+
+/// Owns listener tasks until startup commits them to the runtime.
+///
+/// Dropping a Tokio [`JoinHandle`] detaches its task, so ordinary collection
+/// drop is not sufficient when `start_listeners` itself is cancelled. This
+/// guard aborts every still-staged task on all non-commit exits. Explicit
+/// startup errors additionally await termination through [`Self::abort_and_wait`].
+#[cfg(not(target_arch = "wasm32"))]
+struct StagedListenerHandles {
+    handles: Vec<ListenerHandle>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StagedListenerHandles {
+    fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, handle: ListenerHandle) {
+        self.handles.push(handle);
+    }
+
+    async fn abort_and_wait(&mut self) {
+        while let Some(handle) = self.handles.pop() {
+            handle.abort_and_wait().await;
+        }
+    }
+
+    fn commit(mut self) -> Vec<ListenerHandle> {
+        std::mem::take(&mut self.handles)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StagedListenerHandles {
+    fn drop(&mut self) {
+        for handle in self.handles.drain(..) {
+            handle.abort();
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -5830,6 +6114,146 @@ mod tests {
             .expect("actual signed TCP listener address after start");
         assert_eq!(bound.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
         assert_ne!(bound.port(), 0, "kernel must resolve the ephemeral port");
+    }
+
+    #[tokio::test]
+    async fn listener_start_failure_unwinds_staged_handles_and_retry_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let participant_name = format!("listener-start-transaction-{}", Uuid::new_v4().simple());
+        let requested_address: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut config = test_runtime_config(&participant_name, &tmp);
+        config.listen_tcp = Some(requested_address);
+        let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
+            config,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .unwrap();
+
+        {
+            let mut fault = LISTENER_START_FAULT_AFTER_SIGNED_TCP
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *fault = Some(ListenerStartFault {
+                participant_name: participant_name.clone(),
+                observed_tcp_address: None,
+                armed: true,
+            });
+        }
+
+        let error = runtime
+            .start_listeners()
+            .await
+            .expect_err("fault after signed TCP bind should fail startup");
+        assert!(
+            error
+                .to_string()
+                .contains("fault-injected listener startup failure"),
+            "unexpected startup error: {error}"
+        );
+        let failed_address = LISTENER_START_FAULT_AFTER_SIGNED_TCP
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .and_then(|fault| fault.observed_tcp_address)
+            .expect("fault seam should record the staged signed TCP address");
+
+        assert!(!runtime.listeners_started);
+        assert!(runtime.listener_handles.lock().is_empty());
+        assert_eq!(runtime.bound_tcp_listener_address(), None);
+        assert_eq!(
+            runtime.config.listen_tcp,
+            Some(requested_address),
+            "failed staging must not publish the kernel-selected port"
+        );
+        let rebound = TcpListener::bind(failed_address)
+            .await
+            .expect("failed startup must release the staged TCP listener before returning");
+        drop(rebound);
+
+        runtime
+            .start_listeners()
+            .await
+            .expect("the same runtime should retry cleanly after transactional rollback");
+        assert!(runtime.listeners_started);
+        assert_eq!(runtime.listener_handles.lock().len(), 1);
+        assert!(runtime.bound_tcp_listener_address().is_some());
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn listener_start_cancellation_aborts_staged_handles_and_retry_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let participant_name = format!("listener-start-cancellation-{}", Uuid::new_v4().simple());
+        let requested_address: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut config = test_runtime_config(&participant_name, &tmp);
+        config.listen_tcp = Some(requested_address);
+        let mut runtime = CommsRuntime::new_machine_authority_required_with_silent_intents(
+            config,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .unwrap();
+
+        let (reached, reached_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pause = LISTENER_START_PAUSE_AFTER_SIGNED_TCP
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *pause = Some(ListenerStartPause {
+                participant_name,
+                reached: Some(reached),
+                release: Some(release_rx),
+            });
+        }
+
+        let mut startup = Box::pin(runtime.start_listeners());
+        let staged_address = tokio::select! {
+            observed = reached_rx => observed.expect("pause seam should report the staged TCP address"),
+            result = &mut startup => panic!("listener startup completed before cancellation: {result:?}"),
+            () = tokio::time::sleep(Duration::from_secs(2)) => {
+                panic!("listener startup did not reach the post-bind cancellation seam")
+            }
+        };
+
+        // Cancelling startup drops its staging guard. The guard must abort the
+        // bound listener rather than detach it from the cancelled future.
+        drop(startup);
+        drop(release);
+
+        let rebound = timeout(Duration::from_secs(2), async {
+            loop {
+                match TcpListener::bind(staged_address).await {
+                    Ok(listener) => break listener,
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("unexpected staged-port rebind failure: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("cancelled listener task should release its staged TCP port");
+        drop(rebound);
+
+        assert!(!runtime.listeners_started);
+        assert!(runtime.listener_handles.lock().is_empty());
+        assert_eq!(runtime.bound_tcp_listener_address(), None);
+        assert_eq!(
+            runtime.config.listen_tcp,
+            Some(requested_address),
+            "cancelled staging must not publish the kernel-selected port"
+        );
+
+        runtime
+            .start_listeners()
+            .await
+            .expect("the same runtime should retry cleanly after cancellation rollback");
+        assert!(runtime.listeners_started);
+        assert_eq!(runtime.listener_handles.lock().len(), 1);
+        assert!(runtime.bound_tcp_listener_address().is_some());
+        runtime.shutdown();
     }
 
     #[tokio::test]
@@ -8720,6 +9144,331 @@ mod tests {
             <CommsRuntime as CoreCommsRuntime>::peer_id(&runtime),
             Some(PeerId::from_ed25519_pubkey(&public_key_bytes))
         );
+    }
+
+    #[test]
+    fn prepared_inproc_runtime_is_dormant_and_drop_is_registry_inert() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("prepared-dormant-{suffix}");
+        let namespace = format!("prepared-dormant-ns-{suffix}");
+        let current = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("current runtime should publish");
+        let current_key = current.public_key();
+        let current_sender = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &current_key)
+            .expect("current route should be published");
+
+        let prepared = CommsRuntime::prepare_inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("replacement runtime should prepare");
+        let prepared_key = prepared.runtime().public_key();
+
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&namespace, &prepared_key)
+                .is_none(),
+            "preparation must not publish the candidate route"
+        );
+        let during_prepare = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &current_key)
+            .expect("preparation must retain the current route");
+        assert!(current_sender.same_inbox(&during_prepare));
+
+        drop(prepared);
+
+        let after_drop = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &current_key)
+            .expect("dropping a prepared runtime must retain the current route");
+        assert!(current_sender.same_inbox(&after_drop));
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&namespace, &prepared_key)
+                .is_none(),
+            "dropping an unpublished candidate must have zero registry effect"
+        );
+    }
+
+    #[test]
+    fn prepared_inproc_runtime_atomically_replaces_exact_current_generation() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("prepared-replace-{suffix}");
+        let namespace = format!("prepared-replace-ns-{suffix}");
+        let current = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("current runtime should publish");
+        let current_key = current.public_key();
+        let prepared = CommsRuntime::prepare_inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("replacement runtime should prepare");
+        let replacement_key = prepared.runtime().public_key();
+
+        let replacement = prepared
+            .publish_replacing(&current)
+            .expect("exact current generation should replace atomically");
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&namespace, &current_key)
+                .is_none(),
+            "the old key must be unreachable after publication"
+        );
+        let replacement_sender = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &replacement_key)
+            .expect("the replacement key must be reachable after publication");
+
+        drop(current);
+
+        let after_stale_drop = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &replacement_key)
+            .expect("retired runtime Drop must not remove the replacement");
+        assert!(replacement_sender.same_inbox(&after_stale_drop));
+        drop(replacement);
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&namespace, &replacement_key)
+                .is_none(),
+            "replacement Drop must remove its own exact route"
+        );
+    }
+
+    #[test]
+    fn prepared_inproc_replacement_requires_exact_runtime_identity() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("prepared-identity-{suffix}");
+        let namespace = format!("prepared-identity-ns-{suffix}");
+        let current = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("current runtime should publish");
+        let current_key = current.public_key();
+        let current_sender = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &current_key)
+            .expect("current route should be published");
+
+        for (candidate_name, candidate_namespace) in [
+            (format!("{name}-other"), namespace.clone()),
+            (name, format!("{namespace}-other")),
+        ] {
+            let prepared = CommsRuntime::prepare_inproc_only_with_keypair_and_silent_intents(
+                &candidate_name,
+                Some(candidate_namespace.clone()),
+                Keypair::generate(),
+                Arc::new(HashSet::new()),
+            )
+            .expect("mismatched replacement should prepare without publication");
+            let candidate_key = prepared.runtime().public_key();
+            let error = match prepared.publish_replacing(&current) {
+                Ok(_) => panic!("mismatched runtime identity must fail closed"),
+                Err(error) => error,
+            };
+            let CommsRuntimeError::InprocPublication(reason) = error else {
+                panic!("unexpected identity mismatch error: {error}");
+            };
+            assert_eq!(reason, crate::InprocPublicationError::IdentityMismatch);
+            assert!(
+                InprocRegistry::global()
+                    .get_by_pubkey_in_namespace(&candidate_namespace, &candidate_key)
+                    .is_none(),
+                "identity mismatch must not publish the candidate"
+            );
+            let after = InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&namespace, &current_key)
+                .expect("identity mismatch must retain the current route");
+            assert!(current_sender.same_inbox(&after));
+        }
+    }
+
+    #[test]
+    fn prepared_inproc_replacement_inherits_current_registry_metadata() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("prepared-meta-{suffix}");
+        let namespace = format!("prepared-meta-ns-{suffix}");
+        let current = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("current runtime should publish");
+        let prepared = CommsRuntime::prepare_inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("replacement runtime should prepare");
+        let inherited = crate::PeerMeta::default()
+            .with_description("metadata inherited across replacement")
+            .with_label("generation", "current");
+        current.set_peer_meta(inherited.clone());
+
+        let replacement = prepared
+            .publish_replacing(&current)
+            .expect("replacement should inherit current registry metadata");
+        let observed = InprocRegistry::global()
+            .peers_in_namespace(&namespace)
+            .into_iter()
+            .find(|peer| peer.pubkey == replacement.public_key())
+            .expect("replacement should be published");
+        assert_eq!(observed.meta, inherited);
+    }
+
+    #[test]
+    fn stale_same_key_runtime_drop_cannot_remove_published_replacement() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("prepared-same-key-{suffix}");
+        let namespace = format!("prepared-same-key-ns-{suffix}");
+        let secret = Keypair::generate().secret_bytes();
+        let current = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::from_secret(secret),
+            Arc::new(HashSet::new()),
+        )
+        .expect("current runtime should publish");
+        let key = current.public_key();
+        let prepared = CommsRuntime::prepare_inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::from_secret(secret),
+            Arc::new(HashSet::new()),
+        )
+        .expect("same-key replacement should prepare");
+        let replacement = prepared
+            .publish_replacing(&current)
+            .expect("same-key replacement should publish by exact generation");
+        let replacement_sender = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &key)
+            .expect("same-key replacement route should be current");
+
+        drop(current);
+
+        let after_stale_drop = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &key)
+            .expect("stale same-key Drop must retain the replacement route");
+        assert!(replacement_sender.same_inbox(&after_stale_drop));
+        drop(replacement);
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&namespace, &key)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_publish_conflict_leaves_competing_generation_unchanged() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("prepared-conflict-{suffix}");
+        let namespace = format!("prepared-conflict-ns-{suffix}");
+        let current = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("current runtime should publish");
+        let prepared = CommsRuntime::prepare_inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("replacement runtime should prepare");
+        let prepared_key = prepared.runtime().public_key();
+        let winner = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("competing runtime should publish first");
+        let winner_key = winner.public_key();
+        let winner_sender = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &winner_key)
+            .expect("competing route should be current");
+
+        let (rejected, error) = match prepared.publish_replacing_recoverable(&current) {
+            Ok(_) => panic!("stale exact lease must fail without mutation"),
+            Err(rejected) => rejected,
+        };
+        let CommsRuntimeError::InprocPublication(reason) = error else {
+            panic!("unexpected stale publication error: {error}");
+        };
+        assert_eq!(
+            reason,
+            crate::InprocPublicationError::ExpectedGenerationNotCurrent
+        );
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&namespace, &prepared_key)
+                .is_none(),
+            "failed publication must not expose the prepared route"
+        );
+        let after_conflict = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &winner_key)
+            .expect("failed publication must retain the competing route");
+        assert!(winner_sender.same_inbox(&after_conflict));
+
+        drop(rejected);
+
+        drop(current);
+        let after_stale_drop = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &winner_key)
+            .expect("stale predecessor Drop must retain the competing route");
+        assert!(winner_sender.same_inbox(&after_stale_drop));
+    }
+
+    #[test]
+    fn peer_meta_update_retains_exact_inproc_generation() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("lease-meta-{suffix}");
+        let namespace = format!("lease-meta-ns-{suffix}");
+        let runtime = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            Keypair::generate(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("runtime should publish");
+        let key = runtime.public_key();
+        let before = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &key)
+            .expect("runtime route should be published");
+        let meta = crate::PeerMeta::default()
+            .with_description("lease-preserving metadata")
+            .with_label("generation", "stable");
+
+        runtime.set_peer_meta(meta.clone());
+
+        let after = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &key)
+            .expect("metadata refresh must retain the route");
+        assert!(before.same_inbox(&after));
+        let observed = InprocRegistry::global()
+            .peers_in_namespace(&namespace)
+            .into_iter()
+            .find(|peer| peer.pubkey == key)
+            .expect("metadata peer should remain listed");
+        assert_eq!(observed.meta, meta);
     }
 
     /// Build a fresh per-test session-claim handle. Each test gets its own

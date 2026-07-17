@@ -5271,6 +5271,7 @@ struct LiveExternalPeerHarness {
     supervisor_addresses: Arc<RwLock<Vec<String>>>,
     rotation_operation_ids: Arc<RwLock<Vec<super::bridge_protocol::SupervisorRotationOperationId>>>,
     suppress_rotation_observations: Arc<AtomicBool>,
+    drop_next_attempted_rotation_observation_response: Arc<AtomicBool>,
     reject_next_rotation: Arc<AtomicBool>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
     bind_peer_id_override: Arc<RwLock<Option<String>>>,
@@ -5374,6 +5375,20 @@ impl LiveExternalPeerHarness {
     fn suppress_rotation_observations(&self, suppress: bool) {
         self.suppress_rotation_observations
             .store(suppress, Ordering::Relaxed);
+    }
+
+    fn drop_next_attempted_rotation_observation_response(&self) {
+        assert!(
+            !self
+                .drop_next_attempted_rotation_observation_response
+                .swap(true, Ordering::Relaxed),
+            "attempted-authority observation response drop is already armed"
+        );
+    }
+
+    fn attempted_rotation_observation_response_drop_is_armed(&self) -> bool {
+        self.drop_next_attempted_rotation_observation_response
+            .load(Ordering::Relaxed)
     }
 
     fn reject_next_rotation(&self) {
@@ -5557,6 +5572,9 @@ async fn spawn_live_external_peer_with_transport(
     let responder_rotation_operation_ids = rotation_operation_ids.clone();
     let suppress_rotation_observations = Arc::new(AtomicBool::new(false));
     let responder_suppress_rotation_observations = suppress_rotation_observations.clone();
+    let drop_next_attempted_rotation_observation_response = Arc::new(AtomicBool::new(false));
+    let responder_drop_next_attempted_rotation_observation_response =
+        drop_next_attempted_rotation_observation_response.clone();
     let reject_next_rotation = Arc::new(AtomicBool::new(false));
     let responder_reject_next_rotation = reject_next_rotation.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
@@ -5749,21 +5767,72 @@ async fn spawn_live_external_peer_with_transport(
                                 candidate.interaction.handling_mode,
                             )
                             .expect("record inbound peer request before response");
-                        let to = trust_candidate_sender_for_reply(
-                            responder_runtime.as_ref(),
-                            &candidate,
-                        )
-                        .await;
                         let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
                             serde_json::from_value(params.clone());
-                        if matches!(
+                        let is_rotation_observation = matches!(
                             &bridge_parse,
                             Ok(super::bridge_protocol::BridgeCommand::ObserveSupervisorRotation(_))
-                        ) && responder_suppress_rotation_observations.load(Ordering::Relaxed)
+                        );
+                        let use_correlated_bridge_reply = bridge_parse.is_ok()
+                            && candidate
+                                .ingress
+                                .declared_reply_endpoint
+                                .as_ref()
+                                .is_some_and(|endpoint| {
+                                    endpoint.transport() == meerkat_core::comms::PeerTransport::Tcp
+                                });
+                        let is_attempted_rotation_observer = match &bridge_parse {
+                            Ok(
+                                super::bridge_protocol::BridgeCommand::ObserveSupervisorRotation(
+                                    payload,
+                                ),
+                            ) => responder_rotation_operations
+                                .read()
+                                .await
+                                .get(&payload.operation_id)
+                                .is_some_and(|state| {
+                                    let target = match state {
+                                        super::bridge_protocol::BridgeSupervisorRotationState::Pending {
+                                            operation,
+                                            ..
+                                        } => &operation.target,
+                                        super::bridge_protocol::BridgeSupervisorRotationState::Completed {
+                                            receipt,
+                                        } => &receipt.target,
+                                        super::bridge_protocol::BridgeSupervisorRotationState::Rejected {
+                                            receipt,
+                                        } => &receipt.operation.target,
+                                        _ => return false,
+                                    };
+                                    target.target.peer_id == payload.observer.peer_id
+                                        && target.target.pubkey == payload.observer.pubkey
+                                        && target.target_epoch == payload.observer_epoch
+                                }),
+                            _ => false,
+                        };
+                        if is_rotation_observation
+                            && (responder_suppress_rotation_observations.load(Ordering::Relaxed)
+                                || (is_attempted_rotation_observer
+                                    && responder_drop_next_attempted_rotation_observation_response
+                                        .swap(false, Ordering::Relaxed)))
                         {
                             responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
                             continue;
                         }
+                        let to = if use_correlated_bridge_reply {
+                            // Production keeps bridge callbacks
+                            // correlation-scoped: it stages only the
+                            // authenticated TCP callback carried by each signed
+                            // request and never mints durable trust for a probe.
+                            stage_candidate_sender_for_correlated_reply(
+                                responder_runtime.as_ref(),
+                                &candidate,
+                            )
+                            .await
+                        } else {
+                            trust_candidate_sender_for_reply(responder_runtime.as_ref(), &candidate)
+                                .await
+                        };
                         let mut remove_supervisors_after_response = Vec::new();
                         let response = if let Ok(command) = bridge_parse {
                             match command {
@@ -6365,8 +6434,8 @@ async fn spawn_live_external_peer_with_transport(
                                         }
                                     } else {
                                             super::bridge_protocol::BridgeSupervisorRotationObservation::NotFound {
-                                                operation_id: payload.operation_id,
-                                            }
+                                            operation_id: payload.operation_id,
+                                        }
                                     };
                                     serde_json::to_value(
                                         super::bridge_protocol::BridgeReply::SupervisorRotation(
@@ -6423,6 +6492,42 @@ async fn spawn_live_external_peer_with_transport(
                                 _ => serde_json::json!({ "ok": true }),
                             }
                         };
+                        if use_correlated_bridge_reply {
+                            // Match the production bridge responder: the
+                            // authenticated callback is one-shot and remains
+                            // live only for this request, so consume it with
+                            // an inline response rather than deferring the
+                            // send behind a spawned retry task.
+                            let interaction_id = candidate.interaction.id;
+                            responder_runtime
+                                .send(CommsCommand::PeerResponse {
+                                    objective_id: None,
+                                    content_taint: None,
+                                    to,
+                                    in_reply_to: interaction_id,
+                                    status:
+                                        meerkat_core::interaction::ResponseStatus::Completed,
+                                    result: response,
+                                    blocks: None,
+                                    handling_mode: None,
+                                })
+                                .await
+                                .unwrap_or_else(|error| {
+                                    panic!(
+                                        "send correlated rotation observation response failed: {error}"
+                                    )
+                                });
+                            responder_runtime.mark_interaction_complete(interaction_id.0);
+                            for supervisor_pubkey in remove_supervisors_after_response {
+                                remove_test_peer_projection_trust(
+                                    responder_runtime.as_ref(),
+                                    &supervisor_pubkey.to_peer_id().to_string(),
+                                    "remove rotated supervisor trust",
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
                         // `trust_candidate_sender_for_reply` records trust for
                         // the requester, but registration propagates
                         // asynchronously. A short-lived alternate-authority
@@ -6495,6 +6600,7 @@ async fn spawn_live_external_peer_with_transport(
         supervisor_addresses,
         rotation_operation_ids,
         suppress_rotation_observations,
+        drop_next_attempted_rotation_observation_response,
         reject_next_rotation,
         supervisor_state,
         bind_peer_id_override,
@@ -8185,6 +8291,44 @@ async fn trust_candidate_sender_for_reply(
         "trust typed ingress sender for bridge reply",
     )
     .await;
+    route
+}
+
+async fn stage_candidate_sender_for_correlated_reply(
+    comms: &meerkat_comms::CommsRuntime,
+    candidate: &meerkat_core::interaction::PeerInputCandidate,
+) -> PeerRoute {
+    let route = candidate
+        .ingress
+        .route
+        .clone()
+        .or_else(|| {
+            candidate
+                .interaction
+                .from_route
+                .map(meerkat_core::PeerRoute::new)
+        })
+        .expect("peer request candidate must carry a typed reply route");
+    if let (Some(sender_peer_id), Some(signing_pubkey), Some(reply_endpoint)) = (
+        candidate.ingress.canonical_peer_id,
+        candidate.ingress.signing_pubkey,
+        candidate.ingress.declared_reply_endpoint.clone(),
+    ) {
+        match CoreCommsRuntime::stage_correlated_reply_endpoint(
+            comms,
+            sender_peer_id,
+            candidate.interaction.id,
+            signing_pubkey,
+            reply_endpoint,
+        )
+        .await
+        {
+            Ok(()) | Err(SendError::Unsupported(_)) => {}
+            Err(error) => {
+                panic!("stage authenticated correlated bridge reply endpoint failed: {error}")
+            }
+        }
+    }
     route
 }
 
@@ -12922,14 +13066,26 @@ async fn test_rotate_supervisor_timeout_keeps_durable_operation_and_retry_reuses
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_rotate_supervisor_observes_rejection_through_retained_authority() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
-    let definition = with_unique_mob_id(
+    let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-cross-authority-rejection",
     );
     let mob_id = definition.id.clone();
+    let supervisor_port = unused_loopback_port();
+    let supervisor_address = format!("tcp://127.0.0.1:{supervisor_port}");
+    definition
+        .backend
+        .external
+        .as_mut()
+        .expect("external backend")
+        .supervisor_bridge = Some(crate::definition::SupervisorBridgeEndpointConfig {
+        bind_address: Some(format!("127.0.0.1:{supervisor_port}")),
+        advertised_address: Some(supervisor_address),
+    });
     let storage = MobStorage::in_memory();
     let runtime_metadata = storage.runtime_metadata.clone();
     let service = Arc::new(MockSessionService::new());
@@ -12940,7 +13096,7 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
         .await
         .expect("create mob");
     let external =
-        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-reject")).await;
+        spawn_live_external_tcp_peer(&test_comms_name_for(&mob_id, "worker", "w-reject")).await;
     handle
         .spawn_with_binding(
             ProfileName::from("worker"),
@@ -12957,6 +13113,7 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
         .expect("load original authority")
         .expect("original authority");
     external.reject_next_rotation();
+    external.drop_next_attempted_rotation_observation_response();
     let error = handle
         .rotate_supervisor()
         .await
@@ -12974,6 +13131,10 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
     assert_eq!(previous_epoch, original.epoch);
     assert_eq!(attempted_epoch, original.epoch + 1);
     assert!(pending_authority_recorded);
+    assert!(
+        !external.attempted_rotation_observation_response_drop_is_armed(),
+        "the attempted-authority observation response must be dropped exactly once before retained-authority fallback"
+    );
     assert!(
         reason.contains("was rejected by peer")
             && reason.contains("injected terminal rotation rejection"),
@@ -13001,14 +13162,26 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_restart() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
-    let definition = with_unique_mob_id(
+    let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-legacy-operation-migration",
     );
     let mob_id = definition.id.clone();
+    let supervisor_port = unused_loopback_port();
+    let supervisor_address = format!("tcp://127.0.0.1:{supervisor_port}");
+    definition
+        .backend
+        .external
+        .as_mut()
+        .expect("external backend")
+        .supervisor_bridge = Some(crate::definition::SupervisorBridgeEndpointConfig {
+        bind_address: Some(format!("127.0.0.1:{supervisor_port}")),
+        advertised_address: Some(supervisor_address),
+    });
     let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
     let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
     let service = Arc::new(MockSessionService::new());
@@ -13021,7 +13194,8 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
     .create()
     .await
     .expect("create mob");
-    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let external =
+        spawn_live_external_tcp_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
     handle
         .spawn_with_binding(
             ProfileName::from("worker"),
@@ -13052,7 +13226,8 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         pubkey: next.public_signing_key(),
     };
     let mut legacy_target = target.clone();
-    legacy_target.address = "inproc://legacy-stale-supervisor-route".to_string();
+    let legacy_stale_address = "inproc://legacy-stale-supervisor-route".to_string();
+    legacy_target.address = legacy_stale_address.clone();
     external
         .install_legacy_rotated_supervisor(legacy_target, next.epoch)
         .await;
@@ -13094,14 +13269,17 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         .rotate_supervisor()
         .await
         .expect_err("suppressed observation must leave migrated operation pending");
-    assert!(matches!(
-        error,
-        MobError::SupervisorRotationIncomplete {
-            pending_authority_recorded: true,
-            rollback_succeeded: false,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &error,
+            MobError::SupervisorRotationIncomplete {
+                pending_authority_recorded: true,
+                rollback_succeeded: false,
+                ..
+            }
+        ),
+        "suppressed legacy observation must remain durably pending, got: {error:?}"
+    );
     let migrated = runtime_metadata
         .load_supervisor_authority(&mob_id)
         .await
@@ -13113,9 +13291,21 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         .operation_id
         .expect("stable operation id assigned by CAS");
     assert_eq!(migrated.accepted_peer_ids, vec![external_peer_id.clone()]);
-    assert_eq!(
-        migrated.member_targets.get(&external_peer_id),
-        Some(&target)
+    let migrated_target = migrated
+        .member_targets
+        .get(&external_peer_id)
+        .expect("migrated active member target");
+    assert_eq!(migrated_target.name, target.name);
+    assert_eq!(migrated_target.peer_id, target.peer_id);
+    assert_eq!(migrated_target.pubkey, target.pubkey);
+    assert!(
+        migrated_target.address.starts_with("tcp://"),
+        "migration must persist the resumed controller's authenticated TCP callback: {}",
+        migrated_target.address
+    );
+    assert_ne!(
+        migrated_target.address, legacy_stale_address,
+        "migration must not retain the injected legacy route"
     );
     assert!(
         external.rotation_operation_ids().await.is_empty(),
@@ -13141,11 +13331,17 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         .await
         .expect("restart retry must adopt and observe the same operation");
     assert_eq!(report.public_peer_id, next.public_peer_id);
+    let authorized = external
+        .authorized_supervisor_spec()
+        .await
+        .expect("authorized supervisor after restart recovery");
+    let supervisor_addresses = external.supervisor_addresses().await;
     assert_eq!(
-        external.supervisor_addresses().await.last(),
-        Some(&target.address),
+        supervisor_addresses.last(),
+        Some(&authorized.address),
         "NotFound-triggered next-authority route refresh must repair legacy address drift before adoption"
     );
+    assert_ne!(authorized.address, legacy_stale_address);
     assert_eq!(
         external.rotation_operation_ids().await,
         vec![operation_id],
@@ -14547,7 +14743,10 @@ async fn test_rotate_supervisor_pending_verification_conflict_fails_closed_witho
             assert_eq!(attempted_epoch, original.epoch + 1);
             assert_eq!(rotated_peer_count, 1);
             assert!(!rollback_succeeded);
-            assert!(!pending_authority_recorded);
+            assert!(
+                !pending_authority_recorded,
+                "divergent final-CAS authority must clear the attempted pending witness: {reason}"
+            );
             assert!(
                 reason.contains("local authority activation failed")
                     && reason.contains("supervisor authority changed before final commit"),
@@ -47546,14 +47745,24 @@ async fn test_fixed_port_activation_rebuild_failure_retries_same_durable_operati
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
-async fn test_external_tcp_peer_turn_routes_after_supervisor_rotation() {
+async fn test_private_ephemeral_tcp_supervisor_rotation_rejected_before_mutation() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
-        "external-tcp-rotate-route",
+        "external-tcp-ephemeral-rotate-rejected",
     );
     let mob_id = definition.id.clone();
-    let (handle, service) = create_test_mob(definition).await;
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let owner_bridge_session_id = SessionId::new();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
+        .create()
+        .await
+        .expect("create mob");
     let external_name = test_comms_name_for(&mob_id, "lead", "l-tcp-rotate");
     let external = spawn_live_external_tcp_peer(&external_name).await;
 
@@ -47561,32 +47770,64 @@ async fn test_external_tcp_peer_turn_routes_after_supervisor_rotation() {
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     spec.binding = Some(external.binding());
     handle
-        .spawn_spec_with_generated_owner_context(spec, SessionId::new())
+        .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id)
         .await
         .expect("spawn TCP external member");
 
-    handle
+    let original_authority = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original supervisor authority")
+        .expect("original supervisor authority");
+    let original_remote_authority = external.authorized_supervisor_peer_id().await;
+    let original_rotation_operations = external.rotation_operation_ids().await;
+
+    let error = handle
         .rotate_supervisor()
         .await
-        .expect("rotate supervisor with TCP external member");
+        .expect_err("private ephemeral TCP rotation must fail before mutation");
+    assert!(
+        matches!(&error, MobError::WiringError(message) if message.contains("requires a stable callback endpoint")),
+        "unexpected ephemeral TCP rotation failure: {error:?}"
+    );
+    let retained_authority = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load supervisor authority after rejected rotation")
+        .expect("retained supervisor authority");
+    assert_eq!(retained_authority, original_authority);
+    assert!(retained_authority.pending_rotation.is_none());
+    assert_eq!(
+        external.authorized_supervisor_peer_id().await,
+        original_remote_authority,
+        "rejected rotation must not change remote supervisor authority"
+    );
+    assert_eq!(
+        external.rotation_operation_ids().await,
+        original_rotation_operations,
+        "rejected rotation must not submit a remote operation"
+    );
 
     handle
         .member(&AgentIdentity::from("l-tcp-rotate"))
         .await
         .expect("member handle")
-        .send("tcp external turn after rotation", HandlingMode::Queue)
+        .send(
+            "tcp external turn after rejected rotation",
+            HandlingMode::Queue,
+        )
         .await
-        .expect("peer turn after rotation should route to TCP external runtime");
+        .expect("retained TCP route should remain usable");
 
     assert_eq!(
         service.start_turn_call_count(),
         0,
-        "rotated peer-only TCP external dispatch must not fall back to local session start_turn"
+        "retained peer-only TCP dispatch must not fall back to local session start_turn"
     );
     assert_eq!(
         external.delivered_input_ids().await.len(),
         1,
-        "remote runtime must receive the post-rotation peer turn"
+        "remote runtime must receive the turn after rejected rotation"
     );
 }
 

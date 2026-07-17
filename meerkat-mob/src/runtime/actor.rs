@@ -38677,6 +38677,24 @@ impl MobActor {
             &pending_binds,
             &pending_revokes,
         )?;
+        let remote_peers = {
+            let roster = self.roster.read().await;
+            roster
+                .list_all()
+                .filter_map(Self::runtime_binding_for_entry)
+                .map(|binding| {
+                    Self::peer_only_spec_for_binding(&binding, "handle_rotate_supervisor")
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let bound_hosts = self.bound_host_rotation_targets()?;
+        for peer in remote_peers
+            .iter()
+            .chain(bound_hosts.iter().map(|(_, peer)| peer))
+        {
+            self.supervisor_bridge
+                .require_supported_rotation_endpoint(peer.address.transport())?;
+        }
         let prepared_rotation_admission = self
             .prepare_dsl_input_transition(
                 mob_dsl::MobMachineInput::AdmitSupervisorRotation,
@@ -38769,17 +38787,6 @@ impl MobActor {
             .as_ref()
             .map(|pending| pending.accepted_peer_ids.iter().cloned().collect())
             .unwrap_or_default();
-        let remote_peers = {
-            let roster = self.roster.read().await;
-            roster
-                .list_all()
-                .filter_map(Self::runtime_binding_for_entry)
-                .map(|binding| {
-                    Self::peer_only_spec_for_binding(&binding, "handle_rotate_supervisor")
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let bound_hosts = self.bound_host_rotation_targets()?;
         let mut active_peer_ids: BTreeSet<String> = remote_peers
             .iter()
             .map(|peer| peer.peer_id.to_string())
@@ -39134,8 +39141,12 @@ impl MobActor {
                 if now >= deadline {
                     break false;
                 }
+                // Reserve half of the remaining observation window for the
+                // retained-authority read. A rejected attempted authority can
+                // consume its whole request timeout without returning a typed
+                // rejection because it has no reply route.
                 let request_timeout = std::cmp::min(
-                    deadline.saturating_duration_since(now),
+                    deadline.saturating_duration_since(now) / 2,
                     std::time::Duration::from_millis(500),
                 );
                 // Completed rotations are observable under `next`, while a
@@ -39218,18 +39229,35 @@ impl MobActor {
                         }
                     }
                     Err(next_error) => {
-                        // A timeout or transport fault under `next` is
-                        // ambiguous: the member may already have committed
-                        // and fenced `stable_current`. Probing with the old
-                        // authority here would reintroduce a route the member
-                        // has revoked. Keep the exact operation pending and
-                        // only fall back above on definitive typed evidence
-                        // that `next` is not authoritative.
-                        last_observation = format!(
-                            "{last_observation}; attempted-authority observation remains ambiguous: {next_error}"
+                        // Observation is read-only and never mints remote
+                        // trust. If `next` committed, the member has revoked
+                        // `stable_current` and this retained probe simply
+                        // remains unroutable. If `next` was rejected, the
+                        // retained route is the only authority able to read
+                        // the durable rejection receipt.
+                        let retained_timeout = std::cmp::min(
+                            deadline.saturating_duration_since(Instant::now()),
+                            std::time::Duration::from_millis(500),
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                        continue;
+                        match self
+                            .observe_supervisor_rotation_as_authority(
+                                &stable_current,
+                                peer,
+                                &retained_observe_command,
+                                retained_timeout,
+                                "observe supervisor rotation as retained authority after attempted-authority transport failure",
+                            )
+                            .await
+                        {
+                            Ok(observation) => observation,
+                            Err(retained_error) => {
+                                last_observation = format!(
+                                    "{last_observation}; attempted-authority observation failed: {next_error}; retained-authority observation failed: {retained_error}"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                continue;
+                            }
+                        }
                     }
                 };
                 match observation {

@@ -569,7 +569,7 @@ struct SharedControllingAcceptor {
     listen_tcp: std::net::SocketAddr,
     advertise_address: Option<String>,
     bounds: meerkat_comms::HostAcceptorBounds,
-    live: tokio::sync::Mutex<Option<SharedControllingAcceptorLive>>,
+    live: Arc<tokio::sync::Mutex<Option<SharedControllingAcceptorLive>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -590,12 +590,94 @@ struct SharedControllingAcceptorRegistration {
 /// Exact registration incarnation. Compare-remove prevents an old mob actor
 /// from deleting the replacement inbox for the same durable signing key.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug)]
 pub(super) struct ControllingAcceptorRegistrationLease {
     pub(super) pubkey: meerkat_comms::PubKey,
     pub(super) advertised_address: String,
     key: String,
     pub(super) token: Arc<()>,
+    inbox_sender: meerkat_comms::InboxSender,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for ControllingAcceptorRegistrationLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControllingAcceptorRegistrationLease")
+            .field("pubkey", &self.pubkey)
+            .field("advertised_address", &self.advertised_address)
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Prepared exact replacement of one controlling-acceptor identity.
+///
+/// The owned `live` guard excludes lease-map mutation across the enclosing
+/// supervisor transaction. The comms reservation keeps the old identity as
+/// the sole resolvable TCP route until synchronous commit; dropping this value
+/// leaves both registry and lease map untouched.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) struct PreparedControllingAcceptorReplacement {
+    registry_reservation: Option<meerkat_comms::HostAcceptorIdentityReplacementReservation>,
+    // Declared after the registry reservation so ordinary Drop clears the
+    // reservation before releasing the live-map guard to another task.
+    live: tokio::sync::OwnedMutexGuard<Option<SharedControllingAcceptorLive>>,
+    current_key: String,
+    current_token: Arc<()>,
+    logical_owner: String,
+    registration: Option<MemberAcceptorRegistration>,
+    replacement_key: String,
+    replacement_token: Arc<()>,
+    advertised_address: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PreparedControllingAcceptorReplacement {
+    pub(super) fn advertised_address(&self) -> &str {
+        &self.advertised_address
+    }
+
+    /// Atomically fence the old registry route, install the new one, and then
+    /// swap the exact lease-map generation while the shared live guard remains
+    /// held. Reservation made every invariant fallible before this point.
+    pub(super) fn commit(mut self) -> ControllingAcceptorRegistrationLease {
+        let Some(registration) = self.registration.take() else {
+            std::process::abort();
+        };
+        let Some(registry_reservation) = self.registry_reservation.take() else {
+            std::process::abort();
+        };
+        let Some(live) = self.live.as_mut() else {
+            std::process::abort();
+        };
+        let current_is_exact = live.leases.get(&self.current_key).is_some_and(|current| {
+            current.logical_owner == self.logical_owner
+                && Arc::ptr_eq(&current.token, &self.current_token)
+        });
+        if !current_is_exact
+            || (self.replacement_key != self.current_key
+                && live.leases.contains_key(&self.replacement_key))
+        {
+            std::process::abort();
+        }
+
+        registry_reservation.commit(registration.inbox_sender.clone());
+        live.leases.remove(&self.current_key);
+        live.leases.insert(
+            self.replacement_key.clone(),
+            SharedControllingAcceptorRegistration {
+                logical_owner: self.logical_owner,
+                token: Arc::clone(&self.replacement_token),
+            },
+        );
+        ControllingAcceptorRegistrationLease {
+            pubkey: registration.pubkey,
+            advertised_address: self.advertised_address.clone(),
+            key: self.replacement_key,
+            token: self.replacement_token,
+            inbox_sender: registration.inbox_sender,
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -609,7 +691,7 @@ impl SharedControllingAcceptor {
             listen_tcp,
             advertise_address,
             bounds,
-            live: tokio::sync::Mutex::new(None),
+            live: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -653,6 +735,7 @@ impl SharedControllingAcceptor {
             .as_mut()
             .expect("controlling acceptor initialized above");
         let key = registration.pubkey.to_pubkey_string();
+        let lease_inbox_sender = registration.inbox_sender.clone();
         if let Some(existing) = live.leases.get(&key)
             && existing.logical_owner != logical_owner
         {
@@ -707,6 +790,63 @@ impl SharedControllingAcceptor {
             advertised_address: live.advertised_address.clone(),
             key,
             token,
+            inbox_sender: lease_inbox_sender,
+        })
+    }
+
+    async fn prepare_replacement(
+        self: &Arc<Self>,
+        current: &ControllingAcceptorRegistrationLease,
+        logical_owner: String,
+        registration: MemberAcceptorRegistration,
+    ) -> Result<PreparedControllingAcceptorReplacement, MobError> {
+        let mut live_guard = Arc::clone(&self.live).lock_owned().await;
+        let Some(live) = live_guard.as_mut() else {
+            return Err(MobError::WiringError(
+                "controlling acceptor is not running while preparing identity replacement"
+                    .to_string(),
+            ));
+        };
+        let current_is_exact = live.leases.get(&current.key).is_some_and(|installed| {
+            installed.logical_owner == logical_owner
+                && Arc::ptr_eq(&installed.token, &current.token)
+        });
+        if !current_is_exact {
+            return Err(MobError::WiringError(
+                "controlling acceptor replacement lost its exact current lease".to_string(),
+            ));
+        }
+        let replacement_key = registration.pubkey.to_pubkey_string();
+        if replacement_key != current.key && live.leases.contains_key(&replacement_key) {
+            return Err(MobError::WiringError(format!(
+                "controlling acceptor identity '{replacement_key}' is already registered"
+            )));
+        }
+        let registry_reservation = live
+            .registry
+            .reserve_identity_replacement(
+                Arc::clone(&live.owner),
+                current.pubkey,
+                &current.inbox_sender,
+                registration.pubkey,
+                Arc::clone(&registration.keypair),
+            )
+            .map_err(|error| {
+                MobError::WiringError(format!(
+                    "controlling acceptor identity replacement reservation failed: {error}"
+                ))
+            })?;
+        let advertised_address = live.advertised_address.clone();
+        Ok(PreparedControllingAcceptorReplacement {
+            live: live_guard,
+            registry_reservation: Some(registry_reservation),
+            current_key: current.key.clone(),
+            current_token: Arc::clone(&current.token),
+            logical_owner,
+            registration: Some(registration),
+            replacement_key,
+            replacement_token: Arc::new(()),
+            advertised_address,
         })
     }
 
@@ -845,6 +985,18 @@ impl ControllingAcceptorConfig {
         lease: &ControllingAcceptorRegistrationLease,
     ) -> Result<(), MobError> {
         self.shared.remove(lease).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn prepare_replacement(
+        &self,
+        current: &ControllingAcceptorRegistrationLease,
+        logical_owner: String,
+        registration: MemberAcceptorRegistration,
+    ) -> Result<PreparedControllingAcceptorReplacement, MobError> {
+        self.shared
+            .prepare_replacement(current, logical_owner, registration)
+            .await
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -9865,14 +10017,16 @@ mod tests {
             super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         );
         next.epoch = current.epoch + 1;
-        let bridge = super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
-            &MobId::from(format!("shared-supervisor-{}", uuid::Uuid::new_v4())),
-            current,
-            None,
-            Some(config.clone()),
-        )
-        .await
-        .expect("shared-ingress supervisor bridge");
+        let bridge = Arc::new(
+            super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+                &MobId::from(format!("shared-supervisor-{}", uuid::Uuid::new_v4())),
+                current,
+                None,
+                Some(config.clone()),
+            )
+            .await
+            .expect("shared-ingress supervisor bridge"),
+        );
 
         assert!(
             bridge

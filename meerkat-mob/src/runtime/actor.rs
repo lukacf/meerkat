@@ -39283,28 +39283,55 @@ impl MobActor {
                                     epoch: next.epoch,
                                     protocol_version: next.protocol_version,
                                 });
-                            let refresh_timeout = std::cmp::min(
-                                deadline.saturating_duration_since(Instant::now()),
-                                std::time::Duration::from_millis(500),
-                            );
-                            let refresh_value = match self
-                                .supervisor_bridge
-                                .send_bridge_command_as_authority(
-                                    &next,
-                                    peer,
-                                    &route_refresh,
-                                    refresh_timeout,
-                                )
-                                .await
-                            {
-                                Ok(value) => value,
-                                Err(error) => {
-                                    last_observation = format!(
-                                        "legacy next-authority route refresh remains unconfirmed: {error}"
-                                    );
-                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                                    continue;
+                            // A lost refresh reply is ambiguous. Retry the
+                            // exact idempotent command here, before returning
+                            // to observation, so later reads cannot consume
+                            // the budget reserved for that retry. The first
+                            // attempt receives at most half of the remaining
+                            // convergence window; the retry receives what is
+                            // left, without extending the deadline.
+                            let mut refresh_value = None;
+                            for attempt in 0..2 {
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                let attempt_budget = if attempt == 0 {
+                                    remaining / 2
+                                } else {
+                                    remaining
+                                };
+                                let refresh_timeout = std::cmp::min(
+                                    attempt_budget,
+                                    std::time::Duration::from_millis(500),
+                                );
+                                // Never dispatch a request whose diagnostic
+                                // timeout rounds down to 0ms at the end of the
+                                // convergence window.
+                                if refresh_timeout < std::time::Duration::from_millis(1) {
+                                    break;
                                 }
+                                match self
+                                    .supervisor_bridge
+                                    .send_bridge_command_as_authority(
+                                        &next,
+                                        peer,
+                                        &route_refresh,
+                                        refresh_timeout,
+                                    )
+                                    .await
+                                {
+                                    Ok(value) => {
+                                        refresh_value = Some(value);
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        last_observation = format!(
+                                            "legacy next-authority route refresh remains unconfirmed: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                            let Some(refresh_value) = refresh_value else {
+                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                continue;
                             };
                             if let Err(error) = super::bridge_protocol::decode_bridge_ack(
                                 &route_refresh,

@@ -648,11 +648,22 @@ impl MobSupervisorBridge {
                 endpoint.transport()
             )));
         }
-        let port = endpoint
-            .endpoint()
-            .rsplit_once(':')
-            .and_then(|(host, port)| (!host.is_empty()).then_some(port))
-            .and_then(|port| port.parse::<u16>().ok());
+        let authority = endpoint.endpoint();
+        let port = if let Some(bracketed) = authority.strip_prefix('[') {
+            let closing_bracket = bracketed.find(']');
+            closing_bracket.and_then(|closing_bracket| {
+                let host = &bracketed[..closing_bracket];
+                (!host.is_empty())
+                    .then(|| &bracketed[closing_bracket + 1..])
+                    .and_then(|suffix| suffix.strip_prefix(':'))
+            })
+        } else {
+            authority
+                .rsplit_once(':')
+                .and_then(|(host, port)| (!host.is_empty() && !host.contains(':')).then_some(port))
+        }
+        .filter(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|port| port.parse::<u16>().ok());
         if port.is_none_or(|port| port == 0) {
             return Err(MobError::WiringError(format!(
                 "process host-ingress advertised address '{endpoint}' has no valid nonzero TCP port"
@@ -5869,5 +5880,21 @@ mod tests {
             ),
             Duration::from_millis(15)
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn controlling_reply_endpoint_rejects_unbracketed_ipv6_authority() {
+        let error = MobSupervisorBridge::validated_controlling_reply_endpoint("tcp://::1:9000")
+            .expect_err("unbracketed IPv6 callback authority must fail closed");
+        assert!(
+            matches!(&error, MobError::WiringError(message) if message.contains("no valid nonzero TCP port")),
+            "unexpected validation error: {error:?}"
+        );
+
+        let bracketed =
+            MobSupervisorBridge::validated_controlling_reply_endpoint("tcp://[::1]:9000")
+                .expect("bracketed IPv6 callback authority should remain valid");
+        assert_eq!(bracketed.endpoint(), "[::1]:9000");
     }
 }

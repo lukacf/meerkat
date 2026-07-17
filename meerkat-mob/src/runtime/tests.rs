@@ -5272,6 +5272,7 @@ struct LiveExternalPeerHarness {
     rotation_operation_ids: Arc<RwLock<Vec<super::bridge_protocol::SupervisorRotationOperationId>>>,
     suppress_rotation_observations: Arc<AtomicBool>,
     drop_next_attempted_rotation_observation_response: Arc<AtomicBool>,
+    drop_next_authorize_response: Arc<AtomicBool>,
     reject_next_rotation: Arc<AtomicBool>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
     bind_peer_id_override: Arc<RwLock<Option<String>>>,
@@ -5389,6 +5390,19 @@ impl LiveExternalPeerHarness {
     fn attempted_rotation_observation_response_drop_is_armed(&self) -> bool {
         self.drop_next_attempted_rotation_observation_response
             .load(Ordering::Relaxed)
+    }
+
+    fn drop_next_authorize_response(&self) {
+        assert!(
+            !self
+                .drop_next_authorize_response
+                .swap(true, Ordering::Relaxed),
+            "authorize response drop is already armed"
+        );
+    }
+
+    fn authorize_response_drop_is_armed(&self) -> bool {
+        self.drop_next_authorize_response.load(Ordering::Relaxed)
     }
 
     fn reject_next_rotation(&self) {
@@ -5575,6 +5589,8 @@ async fn spawn_live_external_peer_with_transport(
     let drop_next_attempted_rotation_observation_response = Arc::new(AtomicBool::new(false));
     let responder_drop_next_attempted_rotation_observation_response =
         drop_next_attempted_rotation_observation_response.clone();
+    let drop_next_authorize_response = Arc::new(AtomicBool::new(false));
+    let responder_drop_next_authorize_response = drop_next_authorize_response.clone();
     let reject_next_rotation = Arc::new(AtomicBool::new(false));
     let responder_reject_next_rotation = reject_next_rotation.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
@@ -5773,6 +5789,13 @@ async fn spawn_live_external_peer_with_transport(
                             &bridge_parse,
                             Ok(super::bridge_protocol::BridgeCommand::ObserveSupervisorRotation(_))
                         );
+                        let drop_authorize_response = matches!(
+                            &bridge_parse,
+                            Ok(super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
+                                _
+                            ))
+                        ) && responder_drop_next_authorize_response
+                            .swap(false, Ordering::Relaxed);
                         let use_correlated_bridge_reply = bridge_parse.is_ok()
                             && candidate
                                 .ingress
@@ -6492,6 +6515,21 @@ async fn spawn_live_external_peer_with_transport(
                                 _ => serde_json::json!({ "ok": true }),
                             }
                         };
+                        if drop_authorize_response {
+                            // Simulate a post-commit response loss: the peer
+                            // applied the authorization, but the caller must
+                            // converge by retrying the exact command.
+                            responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
+                            for supervisor_pubkey in remove_supervisors_after_response {
+                                remove_test_peer_projection_trust(
+                                    responder_runtime.as_ref(),
+                                    &supervisor_pubkey.to_peer_id().to_string(),
+                                    "remove rotated supervisor trust after dropped response",
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
                         if use_correlated_bridge_reply {
                             // Match the production bridge responder: the
                             // authenticated callback is one-shot and remains
@@ -6499,24 +6537,40 @@ async fn spawn_live_external_peer_with_transport(
                             // an inline response rather than deferring the
                             // send behind a spawned retry task.
                             let interaction_id = candidate.interaction.id;
-                            responder_runtime
+                            match responder_runtime
                                 .send(CommsCommand::PeerResponse {
                                     objective_id: None,
                                     content_taint: None,
                                     to,
                                     in_reply_to: interaction_id,
-                                    status:
-                                        meerkat_core::interaction::ResponseStatus::Completed,
+                                    status: meerkat_core::interaction::ResponseStatus::Completed,
                                     result: response,
                                     blocks: None,
                                     handling_mode: None,
                                 })
                                 .await
-                                .unwrap_or_else(|error| {
+                            {
+                                Ok(_) => {}
+                                Err(error @ SendError::Transport(_)) => {
+                                    // A Response has no transport ACK. The
+                                    // one-shot probe may retire immediately after
+                                    // admitting it and reset this connection while
+                                    // the sender is still finishing its write. The
+                                    // production responder treats that outcome as
+                                    // ambiguous and continues; the harness must do
+                                    // the same so a retry can establish terminality.
+                                    tracing::warn!(
+                                        %interaction_id,
+                                        %error,
+                                        "correlated rotation response send was not confirmed"
+                                    );
+                                }
+                                Err(error) => {
                                     panic!(
                                         "send correlated rotation observation response failed: {error}"
-                                    )
-                                });
+                                    );
+                                }
+                            }
                             responder_runtime.mark_interaction_complete(interaction_id.0);
                             for supervisor_pubkey in remove_supervisors_after_response {
                                 remove_test_peer_projection_trust(
@@ -6601,6 +6655,7 @@ async fn spawn_live_external_peer_with_transport(
         rotation_operation_ids,
         suppress_rotation_observations,
         drop_next_attempted_rotation_observation_response,
+        drop_next_authorize_response,
         reject_next_rotation,
         supervisor_state,
         bind_peer_id_override,
@@ -12608,7 +12663,7 @@ async fn test_destroy_scrubs_runtime_metadata() {
 async fn test_rotate_supervisor_updates_runtime_metadata() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
-    let definition = sample_definition();
+    let definition = with_unique_mob_id(sample_definition(), "rotate-supervisor-metadata");
     let mob_id = definition.id.clone();
     let storage = MobStorage::in_memory();
     let runtime_metadata = storage.runtime_metadata.clone();
@@ -13317,7 +13372,6 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         .await
         .expect("shutdown after partial legacy migration");
     external.suppress_rotation_observations(false);
-    external.fail_next_authorize();
     let retried = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata.clone(),
@@ -13326,10 +13380,18 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
     .resume()
     .await
     .expect("resume migrated operation for exact retry");
+    // Arm this after resume so the lost reply deterministically lands on the
+    // first NotFound-triggered route refresh. The peer commits that refresh,
+    // but the same call must retry it exactly within the reserved budget.
+    external.drop_next_authorize_response();
     let report = retried
         .rotate_supervisor()
         .await
         .expect("restart retry must adopt and observe the same operation");
+    assert!(
+        !external.authorize_response_drop_is_armed(),
+        "the first legacy route-refresh response must be dropped exactly once"
+    );
     assert_eq!(report.public_peer_id, next.public_peer_id);
     let authorized = external
         .authorized_supervisor_spec()

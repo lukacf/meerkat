@@ -112,8 +112,7 @@ pub struct CompositeDispatcher {
 
 impl CompositeDispatcher {
     /// Remove the concrete projection of one optional builtin family before a
-    /// new registration becomes its canonical owner. Registrations are
-    /// replace-in-place updates, not append-only link-order candidates.
+    /// new registration becomes its canonical owner.
     #[cfg(not(target_arch = "wasm32"))]
     fn remove_optional_builtin_family(&mut self, names: &[&str]) {
         self.builtin_tools
@@ -121,6 +120,24 @@ impl CompositeDispatcher {
         for name in names {
             self.allowed_tools.remove(*name);
         }
+    }
+
+    /// Keep optional builtins in the factory's canonical blob -> web -> image
+    /// order, independent of registration or lifecycle-rebind order.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn normalize_optional_builtin_order(&mut self) {
+        self.builtin_tools.sort_by_key(|tool| {
+            let name = tool.name();
+            if BLOB_FILE_TOOL_NAMES.contains(&name) {
+                1
+            } else if WEB_SEARCH_TOOL_NAMES.contains(&name) {
+                2
+            } else if IMAGE_GENERATION_TOOL_NAMES.contains(&name) {
+                3
+            } else {
+                0
+            }
+        });
     }
 
     /// Create a new composite dispatcher with builtin tools.
@@ -344,6 +361,7 @@ impl CompositeDispatcher {
         });
         // Inherit means visible when the session-owned image substrate is wired.
         if !visibility.resolve(true) {
+            self.normalize_optional_builtin_order();
             return;
         }
         let tool = Arc::new(crate::builtin::image_generation::GenerateImageTool::new(
@@ -351,6 +369,7 @@ impl CompositeDispatcher {
         ));
         self.allowed_tools.insert(tool.name().to_string());
         self.builtin_tools.push(tool);
+        self.normalize_optional_builtin_order();
     }
 
     /// Register the optional Meerkat-owned web-search fallback builtin.
@@ -369,6 +388,7 @@ impl CompositeDispatcher {
         // provider-native tools; callers explicitly enable this fallback for
         // models such as realtime live models.
         if !visibility.resolve(false) {
+            self.normalize_optional_builtin_order();
             return;
         }
         let tool = Arc::new(crate::builtin::web_search::WebSearchTool::new(Arc::clone(
@@ -376,6 +396,7 @@ impl CompositeDispatcher {
         )));
         self.allowed_tools.insert(tool.name().to_string());
         self.builtin_tools.push(tool);
+        self.normalize_optional_builtin_order();
     }
 
     /// Register blob file bridge builtins backed by the session blob store.
@@ -405,6 +426,7 @@ impl CompositeDispatcher {
             }
             self.builtin_tools.push(tool);
         }
+        self.normalize_optional_builtin_order();
     }
 
     /// Get usage instructions for all enabled tools.
@@ -1837,6 +1859,27 @@ mod tests {
             .count()
     }
 
+    fn tool_names(dispatcher: &dyn AgentToolDispatcher) -> Vec<String> {
+        dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    fn catalog_names(dispatcher: &dyn AgentToolDispatcher) -> Vec<String> {
+        dispatcher
+            .tool_catalog()
+            .iter()
+            .map(|entry| entry.tool.name.to_string())
+            .collect()
+    }
+
+    fn assert_advertised_order(dispatcher: &dyn AgentToolDispatcher, expected: &[String]) {
+        assert_eq!(tool_names(dispatcher), expected);
+        assert_eq!(catalog_names(dispatcher), expected);
+    }
+
     async fn dispatch_json(
         dispatcher: &dyn AgentToolDispatcher,
         name: &str,
@@ -1852,6 +1895,99 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_str(&outcome.result.text_content()).unwrap()
+    }
+
+    #[test]
+    fn optional_builtin_order_survives_interleaving_replacement_disable_and_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        let base_order = tool_names(&dispatcher);
+        assert_advertised_order(&dispatcher, &base_order);
+
+        // Deliberately register in a non-canonical order.
+        dispatcher.register_image_generation_tool(
+            rejecting_image_runtime("ordered-image-owner"),
+            ToolCategoryOverride::Enable,
+        );
+        dispatcher.register_blob_file_tools(Arc::new(TestBlobStore::default()));
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "ordered-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+
+        let canonical_order = base_order
+            .iter()
+            .cloned()
+            .chain(
+                [
+                    "blob_save_file",
+                    "blob_load_file",
+                    "blob_inspect",
+                    "web_search",
+                    "generate_image",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .collect::<Vec<_>>();
+        assert_advertised_order(&dispatcher, &canonical_order);
+
+        // Replacing the middle family must not move it to the tail.
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "replacement-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        assert_advertised_order(&dispatcher, &canonical_order);
+
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "disabled-web-owner",
+            }),
+            ToolCategoryOverride::Disable,
+        );
+        let without_web_order = base_order
+            .iter()
+            .cloned()
+            .chain(
+                [
+                    "blob_save_file",
+                    "blob_load_file",
+                    "blob_inspect",
+                    "generate_image",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .collect::<Vec<_>>();
+        assert_advertised_order(&dispatcher, &without_web_order);
+
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "re-enabled-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        assert_advertised_order(&dispatcher, &canonical_order);
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+        assert_advertised_order(&*rebound, &canonical_order);
     }
 
     #[tokio::test]

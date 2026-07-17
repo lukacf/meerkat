@@ -21,8 +21,8 @@ pub struct ContractVersion {
 impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 7,
-        patch: 31,
+        minor: 8,
+        patch: 0,
     };
     pub const PRERELEASE: Option<&'static str> = None;
 

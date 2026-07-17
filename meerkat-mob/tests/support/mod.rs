@@ -3226,6 +3226,15 @@ async fn create_controlling_mob_composed(
         Arc::clone(&mob_service),
     );
     let mut definition = controlling_mob_definition(mob_id.clone());
+    // This composition publishes the supervisor through the one process-wide
+    // controlling acceptor below. The base fixture also serves tests that do
+    // not compose shared ingress, so keep its explicit private bridge default
+    // there and clear it only for this shared-listener path. Run the caller's
+    // mutation afterward so a test can still request (and exercise rejection
+    // of) an explicit conflicting owner deliberately.
+    if let Some(external) = definition.backend.external.as_mut() {
+        external.supervisor_bridge = None;
+    }
     mutate_definition(&mut definition);
     // NO actor-level `with_default_llm_client`: an installed actor override
     // typed-rejects every placed spawn (plan §18.9 —

@@ -1114,6 +1114,14 @@ pub(crate) fn spawn_upcall_responder(
     }
 }
 
+async fn supervisor_runtime_is_still_published(
+    bridge: &super::supervisor_bridge::MobSupervisorBridge,
+    observed: &Arc<dyn CoreCommsRuntime>,
+) -> bool {
+    let published = bridge.runtime_core().await;
+    Arc::ptr_eq(observed, &published)
+}
+
 /// Shared-intake serve loop (§4): drain the supervisor bridge inbox, serve
 /// bridge-intent requests serially in arrival order, and hand EVERYTHING
 /// else to the bridge's shared buffer with a wake — neither this loop nor an
@@ -1143,6 +1151,15 @@ async fn run_upcall_responder(
         tokio::pin!(intake_notified);
         inbox_notified.as_mut().enable();
         intake_notified.as_mut().enable();
+
+        // Rotation can publish and fire `intake_notify.notify_waiters()` in
+        // the narrow resolve→enable window above. That notification has no
+        // stored permit, so re-read after BOTH futures are armed. If the
+        // runtime changed, loop immediately and bind the responder to the new
+        // inbox instead of parking forever on the retired one.
+        if !supervisor_runtime_is_still_published(&bridge, &runtime).await {
+            continue;
+        }
 
         let mut requests = bridge.take_buffered_upcall_requests().await;
         let drained = runtime.drain_peer_input_candidates().await;
@@ -1464,6 +1481,51 @@ async fn resolve_peer_route(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn rotation_between_runtime_resolution_and_notify_enable_forces_reresolve() {
+        let current = crate::store::SupervisorAuthorityRecord::generate(
+            super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        let bridge = super::super::supervisor_bridge::MobSupervisorBridge::new(
+            &crate::MobId::from(format!("upcall-runtime-reresolve-{}", uuid::Uuid::new_v4())),
+            current.clone(),
+            None,
+        )
+        .await
+        .expect("supervisor bridge should build");
+        let observed = bridge.runtime_core().await;
+        let intake_notify = bridge.intake_notify();
+        // Model the exact lost-wake window: the responder resolved the old
+        // runtime and captured the shared Notify, but has not constructed and
+        // enabled its Notified future.
+
+        let mut replacement = crate::store::SupervisorAuthorityRecord::generate(
+            super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        replacement.epoch = current.epoch + 1;
+        bridge
+            .rotate(replacement)
+            .await
+            .expect("rotation should publish replacement runtime");
+        let mut intake_notified = std::pin::pin!(intake_notify.notified());
+        intake_notified.as_mut().enable();
+        assert!(
+            tokio::time::timeout(
+                meerkat_core::time_compat::Duration::from_millis(20),
+                intake_notified.as_mut(),
+            )
+            .await
+            .is_err(),
+            "notify_waiters before enable deliberately demonstrates the lost notification"
+        );
+        assert!(
+            !supervisor_runtime_is_still_published(&bridge, &observed).await,
+            "post-enable generation check must force the responder to resolve the replacement inbox"
+        );
+        bridge.shutdown().await;
+    }
 
     fn payload(
         identity: &str,

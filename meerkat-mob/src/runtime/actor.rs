@@ -6762,16 +6762,12 @@ impl MobActor {
     /// every wired edge with an endpoint placed on THIS host (a restarted
     /// host holds no trust rows) and realize every pending Install against
     /// it. Per-obligation failures stay pending.
-    async fn drain_route_installs_for_host(&mut self, host_id: &mob_dsl::HostId) {
+    async fn drain_route_installs_for_host(
+        &mut self,
+        host_id: &mob_dsl::HostId,
+    ) -> Result<(), MobError> {
         self.record_derived_route_install_obligations(Some(host_id));
-        if let Err(error) = self.realize_pending_route_installs(Some(host_id)).await {
-            tracing::error!(
-                mob_id = %self.definition.id,
-                host = %host_id.as_str(),
-                %error,
-                "route-install host drain rejected an invalid pending ledger"
-            );
-        }
+        self.realize_pending_route_installs(Some(host_id)).await
     }
 
     /// T4 drain: after a placed member is re-materialized (revival), its
@@ -36771,7 +36767,7 @@ impl MobActor {
     }
 
     async fn observe_host_status(&mut self, host_id: &mob_dsl::HostId) -> Result<(), MobError> {
-        let result = self.reconcile_host_members(host_id).await.map(|_| ());
+        let mut result = self.reconcile_host_members(host_id).await.map(|_| ());
         if result
             .as_ref()
             .is_err_and(Self::host_status_rejection_requires_fail_stop)
@@ -36783,7 +36779,18 @@ impl MobActor {
         // the old pre-return convergence guarantee, but never emit route
         // side effects after a durable fail-stop classification.
         if !self.durable_uncertainty_fail_stop {
-            self.drain_route_installs_for_host(host_id).await;
+            if let Err(route_error) = self.drain_route_installs_for_host(host_id).await {
+                if result.is_ok() {
+                    result = Err(route_error);
+                } else {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        host = %host_id.as_str(),
+                        error = %route_error,
+                        "host observation also found an invalid pending route-install ledger"
+                    );
+                }
+            }
         }
         match &result {
             Ok(()) => self
@@ -36803,7 +36810,7 @@ impl MobActor {
         authority: &crate::store::SupervisorAuthorityRecord,
     ) -> Result<(), MobError> {
         let binding_generation = self.current_host_binding_generation(host_id)?;
-        let result = match Self::poll_bound_host_status_once(
+        let mut result = match Self::poll_bound_host_status_once(
             Arc::clone(&self.supervisor_bridge),
             authority,
             &self.definition.id,
@@ -36825,7 +36832,18 @@ impl MobActor {
             self.durable_uncertainty_fail_stop = true;
         }
         if !self.durable_uncertainty_fail_stop {
-            self.drain_route_installs_for_host(host_id).await;
+            if let Err(route_error) = self.drain_route_installs_for_host(host_id).await {
+                if result.is_ok() {
+                    result = Err(route_error);
+                } else {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        host = %host_id.as_str(),
+                        error = %route_error,
+                        "authority-scoped host observation also found an invalid pending route-install ledger"
+                    );
+                }
+            }
         }
         match &result {
             Ok(()) => self
@@ -37326,8 +37344,7 @@ impl MobActor {
         runtime_incarnation_changed: bool,
     ) -> Result<(), MobError> {
         if runtime_incarnation_changed {
-            self.drain_route_installs_for_host(host_id).await;
-            Ok(())
+            self.drain_route_installs_for_host(host_id).await
         } else {
             self.realize_pending_route_installs(Some(host_id)).await
         }

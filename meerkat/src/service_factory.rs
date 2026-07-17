@@ -825,6 +825,23 @@ impl FactoryAgentBuilder {
         &self.factory
     }
 
+    /// Clone the canonical head-config source used by runtime-owned consumers.
+    ///
+    /// Store-backed builders share the exact store that [`Self::resolve_config`]
+    /// reads on every build. Snapshot-only builders lower their immutable
+    /// snapshot into a private memory store so downstream runtime components can
+    /// consume one uniform [`ConfigStore`] seam without inventing a second live
+    /// source of truth.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) fn runtime_config_store(&self) -> Arc<dyn ConfigStore> {
+        self.config_store.clone().unwrap_or_else(|| {
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                self.config_snapshot.clone(),
+                meerkat_models::canonical(),
+            ))
+        })
+    }
+
     /// Get a reference to the config.
     pub fn config(&self) -> &Config {
         &self.config_snapshot

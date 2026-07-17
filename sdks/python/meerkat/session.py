@@ -426,7 +426,7 @@ class Session:
     async def peers(self) -> list[dict[str, Any]]:
         """List peers visible to this session's comms runtime."""
         result = await self._client._peers(self._id)  # noqa: SLF001
-        return result.get("peers", [])
+        return result["peers"]
 
     # -- Dunder ------------------------------------------------------------
 

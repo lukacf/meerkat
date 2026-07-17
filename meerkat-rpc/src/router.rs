@@ -2188,7 +2188,7 @@ impl MethodRouter {
             }
             #[cfg(feature = "live-webrtc")]
             "live/webrtc/answer" if self.live_webrtc_state.is_some() => {
-                if let Some(state) = self.live_webrtc_state.as_deref() {
+                if let Some(state) = self.live_webrtc_state.as_ref() {
                     handlers::live::handle_live_webrtc_answer(id, params, state, &self.runtime)
                         .await
                 } else {

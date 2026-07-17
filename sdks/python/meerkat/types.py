@@ -357,6 +357,21 @@ ContentBlock = Union[
 ContentInput = str | list[ContentBlock]
 """Canonical content input accepted by input-bearing APIs."""
 
+
+class SystemPromptDisable(TypedDict):
+    """Wire form that explicitly suppresses inherited system-prompt sources."""
+
+    action: Literal["disable"]
+
+
+SystemPromptOverride = str | SystemPromptDisable
+"""Per-session system-prompt policy.
+
+Omit the create-session argument (or pass ``None``) to inherit configured prompt
+sources, pass any string (including ``""``) to set an explicit prompt, or pass
+``{"action": "disable"}`` to suppress inherited prompt sources.
+"""
+
 # Transcript history uses the generated wire projection rather than the
 # input-bearing block union above. History may carry structured/unknown blocks
 # and server-owned provenance that an input constructor does not expose.

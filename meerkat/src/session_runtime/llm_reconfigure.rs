@@ -392,7 +392,7 @@ impl SessionRuntimeLlmReconfigureService for EphemeralSessionService<FactoryAgen
 /// instead of duplicating it across MobKit and desktop surfaces.
 pub struct SessionRuntimeLlmReconfigureHostBlueprint {
     factory: AgentFactory,
-    config: Config,
+    config_store: Arc<dyn meerkat_core::ConfigStore>,
     config_state_path: std::path::PathBuf,
     default_llm_client: Arc<std::sync::RwLock<Option<Arc<dyn LlmClient>>>>,
     agent_llm_client_decorator: Arc<std::sync::RwLock<Option<AgentLlmClientDecorator>>>,
@@ -407,7 +407,7 @@ impl SessionRuntimeLlmReconfigureHostBlueprint {
     ) -> Self {
         Self {
             factory: builder.factory().clone(),
-            config: builder.config().clone(),
+            config_store: builder.runtime_config_store(),
             config_state_path,
             default_llm_client,
             agent_llm_client_decorator: Arc::clone(&builder.default_agent_llm_client_decorator),
@@ -415,18 +415,19 @@ impl SessionRuntimeLlmReconfigureHostBlueprint {
         }
     }
 
+    fn config_runtime(&self) -> Arc<ConfigRuntime> {
+        Arc::new(ConfigRuntime::new(
+            Arc::clone(&self.config_store),
+            self.config_state_path.clone(),
+        ))
+    }
+
     pub fn install(
         self,
         runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
         service: Arc<dyn SessionRuntimeLlmReconfigureService>,
     ) {
-        let config_runtime = Arc::new(ConfigRuntime::new(
-            Arc::new(meerkat_core::MemoryConfigStore::new(
-                self.config,
-                meerkat_models::canonical(),
-            )),
-            self.config_state_path,
-        ));
+        let config_runtime = self.config_runtime();
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service,
@@ -808,7 +809,9 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meerkat_core::{AuthBindingRef, BindingId, BindingOrigin, Provider, RealmId};
+    use meerkat_core::{
+        AuthBindingRef, BindingId, BindingOrigin, ConfigStore as _, Provider, RealmId,
+    };
 
     fn anthropic_binding() -> AuthBindingRef {
         AuthBindingRef {
@@ -846,6 +849,71 @@ mod tests {
             provider_params: None,
             auth_binding,
         }
+    }
+
+    #[tokio::test]
+    async fn embedded_blueprint_reads_store_updates_after_construction() {
+        let initial_snapshot = Config {
+            max_tokens: Some(11),
+            ..Config::default()
+        };
+        let config_at_construction = Config {
+            max_tokens: Some(22),
+            ..Config::default()
+        };
+        let live_store = Arc::new(meerkat_core::MemoryConfigStore::new(
+            config_at_construction,
+            meerkat_models::canonical(),
+        ));
+        let builder = FactoryAgentBuilder::new_with_config_store(
+            AgentFactory::minimal(),
+            initial_snapshot,
+            live_store.clone(),
+        );
+        let temp = tempfile::tempdir().expect("temporary config-runtime state root");
+        let blueprint = SessionRuntimeLlmReconfigureHostBlueprint::new(
+            &builder,
+            temp.path().join("config_state.json"),
+            Arc::new(std::sync::RwLock::new(None)),
+        );
+
+        let updated = Config {
+            max_tokens: Some(33),
+            ..Config::default()
+        };
+        live_store
+            .set(updated)
+            .await
+            .expect("update canonical config store after blueprint construction");
+
+        let snapshot = blueprint
+            .config_runtime()
+            .get()
+            .await
+            .expect("blueprint config runtime reads canonical store");
+        assert_eq!(snapshot.config.max_tokens, Some(33));
+    }
+
+    #[tokio::test]
+    async fn embedded_blueprint_lowers_snapshot_only_builder_to_memory_store() {
+        let snapshot = Config {
+            max_tokens: Some(44),
+            ..Config::default()
+        };
+        let builder = FactoryAgentBuilder::new(AgentFactory::minimal(), snapshot);
+        let temp = tempfile::tempdir().expect("temporary config-runtime state root");
+        let blueprint = SessionRuntimeLlmReconfigureHostBlueprint::new(
+            &builder,
+            temp.path().join("config_state.json"),
+            Arc::new(std::sync::RwLock::new(None)),
+        );
+
+        let snapshot = blueprint
+            .config_runtime()
+            .get()
+            .await
+            .expect("snapshot-only blueprint config runtime");
+        assert_eq!(snapshot.config.max_tokens, Some(44));
     }
 
     #[test]

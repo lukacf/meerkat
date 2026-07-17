@@ -50,6 +50,7 @@ import type {
   SessionContentBlock,
   SessionContentInput,
   SessionOptions,
+  SystemPromptOverride,
   SpawnManySpec,
   SpawnSpec,
   SupervisorRotationReportWire,
@@ -647,6 +648,21 @@ const sessionOptionsWithAuthBinding: SessionOptions = {
 };
 
 void sessionOptionsWithAuthBinding;
+
+const emptySystemPromptOverride: SystemPromptOverride = "";
+const disabledSystemPromptOverride: SystemPromptOverride = { action: "disable" };
+const sessionOptionsWithDisabledSystemPrompt: SessionOptions = {
+  systemPrompt: disabledSystemPromptOverride,
+};
+// @ts-expect-error the disable action is a closed wire literal.
+const invalidSystemPromptAction: SystemPromptOverride = { action: "clear" };
+// @ts-expect-error the disable wire object rejects extra fields.
+const invalidSystemPromptShape: SystemPromptOverride = { action: "disable", prompt: "x" };
+
+void emptySystemPromptOverride;
+void sessionOptionsWithDisabledSystemPrompt;
+void invalidSystemPromptAction;
+void invalidSystemPromptShape;
 
 const mobWireMembersBatchEdges: MobWireMembersBatchEdgeInput[] = [
   ["lead-1", "worker-1"],

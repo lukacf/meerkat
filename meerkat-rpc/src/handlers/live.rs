@@ -41,6 +41,30 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+#[cfg(feature = "live-webrtc")]
+#[derive(Clone, Copy)]
+enum LiveWebrtcAnswerCleanupDisposition {
+    Accept,
+    Reject,
+}
+
+#[cfg(feature = "live-webrtc")]
+async fn settle_live_webrtc_answer_cleanup(
+    decision_tx: tokio::sync::oneshot::Sender<LiveWebrtcAnswerCleanupDisposition>,
+    cleanup_task: tokio::task::JoinHandle<Result<(), meerkat_live::LiveWebrtcError>>,
+    disposition: LiveWebrtcAnswerCleanupDisposition,
+) -> Result<(), String> {
+    let decision_result = decision_tx
+        .send(disposition)
+        .map_err(|_| "live WebRTC answer cleanup coordinator stopped before decision".to_string());
+    let cleanup_result = cleanup_task
+        .await
+        .map_err(|error| format!("live WebRTC answer cleanup coordinator failed: {error}"))?
+        .map_err(|error| format!("live WebRTC rejected-answer cleanup failed: {error}"));
+    decision_result?;
+    cleanup_result
+}
+
 /// Public live channel identifiers are UUID-shaped today. Keep a modest
 /// forward-compatible bound so lookup failures cannot reflect an attacker-
 /// sized identifier into a response buffer.
@@ -699,7 +723,7 @@ pub async fn handle_live_open(
 pub async fn handle_live_webrtc_answer(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
-    live_webrtc: &LiveWebrtcState,
+    live_webrtc: &Arc<LiveWebrtcState>,
     runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
     let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
@@ -734,7 +758,7 @@ pub async fn handle_live_webrtc_answer(
     // through admission, peer installation, and generated answer commit so a
     // lifecycle close cannot prove the WebRTC registry empty and then race a
     // late answer peer into existence before its terminal marker.
-    let _live_lifecycle_lease = match runtime
+    let live_lifecycle_lease = match runtime
         .runtime_adapter()
         .acquire_live_open_lifecycle_lease(&session_id)
         .await
@@ -783,52 +807,191 @@ pub async fn handle_live_webrtc_answer(
         .await;
     }
 
-    match live_webrtc
-        .answer_offer(channel_id.clone(), parsed.offer_sdp)
-        .await
-    {
-        Ok(answer) => {
-            let authority = match runtime
-                .runtime_adapter()
-                .resolve_live_webrtc_answer_result(
-                    &session_id,
-                    &channel_id,
-                    answer.answer_observation_sequence,
-                )
+    let (answer_result_tx, answer_result_rx) = tokio::sync::oneshot::channel();
+    let (cleanup_decision_tx, cleanup_decision_rx) = tokio::sync::oneshot::channel();
+    let (handler_liveness_tx, mut handler_liveness_rx) = tokio::sync::oneshot::channel::<()>();
+    let coordinator_live_webrtc = Arc::clone(live_webrtc);
+    let coordinator_channel_id = channel_id.clone();
+    let offer_sdp = parsed.offer_sdp;
+
+    // Construction and cleanup run under one owned coordinator. If this RPC
+    // future is dropped, liveness closes: the coordinator aborts negotiation,
+    // waits for detached construction cleanup, and only then releases the
+    // machine lifecycle lease. If publication won the race, the exact
+    // sequence-keyed peer is rejected through the same pending-answer path.
+    let cleanup_task = tokio::spawn(async move {
+        let answer_live_webrtc = Arc::clone(&coordinator_live_webrtc);
+        let answer_channel_id = coordinator_channel_id.clone();
+        let mut answer_task = tokio::spawn(async move {
+            answer_live_webrtc
+                .answer_offer(answer_channel_id, offer_sdp)
                 .await
-            {
-                Ok(authority) => authority,
-                Err(error) => {
-                    // #346: answer_offer already installed the transport peer in
-                    // the WebRTC registry. The generated answer-result authority
-                    // rejected the result, so fail closed: tear the just-inserted
-                    // peer back out rather than leaving an orphaned peer with no
-                    // accepted answer behind it.
-                    live_webrtc.close_peer(&channel_id).await;
-                    return RpcResponse::error(
-                        id,
-                        error::INTERNAL_ERROR,
-                        format!("live WebRTC answer result authority rejected result: {error}"),
-                    );
-                }
-            };
-            match live_webrtc_answer_result_from_machine_authority(&authority, answer.answer_sdp)
-                .and_then(|result| {
-                    serde_json::to_value(result)
-                        .map_err(|err| format!("failed to serialize LiveWebrtcAnswerResult: {err}"))
-                }) {
-                Ok(value) => RpcResponse::success(id, value),
-                Err(err) => {
-                    // #346: the peer is installed but we cannot hand back a valid
-                    // answer result — fail closed by removing the orphaned peer.
-                    live_webrtc.close_peer(&channel_id).await;
-                    RpcResponse::error(id, error::INTERNAL_ERROR, err)
+        });
+        let (handler_gone, answer_joined) = tokio::select! {
+            _ = &mut handler_liveness_rx => {
+                answer_task.abort();
+                (true, answer_task.await)
+            }
+            joined = &mut answer_task => (false, joined),
+        };
+
+        let cleanup_result = match answer_joined {
+            Ok(Ok(answer)) if handler_gone => {
+                coordinator_live_webrtc
+                    .close_rejected_answer_peer(
+                        &coordinator_channel_id,
+                        answer.answer_observation_sequence,
+                    )
+                    .await
+            }
+            Ok(Ok(answer)) => {
+                let answer_observation_sequence = answer.answer_observation_sequence;
+                if answer_result_tx.send(Ok(answer)).is_err() {
+                    coordinator_live_webrtc
+                        .close_rejected_answer_peer(
+                            &coordinator_channel_id,
+                            answer_observation_sequence,
+                        )
+                        .await
+                } else {
+                    match cleanup_decision_rx.await {
+                        Ok(LiveWebrtcAnswerCleanupDisposition::Accept) => {
+                            coordinator_live_webrtc
+                                .release_answer_cleanup_obligation(
+                                    &coordinator_channel_id,
+                                    answer_observation_sequence,
+                                )
+                                .await;
+                            Ok(())
+                        }
+                        Ok(LiveWebrtcAnswerCleanupDisposition::Reject) | Err(_) => {
+                            coordinator_live_webrtc
+                                .close_rejected_answer_peer(
+                                    &coordinator_channel_id,
+                                    answer_observation_sequence,
+                                )
+                                .await
+                        }
+                    }
                 }
             }
+            Ok(Err(answer_error)) => {
+                // `answer_offer` does not return until pre-publication cleanup
+                // has completed, including surfacing any close failure.
+                let _ = answer_result_tx.send(Err(answer_error));
+                Ok(())
+            }
+            Err(join_error) => {
+                // Aborting answer_offer drops its RAII construction custody,
+                // which starts owned one-shot cleanup. Wait for exact absence
+                // before releasing the lifecycle lease. A non-Closed peer
+                // intentionally retains custody and therefore retains the
+                // lease instead of making a false physical-absence claim.
+                coordinator_live_webrtc
+                    .wait_for_answer_construction_cleanup(&coordinator_channel_id)
+                    .await;
+                if !handler_gone {
+                    let _ =
+                        answer_result_tx.send(Err(meerkat_live::LiveWebrtcError::PeerCreation {
+                            detail: format!("WebRTC answer construction task failed: {join_error}"),
+                        }));
+                }
+                Ok(())
+            }
+        };
+        if let Err(cleanup_error) = &cleanup_result {
+            tracing::error!(
+                channel = %coordinator_channel_id,
+                error = %cleanup_error,
+                "WebRTC answer coordinator cleanup completed with transport shutdown errors"
+            );
         }
-        Err(err) => {
-            live_webrtc_answer_error_response(id, runtime, &session_id, &channel_id, &err).await
+        drop(live_lifecycle_lease);
+        cleanup_result
+    });
+    // This sender exists only to make handler cancellation observable while
+    // negotiation is still in flight. It is deliberately retained through
+    // final authority/serialization settlement below.
+    let _handler_liveness = handler_liveness_tx;
+
+    let answer = match answer_result_rx.await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(err)) => {
+            if let Err(join_error) = cleanup_task.await {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("live WebRTC answer cleanup coordinator failed: {join_error}"),
+                );
+            }
+            return live_webrtc_answer_error_response(id, runtime, &session_id, &channel_id, &err)
+                .await;
         }
+        Err(error) => {
+            let coordinator_error = cleanup_task
+                .await
+                .err()
+                .map(|join_error| format!("; coordinator failed: {join_error}"))
+                .unwrap_or_default();
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!(
+                    "live WebRTC answer coordinator stopped before result: {error}{coordinator_error}"
+                ),
+            );
+        }
+    };
+    let answer_observation_sequence = answer.answer_observation_sequence;
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_webrtc_answer_result(&session_id, &channel_id, answer_observation_sequence)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            if let Err(cleanup_error) = settle_live_webrtc_answer_cleanup(
+                cleanup_decision_tx,
+                cleanup_task,
+                LiveWebrtcAnswerCleanupDisposition::Reject,
+            )
+            .await
+            {
+                return RpcResponse::error(id, error::INTERNAL_ERROR, cleanup_error);
+            }
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live WebRTC answer result authority rejected result: {error}"),
+            );
+        }
+    };
+    match live_webrtc_answer_result_from_machine_authority(&authority, answer.answer_sdp).and_then(
+        |result| {
+            serde_json::to_value(result)
+                .map_err(|err| format!("failed to serialize LiveWebrtcAnswerResult: {err}"))
+        },
+    ) {
+        Ok(value) => match settle_live_webrtc_answer_cleanup(
+            cleanup_decision_tx,
+            cleanup_task,
+            LiveWebrtcAnswerCleanupDisposition::Accept,
+        )
+        .await
+        {
+            Ok(()) => RpcResponse::success(id, value),
+            Err(cleanup_error) => RpcResponse::error(id, error::INTERNAL_ERROR, cleanup_error),
+        },
+        Err(err) => match settle_live_webrtc_answer_cleanup(
+            cleanup_decision_tx,
+            cleanup_task,
+            LiveWebrtcAnswerCleanupDisposition::Reject,
+        )
+        .await
+        {
+            Ok(()) => RpcResponse::error(id, error::INTERNAL_ERROR, err),
+            Err(cleanup_error) => RpcResponse::error(id, error::INTERNAL_ERROR, cleanup_error),
+        },
     }
 }
 

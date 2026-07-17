@@ -1195,6 +1195,15 @@ export interface WorkGraphItemLookupOptions {
   readonly namespace?: string;
 }
 
+/**
+ * Per-session system-prompt policy.
+ *
+ * Omit the create-session option to inherit configured prompt sources, pass any
+ * string (including `""`) to set an explicit prompt, or pass the exact disable
+ * action to suppress inherited prompt sources.
+ */
+export type SystemPromptOverride = string | { readonly action: "disable" };
+
 /** Options for creating a new session. */
 export interface SessionOptions {
   /**
@@ -1206,7 +1215,7 @@ export interface SessionOptions {
   injectedContext?: readonly ContentInput[];
   model?: string;
   provider?: string;
-  systemPrompt?: string;
+  systemPrompt?: SystemPromptOverride;
   maxTokens?: number;
   outputSchema?: Record<string, unknown>;
   structuredOutputRetries?: number;

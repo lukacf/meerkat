@@ -274,6 +274,7 @@ from .types import (
     SkillRuntimeDiagnostics,
     SourceHealthSnapshot,
     StoredMobProfile,
+    SystemPromptOverride,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
     TranscriptRewriteInputMessage,
@@ -771,7 +772,26 @@ class MeerkatClient:
         `realm/list`. Returns a list of `{realm_id, default_binding,
         backend_count, auth_profile_count, binding_count}`."""
         result = await self._request("realm/list", {})
-        return list(result.get("realms", []))
+        context = "Invalid realm/list response"
+        payload = self._require_dict(result, "result", context)
+        realms = self._require_present_list_field(payload, "realms", context)
+        parsed: list[dict[str, Any]] = []
+        for index, raw in enumerate(realms):
+            realm_context = f"{context}: realms[{index}]"
+            realm = self._require_dict(raw, f"realms[{index}]", context)
+            self._require_string_field(realm, "realm_id", realm_context)
+            self._optional_string_field(realm, "default_binding", realm_context)
+            self._require_non_negative_integer_field(
+                realm, "backend_count", realm_context
+            )
+            self._require_non_negative_integer_field(
+                realm, "auth_profile_count", realm_context
+            )
+            self._require_non_negative_integer_field(
+                realm, "binding_count", realm_context
+            )
+            parsed.append(dict(realm))
+        return parsed
 
     async def get_realm(self, realm_id: str) -> dict[str, Any]:
         """Fetch one realm's full WireRealmConnectionSet. Delegates to
@@ -936,7 +956,7 @@ class MeerkatClient:
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
-        system_prompt: str | None = None,
+        system_prompt: SystemPromptOverride | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
@@ -1015,7 +1035,7 @@ class MeerkatClient:
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
-        system_prompt: str | None = None,
+        system_prompt: SystemPromptOverride | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
@@ -1115,7 +1135,7 @@ class MeerkatClient:
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
-        system_prompt: str | None = None,
+        system_prompt: SystemPromptOverride | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
@@ -3765,7 +3785,8 @@ class MeerkatClient:
         return self._parse_comms_send_result(result)
 
     async def peers(self, session_id: str) -> dict[str, Any]:
-        return await self._request("comms/peers", {"session_id": session_id})
+        result = await self._request("comms/peers", {"session_id": session_id})
+        return self._parse_comms_peers_result(result)
 
     @staticmethod
     def _retired_runtime_session_control_error() -> MeerkatError:
@@ -4443,7 +4464,7 @@ class MeerkatClient:
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
-        system_prompt: str | None = None,
+        system_prompt: SystemPromptOverride | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
@@ -4477,7 +4498,7 @@ class MeerkatClient:
             params["provider"] = provider
         if auth_binding is not None:
             params["auth_binding"] = auth_binding
-        if system_prompt:
+        if system_prompt is not None:
             params["system_prompt"] = system_prompt
         if max_tokens:
             params["max_tokens"] = max_tokens
@@ -6310,6 +6331,13 @@ class MeerkatClient:
         return cast(CommsSendResult, result)
 
     @staticmethod
+    def _parse_comms_peers_result(raw: Any) -> dict[str, Any]:
+        context = "Invalid comms/peers response"
+        result = MeerkatClient._require_dict(raw, "result", context)
+        MeerkatClient._require_present_list_field(result, "peers", context)
+        return result
+
+    @staticmethod
     def _parse_member_progress_snapshot(
         raw: Any, context: str
     ) -> WireMemberProgressSnapshot:
@@ -7126,20 +7154,29 @@ class MeerkatClient:
             return default
 
     @staticmethod
-    def _parse_string_map(raw: Any) -> dict[str, str]:
-        if not isinstance(raw, dict):
+    def _parse_optional_string_map_field(
+        raw: dict[str, Any], field: str, context: str
+    ) -> dict[str, str]:
+        if field not in raw:
             return {}
-        result: dict[str, str] = {}
-        for key, value in raw.items():
-            result[str(key)] = str(value)
-        return result
+        value = raw[field]
+        if not isinstance(value, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: {field} must be object"
+            )
+        if not all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value.items()
+        ):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: {field} keys and values must be strings",
+            )
+        return dict(value)
 
     @staticmethod
     def _parse_session_summary(s: dict[str, Any]) -> SessionSummary:
         context = "Invalid session/list response entry"
-        labels_raw = s.get("labels")
-        if labels_raw is not None and not isinstance(labels_raw, dict):
-            raise MeerkatError("INVALID_RESPONSE", f"{context}: labels must be object")
         return SessionSummary(
             session_id=MeerkatClient._require_string_field(s, "session_id", context),
             session_ref=MeerkatClient._optional_string_field(s, "session_ref", context),
@@ -7155,29 +7192,43 @@ class MeerkatClient:
             total_tokens=MeerkatClient._require_non_negative_integer_field(
                 s, "total_tokens", context
             ),
-            labels=MeerkatClient._parse_string_map(labels_raw),
+            labels=MeerkatClient._parse_optional_string_map_field(
+                s, "labels", context
+            ),
             is_active=MeerkatClient._require_bool_field(s, "is_active", context),
         )
 
     @staticmethod
-    def _parse_session_details(s: dict[str, Any]) -> SessionDetails:
+    def _parse_session_details(s: Any) -> SessionDetails:
+        context = "Invalid session/read response"
+        data = MeerkatClient._require_dict(s, "result", context)
         return SessionDetails(
-            session_id=str(s.get("session_id", "")),
-            session_ref=s.get("session_ref"),
-            created_at=MeerkatClient._parse_int(s.get("created_at"), 0),
-            updated_at=MeerkatClient._parse_int(s.get("updated_at"), 0),
-            message_count=MeerkatClient._parse_int(s.get("message_count"), 0),
-            labels=MeerkatClient._parse_string_map(s.get("labels")),
-            is_active=bool(s.get("is_active", False)),
-            model=str(s.get("model", "")),
-            provider=str(s.get("provider", "")),
-            last_assistant_text=(
-                str(s["last_assistant_text"])
-                if s.get("last_assistant_text") is not None
-                else None
+            session_id=MeerkatClient._require_string_field(
+                data, "session_id", context
+            ),
+            session_ref=MeerkatClient._optional_string_field(
+                data, "session_ref", context
+            ),
+            created_at=MeerkatClient._require_non_negative_integer_field(
+                data, "created_at", context
+            ),
+            updated_at=MeerkatClient._require_non_negative_integer_field(
+                data, "updated_at", context
+            ),
+            message_count=MeerkatClient._require_non_negative_integer_field(
+                data, "message_count", context
+            ),
+            labels=MeerkatClient._parse_optional_string_map_field(
+                data, "labels", context
+            ),
+            is_active=MeerkatClient._require_bool_field(data, "is_active", context),
+            model=MeerkatClient._require_string_field(data, "model", context),
+            provider=MeerkatClient._require_string_field(data, "provider", context),
+            last_assistant_text=MeerkatClient._optional_string_field(
+                data, "last_assistant_text", context
             ),
             resolved_capabilities=MeerkatClient._parse_resolved_model_capabilities(
-                s.get("resolved_capabilities")
+                data.get("resolved_capabilities")
             ),
         )
 

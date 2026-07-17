@@ -1992,6 +1992,22 @@ pub trait SessionService: Send + Sync {
         Ok(())
     }
 
+    /// Abort every service projection staged by a run whose atomic runtime
+    /// boundary was rejected.
+    ///
+    /// The compatibility default preserves the former compaction-only
+    /// contract. Durable runtime-backed services override this to clear all
+    /// pre-commit projections at the same turn-finalization boundary.
+    /// Implementations must be cancellation-safe and retry-idempotent: a retry
+    /// after partial cleanup must converge without reconstructing or depending
+    /// on a live actor that an earlier attempt already discarded.
+    async fn abort_rejected_runtime_run_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.abort_uncommitted_compaction_projections(id).await
+    }
+
     /// Cancel an in-flight turn.
     ///
     /// Returns `NotRunning` if no turn is active.

@@ -632,6 +632,16 @@ impl Inbox {
 }
 
 impl InboxSender {
+    /// Whether two sender handles own the exact same inbox generation.
+    ///
+    /// Participant names and signing keys can be deliberately reused across
+    /// a runtime replacement. The notify Arc is minted once per inbox, so
+    /// pointer identity is the narrow lease witness needed for compare-remove
+    /// cleanup without exposing queue internals.
+    pub(crate) fn same_inbox(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.notify, &other.notify)
+    }
+
     /// **Test-only seam for C-H3.** Simulate the classify-then-admit
     /// ordering with an explicit pause between the two steps so a test
     /// can mutate the trust set in the gap.

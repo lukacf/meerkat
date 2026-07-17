@@ -6543,6 +6543,7 @@ class BridgeReplyMemberEventsPage(TypedDict, total=False):
     next_seq: Required[int]
     outcomes_complete: Required[bool]
     result: Required[Literal['member_events_page']]
+    runtime_incarnation: Required[str]
     turn_outcomes: NotRequired[list[BridgeTurnOutcomeRecord]]
     watermark: Required[int]
 
@@ -6565,6 +6566,7 @@ class BridgeReplyHostStatus(TypedDict, total=False):
     capabilities: Required[BridgeCapabilities]
     members: Required[list[dict[str, Any]]]
     result: Required[Literal['host_status']]
+    runtime_incarnation: Required[str]
 
 class BridgeReplyMemberLiveChannelOpened(TypedDict, total=False):
     open: Required[LiveOpenResult]

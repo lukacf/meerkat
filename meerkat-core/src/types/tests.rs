@@ -418,6 +418,60 @@ fn comms_block_round_trips_through_wire_with_typed_peer_id() {
 }
 
 #[test]
+fn system_notice_explicit_null_payloads_round_trip_without_becoming_absent() {
+    let blocks = [
+        SystemNoticeBlock::Comms {
+            kind: CommsNoticeKind::ResponseTerminal,
+            direction: SystemNoticeDirection::Incoming,
+            peer: None,
+            sender_taint: None,
+            request_id: Some("request-null".to_string()),
+            intent: None,
+            status: Some("Completed".to_string()),
+            summary: Some("Peer response terminal".to_string()),
+            payload: Some(Value::Null),
+            content: Vec::new(),
+        },
+        SystemNoticeBlock::ExternalEvent {
+            source: "connector".to_string(),
+            event_type: "nullable".to_string(),
+            summary: None,
+            body: None,
+            payload: Some(Value::Null),
+            content: Vec::new(),
+        },
+        SystemNoticeBlock::RuntimeNotice {
+            category: "nullable".to_string(),
+            detail: None,
+            payload: Some(Value::Null),
+        },
+        SystemNoticeBlock::Unknown {
+            summary: None,
+            payload: Some(Value::Null),
+        },
+    ];
+
+    for block in blocks {
+        let encoded = serde_json::to_value(&block).expect("serialize explicit-null notice");
+        assert!(
+            encoded.get("payload").is_some_and(Value::is_null),
+            "explicit null must be present on the wire: {encoded}"
+        );
+        let decoded: SystemNoticeBlock =
+            serde_json::from_value(encoded.clone()).expect("deserialize explicit-null notice");
+        assert_eq!(
+            decoded, block,
+            "present JSON null must remain distinct from an absent payload"
+        );
+        assert_eq!(
+            serde_json::to_value(decoded).expect("re-serialize explicit-null notice"),
+            encoded,
+            "notice bytes must be stable across the typed persistence round trip"
+        );
+    }
+}
+
+#[test]
 fn test_tool_call_serialization() {
     let tool_call = ToolCall::new(
         "tc_abc123".to_string(),

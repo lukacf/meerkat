@@ -31,6 +31,7 @@ struct MockSessionAgentBuilder {
 struct MockSessionAgent {
     session: Session,
     llm_identity: SessionLlmIdentity,
+    comms_runtime: Arc<meerkat_comms::CommsRuntime>,
     keep_alive: bool,
     start_turn_calls: Arc<AtomicU64>,
     inject_calls: Arc<AtomicU64>,
@@ -95,6 +96,24 @@ impl SessionAgentBuilder for MockSessionAgentBuilder {
             )))
         })?;
         let build = req.build.as_ref();
+        let comms_name = build
+            .and_then(|build| build.comms_name.as_deref())
+            .expect("phase2 routing member should request a comms runtime");
+        let comms_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only(comms_name)
+                .expect("create phase2 routing comms runtime"),
+        );
+        if let Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)) =
+            build.map(|build| &build.runtime_build_mode)
+        {
+            bindings
+                .install_peer_comms_on(comms_runtime.as_ref())
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "install phase2 routing peer-comms authority: {error}"
+                    )))
+                })?;
+        }
         Ok(MockSessionAgent {
             session,
             llm_identity: SessionLlmIdentity {
@@ -106,6 +125,7 @@ impl SessionAgentBuilder for MockSessionAgentBuilder {
                 provider_params: build.and_then(|build| build.provider_params.clone()),
                 auth_binding: build.and_then(|build| build.auth_binding.clone()),
             },
+            comms_runtime,
             keep_alive: build.is_some_and(|build| build.keep_alive),
             start_turn_calls: Arc::clone(&self.start_turn_calls),
             inject_calls: Arc::clone(&self.inject_calls),
@@ -213,6 +233,10 @@ impl SessionAgent for MockSessionAgent {
         Some(Arc::new(MockInjector {
             inject_calls: Arc::clone(&self.inject_calls),
         }))
+    }
+
+    fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        Some(self.comms_runtime.clone())
     }
 }
 

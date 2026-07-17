@@ -97,6 +97,7 @@ const CORE_EXECUTOR_PURE_FORWARD_METHODS: &[&str] = &[
     "checkpoint_committed_session_snapshot",
     "reconcile_committed_compaction_projections",
     "abort_uncommitted_compaction_projections",
+    "abort_rejected_run_projections",
     "publish_interaction_terminals",
     "cancel_after_boundary",
 ];

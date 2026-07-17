@@ -152,6 +152,7 @@ impl MobCommand {
             Self::SpawnProvisioned { .. }
             | Self::RevivePlacedMember { .. }
             | Self::HostStatusPollCompleted { .. }
+            | Self::HostRuntimeIncarnationObserved { .. }
             | Self::HostOrphanReleaseCompleted { .. }
             | Self::PlacedBehaviorCompleted { .. }
             | Self::CommitFlowRunCommand { .. }
@@ -396,6 +397,7 @@ impl MobCommand {
             | Self::RejectPlacedKickoffBeforeAdmission { reply_tx, .. }
             | Self::ApplyExternalPeerReciprocalTrust { reply_tx, .. }
             | Self::EnsureMemberEventPump { reply_tx, .. }
+            | Self::HostRuntimeIncarnationObserved { reply_tx, .. }
             | Self::RecordOperatorActionProvenance { reply_tx, .. }
             | Self::SetSpawnPolicy { reply_tx, .. }
             | Self::Shutdown { reply_tx } => {

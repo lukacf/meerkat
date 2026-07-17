@@ -124,8 +124,19 @@ impl CommsTrustReconciler {
         &self,
         obligation: &CommsTrustReconcileObligation,
     ) -> Result<ReconcileReport, CommsTrustReconcileError> {
+        Self::reconcile_runtime(self.comms.as_ref(), obligation).await
+    }
+
+    /// Reconcile a borrowed runtime against one generated obligation.
+    ///
+    /// Dormant runtimes use this before publication, while the owned
+    /// reconciler above remains the ordinary live-runtime surface.
+    pub async fn reconcile_runtime(
+        comms: &dyn CommsRuntime,
+        obligation: &CommsTrustReconcileObligation,
+    ) -> Result<ReconcileReport, CommsTrustReconcileError> {
         let effective_peers = crate::protocol_comms_trust_reconcile::effective_peers(obligation);
-        let previous_peers = self.canonical_trusted_peer_snapshot().await?;
+        let previous_peers = Self::canonical_trusted_peer_snapshot(comms).await?;
 
         let to_add: Vec<PeerEndpoint> = effective_peers
             .iter()
@@ -157,7 +168,7 @@ impl CommsTrustReconciler {
                 peer_id: endpoint.peer_id.0.clone(),
                 source: SendError::Validation(detail),
             })?;
-            self.comms
+            comms
                 .apply_trust_mutation(CommsTrustMutation::AddTrustedPeer {
                     authority,
                     peer: descriptor,
@@ -179,8 +190,7 @@ impl CommsTrustReconciler {
                 peer_id: endpoint.peer_id.0.clone(),
                 source: SendError::Validation(detail),
             })?;
-            let result = self
-                .comms
+            let result = comms
                 .apply_trust_mutation(CommsTrustMutation::RemoveTrustedPeer {
                     peer_id: endpoint.peer_id.0.clone(),
                     authority,
@@ -209,9 +219,9 @@ impl CommsTrustReconciler {
     }
 
     async fn canonical_trusted_peer_snapshot(
-        &self,
+        comms: &dyn CommsRuntime,
     ) -> Result<BTreeSet<PeerEndpoint>, CommsTrustReconcileError> {
-        self.comms
+        comms
             .trusted_peer_projection_snapshot_for_source(
                 GeneratedCommsTrustAuthoritySourceKind::MeerkatMachinePeerProjection,
             )

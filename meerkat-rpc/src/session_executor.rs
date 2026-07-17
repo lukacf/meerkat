@@ -654,6 +654,14 @@ impl CoreExecutor for SessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn abort_rejected_run_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .core_session_service()
+            .abort_rejected_runtime_run_projections(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn checkpoint_committed_session_snapshot(
         &mut self,
         session_snapshot: &[u8],
@@ -868,6 +876,13 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         self.session_service
             .abort_uncommitted_compaction_projections(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn abort_rejected_run_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .abort_rejected_runtime_run_projections(&self.session_id)
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }

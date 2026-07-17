@@ -2292,6 +2292,36 @@ async fn host_status_reports_materialized_set_and_capabilities() {
     assert_eq!(row.spec_digest, ack.spec_digest);
     assert!(row.healthy, "live census marks the fresh member healthy");
 
+    let member = member_descriptor_from_ack("b2", &ack);
+    let expected_member = member_incarnation_from_ack(&fixture, "mob-t20", "b2", &ack, 1, 1, 1);
+    probe.trust(member.clone()).await;
+    let events_reply = probe
+        .send_bridge_command_raw(
+            &member,
+            &raw_poll_member_events_command(
+                &probe,
+                "mob-t20",
+                1,
+                expected_member,
+                BridgeEventCursor::At {
+                    generation: 1,
+                    seq: 1,
+                },
+                Some(1),
+                Some(0),
+            ),
+            REPLY_TIMEOUT,
+        )
+        .await
+        .expect("member events reply");
+    let BridgeReply::MemberEventsPage(events_page) = events_reply else {
+        panic!("expected MemberEventsPage, got {events_reply:?}");
+    };
+    assert_eq!(
+        events_page.runtime_incarnation, status.runtime_incarnation,
+        "HostStatus and MemberEventsPage must carry the actor's same once-per-boot token"
+    );
+
     // Unbound mob ⇒ NotBound.
     let reply = probe
         .send_bridge_command_raw(

@@ -448,23 +448,24 @@ async fn reconcile_loaded_compaction_projection_outbox(
     Ok(compatibility_checkpoint)
 }
 
-/// Abort the live compaction rewrite after a failed runtime boundary commit.
+/// Abort every live pre-commit projection after a failed runtime boundary
+/// commit.
 ///
 /// `RuntimeStore::atomic_apply` is the final fallible persistence operation in
 /// `commit_runtime_loop_run`, and its contract guarantees that an error leaves
 /// none of the boundary writes visible. Startup also drains every previously
-/// committed compaction outbox before admitting work. Consequently no durable
-/// outbox can authorize reconciliation for this failed run: the exact live
-/// stage is still uncommitted and must be aborted.
-async fn abort_compaction_projection_after_commit_failure(
+/// committed projection outbox before admitting work. Consequently no durable
+/// authority can retain the live transcript, context events, or compaction
+/// stages produced by this failed run: they must all be aborted.
+async fn abort_rejected_run_projections_after_commit_failure(
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
 ) -> Result<(), crate::RuntimeDriverError> {
     executor
-        .abort_uncommitted_compaction_projections()
+        .abort_rejected_run_projections()
         .await
         .map_err(|error| {
             crate::RuntimeDriverError::Internal(format!(
-                "uncommitted compaction projection abort failed: {error}"
+                "rejected runtime run projection abort failed: {error}"
             ))
         })
 }
@@ -1416,7 +1417,7 @@ async fn recover_committed_runtime_projections_before_teardown(
             .lock_current_teardown_driver_authority(driver, "runtime teardown projection recovery")
             .await?,
     );
-    match teardown_slot.owned_commit_cleanup_state() {
+    let rejected_run_projection_abort_completed = match teardown_slot.owned_commit_cleanup_state() {
         Some(OwnedCommitCleanupState::InFlight { run_id }) => {
             return Err(crate::RuntimeDriverError::RecoveryCorruption {
                 reason: format!(
@@ -1426,17 +1427,18 @@ async fn recover_committed_runtime_projections_before_teardown(
         }
         Some(OwnedCommitCleanupState::RejectedAbortPending { run_id }) => {
             executor
-                .abort_uncommitted_compaction_projections()
+                .abort_rejected_run_projections()
                 .await
                 .map_err(|error| {
                     crate::RuntimeDriverError::Internal(format!(
-                        "failed to abort rejected runtime commit compaction stage during teardown: {error}"
+                        "failed to abort rejected runtime run projections during teardown: {error}"
                     ))
                 })?;
             teardown_slot.complete_rejected_commit_abort(&run_id);
+            true
         }
-        None => {}
-    }
+        None => false,
+    };
     let pending_directed_terminalization_run_id = match teardown_slot.owned_terminalization_state()
     {
         Some(OwnedTerminalizationState::InFlight { run_id }) => {
@@ -1449,7 +1451,16 @@ async fn recover_committed_runtime_projections_before_teardown(
         Some(OwnedTerminalizationState::PersistedDirectedDrainPending { run_id }) => Some(run_id),
         None => None,
     };
-    reconcile_compaction_projection_outbox(driver, executor).await?;
+    // A rejected atomic boundary has no committed current-run compaction
+    // outbox, and startup drained every older outbox before admitting work.
+    // The whole-run abort above therefore already settled the exact live
+    // compaction stage before discarding its actor. Do not follow it with the
+    // generic empty-outbox reconciliation: custom builders may require that
+    // actor, and asking again after discard turns successful cleanup into an
+    // unrecoverable `NotFound`/unsupported failure.
+    if !rejected_run_projection_abort_completed {
+        reconcile_compaction_projection_outbox(driver, executor).await?;
+    }
 
     // A mixed failed batch has two disjoint public recipient sets: durable
     // directed Interaction terminals and a local non-directed completion
@@ -4742,23 +4753,23 @@ async fn process_queue(
                         };
                         if let Err(err) = commit_result {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
-                            let compaction_cleanup_error =
-                                abort_compaction_projection_after_commit_failure(executor)
+                            let projection_cleanup_error =
+                                abort_rejected_run_projections_after_commit_failure(executor)
                                     .await
                                     .err();
-                            if let Some(cleanup_error) = compaction_cleanup_error.as_ref() {
+                            if let Some(cleanup_error) = projection_cleanup_error.as_ref() {
                                 tracing::error!(
                                     %run_id,
                                     error = %cleanup_error,
-                                    "failed to reconcile invisible compaction stages after runtime commit failure"
+                                    "failed to abort rejected runtime run projections after commit failure"
                                 );
                             }
-                            if compaction_cleanup_error.is_none() {
+                            if projection_cleanup_error.is_none() {
                                 teardown_slot.complete_rejected_commit_abort(&run_id);
                             }
-                            let failure_detail = match compaction_cleanup_error {
+                            let failure_detail = match projection_cleanup_error {
                                 Some(cleanup_error) => format!(
-                                    "runtime loop commit failed: {err}; compaction stage cleanup also failed: {cleanup_error}"
+                                    "runtime loop commit failed: {err}; rejected run projection cleanup also failed: {cleanup_error}"
                                 ),
                                 None => format!("runtime loop commit failed: {err}"),
                             };
@@ -5353,7 +5364,7 @@ mod tests {
     };
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
 
@@ -5545,6 +5556,108 @@ mod tests {
             self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    struct RejectedAbortTeardownProjectionProbe {
+        abort_calls: Arc<AtomicUsize>,
+        reconcile_calls: Arc<AtomicUsize>,
+        discarded: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for RejectedAbortTeardownProjectionProbe {
+        async fn apply(
+            &mut self,
+            _run_id: meerkat_core::lifecycle::RunId,
+            _primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::CoreExecutorError,
+        > {
+            unreachable!("teardown projection recovery does not apply queued work")
+        }
+
+        async fn reconcile_committed_compaction_projections(
+            &mut self,
+            _intents: &[meerkat_core::CompactionProjectionIntent],
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+            if self.discarded.load(Ordering::SeqCst) {
+                return Err(meerkat_core::lifecycle::CoreExecutorError::Internal(
+                    "post-discard compaction reconciliation must not run".to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn abort_rejected_run_projections(
+            &mut self,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            self.abort_calls.fetch_add(1, Ordering::SeqCst);
+            self.discarded.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_abort_teardown_skips_post_discard_empty_reconciliation() {
+        let driver = make_shared_ephemeral_driver("rejected-abort-teardown-projections");
+        let teardown_slot = RuntimeLoopTeardownSlot::pending();
+        let run_id = RunId::new();
+        teardown_slot
+            .stage_owned_commit_in_flight(&run_id)
+            .expect("stage rejected commit cleanup carrier");
+        teardown_slot
+            .mark_owned_commit_rejected_abort_pending(&run_id)
+            .expect("publish rejected-abort cleanup phase");
+
+        let abort_calls = Arc::new(AtomicUsize::new(0));
+        let reconcile_calls = Arc::new(AtomicUsize::new(0));
+        let discarded = Arc::new(AtomicBool::new(false));
+        let mut executor = RejectedAbortTeardownProjectionProbe {
+            abort_calls: Arc::clone(&abort_calls),
+            reconcile_calls: Arc::clone(&reconcile_calls),
+            discarded: Arc::clone(&discarded),
+        };
+        let recovery = RuntimeLoopRecoveryContext {
+            authority_binding: RuntimeLoopAuthorityBinding::detached_for_test(),
+            completions: None,
+        };
+
+        recover_committed_runtime_projections_before_teardown(
+            &driver,
+            &mut executor,
+            &teardown_slot,
+            &recovery,
+        )
+        .await
+        .expect("rejected projection cleanup must converge without an actorless reconcile");
+
+        assert!(discarded.load(Ordering::SeqCst));
+        assert_eq!(abort_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reconcile_calls.load(Ordering::SeqCst),
+            0,
+            "whole-run abort already settled the authoritative empty outbox"
+        );
+        assert!(
+            teardown_slot.owned_commit_cleanup_state().is_none(),
+            "successful cleanup must clear the exact rejected-commit carrier"
+        );
     }
 
     #[tokio::test]

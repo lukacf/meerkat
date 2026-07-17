@@ -3537,6 +3537,7 @@ export interface BridgeReplyMemberEventsPage {
   next_seq: number;
   outcomes_complete: boolean;
   result: "member_events_page";
+  runtime_incarnation: string;
   turn_outcomes?: BridgeTurnOutcomeRecord[];
   watermark: number;
 }
@@ -3562,6 +3563,7 @@ export interface BridgeReplyHostStatus {
   capabilities: BridgeCapabilities;
   members: Record<string, unknown>[];
   result: "host_status";
+  runtime_incarnation: string;
 }
 
 export interface BridgeReplyMemberLiveChannelOpened {

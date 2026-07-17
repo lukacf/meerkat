@@ -1356,6 +1356,12 @@ struct MockSessionService {
     comms_behaviors: RwLock<HashMap<String, MockCommsBehavior>>,
     /// Sessions whose comms runtime should appear unavailable.
     missing_comms_sessions: RwLock<HashSet<SessionId>>,
+    /// Successful comms-runtime observations remaining before every runtime
+    /// becomes unavailable. Test-only seam separating builder reconciliation
+    /// from a later actor-owned operational startup failure.
+    comms_runtime_failure_after_successes_enabled: AtomicBool,
+    comms_runtime_successes_before_missing: AtomicUsize,
+    comms_runtime_observations: AtomicUsize,
     /// Sessions whose archive() call should fail.
     archive_fail_sessions: RwLock<HashSet<SessionId>>,
     archive_calls: RwLock<HashMap<SessionId, u64>>,
@@ -1475,6 +1481,9 @@ impl MockSessionService {
             external_tools_by_session: RwLock::new(HashMap::new()),
             comms_behaviors: RwLock::new(HashMap::new()),
             missing_comms_sessions: RwLock::new(HashSet::new()),
+            comms_runtime_failure_after_successes_enabled: AtomicBool::new(false),
+            comms_runtime_successes_before_missing: AtomicUsize::new(0),
+            comms_runtime_observations: AtomicUsize::new(0),
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_calls: RwLock::new(HashMap::new()),
             archive_not_found_sessions: RwLock::new(HashSet::new()),
@@ -1741,6 +1750,13 @@ impl MockSessionService {
             .write()
             .await
             .insert(session_id.clone());
+    }
+
+    fn set_comms_runtime_missing_after_successes(&self, successful_observations: usize) {
+        self.comms_runtime_successes_before_missing
+            .store(successful_observations, Ordering::Release);
+        self.comms_runtime_failure_after_successes_enabled
+            .store(true, Ordering::Release);
     }
 
     async fn set_archive_failure(&self, session_id: &SessionId) {
@@ -2925,12 +2941,26 @@ impl SubscribableInjector for CountingInjector {
 #[async_trait]
 impl SessionServiceCommsExt for MockSessionService {
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
+        self.comms_runtime_observations
+            .fetch_add(1, Ordering::Relaxed);
         if self
             .missing_comms_sessions
             .read()
             .await
             .contains(session_id)
         {
+            return None;
+        }
+        let unavailable_after_reconciliation = self
+            .comms_runtime_failure_after_successes_enabled
+            .load(Ordering::Acquire)
+            && self
+                .comms_runtime_successes_before_missing
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_err();
+        if unavailable_after_reconciliation {
             return None;
         }
         let sessions = self.sessions.read().await;
@@ -5241,6 +5271,8 @@ struct LiveExternalPeerHarness {
     supervisor_addresses: Arc<RwLock<Vec<String>>>,
     rotation_operation_ids: Arc<RwLock<Vec<super::bridge_protocol::SupervisorRotationOperationId>>>,
     suppress_rotation_observations: Arc<AtomicBool>,
+    drop_next_attempted_rotation_observation_response: Arc<AtomicBool>,
+    drop_next_authorize_response: Arc<AtomicBool>,
     reject_next_rotation: Arc<AtomicBool>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
     bind_peer_id_override: Arc<RwLock<Option<String>>>,
@@ -5344,6 +5376,33 @@ impl LiveExternalPeerHarness {
     fn suppress_rotation_observations(&self, suppress: bool) {
         self.suppress_rotation_observations
             .store(suppress, Ordering::Relaxed);
+    }
+
+    fn drop_next_attempted_rotation_observation_response(&self) {
+        assert!(
+            !self
+                .drop_next_attempted_rotation_observation_response
+                .swap(true, Ordering::Relaxed),
+            "attempted-authority observation response drop is already armed"
+        );
+    }
+
+    fn attempted_rotation_observation_response_drop_is_armed(&self) -> bool {
+        self.drop_next_attempted_rotation_observation_response
+            .load(Ordering::Relaxed)
+    }
+
+    fn drop_next_authorize_response(&self) {
+        assert!(
+            !self
+                .drop_next_authorize_response
+                .swap(true, Ordering::Relaxed),
+            "authorize response drop is already armed"
+        );
+    }
+
+    fn authorize_response_drop_is_armed(&self) -> bool {
+        self.drop_next_authorize_response.load(Ordering::Relaxed)
     }
 
     fn reject_next_rotation(&self) {
@@ -5527,6 +5586,11 @@ async fn spawn_live_external_peer_with_transport(
     let responder_rotation_operation_ids = rotation_operation_ids.clone();
     let suppress_rotation_observations = Arc::new(AtomicBool::new(false));
     let responder_suppress_rotation_observations = suppress_rotation_observations.clone();
+    let drop_next_attempted_rotation_observation_response = Arc::new(AtomicBool::new(false));
+    let responder_drop_next_attempted_rotation_observation_response =
+        drop_next_attempted_rotation_observation_response.clone();
+    let drop_next_authorize_response = Arc::new(AtomicBool::new(false));
+    let responder_drop_next_authorize_response = drop_next_authorize_response.clone();
     let reject_next_rotation = Arc::new(AtomicBool::new(false));
     let responder_reject_next_rotation = reject_next_rotation.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
@@ -5719,21 +5783,79 @@ async fn spawn_live_external_peer_with_transport(
                                 candidate.interaction.handling_mode,
                             )
                             .expect("record inbound peer request before response");
-                        let to = trust_candidate_sender_for_reply(
-                            responder_runtime.as_ref(),
-                            &candidate,
-                        )
-                        .await;
                         let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
                             serde_json::from_value(params.clone());
-                        if matches!(
+                        let is_rotation_observation = matches!(
                             &bridge_parse,
                             Ok(super::bridge_protocol::BridgeCommand::ObserveSupervisorRotation(_))
-                        ) && responder_suppress_rotation_observations.load(Ordering::Relaxed)
+                        );
+                        let drop_authorize_response = matches!(
+                            &bridge_parse,
+                            Ok(super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
+                                _
+                            ))
+                        ) && responder_drop_next_authorize_response
+                            .swap(false, Ordering::Relaxed);
+                        let use_correlated_bridge_reply = bridge_parse.is_ok()
+                            && candidate
+                                .ingress
+                                .declared_reply_endpoint
+                                .as_ref()
+                                .is_some_and(|endpoint| {
+                                    endpoint.transport() == meerkat_core::comms::PeerTransport::Tcp
+                                });
+                        let is_attempted_rotation_observer = match &bridge_parse {
+                            Ok(
+                                super::bridge_protocol::BridgeCommand::ObserveSupervisorRotation(
+                                    payload,
+                                ),
+                            ) => responder_rotation_operations
+                                .read()
+                                .await
+                                .get(&payload.operation_id)
+                                .is_some_and(|state| {
+                                    let target = match state {
+                                        super::bridge_protocol::BridgeSupervisorRotationState::Pending {
+                                            operation,
+                                            ..
+                                        } => &operation.target,
+                                        super::bridge_protocol::BridgeSupervisorRotationState::Completed {
+                                            receipt,
+                                        } => &receipt.target,
+                                        super::bridge_protocol::BridgeSupervisorRotationState::Rejected {
+                                            receipt,
+                                        } => &receipt.operation.target,
+                                        _ => return false,
+                                    };
+                                    target.target.peer_id == payload.observer.peer_id
+                                        && target.target.pubkey == payload.observer.pubkey
+                                        && target.target_epoch == payload.observer_epoch
+                                }),
+                            _ => false,
+                        };
+                        if is_rotation_observation
+                            && (responder_suppress_rotation_observations.load(Ordering::Relaxed)
+                                || (is_attempted_rotation_observer
+                                    && responder_drop_next_attempted_rotation_observation_response
+                                        .swap(false, Ordering::Relaxed)))
                         {
                             responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
                             continue;
                         }
+                        let to = if use_correlated_bridge_reply {
+                            // Production keeps bridge callbacks
+                            // correlation-scoped: it stages only the
+                            // authenticated TCP callback carried by each signed
+                            // request and never mints durable trust for a probe.
+                            stage_candidate_sender_for_correlated_reply(
+                                responder_runtime.as_ref(),
+                                &candidate,
+                            )
+                            .await
+                        } else {
+                            trust_candidate_sender_for_reply(responder_runtime.as_ref(), &candidate)
+                                .await
+                        };
                         let mut remove_supervisors_after_response = Vec::new();
                         let response = if let Ok(command) = bridge_parse {
                             match command {
@@ -6335,8 +6457,8 @@ async fn spawn_live_external_peer_with_transport(
                                         }
                                     } else {
                                             super::bridge_protocol::BridgeSupervisorRotationObservation::NotFound {
-                                                operation_id: payload.operation_id,
-                                            }
+                                            operation_id: payload.operation_id,
+                                        }
                                     };
                                     serde_json::to_value(
                                         super::bridge_protocol::BridgeReply::SupervisorRotation(
@@ -6393,6 +6515,73 @@ async fn spawn_live_external_peer_with_transport(
                                 _ => serde_json::json!({ "ok": true }),
                             }
                         };
+                        if drop_authorize_response {
+                            // Simulate a post-commit response loss: the peer
+                            // applied the authorization, but the caller must
+                            // converge by retrying the exact command.
+                            responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
+                            for supervisor_pubkey in remove_supervisors_after_response {
+                                remove_test_peer_projection_trust(
+                                    responder_runtime.as_ref(),
+                                    &supervisor_pubkey.to_peer_id().to_string(),
+                                    "remove rotated supervisor trust after dropped response",
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
+                        if use_correlated_bridge_reply {
+                            // Match the production bridge responder: the
+                            // authenticated callback is one-shot and remains
+                            // live only for this request, so consume it with
+                            // an inline response rather than deferring the
+                            // send behind a spawned retry task.
+                            let interaction_id = candidate.interaction.id;
+                            match responder_runtime
+                                .send(CommsCommand::PeerResponse {
+                                    objective_id: None,
+                                    content_taint: None,
+                                    to,
+                                    in_reply_to: interaction_id,
+                                    status: meerkat_core::interaction::ResponseStatus::Completed,
+                                    result: response,
+                                    blocks: None,
+                                    handling_mode: None,
+                                })
+                                .await
+                            {
+                                Ok(_) => {}
+                                Err(error @ SendError::Transport(_)) => {
+                                    // A Response has no transport ACK. The
+                                    // one-shot probe may retire immediately after
+                                    // admitting it and reset this connection while
+                                    // the sender is still finishing its write. The
+                                    // production responder treats that outcome as
+                                    // ambiguous and continues; the harness must do
+                                    // the same so a retry can establish terminality.
+                                    tracing::warn!(
+                                        %interaction_id,
+                                        %error,
+                                        "correlated rotation response send was not confirmed"
+                                    );
+                                }
+                                Err(error) => {
+                                    panic!(
+                                        "send correlated rotation observation response failed: {error}"
+                                    );
+                                }
+                            }
+                            responder_runtime.mark_interaction_complete(interaction_id.0);
+                            for supervisor_pubkey in remove_supervisors_after_response {
+                                remove_test_peer_projection_trust(
+                                    responder_runtime.as_ref(),
+                                    &supervisor_pubkey.to_peer_id().to_string(),
+                                    "remove rotated supervisor trust",
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
                         // `trust_candidate_sender_for_reply` records trust for
                         // the requester, but registration propagates
                         // asynchronously. A short-lived alternate-authority
@@ -6465,6 +6654,8 @@ async fn spawn_live_external_peer_with_transport(
         supervisor_addresses,
         rotation_operation_ids,
         suppress_rotation_observations,
+        drop_next_attempted_rotation_observation_response,
+        drop_next_authorize_response,
         reject_next_rotation,
         supervisor_state,
         bind_peer_id_override,
@@ -8155,6 +8346,44 @@ async fn trust_candidate_sender_for_reply(
         "trust typed ingress sender for bridge reply",
     )
     .await;
+    route
+}
+
+async fn stage_candidate_sender_for_correlated_reply(
+    comms: &meerkat_comms::CommsRuntime,
+    candidate: &meerkat_core::interaction::PeerInputCandidate,
+) -> PeerRoute {
+    let route = candidate
+        .ingress
+        .route
+        .clone()
+        .or_else(|| {
+            candidate
+                .interaction
+                .from_route
+                .map(meerkat_core::PeerRoute::new)
+        })
+        .expect("peer request candidate must carry a typed reply route");
+    if let (Some(sender_peer_id), Some(signing_pubkey), Some(reply_endpoint)) = (
+        candidate.ingress.canonical_peer_id,
+        candidate.ingress.signing_pubkey,
+        candidate.ingress.declared_reply_endpoint.clone(),
+    ) {
+        match CoreCommsRuntime::stage_correlated_reply_endpoint(
+            comms,
+            sender_peer_id,
+            candidate.interaction.id,
+            signing_pubkey,
+            reply_endpoint,
+        )
+        .await
+        {
+            Ok(()) | Err(SendError::Unsupported(_)) => {}
+            Err(error) => {
+                panic!("stage authenticated correlated bridge reply endpoint failed: {error}")
+            }
+        }
+    }
     route
 }
 
@@ -12434,7 +12663,7 @@ async fn test_destroy_scrubs_runtime_metadata() {
 async fn test_rotate_supervisor_updates_runtime_metadata() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
-    let definition = sample_definition();
+    let definition = with_unique_mob_id(sample_definition(), "rotate-supervisor-metadata");
     let mob_id = definition.id.clone();
     let storage = MobStorage::in_memory();
     let runtime_metadata = storage.runtime_metadata.clone();
@@ -12892,14 +13121,26 @@ async fn test_rotate_supervisor_timeout_keeps_durable_operation_and_retry_reuses
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_rotate_supervisor_observes_rejection_through_retained_authority() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
-    let definition = with_unique_mob_id(
+    let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-cross-authority-rejection",
     );
     let mob_id = definition.id.clone();
+    let supervisor_port = unused_loopback_port();
+    let supervisor_address = format!("tcp://127.0.0.1:{supervisor_port}");
+    definition
+        .backend
+        .external
+        .as_mut()
+        .expect("external backend")
+        .supervisor_bridge = Some(crate::definition::SupervisorBridgeEndpointConfig {
+        bind_address: Some(format!("127.0.0.1:{supervisor_port}")),
+        advertised_address: Some(supervisor_address),
+    });
     let storage = MobStorage::in_memory();
     let runtime_metadata = storage.runtime_metadata.clone();
     let service = Arc::new(MockSessionService::new());
@@ -12910,7 +13151,7 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
         .await
         .expect("create mob");
     let external =
-        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-reject")).await;
+        spawn_live_external_tcp_peer(&test_comms_name_for(&mob_id, "worker", "w-reject")).await;
     handle
         .spawn_with_binding(
             ProfileName::from("worker"),
@@ -12927,6 +13168,7 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
         .expect("load original authority")
         .expect("original authority");
     external.reject_next_rotation();
+    external.drop_next_attempted_rotation_observation_response();
     let error = handle
         .rotate_supervisor()
         .await
@@ -12944,6 +13186,10 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
     assert_eq!(previous_epoch, original.epoch);
     assert_eq!(attempted_epoch, original.epoch + 1);
     assert!(pending_authority_recorded);
+    assert!(
+        !external.attempted_rotation_observation_response_drop_is_armed(),
+        "the attempted-authority observation response must be dropped exactly once before retained-authority fallback"
+    );
     assert!(
         reason.contains("was rejected by peer")
             && reason.contains("injected terminal rotation rejection"),
@@ -12971,14 +13217,26 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_restart() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
-    let definition = with_unique_mob_id(
+    let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-legacy-operation-migration",
     );
     let mob_id = definition.id.clone();
+    let supervisor_port = unused_loopback_port();
+    let supervisor_address = format!("tcp://127.0.0.1:{supervisor_port}");
+    definition
+        .backend
+        .external
+        .as_mut()
+        .expect("external backend")
+        .supervisor_bridge = Some(crate::definition::SupervisorBridgeEndpointConfig {
+        bind_address: Some(format!("127.0.0.1:{supervisor_port}")),
+        advertised_address: Some(supervisor_address),
+    });
     let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
     let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
     let service = Arc::new(MockSessionService::new());
@@ -12991,7 +13249,8 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
     .create()
     .await
     .expect("create mob");
-    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let external =
+        spawn_live_external_tcp_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
     handle
         .spawn_with_binding(
             ProfileName::from("worker"),
@@ -13022,7 +13281,8 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         pubkey: next.public_signing_key(),
     };
     let mut legacy_target = target.clone();
-    legacy_target.address = "inproc://legacy-stale-supervisor-route".to_string();
+    let legacy_stale_address = "inproc://legacy-stale-supervisor-route".to_string();
+    legacy_target.address = legacy_stale_address.clone();
     external
         .install_legacy_rotated_supervisor(legacy_target, next.epoch)
         .await;
@@ -13064,14 +13324,17 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         .rotate_supervisor()
         .await
         .expect_err("suppressed observation must leave migrated operation pending");
-    assert!(matches!(
-        error,
-        MobError::SupervisorRotationIncomplete {
-            pending_authority_recorded: true,
-            rollback_succeeded: false,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &error,
+            MobError::SupervisorRotationIncomplete {
+                pending_authority_recorded: true,
+                rollback_succeeded: false,
+                ..
+            }
+        ),
+        "suppressed legacy observation must remain durably pending, got: {error:?}"
+    );
     let migrated = runtime_metadata
         .load_supervisor_authority(&mob_id)
         .await
@@ -13083,9 +13346,21 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         .operation_id
         .expect("stable operation id assigned by CAS");
     assert_eq!(migrated.accepted_peer_ids, vec![external_peer_id.clone()]);
-    assert_eq!(
-        migrated.member_targets.get(&external_peer_id),
-        Some(&target)
+    let migrated_target = migrated
+        .member_targets
+        .get(&external_peer_id)
+        .expect("migrated active member target");
+    assert_eq!(migrated_target.name, target.name);
+    assert_eq!(migrated_target.peer_id, target.peer_id);
+    assert_eq!(migrated_target.pubkey, target.pubkey);
+    assert!(
+        migrated_target.address.starts_with("tcp://"),
+        "migration must persist the resumed controller's authenticated TCP callback: {}",
+        migrated_target.address
+    );
+    assert_ne!(
+        migrated_target.address, legacy_stale_address,
+        "migration must not retain the injected legacy route"
     );
     assert!(
         external.rotation_operation_ids().await.is_empty(),
@@ -13097,7 +13372,6 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
         .await
         .expect("shutdown after partial legacy migration");
     external.suppress_rotation_observations(false);
-    external.fail_next_authorize();
     let retried = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events,
         runtime_metadata.clone(),
@@ -13106,16 +13380,30 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
     .resume()
     .await
     .expect("resume migrated operation for exact retry");
+    // Arm this after resume so the lost reply deterministically lands on the
+    // first NotFound-triggered route refresh. The peer commits that refresh,
+    // but the same call must retry it exactly within the reserved budget.
+    external.drop_next_authorize_response();
     let report = retried
         .rotate_supervisor()
         .await
         .expect("restart retry must adopt and observe the same operation");
+    assert!(
+        !external.authorize_response_drop_is_armed(),
+        "the first legacy route-refresh response must be dropped exactly once"
+    );
     assert_eq!(report.public_peer_id, next.public_peer_id);
+    let authorized = external
+        .authorized_supervisor_spec()
+        .await
+        .expect("authorized supervisor after restart recovery");
+    let supervisor_addresses = external.supervisor_addresses().await;
     assert_eq!(
-        external.supervisor_addresses().await.last(),
-        Some(&target.address),
+        supervisor_addresses.last(),
+        Some(&authorized.address),
         "NotFound-triggered next-authority route refresh must repair legacy address drift before adoption"
     );
+    assert_ne!(authorized.address, legacy_stale_address);
     assert_eq!(
         external.rotation_operation_ids().await,
         vec![operation_id],
@@ -14517,7 +14805,10 @@ async fn test_rotate_supervisor_pending_verification_conflict_fails_closed_witho
             assert_eq!(attempted_epoch, original.epoch + 1);
             assert_eq!(rotated_peer_count, 1);
             assert!(!rollback_succeeded);
-            assert!(!pending_authority_recorded);
+            assert!(
+                !pending_authority_recorded,
+                "divergent final-CAS authority must clear the attempted pending witness: {reason}"
+            );
             assert!(
                 reason.contains("local authority activation failed")
                     && reason.contains("supervisor authority changed before final commit"),
@@ -18902,6 +19193,301 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
         ))
         .await
         .expect("the actor provisioner must own the attachment sidecar committed by recovery");
+}
+
+#[tokio::test]
+async fn test_cold_running_resume_reestablishes_autonomous_startup_ready_without_kickoff() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runs = storage.runs.clone();
+    let specs = storage.specs.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let realm_profiles = storage.realm_profiles.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let member = AgentIdentity::from("cold-ready-autonomous");
+
+    handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn autonomous member");
+    handle
+        .wait_for_members_ready(std::slice::from_ref(&member), Some(Duration::from_secs(2)))
+        .await
+        .expect("fresh member reaches startup readiness");
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
+    assert_eq!(
+        service.keep_alive_start_turn_call_count(),
+        1,
+        "fresh spawn must execute exactly one kickoff turn"
+    );
+
+    // Rebuild from durable state using a process-restart-faithful service.
+    // Its live runtime mechanics and counters start empty, so readiness after
+    // `for_resume` can only come from checks performed by the recovered actor.
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let _ = restarted_service.enable_runtime_adapter();
+    drop(handle);
+    drop(service);
+
+    let resumed = MobBuilder::for_resume(MobStorage {
+        events,
+        runs,
+        specs,
+        runtime_metadata,
+        realm_profiles,
+    })
+    .with_session_service(restarted_service.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("cold resume running mob");
+
+    let ready = resumed
+        .wait_for_members_ready(
+            std::slice::from_ref(&member),
+            Some(Duration::from_millis(250)),
+        )
+        .await
+        .expect("recovered live autonomous member must become startup-ready");
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].0, member);
+    assert_eq!(ready[0].1.status, MobMemberStatus::Active);
+    assert_eq!(
+        restarted_service.keep_alive_start_turn_call_count(),
+        0,
+        "cold readiness recovery must not synthesize a second kickoff turn"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum ColdLocalReadinessFault {
+    RuntimeAdapter,
+    TurnDrivenRuntimeAdapter,
+    CommsRuntime,
+}
+
+async fn wait_for_keep_alive_start_turn_count(service: &MockSessionService, expected: u64) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while service.keep_alive_start_turn_call_count() < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("keep-alive kickoff observation timed out");
+}
+
+fn assert_missing_outbound_comms_capability(
+    error: MobError,
+    expected_member: &AgentIdentity,
+    expected_context: &'static str,
+) {
+    match error {
+        MobError::MissingMemberCapability {
+            member_id,
+            capability,
+            context,
+        } => {
+            assert_eq!(&member_id, expected_member);
+            assert_eq!(
+                capability,
+                crate::error::MobMemberCapability::OutboundCommsRuntime
+            );
+            assert_eq!(context, expected_context);
+        }
+        other => panic!("expected typed missing outbound comms capability, got {other:?}"),
+    }
+}
+
+async fn assert_cold_running_local_resume_fails_closed(
+    fault: ColdLocalReadinessFault,
+    expected_context: &'static str,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runs = storage.runs.clone();
+    let specs = storage.specs.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let realm_profiles = storage.realm_profiles.clone();
+    let mut definition = sample_definition();
+    if matches!(fault, ColdLocalReadinessFault::TurnDrivenRuntimeAdapter) {
+        for profile in definition
+            .profiles
+            .values_mut()
+            .filter_map(|profile| profile.as_inline_mut())
+        {
+            profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+        }
+    }
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let member = AgentIdentity::from(match fault {
+        ColdLocalReadinessFault::RuntimeAdapter => "cold-missing-runtime-adapter",
+        ColdLocalReadinessFault::TurnDrivenRuntimeAdapter => {
+            "cold-turn-driven-missing-runtime-adapter"
+        }
+        ColdLocalReadinessFault::CommsRuntime => "cold-missing-comms-runtime",
+    });
+
+    handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn local member");
+    handle
+        .wait_for_members_ready(std::slice::from_ref(&member), Some(Duration::from_secs(2)))
+        .await
+        .expect("fresh member reaches startup readiness");
+    if !matches!(fault, ColdLocalReadinessFault::TurnDrivenRuntimeAdapter) {
+        wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
+    }
+    let member_entry = handle
+        .get_member(&member)
+        .await
+        .expect("fresh member lookup")
+        .expect("fresh member roster entry");
+    assert!(
+        member_entry.member_ref.bridge_session_id().is_some(),
+        "local member must be session-backed before cold restart"
+    );
+
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    match fault {
+        ColdLocalReadinessFault::RuntimeAdapter
+        | ColdLocalReadinessFault::TurnDrivenRuntimeAdapter => {}
+        ColdLocalReadinessFault::CommsRuntime => {
+            let _ = restarted_service.enable_runtime_adapter();
+            // Cold builder reconciliation observes the live runtime four
+            // times while rebuilding endpoint/trust projections. The fifth
+            // observation is the recovered actor's readiness check.
+            restarted_service.set_comms_runtime_missing_after_successes(4);
+        }
+    }
+    drop(handle);
+    drop(service);
+
+    let resume_result = MobBuilder::for_resume(MobStorage {
+        events: events.clone(),
+        runs,
+        specs,
+        runtime_metadata,
+        realm_profiles,
+    })
+    .with_session_service(restarted_service.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await;
+
+    if matches!(
+        fault,
+        ColdLocalReadinessFault::RuntimeAdapter | ColdLocalReadinessFault::TurnDrivenRuntimeAdapter
+    ) {
+        let error = match resume_result {
+            Ok(_) => panic!("missing composition adapter must reject cold resume synchronously"),
+            Err(error) => error,
+        };
+        assert_missing_outbound_comms_capability(error, &member, expected_context);
+        assert_eq!(
+            restarted_service.keep_alive_start_turn_call_count(),
+            0,
+            "a synchronous composition failure must not start a replacement kickoff turn"
+        );
+        return;
+    }
+
+    // Per-session comms is discovered only after durable reconstruction. The
+    // recovered actor owns that lifecycle failure: it commits Stopped and
+    // retains the handle, whose explicit resume is the canonical typed retry.
+    let resumed = resume_result
+        .expect("per-session readiness failure must return its durably fail-stopped handle");
+
+    let resumed_status = resumed.status().await.expect("failed cold-resume status");
+    let comms_observations = restarted_service
+        .comms_runtime_observations
+        .load(Ordering::Relaxed);
+    let remaining_successes = restarted_service
+        .comms_runtime_successes_before_missing
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        resumed_status,
+        MobState::Stopped,
+        "local cold resume must fail closed when comms-drain readiness is unavailable; observations={comms_observations}, remaining_successes={remaining_successes}"
+    );
+    let durable_events = events
+        .replay_all()
+        .await
+        .expect("replay startup fail-stop events");
+    assert_eq!(
+        durable_events
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::MobStopped))
+            .count(),
+        1,
+        "polling a pending exact interrupt must commit one structural Stop transition"
+    );
+    assert_eq!(
+        durable_events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::MemberKickoffUpdated {
+                        member: event_member,
+                        kickoff,
+                    } if event_member == &member
+                        && kickoff.phase == crate::MobMemberKickoffPhase::Cancelled
+                )
+            })
+            .count(),
+        1,
+        "polling the retained interrupt receiver must not duplicate its durable kickoff cancellation"
+    );
+    let error = resumed
+        .resume()
+        .await
+        .expect_err("explicit retry must preserve the typed missing capability failure");
+    assert_missing_outbound_comms_capability(error, &member, expected_context);
+    assert_eq!(
+        restarted_service.keep_alive_start_turn_call_count(),
+        0,
+        "a readiness failure must not synthesize a replacement kickoff turn"
+    );
+}
+
+#[tokio::test]
+async fn test_cold_running_resume_fails_closed_without_runtime_adapter() {
+    assert_cold_running_local_resume_fails_closed(
+        ColdLocalReadinessFault::RuntimeAdapter,
+        "local member comms-drain runtime adapter",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_cold_running_turn_driven_resume_fails_closed_without_runtime_adapter() {
+    assert_cold_running_local_resume_fails_closed(
+        ColdLocalReadinessFault::TurnDrivenRuntimeAdapter,
+        "local member comms-drain runtime adapter",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_cold_running_resume_fails_closed_without_comms_runtime() {
+    assert_cold_running_local_resume_fails_closed(
+        ColdLocalReadinessFault::CommsRuntime,
+        "local member comms-drain startup",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -47221,14 +47807,24 @@ async fn test_fixed_port_activation_rebuild_failure_retries_same_durable_operati
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
-async fn test_external_tcp_peer_turn_routes_after_supervisor_rotation() {
+async fn test_private_ephemeral_tcp_supervisor_rotation_rejected_before_mutation() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
-        "external-tcp-rotate-route",
+        "external-tcp-ephemeral-rotate-rejected",
     );
     let mob_id = definition.id.clone();
-    let (handle, service) = create_test_mob(definition).await;
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let owner_bridge_session_id = SessionId::new();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
+        .create()
+        .await
+        .expect("create mob");
     let external_name = test_comms_name_for(&mob_id, "lead", "l-tcp-rotate");
     let external = spawn_live_external_tcp_peer(&external_name).await;
 
@@ -47236,32 +47832,64 @@ async fn test_external_tcp_peer_turn_routes_after_supervisor_rotation() {
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     spec.binding = Some(external.binding());
     handle
-        .spawn_spec_with_generated_owner_context(spec, SessionId::new())
+        .spawn_spec_with_generated_owner_context(spec, owner_bridge_session_id)
         .await
         .expect("spawn TCP external member");
 
-    handle
+    let original_authority = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original supervisor authority")
+        .expect("original supervisor authority");
+    let original_remote_authority = external.authorized_supervisor_peer_id().await;
+    let original_rotation_operations = external.rotation_operation_ids().await;
+
+    let error = handle
         .rotate_supervisor()
         .await
-        .expect("rotate supervisor with TCP external member");
+        .expect_err("private ephemeral TCP rotation must fail before mutation");
+    assert!(
+        matches!(&error, MobError::WiringError(message) if message.contains("requires a stable callback endpoint")),
+        "unexpected ephemeral TCP rotation failure: {error:?}"
+    );
+    let retained_authority = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load supervisor authority after rejected rotation")
+        .expect("retained supervisor authority");
+    assert_eq!(retained_authority, original_authority);
+    assert!(retained_authority.pending_rotation.is_none());
+    assert_eq!(
+        external.authorized_supervisor_peer_id().await,
+        original_remote_authority,
+        "rejected rotation must not change remote supervisor authority"
+    );
+    assert_eq!(
+        external.rotation_operation_ids().await,
+        original_rotation_operations,
+        "rejected rotation must not submit a remote operation"
+    );
 
     handle
         .member(&AgentIdentity::from("l-tcp-rotate"))
         .await
         .expect("member handle")
-        .send("tcp external turn after rotation", HandlingMode::Queue)
+        .send(
+            "tcp external turn after rejected rotation",
+            HandlingMode::Queue,
+        )
         .await
-        .expect("peer turn after rotation should route to TCP external runtime");
+        .expect("retained TCP route should remain usable");
 
     assert_eq!(
         service.start_turn_call_count(),
         0,
-        "rotated peer-only TCP external dispatch must not fall back to local session start_turn"
+        "retained peer-only TCP dispatch must not fall back to local session start_turn"
     );
     assert_eq!(
         external.delivered_input_ids().await.len(),
         1,
-        "remote runtime must receive the post-rotation peer turn"
+        "remote runtime must receive the turn after rejected rotation"
     );
 }
 
@@ -57158,6 +57786,7 @@ async fn spawn_host_daemon_stub(label: &str, live_endpoint: Option<String>) -> H
     let responder_runtime = runtime.clone();
     let responder_address = address.clone();
     let responder_peer_id = peer_id.to_string();
+    let responder_runtime_incarnation = super::bridge_protocol::BridgeHostRuntimeIncarnation::new();
     let responder_live_endpoint = live_endpoint;
     let responder_bind_requests = bind_requests.clone();
     let responder_rebind_requests = rebind_requests.clone();
@@ -57394,6 +58023,7 @@ async fn spawn_host_daemon_stub(label: &str, live_endpoint: Option<String>) -> H
                     Ok(super::bridge_protocol::BridgeCommand::HostStatus(_)) => {
                         serde_json::to_value(super::bridge_protocol::BridgeReply::HostStatus(
                             super::bridge_protocol::BridgeHostStatusResponse {
+                                runtime_incarnation: responder_runtime_incarnation,
                                 members: Vec::new(),
                                 capabilities: host_stub_capabilities(),
                             },

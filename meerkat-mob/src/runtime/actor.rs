@@ -30,11 +30,14 @@ use meerkat_core::comms::{
     CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress,
     PeerLifecycleKind, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
 };
-use meerkat_core::time_compat::{Instant, SystemTime};
+use meerkat_core::time_compat::{Duration, Instant, SystemTime};
 use meerkat_machine_kernels::generated::mob::command_capabilities as generated_mob_command_capabilities;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
+
+const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostOrphanReleaseReservation {
@@ -3775,6 +3778,12 @@ pub(super) struct MobActor {
     /// reuse the same authority epoch while changing the host route/process.
     /// Actor restart drops both this map and every detached release task.
     pub(super) host_binding_incarnations: BTreeMap<mob_dsl::HostId, u64>,
+    /// Last authenticated host-process incarnation observed through
+    /// `HostStatus` or a successful member-events page. This actor-local
+    /// cache is only a recovery trigger: MobMachine wiring facts remain the
+    /// sole source of route intent.
+    pub(super) host_runtime_incarnations:
+        BTreeMap<mob_dsl::HostId, super::bridge_protocol::BridgeHostRuntimeIncarnation>,
     pub(super) next_peer_delivery_ticket: PeerDeliveryId,
     pub(super) peer_delivery_tasks: tokio::task::JoinSet<PeerDeliveryCompletion>,
     pub(super) peer_delivery_inflight: BTreeMap<PeerDeliveryId, PeerDeliveryInflight>,
@@ -6740,29 +6749,25 @@ impl MobActor {
     /// nothing (T-W3 pins the idempotency). Re-derivation from durable
     /// graph facts belongs to the triggers that KNOW trust was invalidated:
     /// host (re)bind (T2, `drain_route_installs_for_host`), controlling
-    /// recovery (T3, builder reseed), and placed revival (T4,
-    /// `drive_route_installs_for_identity`). Periodic authenticated
-    /// `HostStatus` drains only this already-recorded ledger; it never
-    /// re-derives route intent from graph projections.
+    /// recovery (T3, builder reseed), placed revival (T4,
+    /// `drive_route_installs_for_identity`), and an authenticated new host
+    /// runtime incarnation. Periodic `HostStatus` for the same incarnation
+    /// drains only this already-recorded ledger.
     async fn handle_drive_route_installs(&mut self) -> Result<(), MobError> {
         self.realize_pending_route_installs(None).await
     }
 
-    /// T2 drain: after a host (re)bind commit, re-derive Install
-    /// obligations for every wired edge with an endpoint placed on THIS
-    /// host (a restarted host holds no trust rows — re-derivation heals the
-    /// volatility) and realize every pending Install against it. Never fails the bind:
-    /// per-obligation failures stay pending.
-    async fn drain_route_installs_for_host(&mut self, host_id: &mob_dsl::HostId) {
+    /// T2 / runtime-incarnation drain: after a host (re)bind commit or an
+    /// authenticated host-process change, re-derive Install obligations for
+    /// every wired edge with an endpoint placed on THIS host (a restarted
+    /// host holds no trust rows) and realize every pending Install against
+    /// it. Per-obligation failures stay pending.
+    async fn drain_route_installs_for_host(
+        &mut self,
+        host_id: &mob_dsl::HostId,
+    ) -> Result<(), MobError> {
         self.record_derived_route_install_obligations(Some(host_id));
-        if let Err(error) = self.realize_pending_route_installs(Some(host_id)).await {
-            tracing::error!(
-                mob_id = %self.definition.id,
-                host = %host_id.as_str(),
-                %error,
-                "route-install host drain rejected an invalid pending ledger"
-            );
-        }
+        self.realize_pending_route_installs(Some(host_id)).await
     }
 
     /// T4 drain: after a placed member is re-materialized (revival), its
@@ -10471,13 +10476,37 @@ impl MobActor {
             );
             return;
         }
-        if let Err(stop_error) = self.stop_all_autonomous_members().await {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                error = %stop_error,
-                "startup failure Stop remains pending on autonomous cleanup"
-            );
-            return;
+        let autonomous_stop_deadline = Instant::now() + STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE;
+        loop {
+            match self.stop_all_autonomous_members().await {
+                Ok(()) => break,
+                Err(stop_error @ MobError::AutonomousStopInterruptsPending { .. }) => {
+                    let now = Instant::now();
+                    if now >= autonomous_stop_deadline {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            error = %stop_error,
+                            failure_label,
+                            "startup failure Stop did not prove exact autonomous cleanup before its deadline"
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(
+                        STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL
+                            .min(autonomous_stop_deadline - now),
+                    )
+                    .await;
+                }
+                Err(stop_error) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %stop_error,
+                        failure_label,
+                        "startup failure Stop remains pending on autonomous cleanup"
+                    );
+                    return;
+                }
+            }
         }
         if let Err(error) = self.commit_stopped_lifecycle_after_cleanup().await {
             tracing::warn!(
@@ -12370,26 +12399,39 @@ impl MobActor {
                 return Ok(());
             };
 
-            if let Some(adapter) = self.runtime_adapter.clone()
-                && let Some(comms_runtime) = self.provisioner.comms_runtime(member_ref).await
-            {
-                let mob_id =
-                    meerkat_runtime::meerkat_machine::dsl::MobId::from(self.definition.id.as_ref());
-                let spawned = adapter
-                    .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
-                    .await
-                    .map_err(|err| {
-                        MobError::Internal(format!(
-                            "mob comms drain spawn failed for session {bridge_session_id}: {err}"
-                        ))
+            let adapter =
+                self.runtime_adapter
+                    .clone()
+                    .ok_or_else(|| MobError::MissingMemberCapability {
+                        member_id: agent_identity.clone(),
+                        capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                        context: "local member comms-drain runtime adapter",
                     })?;
-                if spawned {
-                    tracing::debug!(
-                        agent_identity = %agent_identity,
-                        session_id = %bridge_session_id,
-                        "updated peer ingress for mob member"
-                    );
-                }
+            let comms_runtime = self
+                .provisioner
+                .comms_runtime(member_ref)
+                .await
+                .ok_or_else(|| MobError::MissingMemberCapability {
+                    member_id: agent_identity.clone(),
+                    capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                    context: "local member comms-drain startup",
+                })?;
+            let mob_id =
+                meerkat_runtime::meerkat_machine::dsl::MobId::from(self.definition.id.as_ref());
+            let spawned = adapter
+                .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
+                .await
+                .map_err(|err| {
+                    MobError::Internal(format!(
+                        "mob comms drain spawn failed for session {bridge_session_id}: {err}"
+                    ))
+                })?;
+            if spawned {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    session_id = %bridge_session_id,
+                    "updated peer ingress for mob member"
+                );
             }
         }
 
@@ -13246,9 +13288,12 @@ impl MobActor {
     ///
     /// Called on mob startup and resume. Does NOT fire synthetic kickoff turns —
     /// the keep-alive runtime infrastructure is sufficient. On resume, the
-    /// member's session already has its conversation history.
+    /// member's session already has its conversation history. Once a recovered
+    /// local autonomous member's drain and injector have both been observed,
+    /// publish that exact runtime/fence through MobMachine's existing startup
+    /// readiness transition. Durable membership alone is not readiness.
     async fn ensure_autonomous_runtimes_from_roster(
-        &self,
+        &mut self,
         allow_stopped_resume_reopen: bool,
     ) -> Result<(), MobError> {
         let lifecycle = self.dsl_authority.state();
@@ -13389,6 +13434,41 @@ impl MobActor {
                 );
                 if first_error.is_none() {
                     first_error = Some(error);
+                }
+                continue;
+            }
+
+            // Cold Running recovery rebuilds session runtime mechanics before
+            // the actor starts, then reaches this shared check without the
+            // volatile startup marker created by the original process. Feed
+            // the successful observation through the same exact-runtime/fence
+            // machine transition used by fresh spawn. Never infer this from
+            // the durable roster, and never apply it while the mob is Stopped:
+            // same-handle resume performs these checks before its durable
+            // Resume commit, while a rebuilt attachment checks again after it.
+            if self.state() == MobState::Running {
+                let runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+                if !self
+                    .dsl_authority
+                    .state()
+                    .member_startup_ready
+                    .contains(&runtime_id)
+                    && let Err(error) = self.apply_dsl_input(
+                        mob_dsl::MobMachineInput::StartupMarkReady {
+                            agent_runtime_id: runtime_id,
+                            fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                        },
+                        "ensure_autonomous_runtimes_from_roster/startup_mark_ready",
+                    )
+                {
+                    tracing::warn!(
+                        agent_identity = %entry.agent_identity,
+                        error = %error,
+                        "failed publishing autonomous runtime startup readiness"
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
                 }
             }
         }
@@ -15431,6 +15511,11 @@ impl MobActor {
                     error = %error,
                     "failed to start autonomous host loops during actor startup; entering Stopped"
                 );
+                // Per-session recovery failures are actor-owned lifecycle
+                // facts. Persist Stop and retain the handle so an explicit
+                // MobHandle::resume retry can return the original typed
+                // capability failure; startup must not make an Ok builder
+                // result look Running or ready.
                 self.fail_startup_to_stopped("autonomous runtime startup failure")
                     .await;
             }
@@ -15614,28 +15699,33 @@ impl MobActor {
                     match result {
                         Ok(status) => {
                             match self.reconcile_host_status_response(&host_id, status).await {
-                                Ok(()) => {
-                                    self.reachability_observations
-                                        .mark_host_success(host_id.as_str());
-                                    // T3 recovery records route-install
-                                    // obligations before the replacement
-                                    // actor starts. A successful periodic
-                                    // status reply is authenticated evidence
-                                    // that this exact current host binding is
-                                    // reachable, so converge those existing
-                                    // rows through the canonical drain. Do
-                                    // not re-derive here: polling must never
-                                    // manufacture route intent from a read
-                                    // model.
-                                    if let Err(error) =
-                                        self.realize_pending_route_installs(Some(&host_id)).await
-                                    {
+                                Ok(runtime_incarnation_changed) => {
+                                    // Member trust is process-local. A fresh
+                                    // authenticated host incarnation therefore
+                                    // re-derives this host's obligations from
+                                    // the MobMachine wiring graph; an unchanged
+                                    // incarnation only retries already-pending
+                                    // rows. Both convergence actions precede
+                                    // the reachability success projection so
+                                    // readiness never races route recovery.
+                                    let route_result = self
+                                        .converge_routes_after_host_runtime_observation(
+                                            &host_id,
+                                            runtime_incarnation_changed,
+                                        )
+                                        .await;
+                                    if let Err(error) = route_result {
+                                        self.reachability_observations
+                                            .mark_host_failure(host_id.as_str(), &error);
                                         tracing::error!(
                                             mob_id = %self.definition.id,
                                             host = %host_id.as_str(),
                                             error = %error,
                                             "authenticated host status found an invalid pending route-install ledger"
                                         );
+                                    } else {
+                                        self.reachability_observations
+                                            .mark_host_success(host_id.as_str());
                                     }
                                 }
                                 Err(error) => {
@@ -15664,6 +15754,40 @@ impl MobActor {
                             );
                         }
                     }
+                }
+                MobCommand::HostRuntimeIncarnationObserved {
+                    expected_member,
+                    runtime_incarnation,
+                    reply_tx,
+                } => {
+                    let result = match self
+                        .validate_member_events_runtime_observation(&expected_member)
+                    {
+                        Err(error) => Err(error),
+                        Ok(host_id) => {
+                            let changed = self.record_host_runtime_incarnation(
+                                &host_id,
+                                runtime_incarnation,
+                                "member event page",
+                            );
+                            match self
+                                .converge_routes_after_host_runtime_observation(&host_id, changed)
+                                .await
+                            {
+                                Ok(()) => {
+                                    self.reachability_observations
+                                        .mark_host_member_events_success(host_id.as_str());
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    self.reachability_observations
+                                        .mark_host_failure(host_id.as_str(), &error);
+                                    Err(error)
+                                }
+                            }
+                        }
+                    };
+                    let _ = reply_tx.send(result);
                 }
                 MobCommand::HostOrphanReleaseCompleted { key, result } => {
                     let binding_is_current = {
@@ -17741,7 +17865,9 @@ impl MobActor {
                         continue;
                     }
                     if let Err(error) = self
-                        .close_all_member_live_channels_for_lifecycle("shutdown mob runtime")
+                        .close_controller_local_member_live_channels_for_shutdown(
+                            "shutdown mob runtime",
+                        )
                         .await
                     {
                         let _ = reply_tx.send(Err(error));
@@ -25139,6 +25265,39 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster
                 .list_all()
+                .map(|entry| entry.agent_identity.clone())
+                .collect::<Vec<_>>()
+        };
+        self.close_member_live_channels_for_lifecycle(identities, context)
+            .await
+    }
+
+    fn member_live_ref_is_controller_local(member_ref: &MemberRef) -> bool {
+        matches!(member_ref, MemberRef::Session { .. })
+    }
+
+    /// Close only live channels owned by this controlling process during actor
+    /// shutdown.
+    ///
+    /// Placed live channels are owned by their member hosts, and MobMachine
+    /// deliberately carries no controlling-side channel map. An unnamed status
+    /// probe for every placed roster member would therefore turn ordinary
+    /// process shutdown into a remote liveness gate. Exact channels retained by
+    /// an admitted Open cleanup remain covered by
+    /// `drain_member_live_mutations_for_lifecycle` before this method runs; all
+    /// other placed channel state remains with its owning host across a
+    /// controlling-process restart. `BackendPeer` is likewise never local
+    /// session ownership, even when legacy replay projects a stale bridge
+    /// session ID onto it.
+    async fn close_controller_local_member_live_channels_for_shutdown(
+        &self,
+        context: &'static str,
+    ) -> Result<(), MobError> {
+        let identities = {
+            let roster = self.roster.read().await;
+            roster
+                .list_all()
+                .filter(|entry| Self::member_live_ref_is_controller_local(&entry.member_ref))
                 .map(|entry| entry.agent_identity.clone())
                 .collect::<Vec<_>>()
         };
@@ -36600,11 +36759,6 @@ impl MobActor {
             )));
         }
 
-        // T2 route-install drain (ADJ-P4-1): a (re)bound host holds no
-        // volatile trust rows — re-derive + realize this host's obligations.
-        // Never fails the bind; leftovers stay pending and observable.
-        self.drain_route_installs_for_host(&host_id).await;
-
         Ok(super::handle::HostBindReport {
             host_id: host_id.as_str().to_string(),
             epoch: registered_epoch,
@@ -36613,12 +36767,30 @@ impl MobActor {
     }
 
     async fn observe_host_status(&mut self, host_id: &mob_dsl::HostId) -> Result<(), MobError> {
-        let result = self.reconcile_host_members(host_id).await;
+        let mut result = self.reconcile_host_members(host_id).await.map(|_| ());
         if result
             .as_ref()
             .is_err_and(Self::host_status_rejection_requires_fail_stop)
         {
             self.durable_uncertainty_fail_stop = true;
+        }
+        // Bind/rebind is an explicit route-recovery boundary even if the
+        // follow-up inventory probe itself is temporarily unavailable. Keep
+        // the old pre-return convergence guarantee, but never emit route
+        // side effects after a durable fail-stop classification.
+        if !self.durable_uncertainty_fail_stop {
+            if let Err(route_error) = self.drain_route_installs_for_host(host_id).await {
+                if result.is_ok() {
+                    result = Err(route_error);
+                } else {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        host = %host_id.as_str(),
+                        error = %route_error,
+                        "host observation also found an invalid pending route-install ledger"
+                    );
+                }
+            }
         }
         match &result {
             Ok(()) => self
@@ -36638,7 +36810,7 @@ impl MobActor {
         authority: &crate::store::SupervisorAuthorityRecord,
     ) -> Result<(), MobError> {
         let binding_generation = self.current_host_binding_generation(host_id)?;
-        let result = match Self::poll_bound_host_status_once(
+        let mut result = match Self::poll_bound_host_status_once(
             Arc::clone(&self.supervisor_bridge),
             authority,
             &self.definition.id,
@@ -36647,7 +36819,10 @@ impl MobActor {
         )
         .await
         {
-            Ok(status) => self.reconcile_host_status_response(host_id, status).await,
+            Ok(status) => self
+                .reconcile_host_status_response(host_id, status)
+                .await
+                .map(|_| ()),
             Err(error) => Err(error),
         };
         if result
@@ -36655,6 +36830,20 @@ impl MobActor {
             .is_err_and(Self::host_status_rejection_requires_fail_stop)
         {
             self.durable_uncertainty_fail_stop = true;
+        }
+        if !self.durable_uncertainty_fail_stop {
+            if let Err(route_error) = self.drain_route_installs_for_host(host_id).await {
+                if result.is_ok() {
+                    result = Err(route_error);
+                } else {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        host = %host_id.as_str(),
+                        error = %route_error,
+                        "authority-scoped host observation also found an invalid pending route-install ledger"
+                    );
+                }
+            }
         }
         match &result {
             Ok(()) => self
@@ -36849,7 +37038,10 @@ impl MobActor {
     /// the actor task, serialized with spawn finalization). Orphan releases
     /// feed NO machine signal — the machine has no facts for an orphan
     /// (roster never showed it, §9 row 2).
-    async fn reconcile_host_members(&mut self, host_id: &mob_dsl::HostId) -> Result<(), MobError> {
+    async fn reconcile_host_members(
+        &mut self,
+        host_id: &mob_dsl::HostId,
+    ) -> Result<bool, MobError> {
         let binding_generation = self.current_host_binding_generation(host_id)?;
         let (endpoint, pubkey) = {
             let state = self.dsl_authority.state();
@@ -37075,11 +37267,94 @@ impl MobActor {
         });
     }
 
+    /// Revalidate the full member residency carried by an authenticated
+    /// events page against current MobMachine facts. The event pump also
+    /// checks its local lease before and after this command; this actor-side
+    /// check closes the serialized state-transition interval in between.
+    fn validate_member_events_runtime_observation(
+        &self,
+        expected: &super::bridge_protocol::BridgeMemberIncarnation,
+    ) -> Result<mob_dsl::HostId, MobError> {
+        if self.definition.id != expected.mob_id {
+            return Err(MobError::Internal(format!(
+                "member-events runtime observation names mob '{}' while actor owns '{}'",
+                expected.mob_id, self.definition.id
+            )));
+        }
+        let host_id = mob_dsl::HostId::from(expected.host_id.as_str());
+        let identity = mob_dsl::AgentIdentity::from(expected.agent_identity.as_str());
+        let state = self.dsl_authority.state();
+        let current_matches = state.host_bind_phase.get(&host_id)
+            == Some(&mob_dsl::HostBindPhase::Bound)
+            && state.host_binding_generations.get(&host_id).copied()
+                == Some(expected.binding_generation)
+            && state.member_placement.get(&identity) == Some(&host_id)
+            && state
+                .current_placed_spawn_host_binding_generations
+                .get(&identity)
+                .copied()
+                == Some(expected.binding_generation)
+            && state
+                .identity_runtime_generations
+                .get(&identity)
+                .is_some_and(|generation| generation.0 == expected.generation)
+            && state
+                .identity_runtime_fence_tokens
+                .get(&identity)
+                .is_some_and(|fence| fence.0 == expected.fence_token)
+            && state
+                .member_session_bindings
+                .get(&identity)
+                .is_some_and(|session| session.0 == expected.member_session_id);
+        if !current_matches {
+            return Err(MobError::Internal(format!(
+                "member-events runtime observation for '{}' is stale against the current host/member residency",
+                expected.agent_identity
+            )));
+        }
+        Ok(host_id)
+    }
+
+    fn record_host_runtime_incarnation(
+        &mut self,
+        host_id: &mob_dsl::HostId,
+        runtime_incarnation: super::bridge_protocol::BridgeHostRuntimeIncarnation,
+        source: &'static str,
+    ) -> bool {
+        let previous = self
+            .host_runtime_incarnations
+            .insert(host_id.clone(), runtime_incarnation);
+        let changed = previous != Some(runtime_incarnation);
+        if changed {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                host = %host_id.as_str(),
+                previous_runtime_incarnation = ?previous,
+                runtime_incarnation = %runtime_incarnation,
+                source,
+                "authenticated host runtime incarnation changed; route intent will be re-realized"
+            );
+        }
+        changed
+    }
+
+    async fn converge_routes_after_host_runtime_observation(
+        &mut self,
+        host_id: &mob_dsl::HostId,
+        runtime_incarnation_changed: bool,
+    ) -> Result<(), MobError> {
+        if runtime_incarnation_changed {
+            self.drain_route_installs_for_host(host_id).await
+        } else {
+            self.realize_pending_route_installs(Some(host_id)).await
+        }
+    }
+
     async fn reconcile_host_status_response(
         &mut self,
         host_id: &mob_dsl::HostId,
         status: super::bridge_protocol::BridgeHostStatusResponse,
-    ) -> Result<(), MobError> {
+    ) -> Result<bool, MobError> {
         let recorded_live_endpoint = self
             .dsl_authority
             .state()
@@ -37333,7 +37608,16 @@ impl MobActor {
                 )),
             );
         }
-        Ok(())
+        // Advance this observer-local cache only after the complete inventory
+        // reconciliation succeeds. If an earlier step fails, the next
+        // authenticated reply must still be able to trigger route recovery.
+        Ok(
+            self.record_host_runtime_incarnation(
+                host_id,
+                status.runtime_incarnation,
+                "host status",
+            ),
+        )
     }
 
     async fn current_pending_host_bind_anchors(
@@ -38068,6 +38352,7 @@ impl MobActor {
             &host_id,
         ));
         self.reachability_observations.clear_host(host_id.as_str());
+        self.host_runtime_incarnations.remove(&host_id);
         if let Some(anchor) = revoke_anchor.as_ref() {
             revoke_terminal_try!(self.complete_host_revoke_anchor(anchor).await);
         }
@@ -38355,11 +38640,6 @@ impl MobActor {
                 host_id.as_str()
             )));
         }
-        // T2 route-install drain (ADJ-P4-1): re-derive + realize this
-        // host's obligations after the rebind commit (a restarted host
-        // holds no trust rows; Removes recorded while it was unreachable
-        // drain here too). Never fails the rotation absorption.
-        self.drain_route_installs_for_host(host_id).await;
         Ok(())
     }
 
@@ -38397,6 +38677,24 @@ impl MobActor {
             &pending_binds,
             &pending_revokes,
         )?;
+        let remote_peers = {
+            let roster = self.roster.read().await;
+            roster
+                .list_all()
+                .filter_map(Self::runtime_binding_for_entry)
+                .map(|binding| {
+                    Self::peer_only_spec_for_binding(&binding, "handle_rotate_supervisor")
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let bound_hosts = self.bound_host_rotation_targets()?;
+        for peer in remote_peers
+            .iter()
+            .chain(bound_hosts.iter().map(|(_, peer)| peer))
+        {
+            self.supervisor_bridge
+                .require_supported_rotation_endpoint(peer.address.transport())?;
+        }
         let prepared_rotation_admission = self
             .prepare_dsl_input_transition(
                 mob_dsl::MobMachineInput::AdmitSupervisorRotation,
@@ -38489,17 +38787,6 @@ impl MobActor {
             .as_ref()
             .map(|pending| pending.accepted_peer_ids.iter().cloned().collect())
             .unwrap_or_default();
-        let remote_peers = {
-            let roster = self.roster.read().await;
-            roster
-                .list_all()
-                .filter_map(Self::runtime_binding_for_entry)
-                .map(|binding| {
-                    Self::peer_only_spec_for_binding(&binding, "handle_rotate_supervisor")
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let bound_hosts = self.bound_host_rotation_targets()?;
         let mut active_peer_ids: BTreeSet<String> = remote_peers
             .iter()
             .map(|peer| peer.peer_id.to_string())
@@ -38839,7 +39126,7 @@ impl MobActor {
                     protocol_version: next.protocol_version,
                 });
             let observation_window = if cfg!(test) {
-                std::time::Duration::from_millis(300)
+                std::time::Duration::from_secs(1)
             } else {
                 std::time::Duration::from_secs(5)
             };
@@ -38854,8 +39141,12 @@ impl MobActor {
                 if now >= deadline {
                     break false;
                 }
+                // Reserve half of the remaining observation window for the
+                // retained-authority read. A rejected attempted authority can
+                // consume its whole request timeout without returning a typed
+                // rejection because it has no reply route.
                 let request_timeout = std::cmp::min(
-                    deadline.saturating_duration_since(now),
+                    deadline.saturating_duration_since(now) / 2,
                     std::time::Duration::from_millis(500),
                 );
                 // Completed rotations are observable under `next`, while a
@@ -38938,18 +39229,35 @@ impl MobActor {
                         }
                     }
                     Err(next_error) => {
-                        // A timeout or transport fault under `next` is
-                        // ambiguous: the member may already have committed
-                        // and fenced `stable_current`. Probing with the old
-                        // authority here would reintroduce a route the member
-                        // has revoked. Keep the exact operation pending and
-                        // only fall back above on definitive typed evidence
-                        // that `next` is not authoritative.
-                        last_observation = format!(
-                            "{last_observation}; attempted-authority observation remains ambiguous: {next_error}"
+                        // Observation is read-only and never mints remote
+                        // trust. If `next` committed, the member has revoked
+                        // `stable_current` and this retained probe simply
+                        // remains unroutable. If `next` was rejected, the
+                        // retained route is the only authority able to read
+                        // the durable rejection receipt.
+                        let retained_timeout = std::cmp::min(
+                            deadline.saturating_duration_since(Instant::now()),
+                            std::time::Duration::from_millis(500),
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                        continue;
+                        match self
+                            .observe_supervisor_rotation_as_authority(
+                                &stable_current,
+                                peer,
+                                &retained_observe_command,
+                                retained_timeout,
+                                "observe supervisor rotation as retained authority after attempted-authority transport failure",
+                            )
+                            .await
+                        {
+                            Ok(observation) => observation,
+                            Err(retained_error) => {
+                                last_observation = format!(
+                                    "{last_observation}; attempted-authority observation failed: {next_error}; retained-authority observation failed: {retained_error}"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                continue;
+                            }
+                        }
                     }
                 };
                 match observation {
@@ -38975,28 +39283,55 @@ impl MobActor {
                                     epoch: next.epoch,
                                     protocol_version: next.protocol_version,
                                 });
-                            let refresh_timeout = std::cmp::min(
-                                deadline.saturating_duration_since(Instant::now()),
-                                std::time::Duration::from_millis(500),
-                            );
-                            let refresh_value = match self
-                                .supervisor_bridge
-                                .send_bridge_command_as_authority(
-                                    &next,
-                                    peer,
-                                    &route_refresh,
-                                    refresh_timeout,
-                                )
-                                .await
-                            {
-                                Ok(value) => value,
-                                Err(error) => {
-                                    last_observation = format!(
-                                        "legacy next-authority route refresh remains unconfirmed: {error}"
-                                    );
-                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                                    continue;
+                            // A lost refresh reply is ambiguous. Retry the
+                            // exact idempotent command here, before returning
+                            // to observation, so later reads cannot consume
+                            // the budget reserved for that retry. The first
+                            // attempt receives at most half of the remaining
+                            // convergence window; the retry receives what is
+                            // left, without extending the deadline.
+                            let mut refresh_value = None;
+                            for attempt in 0..2 {
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                let attempt_budget = if attempt == 0 {
+                                    remaining / 2
+                                } else {
+                                    remaining
+                                };
+                                let refresh_timeout = std::cmp::min(
+                                    attempt_budget,
+                                    std::time::Duration::from_millis(500),
+                                );
+                                // Never dispatch a request whose diagnostic
+                                // timeout rounds down to 0ms at the end of the
+                                // convergence window.
+                                if refresh_timeout < std::time::Duration::from_millis(1) {
+                                    break;
                                 }
+                                match self
+                                    .supervisor_bridge
+                                    .send_bridge_command_as_authority(
+                                        &next,
+                                        peer,
+                                        &route_refresh,
+                                        refresh_timeout,
+                                    )
+                                    .await
+                                {
+                                    Ok(value) => {
+                                        refresh_value = Some(value);
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        last_observation = format!(
+                                            "legacy next-authority route refresh remains unconfirmed: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                            let Some(refresh_value) = refresh_value else {
+                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                continue;
                             };
                             if let Err(error) = super::bridge_protocol::decode_bridge_ack(
                                 &route_refresh,
@@ -44621,6 +44956,8 @@ mod member_live_cleanup_tests {
     use super::super::bridge_protocol::BridgeRejectionCause;
     use super::MobActor;
     use crate::MobError;
+    use crate::event::MemberRef;
+    use meerkat_core::types::SessionId;
 
     fn rejection(cause: BridgeRejectionCause, reason: &str) -> MobError {
         MobError::BridgeCommandRejected {
@@ -44659,6 +44996,27 @@ mod member_live_cleanup_tests {
         ] {
             assert!(!MobActor::member_live_cleanup_proves_absent(&error));
             assert!(!MobActor::member_live_status_proves_absent(&error));
+        }
+    }
+
+    #[test]
+    fn shutdown_live_cleanup_selects_only_controller_owned_session_members() {
+        assert!(MobActor::member_live_ref_is_controller_local(
+            &MemberRef::Session {
+                session_id: SessionId::new(),
+            }
+        ));
+
+        for session_id in [None, Some(SessionId::new())] {
+            assert!(!MobActor::member_live_ref_is_controller_local(
+                &MemberRef::BackendPeer {
+                    peer_id: "external-peer".to_string(),
+                    address: "tcp://127.0.0.1:1".to_string(),
+                    pubkey: [0; 32],
+                    bootstrap_token: None,
+                    session_id,
+                }
+            ));
         }
     }
 }

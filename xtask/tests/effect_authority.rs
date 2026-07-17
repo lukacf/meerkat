@@ -25,6 +25,7 @@ trait CoreExecutor {
     fn checkpoint_committed_session_snapshot(&mut self) {}
     fn reconcile_committed_compaction_projections(&mut self) {}
     fn abort_uncommitted_compaction_projections(&mut self) {}
+    fn abort_rejected_run_projections(&mut self) {}
     fn publish_interaction_terminals(&mut self) {}
     fn cancel_after_boundary(&mut self) {}
     fn stop_runtime_executor(&mut self) {}
@@ -48,6 +49,7 @@ impl CoreExecutor for MachineManagedPostStopExecutor {
     fn checkpoint_committed_session_snapshot(&mut self) { self.inner.checkpoint_committed_session_snapshot() }
     fn reconcile_committed_compaction_projections(&mut self) { self.inner.reconcile_committed_compaction_projections() }
     fn abort_uncommitted_compaction_projections(&mut self) { self.inner.abort_uncommitted_compaction_projections() }
+    fn abort_rejected_run_projections(&mut self) { self.inner.abort_rejected_run_projections() }
     fn publish_interaction_terminals(&mut self) { self.inner.publish_interaction_terminals() }
     fn cancel_after_boundary(&mut self) { self.inner.cancel_after_boundary() }
     fn stop_runtime_executor(&mut self) {

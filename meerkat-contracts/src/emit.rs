@@ -338,6 +338,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "BridgeHostMemberRecord": schema_for!(crate::wire::BridgeHostMemberRecord),
         "BridgeHostRebindPayload": schema_for!(crate::wire::BridgeHostRebindPayload),
         "BridgeHostReboundResponse": schema_for!(crate::wire::BridgeHostReboundResponse),
+        "BridgeHostRuntimeIncarnation": schema_for!(crate::wire::BridgeHostRuntimeIncarnation),
         "BridgeHostStatusPayload": schema_for!(crate::wire::BridgeHostStatusPayload),
         "BridgeHostStatusResponse": schema_for!(crate::wire::BridgeHostStatusResponse),
         "BridgeLiveChannelPayload": schema_for!(crate::wire::BridgeLiveChannelPayload),
@@ -1329,6 +1330,29 @@ mod tests {
         assert_eq!(
             wire_types["SupervisorRotationOperationId"]["type"],
             serde_json::json!("string")
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_host_status_schema_requires_typed_runtime_incarnation() {
+        let output_dir = temp_output_dir("host-runtime-incarnation");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        assert_eq!(
+            wire_types["BridgeHostRuntimeIncarnation"]["type"],
+            serde_json::json!("string")
+        );
+        assert!(
+            wire_types["BridgeHostStatusResponse"]["required"]
+                .as_array()
+                .is_some_and(|required| required
+                    .iter()
+                    .any(|field| field == "runtime_incarnation")),
+            "HostStatus must require the authenticated process-incarnation fact"
         );
 
         fs::remove_dir_all(&output_dir).unwrap();

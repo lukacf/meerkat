@@ -1755,7 +1755,7 @@ enum SystemNoticeBlockKnown {
         status: Option<String>,
         #[serde(default)]
         summary: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_present_json_value")]
         payload: Option<Value>,
         #[serde(default)]
         content: Vec<ContentBlock>,
@@ -1767,7 +1767,7 @@ enum SystemNoticeBlockKnown {
         summary: Option<String>,
         #[serde(default)]
         body: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_present_json_value")]
         payload: Option<Value>,
         #[serde(default)]
         content: Vec<ContentBlock>,
@@ -1808,15 +1808,24 @@ enum SystemNoticeBlockKnown {
         category: String,
         #[serde(default)]
         detail: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_present_json_value")]
         payload: Option<Value>,
     },
     Unknown {
         #[serde(default)]
         summary: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_present_json_value")]
         payload: Option<Value>,
     },
+}
+
+/// Deserialize an optional JSON payload without collapsing an explicitly
+/// present `null` into the absent-field state selected by `#[serde(default)]`.
+fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {

@@ -46,7 +46,8 @@ use meerkat_contracts::wire::supervisor_bridge::{
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
-    SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+    BridgeHostRuntimeIncarnation, SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM,
+    SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
 };
 
 use crate::comms_bridge::classified_interaction_to_runtime_input;
@@ -5698,6 +5699,7 @@ fn bounded_member_events_reply(
     window: MemberEventsWindow,
 ) -> Result<BridgeReply, MemberEventsReplyError> {
     let MemberEventsWindow {
+        runtime_incarnation,
         generation,
         fence_token,
         rows,
@@ -5708,6 +5710,7 @@ fn bounded_member_events_reply(
         outcomes_complete,
     } = window;
     let mut page = BridgeMemberEventsPage {
+        runtime_incarnation,
         generation,
         fence_token,
         events: rows
@@ -6931,6 +6934,7 @@ mod tests {
             })
             .collect();
         let reply = bounded_member_events_reply(MemberEventsWindow {
+            runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
             generation: 1,
             fence_token: 1,
             rows: Vec::new(),
@@ -6971,6 +6975,7 @@ mod tests {
             },
         );
         let error = bounded_member_events_reply(MemberEventsWindow {
+            runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
             generation: 1,
             fence_token: 1,
             rows: vec![(7, envelope)],
@@ -7000,6 +7005,7 @@ mod tests {
             AgentEvent::TurnStarted { turn_number: 1 },
         );
         let error = bounded_member_events_reply(MemberEventsWindow {
+            runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
             generation: 1,
             fence_token: 1,
             rows: vec![(u64::MAX, envelope)],
@@ -7020,6 +7026,7 @@ mod tests {
     #[test]
     fn member_events_reply_rejects_empty_exhausted_frontier_instead_of_spinning() {
         let error = bounded_member_events_reply(MemberEventsWindow {
+            runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
             generation: 1,
             fence_token: 1,
             rows: Vec::new(),

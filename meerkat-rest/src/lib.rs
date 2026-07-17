@@ -1918,6 +1918,14 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn abort_rejected_run_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.context
+            .session_service
+            .abort_rejected_runtime_run_projections(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         self.context
             .session_service

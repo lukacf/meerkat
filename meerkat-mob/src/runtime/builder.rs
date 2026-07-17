@@ -569,7 +569,7 @@ struct SharedControllingAcceptor {
     listen_tcp: std::net::SocketAddr,
     advertise_address: Option<String>,
     bounds: meerkat_comms::HostAcceptorBounds,
-    live: tokio::sync::Mutex<Option<SharedControllingAcceptorLive>>,
+    live: Arc<tokio::sync::Mutex<Option<SharedControllingAcceptorLive>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -590,12 +590,94 @@ struct SharedControllingAcceptorRegistration {
 /// Exact registration incarnation. Compare-remove prevents an old mob actor
 /// from deleting the replacement inbox for the same durable signing key.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug)]
 pub(super) struct ControllingAcceptorRegistrationLease {
-    pubkey: meerkat_comms::PubKey,
+    pub(super) pubkey: meerkat_comms::PubKey,
     pub(super) advertised_address: String,
     key: String,
     pub(super) token: Arc<()>,
+    inbox_sender: meerkat_comms::InboxSender,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for ControllingAcceptorRegistrationLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControllingAcceptorRegistrationLease")
+            .field("pubkey", &self.pubkey)
+            .field("advertised_address", &self.advertised_address)
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Prepared exact replacement of one controlling-acceptor identity.
+///
+/// The owned `live` guard excludes lease-map mutation across the enclosing
+/// supervisor transaction. The comms reservation keeps the old identity as
+/// the sole resolvable TCP route until synchronous commit; dropping this value
+/// leaves both registry and lease map untouched.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) struct PreparedControllingAcceptorReplacement {
+    registry_reservation: Option<meerkat_comms::HostAcceptorIdentityReplacementReservation>,
+    // Declared after the registry reservation so ordinary Drop clears the
+    // reservation before releasing the live-map guard to another task.
+    live: tokio::sync::OwnedMutexGuard<Option<SharedControllingAcceptorLive>>,
+    current_key: String,
+    current_token: Arc<()>,
+    logical_owner: String,
+    registration: Option<MemberAcceptorRegistration>,
+    replacement_key: String,
+    replacement_token: Arc<()>,
+    advertised_address: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PreparedControllingAcceptorReplacement {
+    pub(super) fn advertised_address(&self) -> &str {
+        &self.advertised_address
+    }
+
+    /// Atomically fence the old registry route, install the new one, and then
+    /// swap the exact lease-map generation while the shared live guard remains
+    /// held. Reservation made every invariant fallible before this point.
+    pub(super) fn commit(mut self) -> ControllingAcceptorRegistrationLease {
+        let Some(registration) = self.registration.take() else {
+            std::process::abort();
+        };
+        let Some(registry_reservation) = self.registry_reservation.take() else {
+            std::process::abort();
+        };
+        let Some(live) = self.live.as_mut() else {
+            std::process::abort();
+        };
+        let current_is_exact = live.leases.get(&self.current_key).is_some_and(|current| {
+            current.logical_owner == self.logical_owner
+                && Arc::ptr_eq(&current.token, &self.current_token)
+        });
+        if !current_is_exact
+            || (self.replacement_key != self.current_key
+                && live.leases.contains_key(&self.replacement_key))
+        {
+            std::process::abort();
+        }
+
+        registry_reservation.commit(registration.inbox_sender.clone());
+        live.leases.remove(&self.current_key);
+        live.leases.insert(
+            self.replacement_key.clone(),
+            SharedControllingAcceptorRegistration {
+                logical_owner: self.logical_owner,
+                token: Arc::clone(&self.replacement_token),
+            },
+        );
+        ControllingAcceptorRegistrationLease {
+            pubkey: registration.pubkey,
+            advertised_address: self.advertised_address.clone(),
+            key: self.replacement_key,
+            token: self.replacement_token,
+            inbox_sender: registration.inbox_sender,
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -609,7 +691,7 @@ impl SharedControllingAcceptor {
             listen_tcp,
             advertise_address,
             bounds,
-            live: tokio::sync::Mutex::new(None),
+            live: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -653,6 +735,7 @@ impl SharedControllingAcceptor {
             .as_mut()
             .expect("controlling acceptor initialized above");
         let key = registration.pubkey.to_pubkey_string();
+        let lease_inbox_sender = registration.inbox_sender.clone();
         if let Some(existing) = live.leases.get(&key)
             && existing.logical_owner != logical_owner
         {
@@ -707,6 +790,63 @@ impl SharedControllingAcceptor {
             advertised_address: live.advertised_address.clone(),
             key,
             token,
+            inbox_sender: lease_inbox_sender,
+        })
+    }
+
+    async fn prepare_replacement(
+        self: &Arc<Self>,
+        current: &ControllingAcceptorRegistrationLease,
+        logical_owner: String,
+        registration: MemberAcceptorRegistration,
+    ) -> Result<PreparedControllingAcceptorReplacement, MobError> {
+        let mut live_guard = Arc::clone(&self.live).lock_owned().await;
+        let Some(live) = live_guard.as_mut() else {
+            return Err(MobError::WiringError(
+                "controlling acceptor is not running while preparing identity replacement"
+                    .to_string(),
+            ));
+        };
+        let current_is_exact = live.leases.get(&current.key).is_some_and(|installed| {
+            installed.logical_owner == logical_owner
+                && Arc::ptr_eq(&installed.token, &current.token)
+        });
+        if !current_is_exact {
+            return Err(MobError::WiringError(
+                "controlling acceptor replacement lost its exact current lease".to_string(),
+            ));
+        }
+        let replacement_key = registration.pubkey.to_pubkey_string();
+        if replacement_key != current.key && live.leases.contains_key(&replacement_key) {
+            return Err(MobError::WiringError(format!(
+                "controlling acceptor identity '{replacement_key}' is already registered"
+            )));
+        }
+        let registry_reservation = live
+            .registry
+            .reserve_identity_replacement(
+                Arc::clone(&live.owner),
+                current.pubkey,
+                &current.inbox_sender,
+                registration.pubkey,
+                Arc::clone(&registration.keypair),
+            )
+            .map_err(|error| {
+                MobError::WiringError(format!(
+                    "controlling acceptor identity replacement reservation failed: {error}"
+                ))
+            })?;
+        let advertised_address = live.advertised_address.clone();
+        Ok(PreparedControllingAcceptorReplacement {
+            live: live_guard,
+            registry_reservation: Some(registry_reservation),
+            current_key: current.key.clone(),
+            current_token: Arc::clone(&current.token),
+            logical_owner,
+            registration: Some(registration),
+            replacement_key,
+            replacement_token: Arc::new(()),
+            advertised_address,
         })
     }
 
@@ -778,7 +918,9 @@ impl ControllingAcceptorConfig {
 
     /// Resolve the process host-ingress composition from effective config.
     /// The same `[mob_host]` listener facts serve both a dedicated member-host
-    /// daemon and a controlling process that owns local mob members.
+    /// daemon and a controlling process. In the controlling process the one
+    /// shared listener carries supervisor request callbacks immediately, then
+    /// any local-member reverse lanes registered by cross-host wiring.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_mob_host_config(
         config: &meerkat_core::config::MobHostConfig,
@@ -843,6 +985,28 @@ impl ControllingAcceptorConfig {
         lease: &ControllingAcceptorRegistrationLease,
     ) -> Result<(), MobError> {
         self.shared.remove(lease).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn prepare_replacement(
+        &self,
+        current: &ControllingAcceptorRegistrationLease,
+        logical_owner: String,
+        registration: MemberAcceptorRegistration,
+    ) -> Result<PreparedControllingAcceptorReplacement, MobError> {
+        self.shared
+            .prepare_replacement(current, logical_owner, registration)
+            .await
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(super) async fn registration_count_for_test(&self) -> usize {
+        self.shared
+            .live
+            .lock()
+            .await
+            .as_ref()
+            .map_or(0, |live| live.leases.len())
     }
 }
 
@@ -6647,6 +6811,58 @@ struct RuntimeWiring {
     command_rx: mpsc::Receiver<super::scope_gate::RoutedMobCommand>,
 }
 
+/// Owns the supervisor bridge until actor publication succeeds. Builder
+/// create/resume perform fallible persistence and recovery work after the
+/// shared process-ingress lease is installed; every `?` and cancellation in
+/// that window must explicitly unwind the durable lease.
+#[cfg(not(target_arch = "wasm32"))]
+struct SupervisorBridgeStartupGuard {
+    bridge: Option<Arc<MobSupervisorBridge>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SupervisorBridgeStartupGuard {
+    fn new(bridge: Arc<MobSupervisorBridge>) -> Self {
+        Self {
+            bridge: Some(bridge),
+        }
+    }
+
+    async fn settle<T>(mut self, result: Result<T, MobError>) -> Result<T, MobError> {
+        match result {
+            Ok(value) => {
+                self.bridge = None;
+                Ok(value)
+            }
+            Err(error) => {
+                if let Some(bridge) = self.bridge.as_ref() {
+                    bridge.shutdown().await;
+                }
+                self.bridge = None;
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SupervisorBridgeStartupGuard {
+    fn drop(&mut self) {
+        let Some(bridge) = self.bridge.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!(
+                "dropping an unpublished mob supervisor bridge outside a Tokio runtime; startup cleanup could not be scheduled"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            bridge.shutdown().await;
+        });
+    }
+}
+
 impl MobBuilder {
     /// Create a builder for a new mob.
     pub fn new(definition: MobDefinition, storage: MobStorage) -> Self {
@@ -6914,6 +7130,14 @@ impl MobBuilder {
                 ));
             }
         };
+        MobSupervisorBridge::preflight_ingress_ownership(
+            definition
+                .backend
+                .external
+                .as_ref()
+                .and_then(|external| external.supervisor_bridge.as_ref()),
+            controlling_acceptor.as_ref(),
+        )?;
         let mut diagnostics = crate::validate::validate_definition(&definition);
         diagnostics.extend(crate::spec::SpecValidator::validate(&definition));
         let (errors, warnings) = crate::validate::partition_diagnostics(diagnostics);
@@ -7027,7 +7251,7 @@ impl MobBuilder {
                 ))
             })?;
         let supervisor_bridge = Arc::new(
-            MobSupervisorBridge::new(
+            MobSupervisorBridge::new_with_controlling_acceptor(
                 &definition.id,
                 supervisor_authority.clone(),
                 definition
@@ -7035,11 +7259,16 @@ impl MobBuilder {
                     .external
                     .as_ref()
                     .and_then(|external| external.supervisor_bridge.clone()),
+                controlling_acceptor.clone(),
             )
             .await?,
         );
 
-        Self::start_runtime(
+        #[cfg(not(target_arch = "wasm32"))]
+        let supervisor_startup_guard =
+            SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
+
+        let start_result = Self::start_runtime(
             definition,
             Roster::new(),
             dsl_authority,
@@ -7061,7 +7290,15 @@ impl MobBuilder {
             controlling_acceptor,
             member_live_host,
         )
-        .await
+        .await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            supervisor_startup_guard.settle(start_result).await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            start_result
+        }
     }
 
     /// Resume a mob from persisted events.
@@ -7070,6 +7307,15 @@ impl MobBuilder {
     /// - Recover definition from `MobCreated`.
     /// - Rebuild roster by replaying structural events.
     /// - Start actor/runtime in Running state.
+    ///
+    /// Composition failures known before actor creation (for example, a
+    /// missing runtime adapter for a recovered local session-backed member of
+    /// a Running mob) return directly from this method. Per-session mechanical
+    /// failures discovered by the recovered actor are durably fail-stopped
+    /// instead: this returns a `Stopped` handle, and [`MobHandle::resume`] is
+    /// the canonical typed retry surface. Returning that handle preserves
+    /// lifecycle and diagnostic authority rather than losing it with the
+    /// startup task.
     #[cfg(feature = "runtime-adapter")]
     pub async fn resume(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
@@ -7128,6 +7374,14 @@ impl MobBuilder {
                     "cannot resume mob: no MobCreated event found in storage".to_string(),
                 )
             })?;
+        MobSupervisorBridge::preflight_ingress_ownership(
+            definition
+                .backend
+                .external
+                .as_ref()
+                .and_then(|external| external.supervisor_bridge.as_ref()),
+            controlling_acceptor.as_ref(),
+        )?;
         #[allow(unused_mut)]
         let mut mob_events: Vec<_> = all_events
             .into_iter()
@@ -7136,22 +7390,6 @@ impl MobBuilder {
         // Validate authority-operation journals before definition/spec sync
         // or any other recovery mutation/repair write.
         super::actor::validate_host_authority_anchor_epoch_boundaries(&mob_events)?;
-        // §8: AutonomousHost profiles require a runtime adapter. Same check
-        // as create(), but deferred until after definition recovery from events.
-        let has_autonomous = definition
-            .profiles
-            .values()
-            .filter_map(|b| b.as_inline())
-            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
-        if has_autonomous && runtime_adapter.is_none() {
-            return Err(MobError::Internal(
-                "definition contains AutonomousHost profiles but no runtime adapter is available; \
-                 provide one via with_runtime_adapter() or use a session service that implements \
-                 runtime_adapter()"
-                    .to_string(),
-            ));
-        }
-
         Self::sync_definition_with_spec_store(
             storage.specs.clone(),
             definition.id.clone(),
@@ -7313,7 +7551,7 @@ impl MobBuilder {
             }
         };
         let supervisor_bridge = Arc::new(
-            MobSupervisorBridge::new(
+            MobSupervisorBridge::new_with_controlling_acceptor(
                 &definition.id,
                 supervisor_authority,
                 definition
@@ -7321,349 +7559,396 @@ impl MobBuilder {
                     .external
                     .as_ref()
                     .and_then(|external| external.supervisor_bridge.clone()),
+                controlling_acceptor.clone(),
             )
             .await?,
         );
-        recover_cleanup_only_placed_carrier_signals(
-            initial_dsl_authority.as_mut(),
-            &placed_recovery,
-        )?;
-        // One provisioner owns the exact attachment sidecars for the whole
-        // recovered runtime. Placed-carrier cleanup, Running reconciliation,
-        // and the eventual actor must never materialize through temporary
-        // provisioners that the actor cannot subsequently observe.
-        let runtime_provisioner = Arc::new(
-            MultiBackendProvisioner::new(
-                session_service.clone(),
-                runtime_adapter.clone(),
-                workgraph_service.clone(),
-                definition.backend.external.clone(),
+        #[cfg(not(target_arch = "wasm32"))]
+        let supervisor_startup_guard =
+            SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
+        let post_bridge_epoch_start = epoch_start;
+        // Keep every fallible post-registration recovery step inside one
+        // awaited result. Native startup then synchronously settles the
+        // guard before returning an error; `Drop` remains only the
+        // cancellation backstop, never the ordinary error path.
+        let start_result = async {
+            recover_cleanup_only_placed_carrier_signals(
+                initial_dsl_authority.as_mut(),
+                &placed_recovery,
+            )?;
+            // One provisioner owns the exact attachment sidecars for the whole
+            // recovered runtime. Placed-carrier cleanup, Running reconciliation,
+            // and the eventual actor must never materialize through temporary
+            // provisioners that the actor cannot subsequently observe.
+            let runtime_provisioner = Arc::new(
+                MultiBackendProvisioner::new(
+                    session_service.clone(),
+                    runtime_adapter.clone(),
+                    workgraph_service.clone(),
+                    definition.backend.external.clone(),
+                    Arc::clone(&supervisor_bridge),
+                )
+                .with_binding_persistence(definition.id.clone(), storage.runtime_metadata.clone()),
+            );
+            drive_recovered_placed_carrier_cleanup(
+                initial_dsl_authority.as_mut(),
+                &storage.runtime_metadata,
+                &definition.id,
+                &placed_recovery,
+                runtime_provisioner.as_ref(),
                 Arc::clone(&supervisor_bridge),
             )
-            .with_binding_persistence(definition.id.clone(), storage.runtime_metadata.clone()),
-        );
-        drive_recovered_placed_carrier_cleanup(
-            initial_dsl_authority.as_mut(),
-            &storage.runtime_metadata,
-            &definition.id,
-            &placed_recovery,
-            runtime_provisioner.as_ref(),
-            Arc::clone(&supervisor_bridge),
-        )
-        .await?;
+            .await?;
 
-        // Generic event replay remains authoritative for local members and
-        // retired history. It skips only the exact current placed projection;
-        // the canonical committed carrier installs that incarnation in one
-        // recovery signal after historical generations establish high-water.
-        seed_mob_authority_sync_from_events(
-            &mut initial_dsl_authority,
-            epoch_events,
-            &definition,
-            resumed_state == MobState::Completed,
-            &placed_recovery.current_committed_event_keys,
-        )?;
-        recover_current_committed_placed_carrier_signals(
-            initial_dsl_authority.as_mut(),
-            &placed_recovery,
-        )?;
-
-        // A carrier alone may rebuild private machine state, but public roster
-        // history is repaired only after that exact machine tuple has rebuilt
-        // (or validated) the SAME pre-minted owner operation.  Append and
-        // reload are therefore the final recovery step before projection.
-        let placed_recovery = commit_placed_spawn_event_repairs(
-            &storage.events,
-            &storage.runtime_metadata,
-            &definition.id,
-            &mut mob_events,
-            placed_recovery,
-            placed_event_repairs,
-            initial_dsl_authority.as_ref(),
-            runtime_provisioner.as_ref(),
-        )
-        .await?;
-        recover_placed_kickoff_outcome_custody(
-            initial_dsl_authority.as_mut(),
-            &storage.events,
-            &definition.id,
-            &mut mob_events,
-            &placed_recovery,
-        )
-        .await?;
-        let recovered_completion_lifecycle_intent = recover_placed_completion_outcome_custody(
-            initial_dsl_authority.as_mut(),
-            &storage.events,
-            &definition.id,
-            &mut mob_events,
-        )
-        .await?;
-        let repaired_epoch_start = mob_events
-            .iter()
-            .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
-            .map_or(0, |pos| pos + 1);
-        if matches!(
-            resumed_state,
-            MobState::Running | MobState::Stopped | MobState::Completed
-        ) {
-            recover_pending_member_retirements(
-                initial_dsl_authority.as_mut(),
-                &mob_events[repaired_epoch_start..],
-            )?;
-        }
-        let repaired_epoch_events = &mob_events[repaired_epoch_start..];
-
-        // Roster is a projection only. Build it after the authoritative
-        // carrier/event reconciliation and machine recovery have succeeded.
-        let mut roster = Roster::project(&mob_events);
-        #[cfg(not(target_arch = "wasm32"))]
-        Self::normalize_sessionless_backend_runtime_modes(&mut roster);
-        let seeded_restore_diagnostics = HashMap::new();
-        // Prepare shared runtime components early so resume reconciliation can
-        // wire tool dispatchers for recreated sessions to the final actor channel.
-        let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
-        let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
-        let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
-        let (machine_state_watch_tx, machine_state_watch_rx) =
-            tokio::sync::watch::channel(initial_dsl_authority.state().clone());
-        let reachability_observations =
-            Arc::new(super::handle::ReachabilityObservations::default());
-        // Preview phase watch so the preview handle can answer status()
-        // before the actor spawns. The real actor-side sender replaces
-        // this once start_runtime_with_components owns the final pair.
-        let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
-        let mut wiring = RuntimeWiring {
-            roster: roster_state.clone(),
-            dsl_authority: initial_dsl_authority,
-            machine_state_watch_tx,
-            reachability_observations: Arc::clone(&reachability_observations),
-            restore_diagnostics: restore_diagnostics.clone(),
-            runtime_metadata: storage.runtime_metadata.clone(),
-            supervisor_bridge: supervisor_bridge.clone(),
-            command_tx: command_tx.clone(),
-            command_rx,
-        };
-        let preview_handle = MobHandle {
-            // Explicit launch-site mint (A16): the building process IS the
-            // owning operator; surfaces rebind clones per console principal.
-            command_authority: crate::control_policy::CommandAuthority::principal(
-                crate::control_policy::MobControlPrincipal::Owner,
-            ),
-            command_tx: command_tx.clone(),
-            roster: roster_state.clone(),
-            definition: definition.clone(),
-            events: storage.events.clone(),
-            run_store: storage.runs.clone(),
-            flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            session_service: session_service.clone(),
-            runtime_adapter: runtime_adapter.clone(),
-            restore_diagnostics,
-            supervisor_bridge: supervisor_bridge.clone(),
-            machine_state_watch_rx,
-            reachability_observations,
-            phase_watch_rx: preview_phase_rx,
-            realtime_session_factory: realtime_session_factory.clone(),
-        };
-        // session_service is still live here (not consumed until start_runtime_with_components)
-
-        let seeded_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
-            wiring.dsl_authority.state().topology_epoch,
-        ));
-
-        let mut per_spawn_external_tools_seed = BTreeMap::new();
-        if resumed_state == MobState::Running
-            && recovered_completion_lifecycle_intent.is_none()
-            && !super::actor::lifecycle_origin_fenced(wiring.dsl_authority.state())
-        {
-            Self::reconcile_resume(
+            // Generic event replay remains authoritative for local members and
+            // retired history. It skips only the exact current placed projection;
+            // the canonical committed carrier installs that incarnation in one
+            // recovery signal after historical generations establish high-water.
+            seed_mob_authority_sync_from_events(
+                &mut initial_dsl_authority,
+                &mob_events[post_bridge_epoch_start..],
                 &definition,
-                repaired_epoch_events,
-                &mut roster,
-                &session_service,
+                resumed_state == MobState::Completed,
+                &placed_recovery.current_committed_event_keys,
+            )?;
+            recover_current_committed_placed_carrier_signals(
+                initial_dsl_authority.as_mut(),
+                &placed_recovery,
+            )?;
+
+            // A carrier alone may rebuild private machine state, but public roster
+            // history is repaired only after that exact machine tuple has rebuilt
+            // (or validated) the SAME pre-minted owner operation.  Append and
+            // reload are therefore the final recovery step before projection.
+            let placed_recovery = commit_placed_spawn_event_repairs(
+                &storage.events,
+                &storage.runtime_metadata,
+                &definition.id,
+                &mut mob_events,
+                placed_recovery,
+                placed_event_repairs,
+                initial_dsl_authority.as_ref(),
                 runtime_provisioner.as_ref(),
-                &runtime_adapter,
-                supervisor_bridge.clone(),
-                notify_orchestrator_on_resume,
-                default_llm_client.clone(),
-                &tool_bundles,
-                wiring.dsl_authority.as_mut(),
-                &seeded_topology_epoch,
-                &preview_handle,
-                &default_external_tools_provider,
-                &spawn_member_customizer,
-                storage.realm_profiles.clone(),
-                storage.runtime_metadata.clone(),
-                &mut per_spawn_external_tools_seed,
             )
             .await?;
-            // T3 (ADJ-P4-1): re-derive cross-host route-install obligations
-            // from the recovered durable graph facts. RECORD only — the
-            // machine's `RecordRouteInstall` guards demand Running phase and
-            // recovered placement/host facts, which `reconcile_resume` has
-            // just replayed. Realization is deferred off the recovery path
-            // (the first authenticated periodic HostStatus, host rebind, or
-            // operator drive drains them), so resume never blocks on bridge
-            // round trips.
-            record_recovered_route_install_obligations(
-                wiring.dsl_authority.as_mut(),
+            recover_placed_kickoff_outcome_custody(
+                initial_dsl_authority.as_mut(),
+                &storage.events,
                 &definition.id,
-            );
-        }
-
-        let mut deferred_remote_intent_runs = BTreeSet::new();
-        let mut recovered_private_remote_turns = Vec::new();
-        if matches!(
-            resumed_state,
-            MobState::Running | MobState::Stopped | MobState::Completed
-        ) {
-            // Remote outcome custody depends on recovered placement and exact
-            // generation/fence material. Reconstruct it for every recoverable
-            // lifecycle phase; Stopped/Completed must not orphan host rows.
-            let remote_turn_material =
-                super::remote_turn_reconciler::prepare_remote_turn_recovery_material(
-                    storage.runs.clone(),
-                    storage.events.clone(),
-                    &definition.id,
-                    repaired_epoch_events,
-                    true,
-                )
-                .await?;
-            deferred_remote_intent_runs = remote_turn_material.deferred_run_ids.clone();
-            recovered_private_remote_turns = remote_turn_material
-                .intents
-                .iter()
-                .map(|intent| intent.obligation.clone())
-                .collect();
-            // Startup Record repair appends to the event store after
-            // `repaired_epoch_events` was sliced. Reload so custody recovery
-            // validates the repaired public chain, never the stale pre-repair
-            // snapshot that could lose finalized privacy rows on retry.
-            let remote_turn_events = storage.events.replay_all().await?;
-            let remote_turn_mob_events = remote_turn_events
-                .iter()
-                .filter(|event| event.mob_id == definition.id)
-                .collect::<Vec<_>>();
-            let remote_turn_epoch_start = remote_turn_mob_events
+                &mut mob_events,
+                &placed_recovery,
+            )
+            .await?;
+            let recovered_completion_lifecycle_intent = recover_placed_completion_outcome_custody(
+                initial_dsl_authority.as_mut(),
+                &storage.events,
+                &definition.id,
+                &mut mob_events,
+            )
+            .await?;
+            let repaired_epoch_start = mob_events
                 .iter()
                 .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
-                .map_or(0, |position| position + 1);
-            let remote_turn_epoch_events = remote_turn_mob_events[remote_turn_epoch_start..]
-                .iter()
-                .copied()
-                .cloned()
-                .collect::<Vec<_>>();
-            recover_remote_turn_outcome_custody(
-                wiring.dsl_authority.as_mut(),
-                &remote_turn_epoch_events,
-                &remote_turn_material.intents,
-                &remote_turn_material.receipts,
-            )?;
-            // ACK/Dispose makes private material eligible for privacy
-            // cleanup, but only the full recovery validator above proves the
-            // public finalizer chain is coherent. Delete receipt-first after
-            // that proof so corruption never destroys its own evidence.
-            super::remote_turn_reconciler::apply_remote_turn_finalized_privacy_cleanup(
+                .map_or(0, |pos| pos + 1);
+            if matches!(
+                resumed_state,
+                MobState::Running | MobState::Stopped | MobState::Completed
+            ) {
+                recover_pending_member_retirements(
+                    initial_dsl_authority.as_mut(),
+                    &mob_events[repaired_epoch_start..],
+                )?;
+            }
+            let repaired_epoch_events = &mob_events[repaired_epoch_start..];
+
+            // Roster is a projection only. Build it after the authoritative
+            // carrier/event reconciliation and machine recovery have succeeded.
+            let mut roster = Roster::project(&mob_events);
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::normalize_sessionless_backend_runtime_modes(&mut roster);
+            if resumed_state == MobState::Running
+                && recovered_completion_lifecycle_intent.is_none()
+                && !super::actor::lifecycle_origin_fenced(initial_dsl_authority.state())
+                && runtime_adapter.is_none()
+            {
+                if let Some(entry) = roster.list().find(|entry| {
+                    entry.member_ref.bridge_session_id().is_some()
+                        && !super::member_runtime_is_host_owned(
+                            initial_dsl_authority.state(),
+                            &entry.agent_identity,
+                        )
+                }) {
+                    // A missing composition dependency is known before the actor
+                    // exists, so cold resume rejects synchronously and identifies
+                    // the exact local member that cannot own an outbound drain.
+                    return Err(MobError::MissingMemberCapability {
+                        member_id: entry.agent_identity.clone(),
+                        capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                        context: "local member comms-drain runtime adapter",
+                    });
+                }
+            }
+            let seeded_restore_diagnostics = HashMap::new();
+            // Prepare shared runtime components early so resume reconciliation can
+            // wire tool dispatchers for recreated sessions to the final actor channel.
+            let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
+            let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
+            let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
+            let (machine_state_watch_tx, machine_state_watch_rx) =
+                tokio::sync::watch::channel(initial_dsl_authority.state().clone());
+            let reachability_observations =
+                Arc::new(super::handle::ReachabilityObservations::default());
+            // Preview phase watch so the preview handle can answer status()
+            // before the actor spawns. The real actor-side sender replaces
+            // this once start_runtime_with_components owns the final pair.
+            let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
+            let mut wiring = RuntimeWiring {
+                roster: roster_state.clone(),
+                dsl_authority: initial_dsl_authority,
+                machine_state_watch_tx,
+                reachability_observations: Arc::clone(&reachability_observations),
+                restore_diagnostics: restore_diagnostics.clone(),
+                runtime_metadata: storage.runtime_metadata.clone(),
+                supervisor_bridge: supervisor_bridge.clone(),
+                command_tx: command_tx.clone(),
+                command_rx,
+            };
+            let preview_handle = MobHandle {
+                // Explicit launch-site mint (A16): the building process IS the
+                // owning operator; surfaces rebind clones per console principal.
+                command_authority: crate::control_policy::CommandAuthority::principal(
+                    crate::control_policy::MobControlPrincipal::Owner,
+                ),
+                command_tx: command_tx.clone(),
+                roster: roster_state.clone(),
+                definition: definition.clone(),
+                events: storage.events.clone(),
+                run_store: storage.runs.clone(),
+                flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+                session_service: session_service.clone(),
+                runtime_adapter: runtime_adapter.clone(),
+                restore_diagnostics,
+                supervisor_bridge: supervisor_bridge.clone(),
+                machine_state_watch_rx,
+                reachability_observations,
+                phase_watch_rx: preview_phase_rx,
+                realtime_session_factory: realtime_session_factory.clone(),
+            };
+            // session_service is still live here (not consumed until start_runtime_with_components)
+
+            let seeded_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
+                wiring.dsl_authority.state().topology_epoch,
+            ));
+
+            let mut per_spawn_external_tools_seed = BTreeMap::new();
+            if resumed_state == MobState::Running
+                && recovered_completion_lifecycle_intent.is_none()
+                && !super::actor::lifecycle_origin_fenced(wiring.dsl_authority.state())
+            {
+                Self::reconcile_resume(
+                    &definition,
+                    repaired_epoch_events,
+                    &mut roster,
+                    &session_service,
+                    runtime_provisioner.as_ref(),
+                    &runtime_adapter,
+                    supervisor_bridge.clone(),
+                    notify_orchestrator_on_resume,
+                    default_llm_client.clone(),
+                    &tool_bundles,
+                    wiring.dsl_authority.as_mut(),
+                    &seeded_topology_epoch,
+                    &preview_handle,
+                    &default_external_tools_provider,
+                    &spawn_member_customizer,
+                    storage.realm_profiles.clone(),
+                    storage.runtime_metadata.clone(),
+                    &mut per_spawn_external_tools_seed,
+                )
+                .await?;
+                // T3 (ADJ-P4-1): re-derive cross-host route-install obligations
+                // from the recovered durable graph facts. RECORD only — the
+                // machine's `RecordRouteInstall` guards demand Running phase and
+                // recovered placement/host facts, which `reconcile_resume` has
+                // just replayed. Realization is deferred off the recovery path
+                // (the first authenticated periodic HostStatus, host rebind, or
+                // operator drive drains them), so resume never blocks on bridge
+                // round trips.
+                record_recovered_route_install_obligations(
+                    wiring.dsl_authority.as_mut(),
+                    &definition.id,
+                );
+            }
+
+            let mut deferred_remote_intent_runs = BTreeSet::new();
+            let mut recovered_private_remote_turns = Vec::new();
+            if matches!(
+                resumed_state,
+                MobState::Running | MobState::Stopped | MobState::Completed
+            ) {
+                // Remote outcome custody depends on recovered placement and exact
+                // generation/fence material. Reconstruct it for every recoverable
+                // lifecycle phase; Stopped/Completed must not orphan host rows.
+                let remote_turn_material =
+                    super::remote_turn_reconciler::prepare_remote_turn_recovery_material(
+                        storage.runs.clone(),
+                        storage.events.clone(),
+                        &definition.id,
+                        repaired_epoch_events,
+                        true,
+                    )
+                    .await?;
+                deferred_remote_intent_runs = remote_turn_material.deferred_run_ids.clone();
+                recovered_private_remote_turns = remote_turn_material
+                    .intents
+                    .iter()
+                    .map(|intent| intent.obligation.clone())
+                    .collect();
+                // Startup Record repair appends to the event store after
+                // `repaired_epoch_events` was sliced. Reload so custody recovery
+                // validates the repaired public chain, never the stale pre-repair
+                // snapshot that could lose finalized privacy rows on retry.
+                let remote_turn_events = storage.events.replay_all().await?;
+                let remote_turn_mob_events = remote_turn_events
+                    .iter()
+                    .filter(|event| event.mob_id == definition.id)
+                    .collect::<Vec<_>>();
+                let remote_turn_epoch_start = remote_turn_mob_events
+                    .iter()
+                    .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
+                    .map_or(0, |position| position + 1);
+                let remote_turn_epoch_events = remote_turn_mob_events[remote_turn_epoch_start..]
+                    .iter()
+                    .copied()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                recover_remote_turn_outcome_custody(
+                    wiring.dsl_authority.as_mut(),
+                    &remote_turn_epoch_events,
+                    &remote_turn_material.intents,
+                    &remote_turn_material.receipts,
+                )?;
+                // ACK/Dispose makes private material eligible for privacy
+                // cleanup, but only the full recovery validator above proves the
+                // public finalizer chain is coherent. Delete receipt-first after
+                // that proof so corruption never destroys its own evidence.
+                super::remote_turn_reconciler::apply_remote_turn_finalized_privacy_cleanup(
+                    storage.runs.clone(),
+                    &remote_turn_material.finalized_privacy_cleanup,
+                )
+                .await?;
+            }
+            // Persisted flow seeds are recovery facts, not fresh origin. Rebuild
+            // them while the authority is still in its open seed phase, before a
+            // recovered lifecycle intent closes every fresh RunFlow/Create* arm.
+            seed_mob_authority_sync_from_flow_runs(
+                &mut wiring.dsl_authority,
                 storage.runs.clone(),
-                &remote_turn_material.finalized_privacy_cleanup,
+                storage.events.clone(),
+                &definition.id,
+                repaired_epoch_events,
+                &deferred_remote_intent_runs,
             )
             .await?;
-        }
-        // Persisted flow seeds are recovery facts, not fresh origin. Rebuild
-        // them while the authority is still in its open seed phase, before a
-        // recovered lifecycle intent closes every fresh RunFlow/Create* arm.
-        seed_mob_authority_sync_from_flow_runs(
-            &mut wiring.dsl_authority,
-            storage.runs.clone(),
-            storage.events.clone(),
-            &definition.id,
-            repaired_epoch_events,
-            &deferred_remote_intent_runs,
-        )
-        .await?;
-        if resumed_state == MobState::Running {
-            apply_recovered_placed_completion_lifecycle_intent(
-                wiring.dsl_authority.as_mut(),
-                recovered_completion_lifecycle_intent,
-            )?;
-        }
-        if matches!(resumed_state, MobState::Stopped | MobState::Completed) {
-            finish_seeded_mob_authority_phase(wiring.dsl_authority.as_mut(), resumed_state)?;
-            apply_recovered_placed_completion_lifecycle_intent(
-                wiring.dsl_authority.as_mut(),
-                recovered_completion_lifecycle_intent,
-            )?;
-        }
-
-        let restore_diagnostics_snapshot = preview_handle.restore_diagnostics.read().await.clone();
-        seed_mob_authority_restore_failures(
-            &mut wiring.dsl_authority,
-            &restore_diagnostics_snapshot,
-        )?;
-        let _ = wiring
-            .machine_state_watch_tx
-            .send(wiring.dsl_authority.state().clone());
-        *wiring.roster.write().await = RosterAuthority::from_roster(roster);
-
-        // Rebuild the actor's O(1) lifecycle idempotency indexes from the
-        // same current reset epoch that seeded MobMachine. Leaving these
-        // empty would make the automatic retirement retry append a duplicate
-        // Started carrier even though replay already restored Retiring.
-        let mut retired_event_index = HashSet::new();
-        let mut retirement_started_event_index = HashSet::new();
-        for event in repaired_epoch_events {
-            match &event.kind {
-                MobEventKind::MemberRetirementStarted {
-                    agent_identity,
-                    generation,
-                    ..
-                } => {
-                    let key = format!("{}:{}", agent_identity, generation.get());
-                    retirement_started_event_index.insert(key);
-                }
-                MobEventKind::MemberRetired {
-                    agent_identity,
-                    generation,
-                    ..
-                } => {
-                    retired_event_index.insert(format!("{}:{}", agent_identity, generation.get()));
-                }
-                _ => {}
+            if resumed_state == MobState::Running {
+                apply_recovered_placed_completion_lifecycle_intent(
+                    wiring.dsl_authority.as_mut(),
+                    recovered_completion_lifecycle_intent,
+                )?;
             }
-        }
+            if matches!(resumed_state, MobState::Stopped | MobState::Completed) {
+                finish_seeded_mob_authority_phase(wiring.dsl_authority.as_mut(), resumed_state)?;
+                apply_recovered_placed_completion_lifecycle_intent(
+                    wiring.dsl_authority.as_mut(),
+                    recovered_completion_lifecycle_intent,
+                )?;
+            }
 
-        Self::start_runtime_with_components(
-            definition,
-            wiring,
-            storage.events.clone(),
-            storage.runs.clone(),
-            session_service,
-            runtime_adapter,
-            runtime_provisioner,
-            tool_bundles,
-            default_llm_client,
-            default_external_tools_provider,
-            spawn_base_prompt_source,
-            spawn_member_customizer,
-            storage.realm_profiles.clone(),
-            notify_orchestrator_on_resume,
-            per_spawn_external_tools_seed,
-            retired_event_index,
-            retirement_started_event_index,
-            // Respawn is a live helper composition, not a durable replacement
-            // operation. A recovered Started-without-terminal worker therefore
-            // completes ordinary retirement; only a successor already present
-            // in the replay stream consumes a temporary topology hold.
-            HashSet::new(),
-            deferred_remote_intent_runs,
-            recovered_private_remote_turns,
-            recovered_host_revocations,
-            placed_recovery.next_carrier_fence_token,
-            !destroy_storage_finalizing,
-            realtime_session_factory,
-            controlling_acceptor,
-            member_live_host,
-        )
-        .await
+            let restore_diagnostics_snapshot =
+                preview_handle.restore_diagnostics.read().await.clone();
+            seed_mob_authority_restore_failures(
+                &mut wiring.dsl_authority,
+                &restore_diagnostics_snapshot,
+            )?;
+            let _ = wiring
+                .machine_state_watch_tx
+                .send(wiring.dsl_authority.state().clone());
+            *wiring.roster.write().await = RosterAuthority::from_roster(roster);
+
+            // Rebuild the actor's O(1) lifecycle idempotency indexes from the
+            // same current reset epoch that seeded MobMachine. Leaving these
+            // empty would make the automatic retirement retry append a duplicate
+            // Started carrier even though replay already restored Retiring.
+            let mut retired_event_index = HashSet::new();
+            let mut retirement_started_event_index = HashSet::new();
+            for event in repaired_epoch_events {
+                match &event.kind {
+                    MobEventKind::MemberRetirementStarted {
+                        agent_identity,
+                        generation,
+                        ..
+                    } => {
+                        let key = format!("{}:{}", agent_identity, generation.get());
+                        retirement_started_event_index.insert(key);
+                    }
+                    MobEventKind::MemberRetired {
+                        agent_identity,
+                        generation,
+                        ..
+                    } => {
+                        retired_event_index.insert(format!(
+                            "{}:{}",
+                            agent_identity,
+                            generation.get()
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
+            Self::start_runtime_with_components(
+                definition,
+                wiring,
+                storage.events.clone(),
+                storage.runs.clone(),
+                session_service,
+                runtime_adapter,
+                runtime_provisioner,
+                tool_bundles,
+                default_llm_client,
+                default_external_tools_provider,
+                spawn_base_prompt_source,
+                spawn_member_customizer,
+                storage.realm_profiles.clone(),
+                notify_orchestrator_on_resume,
+                per_spawn_external_tools_seed,
+                retired_event_index,
+                retirement_started_event_index,
+                // Respawn is a live helper composition, not a durable replacement
+                // operation. A recovered Started-without-terminal worker therefore
+                // completes ordinary retirement; only a successor already present
+                // in the replay stream consumes a temporary topology hold.
+                HashSet::new(),
+                deferred_remote_intent_runs,
+                recovered_private_remote_turns,
+                recovered_host_revocations,
+                placed_recovery.next_carrier_fence_token,
+                !destroy_storage_finalizing,
+                realtime_session_factory,
+                controlling_acceptor,
+                member_live_host,
+            )
+            .await
+        }
+        .await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            supervisor_startup_guard.settle(start_result).await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            start_result
+        }
     }
 
     async fn sync_definition_with_spec_store(
@@ -9170,6 +9455,9 @@ impl MobBuilder {
             definition.id.clone(),
             supervisor_bridge.clone(),
             runtime_metadata.clone(),
+            Arc::new(super::event_pump::HandleHostRuntimeIncarnationObserver {
+                handle: handle.clone(),
+            }),
         ));
         member_event_pumps
             .install_reachability_observations(Arc::clone(&reachability_observations));
@@ -9327,6 +9615,7 @@ impl MobBuilder {
             next_member_live_open_cleanup_ticket: 0,
             orphan_release_reservations: BTreeMap::new(),
             host_binding_incarnations,
+            host_runtime_incarnations: BTreeMap::new(),
             next_peer_delivery_ticket: 0,
             peer_delivery_tasks: tokio::task::JoinSet::new(),
             peer_delivery_inflight: BTreeMap::new(),
@@ -9620,8 +9909,8 @@ mod tests {
     use crate::machines::mob_machine as mob_dsl;
     use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
     use crate::store::{
-        InMemoryMobEventStore, InMemoryMobRuntimeMetadataStore, MobEventStore,
-        MobRuntimeMetadataStore,
+        InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
+        InMemoryMobSpecStore, MobEventStore, MobRuntimeMetadataStore, MobSpecStore,
     };
     use chrono::Utc;
     use meerkat_core::time_compat::UNIX_EPOCH;
@@ -9710,6 +9999,280 @@ mod tests {
                 .expect("listener remains process-owned")
                 .leases
                 .contains_key(&replacement.key)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn supervisor_bridge_uses_shared_process_ingress_and_rotates_exactly() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let current = crate::store::SupervisorAuthorityRecord::generate(
+            super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        let mut next = crate::store::SupervisorAuthorityRecord::generate(
+            super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        next.epoch = current.epoch + 1;
+        let bridge = Arc::new(
+            super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+                &MobId::from(format!("shared-supervisor-{}", uuid::Uuid::new_v4())),
+                current,
+                None,
+                Some(config.clone()),
+            )
+            .await
+            .expect("shared-ingress supervisor bridge"),
+        );
+
+        assert!(
+            bridge
+                .runtime()
+                .await
+                .bound_tcp_listener_address()
+                .is_none(),
+            "shared mode must not bind a second private supervisor listener"
+        );
+        let before = bridge
+            .routable_supervisor_spec()
+            .await
+            .expect("shared routable supervisor descriptor");
+        assert_eq!(
+            before.address.transport(),
+            meerkat_core::comms::PeerTransport::Tcp
+        );
+        tokio::net::TcpStream::connect(before.address.endpoint())
+            .await
+            .expect("shared supervisor endpoint must already accept TCP before member wiring");
+        let before_key = meerkat_comms::PubKey::new(before.pubkey).to_pubkey_string();
+        {
+            let live = config.shared.live.lock().await;
+            let live = live.as_ref().expect("shared listener is live");
+            assert_eq!(live.leases.len(), 1);
+            assert!(live.leases.contains_key(&before_key));
+        }
+
+        bridge.rotate(next).await.expect("supervisor rotation");
+        let after = bridge
+            .routable_supervisor_spec()
+            .await
+            .expect("rotated shared supervisor descriptor");
+        let after_key = meerkat_comms::PubKey::new(after.pubkey).to_pubkey_string();
+        assert_eq!(after.address, before.address);
+        assert_ne!(after_key, before_key);
+        {
+            let live = config.shared.live.lock().await;
+            let live = live.as_ref().expect("shared listener remains live");
+            assert_eq!(live.leases.len(), 1);
+            assert!(!live.leases.contains_key(&before_key));
+            assert!(live.leases.contains_key(&after_key));
+        }
+
+        bridge.shutdown().await;
+        let live = config.shared.live.lock().await;
+        assert!(
+            live.as_ref()
+                .expect("process listener remains config-owned")
+                .leases
+                .is_empty(),
+            "bridge shutdown must compare-remove its exact supervisor lease"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sibling_supervisors_share_one_process_listener_and_shutdown_independently() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let bridge_a =
+            super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+                &MobId::from(format!("shared-supervisor-a-{}", uuid::Uuid::new_v4())),
+                crate::store::SupervisorAuthorityRecord::generate(
+                    super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                ),
+                None,
+                Some(config.clone()),
+            )
+            .await
+            .expect("first shared supervisor");
+        let bridge_b =
+            super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+                &MobId::from(format!("shared-supervisor-b-{}", uuid::Uuid::new_v4())),
+                crate::store::SupervisorAuthorityRecord::generate(
+                    super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                ),
+                None,
+                Some(config.clone()),
+            )
+            .await
+            .expect("second shared supervisor");
+        let spec_a = bridge_a
+            .routable_supervisor_spec()
+            .await
+            .expect("first shared descriptor");
+        let spec_b = bridge_b
+            .routable_supervisor_spec()
+            .await
+            .expect("second shared descriptor");
+        assert_eq!(spec_a.address, spec_b.address);
+        assert_ne!(spec_a.pubkey, spec_b.pubkey);
+        assert_eq!(
+            config
+                .shared
+                .live
+                .lock()
+                .await
+                .as_ref()
+                .expect("shared listener")
+                .leases
+                .len(),
+            2
+        );
+
+        bridge_a.shutdown().await;
+        assert_eq!(
+            config
+                .shared
+                .live
+                .lock()
+                .await
+                .as_ref()
+                .expect("shared listener")
+                .leases
+                .len(),
+            1,
+            "stopping one mob must preserve its sibling's supervisor ingress"
+        );
+        tokio::net::TcpStream::connect(spec_b.address.endpoint())
+            .await
+            .expect("sibling supervisor endpoint remains reachable");
+
+        bridge_b.shutdown().await;
+        assert!(
+            config
+                .shared
+                .live
+                .lock()
+                .await
+                .as_ref()
+                .expect("shared listener")
+                .leases
+                .is_empty()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn supervisor_endpoint_config_conflicts_with_process_ingress() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let error = super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+            &MobId::from(format!("conflicting-supervisor-{}", uuid::Uuid::new_v4())),
+            crate::store::SupervisorAuthorityRecord::generate(
+                super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            ),
+            Some(crate::definition::SupervisorBridgeEndpointConfig::default()),
+            Some(config),
+        )
+        .await
+        .err()
+        .expect("two supervisor TCP ingress owners must fail closed");
+        assert!(error.to_string().contains("single TCP listener"));
+    }
+
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn builder_preflights_supervisor_ingress_conflict_before_persistent_creation() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let events = Arc::new(InMemoryMobEventStore::new());
+        let runs = Arc::new(InMemoryMobRunStore::new());
+        let specs = Arc::new(InMemoryMobSpecStore::new());
+        let metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+        let storage = MobStorage::custom_with_runtime_metadata(
+            events.clone(),
+            runs,
+            specs.clone(),
+            metadata.clone(),
+        );
+        let mob_id = MobId::from(format!("builder-ingress-conflict-{}", uuid::Uuid::new_v4()));
+        let mut definition = MobDefinition::explicit(mob_id.clone());
+        definition.backend.external = Some(crate::definition::ExternalBackendConfig {
+            address_base: "tcp://external.invalid".to_string(),
+            supervisor_bridge: Some(crate::definition::SupervisorBridgeEndpointConfig::default()),
+        });
+
+        let error = MobBuilder::new(definition, storage)
+            .with_controlling_acceptor(config.clone())
+            .create()
+            .await
+            .err()
+            .expect("conflicting ingress authorities must fail before builder writes");
+        assert!(error.to_string().contains("single TCP listener"));
+        assert!(
+            events.replay_all().await.expect("event replay").is_empty(),
+            "failed composition must not append MobCreated"
+        );
+        assert_eq!(
+            specs.get_spec(&mob_id).await.expect("spec lookup"),
+            None,
+            "failed composition must not persist the definition"
+        );
+        assert_eq!(
+            metadata
+                .load_supervisor_authority(&mob_id)
+                .await
+                .expect("authority lookup"),
+            None,
+            "failed composition must not mint supervisor authority metadata"
+        );
+        assert_eq!(config.registration_count_for_test().await, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn builder_startup_error_unwinds_shared_supervisor_durable_lease() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let bridge = Arc::new(
+            super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+                &MobId::from(format!("builder-startup-unwind-{}", uuid::Uuid::new_v4())),
+                crate::store::SupervisorAuthorityRecord::generate(
+                    super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                ),
+                None,
+                Some(config.clone()),
+            )
+            .await
+            .expect("startup bridge should install its durable lease"),
+        );
+        assert_eq!(config.registration_count_for_test().await, 1);
+        let guard = SupervisorBridgeStartupGuard::new(bridge);
+        let result: Result<(), MobError> = guard
+            .settle(Err(MobError::Internal(
+                "fault-injected builder startup failure".to_string(),
+            )))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            config.registration_count_for_test().await,
+            0,
+            "builder startup failure must synchronously unwind its durable ingress lease"
         );
     }
 

@@ -265,6 +265,13 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   `input_id` separate from caller transcript identity; tracked completion
 ///   uses the same canonical UUID for both so its retained sidecar remains
 ///   exactly correlated.
+/// - `4` (0.8 pre-publication clean cut): `HostStatus` and every successful
+///   `MemberEventsPage` require the same host-actor `runtime_incarnation`.
+///   V4 had not shipped in a tagged release before this field became
+///   mandatory, so no V5 compatibility era exists. Development builds on
+///   either side fail closed in both directions: a new receiver rejects the
+///   missing required field, and the former strict receiver rejects the new
+///   field through `deny_unknown_fields`.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -1499,6 +1506,10 @@ pub struct BridgeMemberHistoryPage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeMemberEventsPage {
+    /// Exact boot incarnation of the member-host actor that served this
+    /// page. Required in the first published V4 contract so a successful
+    /// event poll can fence volatile route recovery before reachability.
+    pub runtime_incarnation: BridgeHostRuntimeIncarnation,
     pub generation: u64,
     /// Materialization fence paired with `generation`. Event/fold consumers
     /// must bind both values: a fence can rotate without changing the
@@ -1626,6 +1637,71 @@ pub enum RuntimeReleaseCause {
     NoDurableSessions,
 }
 
+/// Per-process incarnation reported by a member host.
+///
+/// The host mints this once per actor boot. It is an authenticated observation
+/// trigger, not a host-owned authority fact: a controller that observes a new
+/// value re-realizes its own durable routing intent because member peer-trust
+/// rows are process-local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct BridgeHostRuntimeIncarnation(
+    #[cfg_attr(feature = "schema", schemars(with = "String"))] uuid::Uuid,
+);
+
+impl BridgeHostRuntimeIncarnation {
+    /// Create a fresh host-process incarnation identifier.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Construct an incarnation identifier from a typed UUID.
+    #[must_use]
+    pub const fn from_uuid(value: uuid::Uuid) -> Self {
+        Self(value)
+    }
+
+    /// Return the underlying typed UUID.
+    #[must_use]
+    pub const fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+}
+
+impl Default for BridgeHostRuntimeIncarnation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for BridgeHostRuntimeIncarnation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for BridgeHostRuntimeIncarnation {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(value).map(Self)
+    }
+}
+
+impl From<uuid::Uuid> for BridgeHostRuntimeIncarnation {
+    fn from(value: uuid::Uuid) -> Self {
+        Self::from_uuid(value)
+    }
+}
+
+impl From<BridgeHostRuntimeIncarnation> for uuid::Uuid {
+    fn from(value: BridgeHostRuntimeIncarnation) -> Self {
+        value.0
+    }
+}
+
 /// Response to `HostStatus`: the host's materialized inventory. Feeds
 /// orphan reconciliation (`ReleaseMember` at a stale fence) and the
 /// reachability projection.
@@ -1633,6 +1709,7 @@ pub enum RuntimeReleaseCause {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeHostStatusResponse {
+    pub runtime_incarnation: BridgeHostRuntimeIncarnation,
     pub members: Vec<BridgeHostMemberRecord>,
     pub capabilities: BridgeCapabilities,
 }
@@ -3021,6 +3098,23 @@ mod tests {
         assert!(
             serde_json::from_value::<SupervisorRotationOperationId>(json!("not-a-uuid")).is_err(),
             "an unchecked string must not cross the operation-id boundary"
+        );
+    }
+
+    #[test]
+    fn host_runtime_incarnation_validates_uuid_at_json_ingress() {
+        let incarnation: BridgeHostRuntimeIncarnation = "11111111-2222-4333-8444-555555555555"
+            .parse()
+            .expect("valid host runtime incarnation");
+        let value = serde_json::to_value(incarnation).expect("serialize host incarnation");
+        assert_eq!(value, json!("11111111-2222-4333-8444-555555555555"));
+
+        let decoded: BridgeHostRuntimeIncarnation =
+            serde_json::from_value(value).expect("decode host incarnation");
+        assert_eq!(decoded, incarnation);
+        assert!(
+            serde_json::from_value::<BridgeHostRuntimeIncarnation>(json!("not-a-uuid")).is_err(),
+            "an unchecked string must not cross the host-incarnation boundary"
         );
     }
 
@@ -5789,6 +5883,7 @@ mod tests {
                 },
             }),
             BridgeReply::MemberEventsPage(BridgeMemberEventsPage {
+                runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
                 generation: 2,
                 fence_token: 9,
                 events: vec![WireEventRow {
@@ -5830,6 +5925,9 @@ mod tests {
                 },
             }),
             BridgeReply::HostStatus(BridgeHostStatusResponse {
+                runtime_incarnation: BridgeHostRuntimeIncarnation::from_uuid(uuid::uuid!(
+                    "11111111-2222-4333-8444-555555555555"
+                )),
                 members: vec![BridgeHostMemberRecord {
                     agent_identity: "worker-1".to_string(),
                     generation: 1,
@@ -5895,6 +5993,108 @@ mod tests {
         for reply in &replies {
             assert_reply_value_round_trip(reply);
         }
+    }
+
+    /// The host boot token landed before V4's first tagged publication. This
+    /// is an intentional 0.8 clean cut, not an additive compatibility field:
+    /// both carriers fail closed in both mixed-development-build directions.
+    #[test]
+    fn v4_prepublication_runtime_incarnation_clean_cut_fails_closed_both_directions() {
+        #[allow(dead_code)]
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PreIncarnationHostStatus {
+            members: Vec<BridgeHostMemberRecord>,
+            capabilities: BridgeCapabilities,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PreIncarnationMemberEventsPage {
+            generation: u64,
+            fence_token: u64,
+            events: Vec<WireEventRow>,
+            from_seq: u64,
+            next_seq: u64,
+            watermark: u64,
+            turn_outcomes: Vec<BridgeTurnOutcomeRecord>,
+            outcomes_complete: bool,
+        }
+
+        fn without_tag(mut value: serde_json::Value) -> serde_json::Value {
+            value
+                .as_object_mut()
+                .expect("reply is an object")
+                .remove("result")
+                .expect("reply carries its result tag");
+            value
+        }
+
+        let runtime_incarnation = BridgeHostRuntimeIncarnation::from_uuid(uuid::uuid!(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        ));
+        let host_status = BridgeReply::HostStatus(BridgeHostStatusResponse {
+            runtime_incarnation,
+            members: Vec::new(),
+            capabilities: BridgeCapabilities::default(),
+        });
+        let host_status_value = serde_json::to_value(host_status).expect("serialize host status");
+        let mut pre_field_host_status = host_status_value.clone();
+        pre_field_host_status
+            .as_object_mut()
+            .expect("host status object")
+            .remove("runtime_incarnation");
+        let new_receiver_error = serde_json::from_value::<BridgeReply>(pre_field_host_status)
+            .expect_err("new V4 receiver rejects old HostStatus without the boot token");
+        assert!(
+            new_receiver_error
+                .to_string()
+                .contains("runtime_incarnation")
+        );
+        let old_receiver_error =
+            serde_json::from_value::<PreIncarnationHostStatus>(without_tag(host_status_value))
+                .expect_err("old strict V4 receiver rejects new HostStatus boot token");
+        assert!(
+            old_receiver_error
+                .to_string()
+                .contains("runtime_incarnation")
+        );
+
+        let member_events = BridgeReply::MemberEventsPage(BridgeMemberEventsPage {
+            runtime_incarnation,
+            generation: 3,
+            fence_token: 5,
+            events: Vec::new(),
+            from_seq: 1,
+            next_seq: 1,
+            watermark: 0,
+            turn_outcomes: Vec::new(),
+            outcomes_complete: true,
+        });
+        let member_events_value =
+            serde_json::to_value(member_events).expect("serialize member events page");
+        let mut pre_field_member_events = member_events_value.clone();
+        pre_field_member_events
+            .as_object_mut()
+            .expect("member events object")
+            .remove("runtime_incarnation");
+        let new_receiver_error = serde_json::from_value::<BridgeReply>(pre_field_member_events)
+            .expect_err("new V4 receiver rejects old MemberEventsPage without the boot token");
+        assert!(
+            new_receiver_error
+                .to_string()
+                .contains("runtime_incarnation")
+        );
+        let old_receiver_error = serde_json::from_value::<PreIncarnationMemberEventsPage>(
+            without_tag(member_events_value),
+        )
+        .expect_err("old strict V4 receiver rejects new MemberEventsPage boot token");
+        assert!(
+            old_receiver_error
+                .to_string()
+                .contains("runtime_incarnation")
+        );
     }
 
     #[test]

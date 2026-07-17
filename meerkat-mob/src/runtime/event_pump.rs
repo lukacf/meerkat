@@ -35,9 +35,9 @@ use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity, Stream
 use meerkat_core::interaction::InteractionId;
 
 use super::bridge_protocol::{
-    BridgeCommand, BridgeEventCursor, BridgeMemberEventsPage, BridgeMemberIncarnation,
-    BridgePollEventsPayload, BridgeProtocolVersion, BridgeRejectionCause, BridgeTurnOutcomeAck,
-    BridgeTurnOutcomeRecord,
+    BridgeCommand, BridgeEventCursor, BridgeHostRuntimeIncarnation, BridgeMemberEventsPage,
+    BridgeMemberIncarnation, BridgePollEventsPayload, BridgeProtocolVersion, BridgeRejectionCause,
+    BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
 };
 use super::remote_flow_ticket::{OutcomeRecordDisposition, RemoteFlowTicketRegistry};
 use crate::MobError;
@@ -610,6 +610,49 @@ pub(crate) struct HandleObligationProbe {
     pub(crate) handle: super::handle::MobHandle,
 }
 
+/// Actor-serialized boot-incarnation barrier. A successful remote page is
+/// not reachability evidence until the MobMachine-owned route intent has
+/// been re-realized for the host process that served it.
+#[async_trait]
+pub(crate) trait HostRuntimeIncarnationObserver: Send + Sync {
+    async fn observe(
+        &self,
+        expected_member: &BridgeMemberIncarnation,
+        runtime_incarnation: BridgeHostRuntimeIncarnation,
+    ) -> Result<(), MobError>;
+}
+
+/// Unit-test seam for driving the complete pump loop without a second comms
+/// runtime. Production always polls through [`MobSupervisorBridge`].
+#[cfg(test)]
+#[async_trait]
+trait MemberEventPageSource: Send + Sync {
+    async fn poll(
+        &self,
+        material: &MemberPumpMaterial,
+        cursor: BridgeEventCursor,
+        outcome_acks: &[BridgeTurnOutcomeAck],
+        wait_ms: u32,
+    ) -> Result<BridgeMemberEventsPage, MobError>;
+}
+
+pub(crate) struct HandleHostRuntimeIncarnationObserver {
+    pub(crate) handle: super::handle::MobHandle,
+}
+
+#[async_trait]
+impl HostRuntimeIncarnationObserver for HandleHostRuntimeIncarnationObserver {
+    async fn observe(
+        &self,
+        expected_member: &BridgeMemberIncarnation,
+        runtime_incarnation: BridgeHostRuntimeIncarnation,
+    ) -> Result<(), MobError> {
+        self.handle
+            .observe_host_runtime_incarnation(expected_member.clone(), runtime_incarnation)
+            .await
+    }
+}
+
 impl RemoteObligationProbe for HandleObligationProbe {
     fn has_pending_obligation(&self, expected_member: &BridgeMemberIncarnation) -> bool {
         self.handle
@@ -772,9 +815,12 @@ pub(crate) struct MemberEventPumpManager {
     mob_id: crate::MobId,
     bridge: Arc<super::MobSupervisorBridge>,
     store: Arc<dyn MobRuntimeMetadataStore>,
+    host_runtime_observer: Arc<dyn HostRuntimeIncarnationObserver>,
     sink: OnceLock<Arc<dyn RemoteTurnOutcomeSink>>,
     obligation_probe: OnceLock<Arc<dyn RemoteObligationProbe>>,
     reachability_observations: OnceLock<Arc<super::handle::ReachabilityObservations>>,
+    #[cfg(test)]
+    page_source: OnceLock<Arc<dyn MemberEventPageSource>>,
     waiters: Arc<RemoteCompletionWaiters>,
     priority_poll_permits: Arc<Semaphore>,
     observation_poll_permits: Arc<Semaphore>,
@@ -809,14 +855,18 @@ impl MemberEventPumpManager {
         mob_id: crate::MobId,
         bridge: Arc<super::MobSupervisorBridge>,
         store: Arc<dyn MobRuntimeMetadataStore>,
+        host_runtime_observer: Arc<dyn HostRuntimeIncarnationObserver>,
     ) -> Self {
         Self {
             mob_id,
             bridge,
             store,
+            host_runtime_observer,
             sink: OnceLock::new(),
             obligation_probe: OnceLock::new(),
             reachability_observations: OnceLock::new(),
+            #[cfg(test)]
+            page_source: OnceLock::new(),
             waiters: Arc::new(RemoteCompletionWaiters::default()),
             priority_poll_permits: Arc::new(Semaphore::new(PRIORITY_MEMBER_POLL_PERMITS)),
             observation_poll_permits: Arc::new(Semaphore::new(OBSERVATION_MEMBER_POLL_PERMITS)),
@@ -862,6 +912,11 @@ impl MemberEventPumpManager {
         observations: Arc<super::handle::ReachabilityObservations>,
     ) {
         let _ = self.reachability_observations.set(observations);
+    }
+
+    #[cfg(test)]
+    fn install_page_source(&self, source: Arc<dyn MemberEventPageSource>) {
+        let _ = self.page_source.set(source);
     }
 
     fn has_pending_obligation(&self, expected_member: &BridgeMemberIncarnation) -> bool {
@@ -1952,6 +2007,38 @@ async fn run_member_pump(
                     );
                     continue;
                 }
+                if let Err(error) = manager
+                    .host_runtime_observer
+                    .observe(&material.expected_member, page.runtime_incarnation)
+                    .await
+                {
+                    if let Some(observations) = manager.reachability_observations.get() {
+                        observations.mark_member_poll_failure(&identity, false);
+                    }
+                    tracing::warn!(
+                        agent_identity = %identity,
+                        host = %material.host_id,
+                        runtime_incarnation = %page.runtime_incarnation,
+                        error = %error,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "member event page could not cross the host runtime-incarnation barrier"
+                    );
+                    tokio::select! {
+                        () = cancel.cancelled() => break,
+                        () = tokio::time::sleep(backoff) => {}
+                    }
+                    backoff = (backoff * 2).min(POLL_BACKOFF_CEIL);
+                    continue;
+                }
+                if cancel.is_cancelled()
+                    || !manager.is_current_incarnation(
+                        &identity,
+                        &material.expected_member,
+                        incarnation,
+                    )
+                {
+                    break;
+                }
                 if let Some(observations) = manager.reachability_observations.get() {
                     observations.mark_member_progress(&identity);
                 }
@@ -2230,9 +2317,6 @@ async fn run_member_pump(
                     },
                 ..
             }) => {
-                if let Some(observations) = manager.reachability_observations.get() {
-                    observations.mark_member_progress(&identity);
-                }
                 let next_seq = match remote_cursor_successor(watermark) {
                     Ok(next_seq) => next_seq,
                     Err(error) => {
@@ -2316,9 +2400,6 @@ async fn run_member_pump(
                     },
                 reason,
             }) => {
-                if let Some(observations) = manager.reachability_observations.get() {
-                    observations.mark_member_progress(&identity);
-                }
                 // Deterministic poison-row disposition: the owning host has
                 // proved this immutable envelope cannot cross the transport.
                 // Record a typed gap and advance exactly one durable row;
@@ -2468,6 +2549,11 @@ async fn poll_once(
     outcome_acks: &[BridgeTurnOutcomeAck],
     wait_ms: u32,
 ) -> Result<BridgeMemberEventsPage, MobError> {
+    #[cfg(test)]
+    if let Some(source) = manager.page_source.get() {
+        return source.poll(material, cursor, outcome_acks, wait_ms).await;
+    }
+
     let authority = manager.bridge.authority().await;
     let sup_spec = manager
         .bridge
@@ -2503,7 +2589,193 @@ mod tests {
     use super::*;
     use crate::ids::{AgentIdentity, AgentRuntimeId, RunId, StepId};
     use crate::runtime::remote_flow_ticket::RemoteTurnObligationResolver;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct AcceptHostRuntimeIncarnation;
+
+    #[async_trait]
+    impl HostRuntimeIncarnationObserver for AcceptHostRuntimeIncarnation {
+        async fn observe(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _runtime_incarnation: BridgeHostRuntimeIncarnation,
+        ) -> Result<(), MobError> {
+            Ok(())
+        }
+    }
+
+    fn accepting_host_runtime_observer() -> Arc<dyn HostRuntimeIncarnationObserver> {
+        Arc::new(AcceptHostRuntimeIncarnation)
+    }
+
+    #[derive(Default)]
+    struct RejectThenBlockHostRuntimeIncarnation {
+        calls: AtomicUsize,
+        first_entered: Notify,
+        release_first_rejection: Notify,
+        second_entered: Notify,
+        release_second_success: Notify,
+    }
+
+    #[async_trait]
+    impl HostRuntimeIncarnationObserver for RejectThenBlockHostRuntimeIncarnation {
+        async fn observe(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _runtime_incarnation: BridgeHostRuntimeIncarnation,
+        ) -> Result<(), MobError> {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    self.first_entered.notify_one();
+                    self.release_first_rejection.notified().await;
+                    Err(MobError::Internal(
+                        "scripted host-runtime observation rejection".to_string(),
+                    ))
+                }
+                1 => {
+                    self.second_entered.notify_one();
+                    self.release_second_success.notified().await;
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    struct StaticMemberEventPageSource {
+        requested_cursor: BridgeEventCursor,
+        expected_ack: BridgeTurnOutcomeAck,
+        page: BridgeMemberEventsPage,
+        polls: AtomicUsize,
+        polls_with_expected_ack: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MemberEventPageSource for StaticMemberEventPageSource {
+        async fn poll(
+            &self,
+            _material: &MemberPumpMaterial,
+            cursor: BridgeEventCursor,
+            outcome_acks: &[BridgeTurnOutcomeAck],
+            _wait_ms: u32,
+        ) -> Result<BridgeMemberEventsPage, MobError> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if outcome_acks == [self.expected_ack.clone()] {
+                self.polls_with_expected_ack.fetch_add(1, Ordering::SeqCst);
+            }
+            if cursor == self.requested_cursor {
+                return Ok(self.page.clone());
+            }
+            std::future::pending().await
+        }
+    }
+
+    struct AckUntilConfirmedProbe {
+        ack: BridgeTurnOutcomeAck,
+        confirmed: Arc<AtomicBool>,
+    }
+
+    impl RemoteObligationProbe for AckUntilConfirmedProbe {
+        fn has_pending_obligation(&self, _expected_member: &BridgeMemberIncarnation) -> bool {
+            false
+        }
+
+        fn resolved_outcome_acks(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+        ) -> Vec<BridgeTurnOutcomeAck> {
+            if self.confirmed.load(Ordering::SeqCst) {
+                Vec::new()
+            } else {
+                vec![self.ack.clone()]
+            }
+        }
+    }
+
+    struct BarrierRecordingOutcomeSink {
+        generations: AtomicUsize,
+        pages: AtomicUsize,
+        rows: AtomicUsize,
+        consumed: AtomicUsize,
+        acknowledged: AtomicUsize,
+        ack_confirmed: Arc<AtomicBool>,
+    }
+
+    impl BarrierRecordingOutcomeSink {
+        fn new(ack_confirmed: Arc<AtomicBool>) -> Self {
+            Self {
+                generations: AtomicUsize::new(0),
+                pages: AtomicUsize::new(0),
+                rows: AtomicUsize::new(0),
+                consumed: AtomicUsize::new(0),
+                acknowledged: AtomicUsize::new(0),
+                ack_confirmed,
+            }
+        }
+
+        fn folded(&self) -> bool {
+            self.generations.load(Ordering::SeqCst) != 0
+                || self.pages.load(Ordering::SeqCst) != 0
+                || self.rows.load(Ordering::SeqCst) != 0
+                || self.consumed.load(Ordering::SeqCst) != 0
+        }
+    }
+
+    #[async_trait]
+    impl RemoteTurnOutcomeSink for BarrierRecordingOutcomeSink {
+        fn install_member_residency(&self, _expected_member: &BridgeMemberIncarnation) {}
+
+        fn observe_member_generation(&self, _expected_member: &BridgeMemberIncarnation) {
+            self.generations.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn rewind_member_fold(&self, _expected_member: &BridgeMemberIncarnation) {}
+
+        fn observe_turn_outcome_page(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _event_frontier_exclusive: u64,
+            _outcomes_complete: bool,
+            _records: &[BridgeTurnOutcomeRecord],
+        ) {
+            self.pages.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn observe_member_event_row(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _seq: u64,
+            _event: &AgentEvent,
+        ) {
+            self.rows.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn observe_omitted_member_event_row(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _seq: u64,
+        ) {
+        }
+
+        async fn consume_turn_outcome_record(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _record: &BridgeTurnOutcomeRecord,
+        ) -> Result<OutcomeRecordDisposition, MobError> {
+            self.consumed.fetch_add(1, Ordering::SeqCst);
+            Ok(OutcomeRecordDisposition::Retain)
+        }
+
+        async fn acknowledge_turn_outcome(
+            &self,
+            _expected_member: &BridgeMemberIncarnation,
+            _ack: &BridgeTurnOutcomeAck,
+        ) -> Result<(), MobError> {
+            self.acknowledged.fetch_add(1, Ordering::SeqCst);
+            self.ack_confirmed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     const TEST_HOST_ID: &str = "host-a";
 
@@ -2719,6 +2991,7 @@ mod tests {
     ) -> BridgeMemberEventsPage {
         let from_seq = rows.first().map_or(next_seq, |row| row.durable_seq);
         BridgeMemberEventsPage {
+            runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
             generation: member.generation,
             fence_token: member.fence_token,
             events: rows,
@@ -2728,6 +3001,184 @@ mod tests {
             turn_outcomes: Vec::new(),
             outcomes_complete: true,
         }
+    }
+
+    #[tokio::test]
+    async fn host_runtime_barrier_blocks_progress_fold_ack_and_cursor_until_success() {
+        let authority = crate::store::SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let mob_id = crate::MobId::from("pump-host-runtime-barrier");
+        let bridge = Arc::new(
+            super::super::MobSupervisorBridge::new(&mob_id, authority, None)
+                .await
+                .expect("supervisor bridge builds"),
+        );
+        let store = Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
+        let observer = Arc::new(RejectThenBlockHostRuntimeIncarnation::default());
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id.clone(),
+            Arc::clone(&bridge),
+            Arc::clone(&store) as Arc<dyn MobRuntimeMetadataStore>,
+            Arc::clone(&observer) as Arc<dyn HostRuntimeIncarnationObserver>,
+        ));
+        let reachability = Arc::new(super::super::handle::ReachabilityObservations::default());
+        manager.install_reachability_observations(Arc::clone(&reachability));
+
+        let identity = AgentIdentity::from("w-runtime-barrier");
+        let runtime_id = AgentRuntimeId::initial(identity.clone());
+        let fence_token = FenceToken::new(7);
+        let expected_member = test_member(&identity, &runtime_id, fence_token);
+        let requested_cursor = BridgeEventCursor::At {
+            generation: expected_member.generation,
+            seq: 1,
+        };
+        let ack = BridgeTurnOutcomeAck {
+            generation: expected_member.generation,
+            fence_token: expected_member.fence_token,
+            input_id: uuid::Uuid::from_u128(0x888).to_string(),
+        };
+        let page = BridgeMemberEventsPage {
+            runtime_incarnation: BridgeHostRuntimeIncarnation::new(),
+            generation: expected_member.generation,
+            fence_token: expected_member.fence_token,
+            events: vec![WireEventRow {
+                durable_seq: 1,
+                envelope: EventEnvelope::new(
+                    identity.to_string(),
+                    1,
+                    Some(mob_id.to_string()),
+                    AgentEvent::TurnStarted { turn_number: 1 },
+                ),
+            }],
+            from_seq: 1,
+            next_seq: 2,
+            watermark: 1,
+            turn_outcomes: Vec::new(),
+            outcomes_complete: true,
+        };
+        let page_source = Arc::new(StaticMemberEventPageSource {
+            requested_cursor,
+            expected_ack: ack.clone(),
+            page,
+            polls: AtomicUsize::new(0),
+            polls_with_expected_ack: AtomicUsize::new(0),
+        });
+        manager.install_page_source(Arc::clone(&page_source) as Arc<dyn MemberEventPageSource>);
+        let ack_confirmed = Arc::new(AtomicBool::new(false));
+        manager.install_obligation_probe(Arc::new(AckUntilConfirmedProbe {
+            ack,
+            confirmed: Arc::clone(&ack_confirmed),
+        }));
+        let sink = Arc::new(BarrierRecordingOutcomeSink::new(ack_confirmed));
+        manager.install_outcome_sink(Arc::clone(&sink) as Arc<dyn RemoteTurnOutcomeSink>);
+
+        let mut events = manager
+            .ensure_pump_with_tap(MemberPumpMaterial {
+                agent_identity: identity.clone(),
+                host_id: TEST_HOST_ID.to_string(),
+                expected_member: expected_member.clone(),
+                runtime_id,
+                fence_token,
+                role: ProfileName::from("worker"),
+                peer: completion_test_peer("w-runtime-barrier", "127.0.0.1:4088"),
+            })
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), observer.first_entered.notified())
+            .await
+            .expect("first host-runtime observation reaches its blocking barrier");
+        assert_eq!(page_source.polls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            page_source.polls_with_expected_ack.load(Ordering::SeqCst),
+            1,
+            "the unconfirmed ACK is carried into the first poll"
+        );
+        assert!(!sink.folded(), "a blocked observation cannot fold the page");
+        assert_eq!(sink.acknowledged.load(Ordering::SeqCst), 0);
+        assert!(reachability.member(&identity).is_none());
+        assert!(
+            store
+                .list_member_event_cursors(&mob_id)
+                .await
+                .expect("list cursor before observation")
+                .is_empty(),
+            "a blocked observation cannot persist cursor progress"
+        );
+
+        observer.release_first_rejection.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), observer.second_entered.notified())
+            .await
+            .expect("rejected observation retries the unchanged page");
+        assert_eq!(observer.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(page_source.polls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            page_source.polls_with_expected_ack.load(Ordering::SeqCst),
+            2,
+            "rejection retains the ACK for the retry"
+        );
+        assert!(
+            !sink.folded(),
+            "a rejected observation cannot fold the page"
+        );
+        assert_eq!(sink.acknowledged.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            reachability
+                .member(&identity)
+                .expect("the rejected observation marks poll failure")
+                .freshness_reason,
+            "event_pump_unreachable"
+        );
+        assert!(
+            store
+                .list_member_event_cursors(&mob_id)
+                .await
+                .expect("list cursor after rejection")
+                .is_empty(),
+            "a rejected observation cannot persist cursor progress"
+        );
+
+        observer.release_second_success.notify_one();
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("successful observation resumes fanout")
+            .expect("event tap remains live");
+        assert!(matches!(
+            event.envelope.payload,
+            AgentEvent::TurnStarted { turn_number: 1 }
+        ));
+        let cursor = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let cursors = store
+                    .list_member_event_cursors(&mob_id)
+                    .await
+                    .expect("list cursor after observation success");
+                if let Some(cursor) = cursors.into_iter().next() {
+                    break cursor;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("successful observation persists cursor progress");
+        assert_eq!(sink.acknowledged.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.generations.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.pages.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.rows.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.consumed.load(Ordering::SeqCst), 0);
+        assert_eq!(cursor.next_seq, 2);
+        assert_eq!(cursor.host_id, TEST_HOST_ID);
+        assert_eq!(
+            reachability
+                .member(&identity)
+                .expect("successful observation marks member progress")
+                .freshness_reason,
+            "event_pump_progress"
+        );
+
+        manager.stop_all_and_join().await;
+        bridge.shutdown().await;
     }
 
     #[test]
@@ -3103,7 +3554,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        Arc::new(MemberEventPumpManager::new(mob_id, bridge, store))
+        Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ))
     }
 
     #[tokio::test]
@@ -3458,7 +3914,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = Arc::new(MemberEventPumpManager::new(mob_id, bridge, store));
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ));
 
         let identity = AgentIdentity::from("w-stop");
         let runtime_id = AgentRuntimeId::initial(identity.clone());
@@ -3566,7 +4027,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = Arc::new(MemberEventPumpManager::new(mob_id, bridge, store));
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ));
         let stale_incarnation = manager
             .next_incarnation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3659,7 +4125,12 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = Arc::new(MemberEventPumpManager::new(mob_id, bridge, store));
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ));
         let stale_incarnation = manager
             .next_incarnation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4498,7 +4969,8 @@ mod tests {
         );
         let store: Arc<dyn MobRuntimeMetadataStore> =
             Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
-        let manager = MemberEventPumpManager::new(mob_id, bridge, store);
+        let manager =
+            MemberEventPumpManager::new(mob_id, bridge, store, accepting_host_runtime_observer());
         let identity = AgentIdentity::from("w-gap");
         let runtime_id = AgentRuntimeId::initial(identity.clone());
         let expected_member = test_member(&identity, &runtime_id, FenceToken::new(7));

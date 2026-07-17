@@ -155,6 +155,10 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- Runtime member-disposal retries now re-admit an exact machine-proven
+  retained cleanup sidecar while cancellation-safe retirement is still
+  uncertain. Stale registration or attachment witnesses continue to fail
+  closed instead of blocking the valid retry path.
 - Rejected atomic runtime commits now abort every pre-commit session
   projection—not only compaction—including the live transcript/checkpointer
   and pending context events before recovery checkpoints can reload the prior

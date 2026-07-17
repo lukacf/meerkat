@@ -181,6 +181,7 @@ export type {
   SessionListOptions,
   SessionMessage,
   SessionOptions,
+  SystemPromptOverride,
   SessionTranscriptRevision,
   SessionTranscriptRevisionEntry,
   SessionTranscriptRevisionList,

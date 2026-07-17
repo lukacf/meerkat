@@ -54,6 +54,7 @@ import {
   type ConfigPatchParams,
   type ConfigSetParams,
   type ConfigWriteResult,
+  type CommsPeersResult,
   type CommsSendResult,
   type InterruptResult,
   type ServerCapabilities,
@@ -1092,7 +1093,7 @@ export class MeerkatClient {
     sessionId: string,
     text: string,
     options?: SessionIngressOptions,
-  ): Promise<{ status: string }> {
+  ): Promise<RpcInjectSystemContextResult> {
     type _RpcSignature = [RpcInjectSystemContextParams, RpcInjectSystemContextResult];
     const params: Record<string, unknown> = {
       session_id: sessionId,
@@ -1105,7 +1106,13 @@ export class MeerkatClient {
       params.idempotency_key = options.idempotencyKey;
     }
     const result = await this.request("session/inject_context", params);
-    return { status: String(result.status ?? "") };
+    const status = MeerkatClient.requireClosedStringField(
+      result,
+      "status",
+      ["applied", "staged", "duplicate"],
+      "Invalid session/inject_context response",
+    ) as RpcInjectSystemContextResult["status"];
+    return { status };
   }
 
   /**
@@ -3300,7 +3307,9 @@ export class MeerkatClient {
       params.self_hosted_server_id = options.selfHostedServerId;
     }
     if (options?.maxTokens) params.max_tokens = options.maxTokens;
-    if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
+    if (options?.systemPrompt !== undefined) {
+      params.system_prompt = options.systemPrompt;
+    }
     if (options?.outputSchema) params.output_schema = options.outputSchema;
     if (options?.structuredOutputRetries != null) {
       params.structured_output_retries = options.structuredOutputRetries;
@@ -3352,7 +3361,9 @@ export class MeerkatClient {
       params.self_hosted_server_id = options.selfHostedServerId;
     }
     if (options?.maxTokens) params.max_tokens = options.maxTokens;
-    if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
+    if (options?.systemPrompt !== undefined) {
+      params.system_prompt = options.systemPrompt;
+    }
     if (options?.outputSchema) params.output_schema = options.outputSchema;
     if (options?.structuredOutputRetries != null) {
       params.structured_output_retries = options.structuredOutputRetries;
@@ -3448,7 +3459,7 @@ export class MeerkatClient {
   /** @internal */
   async _peers(
     sessionId: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<CommsPeersResult> {
     return this.peers(sessionId);
   }
 
@@ -3464,8 +3475,15 @@ export class MeerkatClient {
 
   async peers(
     sessionId: string,
-  ): Promise<Record<string, unknown>> {
-    return this.request("comms/peers", { session_id: sessionId });
+  ): Promise<CommsPeersResult> {
+    const result = await this.request("comms/peers", { session_id: sessionId });
+    if (!Array.isArray(result.peers)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid comms/peers response: missing peers",
+      );
+    }
+    return { peers: result.peers } as CommsPeersResult;
   }
 
   /** Idempotent spawn: spawns or returns the existing member entry. */
@@ -6558,7 +6576,7 @@ export class MeerkatClient {
     if (options.injectedContext != null) params.injected_context = options.injectedContext;
     if (options.model) params.model = options.model;
     if (options.provider) params.provider = options.provider;
-    if (options.systemPrompt) params.system_prompt = options.systemPrompt;
+    if (options.systemPrompt !== undefined) params.system_prompt = options.systemPrompt;
     if (options.maxTokens) params.max_tokens = options.maxTokens;
     if (options.outputSchema != null) params.output_schema = options.outputSchema;
     if (options.structuredOutputRetries != null) {

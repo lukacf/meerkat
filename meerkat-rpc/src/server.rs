@@ -25,7 +25,7 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::callback_dispatcher::{CallbackRequestEnvelope, CallbackResponseHandoff};
 use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse};
-use crate::router::{MethodRouter, NotificationSink};
+use crate::router::{MethodRouter, NotificationSink, RoutedRpcResponse};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{
     AdmittedJsonlMessage, BlockingWriter, JSONL_MAX_FRAME_BYTES, JSONL_SMALL_FRAME_BYTES,
@@ -771,7 +771,7 @@ struct LongRunningResponse {
 /// handoff lets a non-reading client turn bounded request memory into
 /// unbounded queued response memory.
 struct AdmittedRpcResponse {
-    response: RpcResponse,
+    routed: RoutedRpcResponse,
     _request_permit: RpcRequestAdmissionPermit,
 }
 
@@ -1026,9 +1026,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let mut callback_sweep = tokio::time::interval(tokio::time::Duration::from_secs(30));
         callback_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        loop {
-            let frame_read_admission = self.rpc_frame_read_admission.clone();
-            tokio::select! {
+        let connection_result: Result<(), ServerError> = async {
+            loop {
+                let frame_read_admission = self.rpc_frame_read_admission.clone();
+                tokio::select! {
                 // Read the next message from the transport.
                 msg = self.transport.read_message_admitted(&frame_read_admission) => {
                     match msg {
@@ -1158,18 +1159,28 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                             let router = self.router.clone();
                             let resp_tx = self.response_tx.clone();
                             tokio::spawn(async move {
-                                let response = Box::pin(router.dispatch(request)).await;
+                                let response = Box::pin(router.dispatch_for_transport(request)).await;
                                 // Admission is non-blocking in the server loop.
                                 // Move the reservation with the response so it
                                 // remains held across queueing, serialization,
                                 // and the potentially blocking socket write.
-                                if let Some(response) = response {
-                                    let _ = resp_tx
+                                if let Some(response) = response
+                                    && let Err(error) = resp_tx
                                         .send(AdmittedRpcResponse {
-                                            response,
+                                            routed: response,
                                             _request_permit: request_permit,
                                         })
-                                        .await;
+                                        .await
+                                {
+                                    let mut admitted = error.0;
+                                    if let Err(settlement_error) =
+                                        admitted.routed.settle_delivery(false)
+                                    {
+                                        tracing::error!(
+                                            error = %settlement_error,
+                                            "failed to reject RPC response after delivery queue closed"
+                                        );
+                                    }
                                 }
                             });
                         }
@@ -1243,8 +1254,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
                 // Write responses from completed dispatch tasks.
                 Some(admitted) = self.response_rx.recv() => {
-                    self.transport.write_response(&admitted.response).await?;
-                    drop(admitted);
+                    self.write_admitted_response(admitted).await?;
                 }
 
                 Some(response) = self.long_running_rx.recv() => {
@@ -1272,8 +1282,19 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                 _ = callback_sweep.tick() => {
                     self.pending_callbacks.retain(|_, tx| !tx.is_closed());
                 }
+                }
             }
+            Ok(())
         }
+        .await;
+
+        // EOF or any read/write failure closes the response queue before we
+        // return. Dispatch tasks that finish later receive a send error and
+        // reject their own delivery custody; responses already queued here are
+        // rejected synchronously so an accepted WebRTC peer cannot outlive the
+        // connection that failed to deliver its answer.
+        self.reject_queued_responses();
+        connection_result?;
 
         // Graceful shutdown: close all sessions (unless this is a shared TCP
         // runtime where client disconnect should not destroy state).
@@ -1326,6 +1347,37 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             }
         });
         Ok((request_key, handle))
+    }
+
+    async fn write_admitted_response(
+        &mut self,
+        mut admitted: AdmittedRpcResponse,
+    ) -> Result<(), ServerError> {
+        let write_result = self
+            .transport
+            .write_response(&admitted.routed.response)
+            .await;
+        let delivered = write_result.is_ok();
+        if let Err(settlement_error) = admitted.routed.settle_delivery(delivered) {
+            tracing::error!(
+                delivered,
+                error = %settlement_error,
+                "failed to settle RPC response delivery custody"
+            );
+        }
+        write_result.map_err(ServerError::from)
+    }
+
+    fn reject_queued_responses(&mut self) {
+        self.response_rx.close();
+        while let Ok(mut admitted) = self.response_rx.try_recv() {
+            if let Err(settlement_error) = admitted.routed.settle_delivery(false) {
+                tracing::error!(
+                    error = %settlement_error,
+                    "failed to reject queued RPC response during connection shutdown"
+                );
+            }
+        }
     }
 
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
@@ -1861,11 +1913,14 @@ mod tests {
         let admission = RpcRequestAdmission::new(capacity, 1);
         let permit = admission.admit(&request).expect("first request admission");
         let admitted = AdmittedRpcResponse {
-            response: RpcResponse::success(request.id.clone(), serde_json::json!({"ok": true})),
+            routed: RoutedRpcResponse::new(RpcResponse::success(
+                request.id.clone(),
+                serde_json::json!({"ok": true}),
+            )),
             _request_permit: permit,
         };
 
-        let serialized = serde_json::to_vec(&admitted.response).expect("serialize response");
+        let serialized = serde_json::to_vec(&admitted.routed.response).expect("serialize response");
         assert!(!serialized.is_empty());
         assert!(matches!(
             admission.admit(&request),
@@ -2057,6 +2112,20 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "live-webrtc")]
+    struct FailingWriter;
+
+    #[cfg(feature = "live-webrtc")]
+    #[async_trait]
+    impl TransportWriter for FailingWriter {
+        async fn write_message(&mut self, _bytes: Vec<u8>) -> Result<(), TransportError> {
+            Err(TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected response delivery failure",
+            )))
+        }
+    }
+
     fn rpc_request_line(request: &RpcRequest) -> Vec<u8> {
         let mut line = serde_json::to_vec(request).expect("request should serialize");
         line.push(b'\n');
@@ -2089,6 +2158,166 @@ mod tests {
         })
         .await
         .expect("timed out waiting for RPC responses")
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    fn test_answer_response(
+        request: &RpcRequest,
+        request_permit: RpcRequestAdmissionPermit,
+    ) -> (AdmittedRpcResponse, tokio::sync::oneshot::Receiver<bool>) {
+        let (custody, settled_rx) =
+            crate::handlers::live::test_live_webrtc_answer_delivery_custody();
+        (
+            AdmittedRpcResponse {
+                routed: RoutedRpcResponse::with_live_webrtc_delivery(
+                    RpcResponse::success(
+                        request.id.clone(),
+                        serde_json::json!({"answer_sdp": "v=0"}),
+                    ),
+                    Some(custody),
+                ),
+                _request_permit: request_permit,
+            },
+            settled_rx,
+        )
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    fn test_answer_request(id: i64) -> RpcRequest {
+        RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RpcId::Num(id)),
+            method: "live/webrtc/answer".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "channel_id": "test-channel",
+                "token": "test-token",
+                "offer_sdp": "v=0"
+            }))),
+        }
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[tokio::test]
+    async fn webrtc_answer_dropped_before_delivery_rejects_custody() {
+        let (custody, settled_rx) =
+            crate::handlers::live::test_live_webrtc_answer_delivery_custody();
+        let routed = RoutedRpcResponse::with_live_webrtc_delivery(
+            RpcResponse::success(
+                Some(RpcId::Num(40)),
+                serde_json::json!({"answer_sdp": "v=0"}),
+            ),
+            Some(custody),
+        );
+
+        drop(routed);
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("dropped delivery custody should settle")
+                .expect("delivery observation sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[tokio::test]
+    async fn webrtc_answer_custody_waits_for_actual_response_write() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let writer = GateWriter {
+            output,
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        };
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let request = test_answer_request(41);
+        let permit = server
+            .rpc_request_admission
+            .admit(&request)
+            .expect("answer request admission");
+        let (admitted, mut settled_rx) = test_answer_response(&request, permit);
+
+        let write_task =
+            tokio::spawn(async move { server.write_admitted_response(admitted).await });
+        let started_permit =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), started.acquire())
+                .await
+                .expect("response writer should start")
+                .expect("response writer start semaphore open");
+        started_permit.forget();
+        assert!(matches!(
+            settled_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        release.add_permits(1);
+        write_task
+            .await
+            .expect("response write task should join")
+            .expect("response write should succeed");
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("delivery custody should settle")
+                .expect("delivery observation sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[tokio::test]
+    async fn webrtc_answer_write_failure_rejects_delivery_custody() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store);
+        let request = test_answer_request(42);
+        let permit = server
+            .rpc_request_admission
+            .admit(&request)
+            .expect("answer request admission");
+        let (admitted, settled_rx) = test_answer_response(&request, permit);
+
+        server
+            .write_admitted_response(admitted)
+            .await
+            .expect_err("broken writer must fail response delivery");
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("failed delivery custody should settle")
+                .expect("delivery observation sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[tokio::test]
+    async fn webrtc_answer_connection_shutdown_rejects_queued_delivery_custody() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store);
+        let request = test_answer_request(43);
+        let permit = server
+            .rpc_request_admission
+            .admit(&request)
+            .expect("answer request admission");
+        let (admitted, settled_rx) = test_answer_response(&request, permit);
+        server
+            .response_tx
+            .try_send(admitted)
+            .expect("queue answer before connection shutdown");
+
+        server.reject_queued_responses();
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("queued delivery custody should settle")
+                .expect("delivery observation sender should remain live")
+        );
     }
 
     fn run_stack_heavy_rpc_loop_test(test: impl FnOnce() + Send + 'static) {
@@ -2342,10 +2571,10 @@ mod tests {
                 server
                     .response_tx
                     .try_send(AdmittedRpcResponse {
-                        response: RpcResponse::success(
+                        routed: RoutedRpcResponse::new(RpcResponse::success(
                             request.id.clone(),
                             serde_json::json!({"fair": true}),
-                        ),
+                        )),
                         _request_permit: request_permit,
                     })
                     .expect("queue fairness response before starting loop");

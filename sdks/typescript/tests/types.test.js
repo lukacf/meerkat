@@ -1578,6 +1578,29 @@ describe("Session wrappers", () => {
     });
   });
 
+  it("createSession preserves system-prompt override presence", async () => {
+    const client = new MeerkatClient();
+    const seen = [];
+    client.request = async (method, params) => {
+      seen.push({ method, params });
+      return {
+        session_id: `session-${seen.length}`,
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      };
+    };
+
+    await client.createSession("inherit");
+    await client.createSession("empty", { systemPrompt: "" });
+    await client.createSession("disable", { systemPrompt: { action: "disable" } });
+
+    assert.equal("system_prompt" in seen[0].params, false);
+    assert.equal(seen[1].params.system_prompt, "");
+    assert.deepEqual(seen[2].params.system_prompt, { action: "disable" });
+  });
+
   it("listSessions and readSession parse typed metadata", async () => {
     const client = new MeerkatClient();
     client.request = async (method) => {
@@ -1748,6 +1771,17 @@ describe("Session wrappers", () => {
     ]);
   });
 
+  it("injectContext rejects missing or invalid required status", async () => {
+    const client = new MeerkatClient();
+    for (const response of [{}, { status: "" }, { status: "future" }, { status: 42 }]) {
+      client.request = async () => response;
+      await assert.rejects(
+        () => client.injectContext("s1", "ctx"),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
+  });
+
   it("sendPeerResponseTerminal forwards canonical peer id and correlation id", async () => {
     const calls = [];
     const client = new MeerkatClient();
@@ -1831,6 +1865,12 @@ describe("Session wrappers", () => {
     await client._startTurn("s1", "reject empty route", {
       selfHostedServerId: "",
     });
+    await client._startTurn("s1", "empty system prompt", {
+      systemPrompt: "",
+    });
+    client._startTurnStreaming("s1", "empty system prompt", {
+      systemPrompt: "",
+    });
 
     assert.equal(calls[0].method, "turn/start");
     assert.equal(calls[0].params.additional_instructions[0], "a");
@@ -1844,6 +1884,16 @@ describe("Session wrappers", () => {
       calls[1].params.self_hosted_server_id,
       "",
       "an explicit empty route must reach Rust validation instead of becoming inherit",
+    );
+    assert.equal(
+      calls[2].params.system_prompt,
+      "",
+      "an explicit empty system prompt must remain a present per-turn override",
+    );
+    assert.equal(
+      JSON.parse(writes[1]).params.system_prompt,
+      "",
+      "streaming must preserve the same empty per-turn override",
     );
   });
 });
@@ -2141,6 +2191,23 @@ describe("Comms methods", () => {
       { type: "text", text: "hello" },
       { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
     ]);
+  });
+
+  it("Session.peers rejects a missing required peers field", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({});
+    const session = new Session(client, {
+      sessionId: "s1",
+      text: "ready",
+      turns: 0,
+      toolCalls: 0,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    await assert.rejects(
+      () => session.peers(),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
   });
 
   it("rejects malformed and legacy comms/send receipts", async () => {

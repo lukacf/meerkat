@@ -198,7 +198,6 @@ BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
     ("ts", "auth/profile/list", "result"),
     ("ts", "auth/status/get", "result"),
     ("ts", "comms/peers", "params"),
-    ("ts", "comms/peers", "result"),
     ("ts", "comms/send", "params"),
     ("ts", "mob/append_system_context", "params"),
     ("ts", "mob/append_system_context", "result"),

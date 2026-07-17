@@ -19,6 +19,7 @@
  * ```
  */
 
+import type { PeerDirectoryEntry } from "./generated/types.js";
 import type {
   AgentEventEnvelope,
   CommsCommand,
@@ -234,9 +235,9 @@ export class Session {
     return this._client._send(this._id, command);
   }
 
-  async peers(): Promise<Array<Record<string, unknown>>> {
+  async peers(): Promise<PeerDirectoryEntry[]> {
     const result = await this._client._peers(this._id);
-    return (result.peers ?? []) as Array<Record<string, unknown>>;
+    return result.peers;
   }
 
   toString(): string {

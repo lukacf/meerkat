@@ -1053,6 +1053,57 @@ fn lower_session_fork_replace_request(
     }
 }
 
+/// One routed response plus any custody that ends at transport delivery.
+pub(crate) struct RoutedRpcResponse {
+    pub(crate) response: RpcResponse,
+    #[cfg(feature = "live-webrtc")]
+    live_webrtc_answer_delivery: Option<handlers::live::LiveWebrtcAnswerDeliveryCustody>,
+}
+
+impl RoutedRpcResponse {
+    pub(crate) fn new(response: RpcResponse) -> Self {
+        Self {
+            response,
+            #[cfg(feature = "live-webrtc")]
+            live_webrtc_answer_delivery: None,
+        }
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    fn with_live_webrtc_answer(result: handlers::live::LiveWebrtcAnswerHandlerResult) -> Self {
+        Self::with_live_webrtc_delivery(result.response, result.delivery_custody)
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    pub(crate) fn with_live_webrtc_delivery(
+        response: RpcResponse,
+        delivery: Option<handlers::live::LiveWebrtcAnswerDeliveryCustody>,
+    ) -> Self {
+        Self {
+            response,
+            live_webrtc_answer_delivery: delivery,
+        }
+    }
+
+    pub(crate) fn settle_delivery(&mut self, delivered: bool) -> Result<(), String> {
+        #[cfg(feature = "live-webrtc")]
+        if let Some(custody) = self.live_webrtc_answer_delivery.take() {
+            if delivered {
+                custody.delivered()?;
+            } else {
+                custody.rejected()?;
+            }
+        }
+        #[cfg(not(feature = "live-webrtc"))]
+        let _ = delivered;
+        Ok(())
+    }
+
+    fn into_response(self) -> RpcResponse {
+        self.response
+    }
+}
+
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
 #[derive(Clone)]
 pub struct MethodRouter {
@@ -1664,6 +1715,37 @@ impl MethodRouter {
         request: RpcRequest,
         request_context: Option<RequestContext>,
     ) -> Option<RpcResponse> {
+        let mut routed = self
+            .dispatch_routed_with_request_context(request, request_context)
+            .await?;
+        let response_id = routed.response.id.clone();
+        if let Err(settlement_error) = routed.settle_delivery(true) {
+            return Some(RpcResponse::error(
+                response_id,
+                error::INTERNAL_ERROR,
+                format!("RPC response delivery settlement failed: {settlement_error}"),
+            ));
+        }
+        Some(routed.into_response())
+    }
+
+    /// Dispatch for a concrete transport connection. Unlike direct in-process
+    /// dispatch, the returned delivery owner is not settled until the server's
+    /// writer confirms that the response crossed the transport boundary.
+    pub(crate) async fn dispatch_for_transport(
+        &self,
+        request: RpcRequest,
+    ) -> Option<RoutedRpcResponse> {
+        self.dispatch_routed_with_request_context(request, None)
+            .await
+    }
+
+    #[allow(clippy::if_not_else)]
+    async fn dispatch_routed_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: Option<RequestContext>,
+    ) -> Option<RoutedRpcResponse> {
         // Validate the JSON-RPC envelope version at the boundary. The transport
         // carries `jsonrpc` as a free String; an envelope that does not declare
         // the supported "2.0" version is rejected here (typed via
@@ -1678,7 +1760,7 @@ impl MethodRouter {
                 );
                 return None;
             }
-            return Some(RpcResponse::error(
+            return Some(RoutedRpcResponse::new(RpcResponse::error(
                 request.id.clone(),
                 error::INVALID_REQUEST,
                 format!(
@@ -1686,7 +1768,7 @@ impl MethodRouter {
                     crate::protocol::JSONRPC_VERSION,
                     request.jsonrpc
                 ),
-            ));
+            )));
         }
 
         // Notifications (no id) are fire-and-forget
@@ -2188,16 +2270,17 @@ impl MethodRouter {
             }
             #[cfg(feature = "live-webrtc")]
             "live/webrtc/answer" if self.live_webrtc_state.is_some() => {
-                if let Some(state) = self.live_webrtc_state.as_deref() {
-                    handlers::live::handle_live_webrtc_answer(id, params, state, &self.runtime)
-                        .await
-                } else {
-                    RpcResponse::error(
-                        id,
-                        error::INTERNAL_ERROR,
-                        "live/webrtc/answer reached handler without WebRTC state".to_string(),
-                    )
+                if let Some(state) = self.live_webrtc_state.as_ref() {
+                    return Some(RoutedRpcResponse::with_live_webrtc_answer(
+                        handlers::live::handle_live_webrtc_answer(id, params, state, &self.runtime)
+                            .await,
+                    ));
                 }
+                RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    "live/webrtc/answer reached handler without WebRTC state".to_string(),
+                )
             }
             "live/status" if self.live_enabled() => {
                 handlers::live::handle_live_status(
@@ -2214,6 +2297,8 @@ impl MethodRouter {
                     params,
                     &self.live_adapter_host,
                     &self.runtime,
+                    #[cfg(feature = "live-webrtc")]
+                    self.live_webrtc_state.as_deref(),
                 )
                 .await
             }
@@ -2315,7 +2400,7 @@ impl MethodRouter {
             ),
         };
 
-        Some(response)
+        Some(RoutedRpcResponse::new(response))
     }
 
     /// Access the underlying session runtime.

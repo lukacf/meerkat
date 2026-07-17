@@ -75,6 +75,13 @@ struct BlobToolBinding {
     blob_store: Arc<dyn BlobStore>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+const IMAGE_GENERATION_TOOL_NAMES: &[&str] = &["generate_image"];
+#[cfg(not(target_arch = "wasm32"))]
+const WEB_SEARCH_TOOL_NAMES: &[&str] = &["web_search"];
+#[cfg(not(target_arch = "wasm32"))]
+const BLOB_FILE_TOOL_NAMES: &[&str] = &["blob_save_file", "blob_load_file", "blob_inspect"];
+
 /// A composite dispatcher that combines multiple sources of tools.
 pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
@@ -104,6 +111,35 @@ pub struct CompositeDispatcher {
 }
 
 impl CompositeDispatcher {
+    /// Remove the concrete projection of one optional builtin family before a
+    /// new registration becomes its canonical owner.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remove_optional_builtin_family(&mut self, names: &[&str]) {
+        self.builtin_tools
+            .retain(|tool| !names.contains(&tool.name()));
+        for name in names {
+            self.allowed_tools.remove(*name);
+        }
+    }
+
+    /// Keep optional builtins in the factory's canonical blob -> web -> image
+    /// order, independent of registration or lifecycle-rebind order.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn normalize_optional_builtin_order(&mut self) {
+        self.builtin_tools.sort_by_key(|tool| {
+            let name = tool.name();
+            if BLOB_FILE_TOOL_NAMES.contains(&name) {
+                1
+            } else if WEB_SEARCH_TOOL_NAMES.contains(&name) {
+                2
+            } else if IMAGE_GENERATION_TOOL_NAMES.contains(&name) {
+                3
+            } else {
+                0
+            }
+        });
+    }
+
     /// Create a new composite dispatcher with builtin tools.
     ///
     /// view_image is always registered; visibility for non-image models is
@@ -318,19 +354,22 @@ impl CompositeDispatcher {
         runtime: crate::builtin::image_generation::ImageGenerationToolRuntime,
         visibility: ToolCategoryOverride,
     ) {
+        self.remove_optional_builtin_family(IMAGE_GENERATION_TOOL_NAMES);
+        self.image_generation_runtime = Some(ImageGenerationToolBinding {
+            runtime: runtime.clone(),
+            visibility,
+        });
         // Inherit means visible when the session-owned image substrate is wired.
         if !visibility.resolve(true) {
+            self.normalize_optional_builtin_order();
             return;
         }
         let tool = Arc::new(crate::builtin::image_generation::GenerateImageTool::new(
-            runtime.clone(),
+            runtime,
         ));
         self.allowed_tools.insert(tool.name().to_string());
         self.builtin_tools.push(tool);
-        self.image_generation_runtime = Some(ImageGenerationToolBinding {
-            runtime,
-            visibility,
-        });
+        self.normalize_optional_builtin_order();
     }
 
     /// Register the optional Meerkat-owned web-search fallback builtin.
@@ -340,10 +379,16 @@ impl CompositeDispatcher {
         executor: Arc<dyn meerkat_llm_core::WebSearchExecutor>,
         visibility: ToolCategoryOverride,
     ) {
+        self.remove_optional_builtin_family(WEB_SEARCH_TOOL_NAMES);
+        self.web_search_runtime = Some(WebSearchToolBinding {
+            executor: Arc::clone(&executor),
+            visibility,
+        });
         // Inherit is intentionally off. Models with native web search use
         // provider-native tools; callers explicitly enable this fallback for
         // models such as realtime live models.
         if !visibility.resolve(false) {
+            self.normalize_optional_builtin_order();
             return;
         }
         let tool = Arc::new(crate::builtin::web_search::WebSearchTool::new(Arc::clone(
@@ -351,15 +396,16 @@ impl CompositeDispatcher {
         )));
         self.allowed_tools.insert(tool.name().to_string());
         self.builtin_tools.push(tool);
-        self.web_search_runtime = Some(WebSearchToolBinding {
-            executor,
-            visibility,
-        });
+        self.normalize_optional_builtin_order();
     }
 
     /// Register blob file bridge builtins backed by the session blob store.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn register_blob_file_tools(&mut self, blob_store: Arc<dyn BlobStore>) {
+        self.remove_optional_builtin_family(BLOB_FILE_TOOL_NAMES);
+        self.blob_tools = Some(BlobToolBinding {
+            blob_store: Arc::clone(&blob_store),
+        });
         let Some(project_root) = self.project_root.clone() else {
             return;
         };
@@ -380,7 +426,7 @@ impl CompositeDispatcher {
             }
             self.builtin_tools.push(tool);
         }
-        self.blob_tools = Some(BlobToolBinding { blob_store });
+        self.normalize_optional_builtin_order();
     }
 
     /// Get usage instructions for all enabled tools.
@@ -946,6 +992,165 @@ mod tests {
 
         fn is_persistent(&self) -> bool {
             false
+        }
+    }
+
+    struct RejectingImageMachine {
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl crate::builtin::image_generation::ImageGenerationMachine for RejectingImageMachine {
+        async fn session_model_routing_status(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<
+            meerkat_core::image_generation::SessionModelRoutingStatus,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                reason: self.marker.to_string(),
+            })
+        }
+
+        async fn begin_image_operation(
+            &self,
+            _session_id: &SessionId,
+            _request: meerkat_runtime::ImageOperationRoutingRequest,
+        ) -> Result<meerkat_runtime::ImageOperationRoutingResult, meerkat_runtime::RuntimeDriverError>
+        {
+            unreachable!("routing status rejection must precede begin")
+        }
+
+        async fn deny_image_operation_plan(
+            &self,
+            _session_id: &SessionId,
+            _operation_id: meerkat_core::ImageOperationId,
+            _reason: meerkat_core::image_generation::ImageOperationDenialReason,
+        ) -> Result<
+            meerkat_core::image_generation::ImageOperationPhase,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            unreachable!("routing status rejection must precede denial")
+        }
+
+        async fn activate_image_operation_override(
+            &self,
+            _session_id: &SessionId,
+            _operation_id: meerkat_core::ImageOperationId,
+        ) -> Result<
+            meerkat_core::image_generation::ImageOperationPhase,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            unreachable!("routing status rejection must precede activation")
+        }
+
+        async fn classify_image_operation_terminal(
+            &self,
+            _session_id: &SessionId,
+            _operation_id: meerkat_core::ImageOperationId,
+            _observation: meerkat_core::image_generation::ImageProviderTerminalObservation,
+            _provider_text: meerkat_core::image_generation::ProviderTextDisposition,
+        ) -> Result<
+            meerkat_core::image_generation::ImageOperationTerminalClass,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            unreachable!("routing status rejection must precede classification")
+        }
+
+        async fn complete_image_operation(
+            &self,
+            _session_id: &SessionId,
+            _operation_id: meerkat_core::ImageOperationId,
+            _terminal: meerkat_core::image_generation::ImageOperationTerminalClass,
+        ) -> Result<
+            meerkat_core::image_generation::ImageOperationPhase,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            unreachable!("routing status rejection must precede completion")
+        }
+
+        async fn restore_image_operation_override(
+            &self,
+            _session_id: &SessionId,
+            _operation_id: meerkat_core::ImageOperationId,
+        ) -> Result<
+            meerkat_core::image_generation::ImageOperationPhase,
+            meerkat_runtime::RuntimeDriverError,
+        > {
+            unreachable!("routing status rejection must precede restore")
+        }
+    }
+
+    struct NeverImagePlanner;
+
+    impl meerkat_core::image_generation::ImageGenerationPlanner for NeverImagePlanner {
+        fn resolve_image_generation_plan(
+            &self,
+            _status: &meerkat_core::image_generation::SessionModelRoutingStatus,
+            _operation_id: meerkat_core::ImageOperationId,
+            _request: &meerkat_core::image_generation::GenerateImageRequest,
+        ) -> Result<
+            meerkat_core::image_generation::ImageGenerationResolvedPlan,
+            meerkat_core::image_generation::ImageOperationDenialReason,
+        > {
+            unreachable!("routing status rejection must precede planning")
+        }
+
+        fn infer_provider_for_model(
+            &self,
+            _model: &str,
+        ) -> Option<meerkat_core::image_generation::ProviderId> {
+            None
+        }
+    }
+
+    struct NeverImageExecutor;
+
+    #[async_trait]
+    impl meerkat_llm_core::ImageGenerationExecutor for NeverImageExecutor {
+        async fn execute_image_generation(
+            &self,
+            _request: meerkat_llm_core::ProviderImageGenerationRequest,
+        ) -> Result<meerkat_llm_core::ProviderImageGenerationOutput, meerkat_llm_core::LlmError>
+        {
+            unreachable!("routing status rejection must precede execution")
+        }
+    }
+
+    fn rejecting_image_runtime(
+        marker: &'static str,
+    ) -> crate::builtin::image_generation::ImageGenerationToolRuntime {
+        crate::builtin::image_generation::ImageGenerationToolRuntime {
+            session_id: SessionId::new(),
+            machine: Arc::new(RejectingImageMachine { marker }),
+            planner: Arc::new(NeverImagePlanner),
+            blob_store: Arc::new(TestBlobStore::default()),
+            executor: Arc::new(NeverImageExecutor),
+        }
+    }
+
+    struct MarkerWebSearchExecutor {
+        marker: &'static str,
+    }
+
+    #[async_trait]
+    impl meerkat_llm_core::WebSearchExecutor for MarkerWebSearchExecutor {
+        async fn execute_web_search(
+            &self,
+            request: meerkat_core::web_search::WebSearchRequest,
+        ) -> Result<meerkat_core::web_search::WebSearchResult, meerkat_llm_core::LlmError> {
+            Ok(meerkat_core::web_search::WebSearchResult {
+                status: meerkat_core::WebSearchStatus::Completed,
+                query: request.query,
+                provider: None,
+                model: None,
+                answer: Some(self.marker.to_string()),
+                evidence: Vec::new(),
+                native_events: Vec::new(),
+                error: None,
+                checked_at: chrono::Utc::now(),
+            })
         }
     }
 
@@ -1638,6 +1843,321 @@ mod tests {
         assert_eq!(result.result.text_content(), "{}");
     }
 
+    fn tool_name_count(dispatcher: &dyn AgentToolDispatcher, name: &str) -> usize {
+        dispatcher
+            .tools()
+            .iter()
+            .filter(|tool| tool.name == name)
+            .count()
+    }
+
+    fn catalog_name_count(dispatcher: &dyn AgentToolDispatcher, name: &str) -> usize {
+        dispatcher
+            .tool_catalog()
+            .iter()
+            .filter(|entry| entry.tool.name == name)
+            .count()
+    }
+
+    fn tool_names(dispatcher: &dyn AgentToolDispatcher) -> Vec<String> {
+        dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    fn catalog_names(dispatcher: &dyn AgentToolDispatcher) -> Vec<String> {
+        dispatcher
+            .tool_catalog()
+            .iter()
+            .map(|entry| entry.tool.name.to_string())
+            .collect()
+    }
+
+    fn assert_advertised_order(dispatcher: &dyn AgentToolDispatcher, expected: &[String]) {
+        assert_eq!(tool_names(dispatcher), expected);
+        assert_eq!(catalog_names(dispatcher), expected);
+    }
+
+    async fn dispatch_json(
+        dispatcher: &dyn AgentToolDispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        let outcome = dispatcher
+            .dispatch(ToolCallView {
+                id: "optional-builtin-owner",
+                name,
+                args: &raw,
+            })
+            .await
+            .unwrap();
+        serde_json::from_str(&outcome.result.text_content()).unwrap()
+    }
+
+    #[test]
+    fn optional_builtin_order_survives_interleaving_replacement_disable_and_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        let base_order = tool_names(&dispatcher);
+        assert_advertised_order(&dispatcher, &base_order);
+
+        // Deliberately register in a non-canonical order.
+        dispatcher.register_image_generation_tool(
+            rejecting_image_runtime("ordered-image-owner"),
+            ToolCategoryOverride::Enable,
+        );
+        dispatcher.register_blob_file_tools(Arc::new(TestBlobStore::default()));
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "ordered-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+
+        let canonical_order = base_order
+            .iter()
+            .cloned()
+            .chain(
+                [
+                    "blob_save_file",
+                    "blob_load_file",
+                    "blob_inspect",
+                    "web_search",
+                    "generate_image",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .collect::<Vec<_>>();
+        assert_advertised_order(&dispatcher, &canonical_order);
+
+        // Replacing the middle family must not move it to the tail.
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "replacement-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        assert_advertised_order(&dispatcher, &canonical_order);
+
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "disabled-web-owner",
+            }),
+            ToolCategoryOverride::Disable,
+        );
+        let without_web_order = base_order
+            .iter()
+            .cloned()
+            .chain(
+                [
+                    "blob_save_file",
+                    "blob_load_file",
+                    "blob_inspect",
+                    "generate_image",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .collect::<Vec<_>>();
+        assert_advertised_order(&dispatcher, &without_web_order);
+
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "re-enabled-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        assert_advertised_order(&dispatcher, &canonical_order);
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+        assert_advertised_order(&*rebound, &canonical_order);
+    }
+
+    #[tokio::test]
+    async fn repeated_image_registration_uses_latest_owner_before_and_after_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        dispatcher.register_image_generation_tool(
+            rejecting_image_runtime("stale-image-owner"),
+            ToolCategoryOverride::Enable,
+        );
+        dispatcher.register_image_generation_tool(
+            rejecting_image_runtime("latest-image-owner"),
+            ToolCategoryOverride::Enable,
+        );
+
+        assert_eq!(tool_name_count(&dispatcher, "generate_image"), 1);
+        assert_eq!(catalog_name_count(&dispatcher, "generate_image"), 1);
+        let raw = serde_json::value::RawValue::from_string(
+            json!({"request": {"prompt": "draw a dot"}}).to_string(),
+        )
+        .unwrap();
+        let err = dispatcher
+            .dispatch(ToolCallView {
+                id: "image-latest-before-rebind",
+                name: "generate_image",
+                args: &raw,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("latest-image-owner"), "{err}");
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+        assert_eq!(tool_name_count(&*rebound, "generate_image"), 1);
+        assert_eq!(catalog_name_count(&*rebound, "generate_image"), 1);
+        let err = rebound
+            .dispatch(ToolCallView {
+                id: "image-latest-after-rebind",
+                name: "generate_image",
+                args: &raw,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("latest-image-owner"), "{err}");
+    }
+
+    #[test]
+    fn latest_disabled_image_registration_removes_stale_owner_across_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        dispatcher.register_image_generation_tool(
+            rejecting_image_runtime("stale-image-owner"),
+            ToolCategoryOverride::Enable,
+        );
+        dispatcher.register_image_generation_tool(
+            rejecting_image_runtime("disabled-latest-owner"),
+            ToolCategoryOverride::Disable,
+        );
+
+        assert_eq!(tool_name_count(&dispatcher, "generate_image"), 0);
+        assert_eq!(catalog_name_count(&dispatcher, "generate_image"), 0);
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+        assert_eq!(tool_name_count(&*rebound, "generate_image"), 0);
+        assert_eq!(catalog_name_count(&*rebound, "generate_image"), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_web_search_registration_uses_latest_owner_across_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "stale-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "latest-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+
+        assert_eq!(tool_name_count(&dispatcher, "web_search"), 1);
+        assert_eq!(catalog_name_count(&dispatcher, "web_search"), 1);
+        let result = dispatch_json(&dispatcher, "web_search", json!({"query": "owner"})).await;
+        assert_eq!(result["answer"], "latest-web-owner");
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+        assert_eq!(tool_name_count(&*rebound, "web_search"), 1);
+        assert_eq!(catalog_name_count(&*rebound, "web_search"), 1);
+        let result = dispatch_json(&*rebound, "web_search", json!({"query": "owner"})).await;
+        assert_eq!(result["answer"], "latest-web-owner");
+    }
+
+    #[test]
+    fn latest_disabled_web_search_registration_removes_stale_owner_across_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "stale-web-owner",
+            }),
+            ToolCategoryOverride::Enable,
+        );
+        dispatcher.register_web_search_tool(
+            Arc::new(MarkerWebSearchExecutor {
+                marker: "disabled-latest-owner",
+            }),
+            ToolCategoryOverride::Disable,
+        );
+
+        assert_eq!(tool_name_count(&dispatcher, "web_search"), 0);
+        assert_eq!(catalog_name_count(&dispatcher, "web_search"), 0);
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+        assert_eq!(tool_name_count(&*rebound, "web_search"), 0);
+        assert_eq!(catalog_name_count(&*rebound, "web_search"), 0);
+    }
+
     #[test]
     fn blob_file_tools_register_when_blob_store_is_wired() {
         let temp_dir = TempDir::new().unwrap();
@@ -1785,6 +2305,73 @@ mod tests {
                 "{expected} should survive ops lifecycle rebinding; tools={names:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_blob_registration_uses_latest_owner_before_and_after_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let shared_id = BlobId::new("blob-shared-owner-test");
+        let stale_store = Arc::new(TestBlobStore::default());
+        stale_store.blobs.lock().await.insert(
+            shared_id.clone(),
+            BlobPayload {
+                blob_id: shared_id.clone(),
+                media_type: "application/x-stale-owner".to_string(),
+                data: "YQ==".to_string(),
+            },
+        );
+        let latest_store = Arc::new(TestBlobStore::default());
+        latest_store.blobs.lock().await.insert(
+            shared_id.clone(),
+            BlobPayload {
+                blob_id: shared_id.clone(),
+                media_type: "application/x-latest-owner".to_string(),
+                data: "YmJi".to_string(),
+            },
+        );
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .unwrap();
+        dispatcher.register_blob_file_tools(stale_store);
+        dispatcher.register_blob_file_tools(latest_store);
+
+        for name in BLOB_FILE_TOOL_NAMES {
+            assert_eq!(tool_name_count(&dispatcher, name), 1, "{name}");
+            assert_eq!(catalog_name_count(&dispatcher, name), 1, "{name}");
+        }
+        let result = dispatch_json(
+            &dispatcher,
+            "blob_inspect",
+            json!({"blob_id": shared_id.as_str()}),
+        )
+        .await;
+        assert_eq!(result["media_type"], "application/x-latest-owner");
+        assert_eq!(result["size_bytes"], 3);
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+        for name in BLOB_FILE_TOOL_NAMES {
+            assert_eq!(tool_name_count(&*rebound, name), 1, "{name}");
+            assert_eq!(catalog_name_count(&*rebound, name), 1, "{name}");
+        }
+        let result = dispatch_json(
+            &*rebound,
+            "blob_inspect",
+            json!({"blob_id": shared_id.as_str()}),
+        )
+        .await;
+        assert_eq!(result["media_type"], "application/x-latest-owner");
+        assert_eq!(result["size_bytes"], 3);
     }
 
     #[test]

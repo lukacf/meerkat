@@ -99,6 +99,33 @@ def test_multi_host_bridge_contract_types_are_public_root_exports():
         assert getattr(meerkat, name) is getattr(public_types, name)
 
 
+def test_system_prompt_override_is_a_public_typed_tri_state():
+    import meerkat
+    from meerkat import types as public_types
+
+    assert meerkat.SystemPromptOverride is public_types.SystemPromptOverride
+    assert meerkat.SystemPromptDisable is public_types.SystemPromptDisable
+    assert set(get_args(meerkat.SystemPromptOverride)) == {
+        str,
+        meerkat.SystemPromptDisable,
+    }
+    action = get_type_hints(meerkat.SystemPromptDisable)["action"]
+    assert get_origin(action) is Literal
+    assert get_args(action) == ("disable",)
+    for create_method in (
+        meerkat.MeerkatClient.create_session,
+        meerkat.MeerkatClient.create_session_streaming,
+        meerkat.MeerkatClient.create_deferred_session,
+        meerkat.MeerkatClient._build_create_params,
+    ):
+        system_prompt = get_type_hints(create_method)["system_prompt"]
+        assert set(get_args(system_prompt)) == {
+            str,
+            meerkat.SystemPromptDisable,
+            type(None),
+        }
+
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
@@ -3499,6 +3526,80 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
 
 
 @pytest.mark.asyncio
+async def test_session_peers_rejects_missing_required_peers_field():
+    client = MeerkatClient()
+
+    async def fake_request(method, params):
+        assert method == "comms/peers"
+        assert params == {"session_id": "s1"}
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+    session = Session(client, RunResult(session_id="s1"))
+
+    with pytest.raises(MeerkatError, match="missing peers") as exc_info:
+        await session.peers()
+
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_realms_requires_the_wire_realms_field():
+    client = MeerkatClient()
+
+    async def fake_request(method, params):
+        assert method == "realm/list"
+        assert params == {}
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing realms") as exc_info:
+        await client.list_realms()
+
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_list_realms_accepts_present_empty_and_valid_typed_entries():
+    client = MeerkatClient()
+    responses = iter(
+        [
+            {"realms": []},
+            {
+                "realms": [
+                    {
+                        "realm_id": "default",
+                        "default_binding": None,
+                        "backend_count": 1,
+                        "auth_profile_count": 2,
+                        "binding_count": 3,
+                    }
+                ]
+            },
+        ]
+    )
+
+    async def fake_request(method, params):
+        assert method == "realm/list"
+        assert params == {}
+        return next(responses)
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    assert await client.list_realms() == []
+    assert await client.list_realms() == [
+        {
+            "realm_id": "default",
+            "default_binding": None,
+            "backend_count": 1,
+            "auth_profile_count": 2,
+            "binding_count": 3,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "response",
     [
@@ -3694,6 +3795,54 @@ async def test_client_read_session_parses_details_shape():
 
 
 @pytest.mark.asyncio
+async def test_client_read_session_rejects_missing_required_facts():
+    client = MeerkatClient()
+
+    async def fake_request(method, params):
+        assert method == "session/read"
+        assert params == {"session_id": "expected"}
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing session_id") as exc_info:
+        await client.read_session("expected")
+
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("labels", [None, {"priority": 7}, {1: "high"}])
+def test_session_success_parsers_reject_malformed_present_labels(labels):
+    details = {
+        "session_id": "expected",
+        "created_at": 10,
+        "updated_at": 20,
+        "message_count": 2,
+        "is_active": True,
+        "model": "gpt-test",
+        "provider": "openai",
+        "labels": labels,
+    }
+    summary = {
+        "session_id": "expected",
+        "created_at": 10,
+        "updated_at": 20,
+        "message_count": 2,
+        "total_tokens": 3,
+        "is_active": True,
+        "labels": labels,
+    }
+
+    for parser, payload in (
+        (MeerkatClient._parse_session_details, details),
+        (MeerkatClient._parse_session_summary, summary),
+    ):
+        with pytest.raises(MeerkatError, match="labels") as exc_info:
+            parser(payload)
+        assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_client_read_session_drops_malformed_resolved_capabilities():
     client = MeerkatClient()
 
@@ -3705,6 +3854,8 @@ async def test_client_read_session_drops_malformed_resolved_capabilities():
             "updated_at": 20,
             "message_count": 2,
             "is_active": False,
+            "model": "gpt-test",
+            "provider": "openai",
             "resolved_capabilities": {
                 "vision": True,
                 "image_input": True,
@@ -4018,6 +4169,18 @@ def test_create_session_params_forward_workgraph_override():
     assert params["enable_schedule"] is True
     assert params["enable_workgraph"] is True
     assert params["enable_web_search"] is True
+
+
+def test_create_session_params_preserve_system_prompt_override_presence():
+    inherited = MeerkatClient._build_create_params("Hello", system_prompt=None)
+    empty_set = MeerkatClient._build_create_params("Hello", system_prompt="")
+    disabled = MeerkatClient._build_create_params(
+        "Hello", system_prompt={"action": "disable"}
+    )
+
+    assert "system_prompt" not in inherited
+    assert empty_set["system_prompt"] == ""
+    assert disabled["system_prompt"] == {"action": "disable"}
 
 
 @pytest.mark.asyncio

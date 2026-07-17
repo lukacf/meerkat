@@ -33,6 +33,8 @@ use meerkat_core::time_compat::Duration;
 use meerkat_core::time_compat::Instant;
 use meerkat_core::types::SessionId;
 #[cfg(feature = "runtime-adapter")]
+use meerkat_core::{TurnTerminalClassifier, TurnTerminalKind};
+#[cfg(feature = "runtime-adapter")]
 #[allow(unused_imports)]
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 #[cfg(feature = "runtime-adapter")]
@@ -199,27 +201,21 @@ impl DeferredTurnEventDelivery {
 }
 
 #[cfg(feature = "runtime-adapter")]
-fn deferred_terminal_matches_outcome(
-    event: &meerkat_core::AgentEvent,
+fn deferred_terminal_kind_matches_outcome(
+    terminal_kind: TurnTerminalKind,
     outcome: DeferredTurnEventOutcome,
 ) -> bool {
-    match event {
-        meerkat_core::AgentEvent::RunCompleted { .. }
-        | meerkat_core::AgentEvent::ExtractionSucceeded { .. }
-        | meerkat_core::AgentEvent::InteractionComplete { .. } => {
-            outcome == DeferredTurnEventOutcome::Succeeded
-        }
-        meerkat_core::AgentEvent::InteractionCallbackPending { .. } => {
+    match terminal_kind {
+        TurnTerminalKind::RunCompleted
+        | TurnTerminalKind::ExtractionSucceeded
+        | TurnTerminalKind::InteractionComplete => outcome == DeferredTurnEventOutcome::Succeeded,
+        TurnTerminalKind::InteractionCallbackPending => {
             outcome == DeferredTurnEventOutcome::CallbackPending
         }
-        meerkat_core::AgentEvent::ExtractionFailed { .. } => {
-            outcome == DeferredTurnEventOutcome::ExtractionFailed
-        }
-        meerkat_core::AgentEvent::RunFailed { .. }
-        | meerkat_core::AgentEvent::InteractionFailed { .. } => {
-            outcome == DeferredTurnEventOutcome::Failed
-        }
-        _ => true,
+        TurnTerminalKind::ExtractionFailed => outcome == DeferredTurnEventOutcome::ExtractionFailed,
+        TurnTerminalKind::RunFailed
+        | TurnTerminalKind::InteractionFailed
+        | TurnTerminalKind::ChannelClosed => outcome == DeferredTurnEventOutcome::Failed,
     }
 }
 
@@ -285,6 +281,7 @@ fn defer_turn_events_until_machine_completion(
     let (release_tx, release_rx) = oneshot::channel();
     tokio::spawn(async move {
         let mut release_rx = Box::pin(release_rx);
+        let mut terminal_classifier = TurnTerminalClassifier::new();
         let mut buffered_terminal = Vec::new();
         let mut stream_closed = false;
         let mut released = None;
@@ -294,22 +291,27 @@ fn defer_turn_events_until_machine_completion(
                 event = deferred_rx.recv(), if !stream_closed => {
                     match event {
                         Some(event) => {
-                            let terminal = matches!(
-                                &event.payload,
-                                meerkat_core::AgentEvent::RunCompleted { .. }
-                                    | meerkat_core::AgentEvent::RunFailed { .. }
-                                    | meerkat_core::AgentEvent::ExtractionSucceeded { .. }
-                                    | meerkat_core::AgentEvent::ExtractionFailed { .. }
-                                    | meerkat_core::AgentEvent::InteractionComplete { .. }
-                                    | meerkat_core::AgentEvent::InteractionCallbackPending { .. }
-                                    | meerkat_core::AgentEvent::InteractionFailed { .. }
-                            );
-                            if terminal && released.is_none() {
-                                buffered_terminal.push(event);
-                            } else if released.is_none_or(|outcome| {
-                                deferred_terminal_matches_outcome(&event.payload, outcome)
-                            }) && event_tx.send(event).await.is_err() {
-                                return;
+                            let terminal_kind = terminal_classifier
+                                .observe(&event.payload)
+                                .map(|terminal| terminal.kind);
+                            match (terminal_kind, released) {
+                                (Some(terminal_kind), None) => {
+                                    buffered_terminal.push((event, terminal_kind));
+                                }
+                                (Some(terminal_kind), Some(outcome)) => {
+                                    if deferred_terminal_kind_matches_outcome(
+                                        terminal_kind,
+                                        outcome,
+                                    ) && event_tx.send(event).await.is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                                (None, _) => {
+                                    if event_tx.send(event).await.is_err() {
+                                        return;
+                                    }
+                                }
                             }
                         }
                         None => stream_closed = true,
@@ -321,8 +323,8 @@ fn defer_turn_events_until_machine_completion(
                     // machine completion result.
                     let outcome = result.unwrap_or(DeferredTurnEventOutcome::Failed);
                     released = Some(outcome);
-                    for event in buffered_terminal.drain(..) {
-                        if deferred_terminal_matches_outcome(&event.payload, outcome)
+                    for (event, terminal_kind) in buffered_terminal.drain(..) {
+                        if deferred_terminal_kind_matches_outcome(terminal_kind, outcome)
                             && event_tx.send(event).await.is_err()
                         {
                             return;
@@ -4910,6 +4912,145 @@ mod tests {
 
     #[cfg(feature = "runtime-adapter")]
     #[tokio::test]
+    async fn deferred_turn_delivery_streams_extraction_boundary_before_success_commit() {
+        let session_id = SessionId::new();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let (queued_event_tx, deferred_delivery) =
+            defer_turn_events_until_machine_completion(&session_id, Some(event_tx));
+        let queued_event_tx = queued_event_tx.expect("queued event sender");
+        let deferred_delivery = deferred_delivery.expect("deferred delivery handle");
+
+        queued_event_tx
+            .send(meerkat_core::EventEnvelope::new_session(
+                session_id.clone(),
+                1,
+                None,
+                meerkat_core::AgentEvent::RunCompleted {
+                    session_id: session_id.clone(),
+                    result: "committed primary output".to_string(),
+                    structured_output: None,
+                    extraction_required: true,
+                    usage: Default::default(),
+                    terminal_cause_kind: None,
+                },
+            ))
+            .await
+            .expect("send extraction boundary");
+        let boundary = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("extraction boundary should stream before release")
+            .expect("extraction boundary event");
+        assert!(matches!(
+            boundary.payload,
+            meerkat_core::AgentEvent::RunCompleted {
+                extraction_required: true,
+                ..
+            }
+        ));
+
+        queued_event_tx
+            .send(meerkat_core::EventEnvelope::new_session(
+                session_id.clone(),
+                2,
+                None,
+                meerkat_core::AgentEvent::ExtractionSucceeded {
+                    session_id,
+                    structured_output: json!({"answer": 42}),
+                    schema_warnings: None,
+                },
+            ))
+            .await
+            .expect("send extraction success terminal");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), event_rx.recv())
+                .await
+                .is_err(),
+            "extraction success must remain buffered before commit release"
+        );
+
+        deferred_delivery.release(DeferredTurnEventOutcome::Succeeded);
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("extraction success should flush after release")
+            .expect("extraction success event");
+        assert!(matches!(
+            terminal.payload,
+            meerkat_core::AgentEvent::ExtractionSucceeded { .. }
+        ));
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn deferred_turn_delivery_streams_extraction_boundary_before_failure_commit() {
+        let session_id = SessionId::new();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let (queued_event_tx, deferred_delivery) =
+            defer_turn_events_until_machine_completion(&session_id, Some(event_tx));
+        let queued_event_tx = queued_event_tx.expect("queued event sender");
+        let deferred_delivery = deferred_delivery.expect("deferred delivery handle");
+
+        queued_event_tx
+            .send(meerkat_core::EventEnvelope::new_session(
+                session_id.clone(),
+                1,
+                None,
+                meerkat_core::AgentEvent::RunCompleted {
+                    session_id: session_id.clone(),
+                    result: "committed primary output".to_string(),
+                    structured_output: None,
+                    extraction_required: true,
+                    usage: Default::default(),
+                    terminal_cause_kind: None,
+                },
+            ))
+            .await
+            .expect("send extraction boundary");
+        let boundary = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("extraction boundary should stream before release")
+            .expect("extraction boundary event");
+        assert!(matches!(
+            boundary.payload,
+            meerkat_core::AgentEvent::RunCompleted {
+                extraction_required: true,
+                ..
+            }
+        ));
+
+        queued_event_tx
+            .send(meerkat_core::EventEnvelope::new_session(
+                session_id.clone(),
+                2,
+                None,
+                meerkat_core::AgentEvent::ExtractionFailed {
+                    session_id,
+                    last_output: "committed primary output".to_string(),
+                    attempts: 1,
+                    reason: "invalid shape".to_string(),
+                },
+            ))
+            .await
+            .expect("send extraction failure terminal");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), event_rx.recv())
+                .await
+                .is_err(),
+            "extraction failure must remain buffered before commit release"
+        );
+
+        deferred_delivery.release(DeferredTurnEventOutcome::ExtractionFailed);
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("extraction failure should flush after release")
+            .expect("extraction failure event");
+        assert!(matches!(
+            terminal.payload,
+            meerkat_core::AgentEvent::ExtractionFailed { .. }
+        ));
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
     async fn deferred_turn_delivery_commit_gates_all_interaction_terminals() {
         async fn assert_gated(event: meerkat_core::AgentEvent, outcome: DeferredTurnEventOutcome) {
             let session_id = SessionId::new();
@@ -4947,6 +5088,13 @@ mod tests {
                     ) | (
                         DeferredTurnEventOutcome::Failed,
                         meerkat_core::AgentEvent::InteractionFailed { .. }
+                    ) | (
+                        DeferredTurnEventOutcome::ExtractionFailed,
+                        meerkat_core::AgentEvent::InteractionFailed {
+                            reason:
+                                meerkat_core::event::InteractionFailureReason::ExtractionFailed { .. },
+                            ..
+                        }
                     )
                 ),
                 "released interaction terminal must match committed outcome"
@@ -4978,6 +5126,18 @@ mod tests {
                 reason: meerkat_core::event::InteractionFailureReason::abandoned("runtime failed"),
             },
             DeferredTurnEventOutcome::Failed,
+        )
+        .await;
+        assert_gated(
+            meerkat_core::AgentEvent::InteractionFailed {
+                interaction_id,
+                reason: meerkat_core::event::InteractionFailureReason::ExtractionFailed {
+                    last_output: "primary output".to_string(),
+                    attempts: 1,
+                    reason: "invalid shape".to_string(),
+                },
+            },
+            DeferredTurnEventOutcome::ExtractionFailed,
         )
         .await;
     }

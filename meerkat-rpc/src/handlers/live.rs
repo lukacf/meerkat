@@ -41,6 +41,107 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+#[cfg(feature = "live-webrtc")]
+#[derive(Clone, Copy)]
+enum LiveWebrtcAnswerCleanupDisposition {
+    Accept,
+    Reject,
+}
+
+/// Transport-delivery custody for one accepted WebRTC answer.
+///
+/// The answer coordinator retains both the exact peer cleanup obligation and
+/// the session live/lifecycle lease until this owner reports that the JSON-RPC
+/// response was actually written. Dropping the owner closes the decision
+/// channel, which the coordinator treats exactly like an explicit rejection.
+#[cfg(feature = "live-webrtc")]
+pub(crate) struct LiveWebrtcAnswerDeliveryCustody {
+    decision_tx: tokio::sync::oneshot::Sender<LiveWebrtcAnswerCleanupDisposition>,
+}
+
+#[cfg(feature = "live-webrtc")]
+impl LiveWebrtcAnswerDeliveryCustody {
+    fn new(
+        decision_tx: tokio::sync::oneshot::Sender<LiveWebrtcAnswerCleanupDisposition>,
+        cleanup_task: tokio::task::JoinHandle<Result<(), meerkat_live::LiveWebrtcError>>,
+    ) -> Self {
+        // The coordinator is already an owned task. Dropping its JoinHandle
+        // detaches it; the decision sender is the only custody the response
+        // handoff needs to retain.
+        drop(cleanup_task);
+        Self { decision_tx }
+    }
+
+    pub(crate) fn delivered(self) -> Result<(), String> {
+        self.decision_tx
+            .send(LiveWebrtcAnswerCleanupDisposition::Accept)
+            .map_err(|_| {
+                "live WebRTC answer cleanup coordinator stopped before decision".to_string()
+            })
+    }
+
+    pub(crate) fn rejected(self) -> Result<(), String> {
+        self.decision_tx
+            .send(LiveWebrtcAnswerCleanupDisposition::Reject)
+            .map_err(|_| {
+                "live WebRTC answer cleanup coordinator stopped before decision".to_string()
+            })
+    }
+}
+
+#[cfg(feature = "live-webrtc")]
+pub(crate) struct LiveWebrtcAnswerHandlerResult {
+    pub(crate) response: RpcResponse,
+    pub(crate) delivery_custody: Option<LiveWebrtcAnswerDeliveryCustody>,
+}
+
+#[cfg(feature = "live-webrtc")]
+impl LiveWebrtcAnswerHandlerResult {
+    fn accepted(response: RpcResponse, delivery_custody: LiveWebrtcAnswerDeliveryCustody) -> Self {
+        Self {
+            response,
+            delivery_custody: Some(delivery_custody),
+        }
+    }
+}
+
+#[cfg(feature = "live-webrtc")]
+impl From<RpcResponse> for LiveWebrtcAnswerHandlerResult {
+    fn from(response: RpcResponse) -> Self {
+        Self {
+            response,
+            delivery_custody: None,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "live-webrtc"))]
+pub(crate) fn test_live_webrtc_answer_delivery_custody() -> (
+    LiveWebrtcAnswerDeliveryCustody,
+    tokio::sync::oneshot::Receiver<bool>,
+) {
+    let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+    let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+    let cleanup_task = tokio::spawn(async move {
+        let delivered = matches!(
+            decision_rx.await,
+            Ok(LiveWebrtcAnswerCleanupDisposition::Accept)
+        );
+        let _ = settled_tx.send(delivered);
+        Ok(())
+    });
+    (
+        LiveWebrtcAnswerDeliveryCustody::new(decision_tx, cleanup_task),
+        settled_rx,
+    )
+}
+
+#[cfg(feature = "live-webrtc")]
+enum LiveWebrtcAnswerCoordinatorResult {
+    Answer(meerkat_live::LiveWebrtcAnswerAccepted),
+    Rejection(RpcResponse),
+}
+
 /// Public live channel identifiers are UUID-shaped today. Keep a modest
 /// forward-compatible bound so lookup failures cannot reflect an attacker-
 /// sized identifier into a response buffer.
@@ -696,15 +797,15 @@ pub async fn handle_live_open(
 }
 
 #[cfg(feature = "live-webrtc")]
-pub async fn handle_live_webrtc_answer(
+pub(crate) async fn handle_live_webrtc_answer(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
-    live_webrtc: &LiveWebrtcState,
+    live_webrtc: &Arc<LiveWebrtcState>,
     runtime: &Arc<SessionRuntime>,
-) -> RpcResponse {
+) -> LiveWebrtcAnswerHandlerResult {
     let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into(),
     };
     let channel_id = LiveChannelId::new(parsed.channel_id.clone());
     let request_kind =
@@ -724,7 +825,8 @@ pub async fn handle_live_webrtc_answer(
                     &channel_id,
                     request_kind,
                 )
-                .await;
+                .await
+                .into();
             }
         },
     };
@@ -734,7 +836,7 @@ pub async fn handle_live_webrtc_answer(
     // through admission, peer installation, and generated answer commit so a
     // lifecycle close cannot prove the WebRTC registry empty and then race a
     // late answer peer into existence before its terminal marker.
-    let _live_lifecycle_lease = match runtime
+    let live_lifecycle_lease = match runtime
         .runtime_adapter()
         .acquire_live_open_lifecycle_lease(&session_id)
         .await
@@ -745,13 +847,14 @@ pub async fn handle_live_webrtc_answer(
                 id,
                 error::INTERNAL_ERROR,
                 format!("live WebRTC answer lifecycle authority unavailable: {error}"),
-            );
+            )
+            .into();
         }
     };
 
     let observed_at_ms = match live_webrtc_now_ms() {
         Ok(now) => now,
-        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err),
+        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err).into(),
     };
     let admission = match runtime
         .runtime_adapter()
@@ -769,7 +872,8 @@ pub async fn handle_live_webrtc_answer(
                 id,
                 error::INTERNAL_ERROR,
                 format!("live WebRTC answer admission authority rejected result: {error}"),
-            );
+            )
+            .into();
         }
     };
     if !admission.admitted {
@@ -780,55 +884,233 @@ pub async fn handle_live_webrtc_answer(
             &admission,
             &channel_id,
         )
-        .await;
+        .await
+        .into();
     }
 
-    match live_webrtc
-        .answer_offer(channel_id.clone(), parsed.offer_sdp)
-        .await
-    {
-        Ok(answer) => {
-            let authority = match runtime
-                .runtime_adapter()
-                .resolve_live_webrtc_answer_result(
-                    &session_id,
-                    &channel_id,
-                    answer.answer_observation_sequence,
-                )
+    let (answer_result_tx, answer_result_rx) = tokio::sync::oneshot::channel();
+    let (cleanup_decision_tx, cleanup_decision_rx) = tokio::sync::oneshot::channel();
+    let (handler_liveness_tx, mut handler_liveness_rx) = tokio::sync::oneshot::channel::<()>();
+    let coordinator_live_webrtc = Arc::clone(live_webrtc);
+    let coordinator_channel_id = channel_id.clone();
+    let coordinator_runtime = Arc::clone(runtime);
+    let coordinator_session_id = session_id.clone();
+    let coordinator_response_id = id.clone();
+    let offer_sdp = parsed.offer_sdp;
+
+    // Construction and cleanup run under one owned coordinator. If this RPC
+    // future is dropped, liveness closes: the coordinator aborts negotiation,
+    // waits boundedly for detached construction cleanup, and then releases the
+    // machine lifecycle lease. Exact registry custody outlives that observer.
+    // If publication won the race, the exact sequence-keyed peer is rejected
+    // through the same pending-answer path.
+    let cleanup_task = tokio::spawn(async move {
+        let answer_live_webrtc = Arc::clone(&coordinator_live_webrtc);
+        let answer_channel_id = coordinator_channel_id.clone();
+        let mut answer_task = tokio::spawn(async move {
+            answer_live_webrtc
+                .answer_offer(answer_channel_id, offer_sdp)
                 .await
-            {
-                Ok(authority) => authority,
-                Err(error) => {
-                    // #346: answer_offer already installed the transport peer in
-                    // the WebRTC registry. The generated answer-result authority
-                    // rejected the result, so fail closed: tear the just-inserted
-                    // peer back out rather than leaving an orphaned peer with no
-                    // accepted answer behind it.
-                    live_webrtc.close_peer(&channel_id).await;
-                    return RpcResponse::error(
-                        id,
-                        error::INTERNAL_ERROR,
-                        format!("live WebRTC answer result authority rejected result: {error}"),
-                    );
-                }
-            };
-            match live_webrtc_answer_result_from_machine_authority(&authority, answer.answer_sdp)
-                .and_then(|result| {
-                    serde_json::to_value(result)
-                        .map_err(|err| format!("failed to serialize LiveWebrtcAnswerResult: {err}"))
-                }) {
-                Ok(value) => RpcResponse::success(id, value),
-                Err(err) => {
-                    // #346: the peer is installed but we cannot hand back a valid
-                    // answer result — fail closed by removing the orphaned peer.
-                    live_webrtc.close_peer(&channel_id).await;
-                    RpcResponse::error(id, error::INTERNAL_ERROR, err)
+        });
+        let (handler_gone, answer_joined) = tokio::select! {
+            _ = &mut handler_liveness_rx => {
+                answer_task.abort();
+                (true, answer_task.await)
+            }
+            joined = &mut answer_task => (false, joined),
+        };
+
+        let cleanup_result = match answer_joined {
+            Ok(Ok(answer)) if handler_gone => {
+                coordinator_live_webrtc
+                    .close_rejected_answer_peer(
+                        &coordinator_channel_id,
+                        answer.answer_observation_sequence,
+                    )
+                    .await
+            }
+            Ok(Ok(answer)) => {
+                let answer_observation_sequence = answer.answer_observation_sequence;
+                if answer_result_tx
+                    .send(LiveWebrtcAnswerCoordinatorResult::Answer(answer))
+                    .is_err()
+                {
+                    coordinator_live_webrtc
+                        .close_rejected_answer_peer(
+                            &coordinator_channel_id,
+                            answer_observation_sequence,
+                        )
+                        .await
+                } else {
+                    match cleanup_decision_rx.await {
+                        Ok(LiveWebrtcAnswerCleanupDisposition::Accept) => {
+                            coordinator_live_webrtc
+                                .release_answer_cleanup_obligation(
+                                    &coordinator_channel_id,
+                                    answer_observation_sequence,
+                                )
+                                .await;
+                            Ok(())
+                        }
+                        Ok(LiveWebrtcAnswerCleanupDisposition::Reject) | Err(_) => {
+                            coordinator_live_webrtc
+                                .close_rejected_answer_peer(
+                                    &coordinator_channel_id,
+                                    answer_observation_sequence,
+                                )
+                                .await
+                        }
+                    }
                 }
             }
+            Ok(Err(answer_error)) => {
+                // `answer_offer` does not return until its bounded
+                // pre-publication cleanup join has settled, including surfacing
+                // any close failure. Record the generated rejection while this
+                // owned coordinator still retains the session lifecycle lease;
+                // handler cancellation therefore cannot reopen the lifecycle
+                // race between transport failure and machine-visible rejection.
+                let response = live_webrtc_answer_error_response(
+                    coordinator_response_id.clone(),
+                    &coordinator_runtime,
+                    &coordinator_session_id,
+                    &coordinator_channel_id,
+                    &answer_error,
+                )
+                .await;
+                let _ =
+                    answer_result_tx.send(LiveWebrtcAnswerCoordinatorResult::Rejection(response));
+                // `answer_offer` already awaited its bounded construction
+                // cleanup join. Any peer it could not retire remains in exact
+                // registry custody; the lifecycle mutex is free to release.
+                Ok(())
+            }
+            Err(join_error) => {
+                // Aborting answer_offer drops its RAII construction custody,
+                // which starts owned one-shot cleanup. Authorize the rejection
+                // first so cleanup failure cannot suppress the error response.
+                if !handler_gone {
+                    let answer_error = meerkat_live::LiveWebrtcError::PeerCreation {
+                        detail: format!("WebRTC answer construction task failed: {join_error}"),
+                    };
+                    let response = live_webrtc_answer_error_response(
+                        coordinator_response_id,
+                        &coordinator_runtime,
+                        &coordinator_session_id,
+                        &coordinator_channel_id,
+                        &answer_error,
+                    )
+                    .await;
+                    let _ = answer_result_tx
+                        .send(LiveWebrtcAnswerCoordinatorResult::Rejection(response));
+                }
+                // Wait boundedly for exact absence. A non-Closed peer keeps
+                // exact registry custody, but the lifecycle mutex is not
+                // durable transport-fault state and must still be released.
+                coordinator_live_webrtc
+                    .wait_for_answer_construction_cleanup(&coordinator_channel_id)
+                    .await
+            }
+        };
+        match cleanup_result {
+            Ok(()) => {
+                drop(live_lifecycle_lease);
+                Ok(())
+            }
+            Err(cleanup_error) => {
+                tracing::error!(
+                    channel = %coordinator_channel_id,
+                    error = %cleanup_error,
+                    "WebRTC answer cleanup reported a transport shutdown error"
+                );
+                drop(live_lifecycle_lease);
+                Err(cleanup_error)
+            }
         }
-        Err(err) => {
-            live_webrtc_answer_error_response(id, runtime, &session_id, &channel_id, &err).await
+    });
+    // This sender exists only to make handler cancellation observable while
+    // negotiation is still in flight. It is deliberately retained through
+    // final authority/serialization settlement below.
+    let _handler_liveness = handler_liveness_tx;
+
+    let answer = match answer_result_rx.await {
+        Ok(LiveWebrtcAnswerCoordinatorResult::Answer(answer)) => answer,
+        Ok(LiveWebrtcAnswerCoordinatorResult::Rejection(response)) => {
+            // Rejection authority has already acknowledged the answer fault.
+            // Detaching leaves the bounded cleanup coordinator responsible for
+            // releasing the lifecycle lease; exact registry custody remains if
+            // the physical peer cannot reach typed Closed.
+            drop(cleanup_task);
+            return response.into();
         }
+        Err(error) => {
+            let coordinator_error = cleanup_task
+                .await
+                .err()
+                .map(|join_error| format!("; coordinator failed: {join_error}"))
+                .unwrap_or_default();
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!(
+                    "live WebRTC answer coordinator stopped before result: {error}{coordinator_error}"
+                ),
+            )
+            .into();
+        }
+    };
+    let answer_observation_sequence = answer.answer_observation_sequence;
+    let authority = match runtime
+        .runtime_adapter()
+        .resolve_live_webrtc_answer_result(&session_id, &channel_id, answer_observation_sequence)
+        .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            if let Err(cleanup_error) =
+                LiveWebrtcAnswerDeliveryCustody::new(cleanup_decision_tx, cleanup_task).rejected()
+            {
+                return RpcResponse::error(id, error::INTERNAL_ERROR, cleanup_error).into();
+            }
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live WebRTC answer result authority rejected result: {error}"),
+            )
+            .into();
+        }
+    };
+    match live_webrtc_answer_result_from_machine_authority(&authority, answer.answer_sdp).and_then(
+        |result| {
+            serde_json::to_value(result)
+                .map_err(|err| format!("failed to serialize LiveWebrtcAnswerResult: {err}"))
+        },
+    ) {
+        Ok(value) => {
+            let response = RpcResponse::success(id, value);
+            if response.error.is_some() {
+                return match LiveWebrtcAnswerDeliveryCustody::new(cleanup_decision_tx, cleanup_task)
+                    .rejected()
+                {
+                    Ok(()) => response.into(),
+                    Err(cleanup_error) => {
+                        RpcResponse::error(response.id, error::INTERNAL_ERROR, cleanup_error).into()
+                    }
+                };
+            }
+            LiveWebrtcAnswerHandlerResult::accepted(
+                response,
+                LiveWebrtcAnswerDeliveryCustody::new(cleanup_decision_tx, cleanup_task),
+            )
+        }
+        Err(err) => match LiveWebrtcAnswerDeliveryCustody::new(cleanup_decision_tx, cleanup_task)
+            .rejected()
+        {
+            Ok(()) => RpcResponse::error(id, error::INTERNAL_ERROR, err).into(),
+            Err(cleanup_error) => {
+                RpcResponse::error(id, error::INTERNAL_ERROR, cleanup_error).into()
+            }
+        },
     }
 }
 
@@ -868,12 +1150,89 @@ pub async fn handle_live_close(
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
     runtime: &Arc<SessionRuntime>,
+    #[cfg(feature = "live-webrtc")] live_webrtc: Option<&LiveWebrtcState>,
 ) -> RpcResponse {
     let parsed: LiveChannelParams = match super::parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
+
+    // Serialize the transport close with answer construction. Without this
+    // existing session gate, close could observe no peer, then an in-flight
+    // answer could publish one before the semantic close committed.
+    #[cfg(feature = "live-webrtc")]
+    let webrtc_close_authority = if live_webrtc.is_some() {
+        match runtime
+            .runtime_adapter()
+            .live_session_for_active_channel(&channel_id)
+            .await
+        {
+            Some(session_id) => match runtime
+                .runtime_adapter()
+                .acquire_live_open_lifecycle_lease(&session_id)
+                .await
+            {
+                Ok(lease) => Some((session_id, lease)),
+                Err(error) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("live close lifecycle authority unavailable: {error}"),
+                    );
+                }
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // The WebRTC peer is transport custody outside the semantic live host.
+    // Close it exactly before the generated semantic close so an audio-only
+    // peer (whose data-channel observation pump never started) cannot survive a
+    // successful `live/close`. The checked primitive owns cancellation-safe,
+    // one-shot physical shutdown and leaves semantic state active on failure;
+    // retained physical custody stays visible in the WebRTC registries.
+    #[cfg(feature = "live-webrtc")]
+    if let Some(live_webrtc) = live_webrtc
+        && let Err(close_error) = live_webrtc.close_peer_checked(&channel_id).await
+    {
+        let request = meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::Close;
+        let detail = format!("WebRTC peer close failed before semantic live close: {close_error}");
+        let Some((session_id, lease)) = webrtc_close_authority else {
+            return live_unbound_channel_request_error_response(id, runtime, &channel_id, request)
+                .await;
+        };
+        let response = match runtime
+            .runtime_adapter()
+            .resolve_live_channel_request_rejection_reason_result(
+                &session_id,
+                &channel_id,
+                request,
+                meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestRejectionReason::InternalHostError,
+            )
+            .await
+        {
+            Ok(authority) => live_channel_request_rejection_response_from_machine_authority(
+                id.clone(),
+                &authority,
+                request,
+                &channel_id,
+                Some(detail),
+            ),
+            Err(error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live WebRTC close rejection authority rejected result: {error}"),
+            ),
+        };
+        // Exact WebRTC custody remains in its registries when the one-shot
+        // close cannot reach typed Closed. The lifecycle mutex is an exclusion
+        // witness, not durable transport-fault state, so always release it.
+        drop(lease);
+        return response;
+    }
 
     match runtime.close_live_channel(host, &channel_id).await {
         Ok(result) => match serde_json::to_value(result) {

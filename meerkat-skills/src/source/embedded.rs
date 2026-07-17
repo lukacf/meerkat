@@ -64,14 +64,38 @@ fn registration_to_document(reg: &SkillRegistration) -> Result<SkillDocument, Sk
 /// Outcome of scanning the embedded inventory: the valid descriptors plus the
 /// counts that feed source-health classification (invalid = unparsable
 /// registrations and id collisions; total = every registration considered).
-struct EmbeddedScan {
+struct EmbeddedScan<'a> {
     descriptors: Vec<SkillDescriptor>,
+    registrations: IndexMap<SkillKey, &'a SkillRegistration>,
+    ambiguous_keys: HashSet<SkillKey>,
     invalid_count: u32,
     total_count: u32,
 }
 
+impl EmbeddedScan<'_> {
+    /// Resolve one registration from the same collision-aware projection used
+    /// by list and health. An ambiguous key is a load error, never a
+    /// link-order-dependent `NotFound` or silently selected owner.
+    fn load(&self, key: &SkillKey) -> Result<SkillDocument, SkillError> {
+        if self.ambiguous_keys.contains(key) {
+            return Err(SkillError::Load(
+                format!(
+                    "ambiguous embedded skill registration for {key}: every colliding owner is excluded"
+                )
+                .into(),
+            ));
+        }
+        self.registrations
+            .get(key)
+            .copied()
+            .map(registration_to_document)
+            .transpose()?
+            .ok_or_else(|| SkillError::NotFound { key: key.clone() })
+    }
+}
+
 /// Scan the ambient `inventory` registry once into a typed [`EmbeddedScan`].
-fn scan_registrations() -> EmbeddedScan {
+fn scan_registrations() -> EmbeddedScan<'static> {
     scan_registration_iter(collect_registered_skills())
 }
 
@@ -81,9 +105,10 @@ fn scan_registrations() -> EmbeddedScan {
 /// exercisable independently of the ambient `inventory` registry.
 fn scan_registration_iter<'a>(
     registrations: impl IntoIterator<Item = &'a SkillRegistration>,
-) -> EmbeddedScan {
-    let mut descriptors: Vec<SkillDescriptor> = Vec::new();
-    let mut seen: HashSet<SkillKey> = HashSet::new();
+) -> EmbeddedScan<'a> {
+    let mut loadable: IndexMap<SkillKey, (&'a SkillRegistration, SkillDescriptor)> =
+        IndexMap::new();
+    let mut ambiguous_keys: HashSet<SkillKey> = HashSet::new();
     let mut invalid_count: u32 = 0;
     let mut total_count: u32 = 0;
 
@@ -91,19 +116,34 @@ fn scan_registration_iter<'a>(
         total_count = total_count.saturating_add(1);
         match registration_to_descriptor(reg) {
             Ok(desc) => {
-                if !seen.insert(desc.key.clone()) {
-                    // Fail-closed collision: two distinct registrations resolved
-                    // to one builtin key. Count it invalid rather than letting a
-                    // later registration silently shadow an earlier one.
+                let key = desc.key.clone();
+                if ambiguous_keys.contains(&key) {
+                    // Every registration participating in an already-known
+                    // collision is invalid. Never allow a third or later entry
+                    // to repopulate the key after the first pair was removed.
                     invalid_count = invalid_count.saturating_add(1);
                     tracing::warn!(
                         skill_id = %reg.id,
-                        key = %desc.key,
-                        "embedded skill registration collides with an existing builtin key"
+                        key = %key,
+                        "embedded skill registration participates in an ambiguous builtin key"
                     );
                     continue;
                 }
-                descriptors.push(desc);
+                if loadable.shift_remove(&key).is_some() {
+                    // The first and second registrations are BOTH invalid: the
+                    // builtin key has no canonical owner. Remove the first entry
+                    // and permanently mark the key ambiguous for this scan so
+                    // link iteration order can never select a winner.
+                    invalid_count = invalid_count.saturating_add(2);
+                    ambiguous_keys.insert(key.clone());
+                    tracing::warn!(
+                        skill_id = %reg.id,
+                        key = %key,
+                        "embedded skill registration collides with an existing builtin key; excluding every owner"
+                    );
+                    continue;
+                }
+                loadable.insert(key, (reg, desc));
             }
             Err(err) => {
                 invalid_count = invalid_count.saturating_add(1);
@@ -115,8 +155,17 @@ fn scan_registration_iter<'a>(
         }
     }
 
+    let mut descriptors = Vec::with_capacity(loadable.len());
+    let mut registrations = IndexMap::with_capacity(loadable.len());
+    for (key, (registration, descriptor)) in loadable {
+        descriptors.push(descriptor);
+        registrations.insert(key, registration);
+    }
+
     EmbeddedScan {
         descriptors,
+        registrations,
+        ambiguous_keys,
         invalid_count,
         total_count,
     }
@@ -165,18 +214,7 @@ impl SkillSource for EmbeddedSkillSource {
         if key.source_uuid != SourceUuid::builtin() {
             return Err(SkillError::NotFound { key: key.clone() });
         }
-        let slug = key.skill_name.as_str();
-        collect_registered_skills()
-            .into_iter()
-            .find(|r| match RegistrationId::parse(r.id) {
-                // Match the FULL typed registration id, not a trailing path
-                // segment, so distinct ids cannot resolve through one slug.
-                Ok(registration_id) => registration_id.as_str() == slug,
-                Err(_) => false,
-            })
-            .map(registration_to_document)
-            .transpose()?
-            .ok_or_else(|| SkillError::NotFound { key: key.clone() })
+        scan_registrations().load(key)
     }
 }
 
@@ -301,7 +339,8 @@ mod tests {
     fn embedded_scan_reports_real_counts_not_default() {
         // Row #220: the scan is the typed source of health truth, not a Default
         // placeholder. Every registration considered is counted (`total`); a
-        // builtin-key collision and a parse failure are each counted invalid.
+        // builtin-key collision invalidates BOTH colliders; the parse failure is
+        // independently invalid.
         // A `Default` snapshot would report (total 0, invalid 0); a real scan
         // over these known-bad registrations cannot.
         let valid = SkillRegistration {
@@ -341,13 +380,68 @@ mod tests {
             "every registration considered is counted"
         );
         assert_eq!(
-            scan.invalid_count, 2,
-            "the key collision and the invalid slug are both counted invalid"
+            scan.invalid_count, 3,
+            "every invalid registration is counted"
         );
         assert_eq!(
             scan.descriptors.len(),
-            1,
-            "only the first registration of a colliding key survives"
+            0,
+            "no registration participating in a collision is listable"
         );
+        assert!(scan.registrations.is_empty());
+        assert_eq!(scan.ambiguous_keys.len(), 1);
+    }
+
+    #[test]
+    fn colliding_builtin_key_has_no_link_order_winner() {
+        let first = SkillRegistration {
+            id: "task-workflow",
+            name: "First owner",
+            description: "first",
+            scope: SkillScope::Builtin,
+            requires_capabilities: &[],
+            body: "first body",
+            extensions: &[],
+        };
+        let second = SkillRegistration {
+            id: "task-workflow",
+            name: "Second owner",
+            description: "second",
+            scope: SkillScope::Builtin,
+            requires_capabilities: &["shell"],
+            body: "second body",
+            extensions: &[],
+        };
+        let key =
+            SkillKey::builtin(meerkat_core::skills::SkillName::parse("task-workflow").unwrap());
+
+        for registrations in [[&first, &second], [&second, &first]] {
+            let scan = scan_registration_iter(registrations);
+            assert_eq!(scan.invalid_count, 2);
+            assert_eq!(scan.total_count, 2);
+            assert!(scan.descriptors.is_empty());
+            assert!(!scan.registrations.contains_key(&key));
+            assert!(scan.ambiguous_keys.contains(&key));
+            assert!(matches!(scan.load(&key), Err(SkillError::Load(_))));
+        }
+    }
+
+    #[test]
+    fn every_registration_in_multiway_collision_is_invalid() {
+        let registrations = ["first", "second", "third"].map(|name| SkillRegistration {
+            id: "task-workflow",
+            name,
+            description: "",
+            scope: SkillScope::Builtin,
+            requires_capabilities: &[],
+            body: name,
+            extensions: &[],
+        });
+        let scan = scan_registration_iter(registrations.iter());
+
+        assert_eq!(scan.total_count, 3);
+        assert_eq!(scan.invalid_count, 3);
+        assert!(scan.descriptors.is_empty());
+        assert!(scan.registrations.is_empty());
     }
 }

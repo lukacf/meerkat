@@ -1507,6 +1507,31 @@ async fn shutdown_does_not_probe_an_offline_placed_member_without_a_live_channel
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn shutdown_closes_active_controller_local_live_channel() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let gateway = Arc::new(LifecycleBarrierMemberLiveHost::default());
+    gateway.seed_active_channel();
+    let controlling =
+        lifecycle_live_fixture("xhl-local-shutdown-active", Arc::clone(&gateway)).await;
+    assert_eq!(
+        gateway.active_channel().as_deref(),
+        Some("lifecycle-live-channel")
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), controlling.handle.shutdown())
+        .await
+        .expect("controller shutdown must complete for a controller-local member")
+        .expect("controller shutdown closes the controller-local live channel");
+
+    assert_eq!(gateway.active_channel(), None);
+    assert_eq!(
+        gateway.calls(),
+        vec!["status", "close"],
+        "shutdown discovers and closes the active channel owned by its local Session member"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dropped_local_open_caller_is_exactly_cleaned_by_actor_custody() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let gateway = Arc::new(LifecycleBarrierMemberLiveHost::default());

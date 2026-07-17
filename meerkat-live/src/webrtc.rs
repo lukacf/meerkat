@@ -583,6 +583,14 @@ impl LiveWebrtcConstructionRegistry {
         }
     }
 
+    fn contains_channel(&self, channel_id: &LiveChannelId) -> bool {
+        self.peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|entry| entry.channel_id == *channel_id)
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.peers
@@ -1210,6 +1218,24 @@ impl LiveWebrtcState {
         self.construction_peers
             .wait_for_channel_absent(channel_id)
             .await;
+    }
+
+    /// Whether any construction, published-peer, or rejected-answer registry
+    /// still owns physical WebRTC custody for this channel. A close may return
+    /// an error after the peer nevertheless reached typed Closed; lifecycle
+    /// callers use this exact check to distinguish that case from retained
+    /// fail-closed custody.
+    pub async fn retains_physical_peer_custody(&self, channel_id: &LiveChannelId) -> bool {
+        if self.construction_peers.contains_channel(channel_id)
+            || self.peers.lock().await.contains_key(channel_id)
+        {
+            return true;
+        }
+        self.pending_answers
+            .lock()
+            .await
+            .values()
+            .any(|pending| pending.channel_id == *channel_id)
     }
 
     pub async fn close_peer(&self, channel_id: &LiveChannelId) {
@@ -3305,6 +3331,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checked_close_reclaims_answered_audio_only_peer_without_data_channel() {
+        ensure_test_crypto_provider();
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
+            .await
+            .unwrap();
+        let (adapter, _command_rx, _observation_tx) = RecordingAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
+
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(host);
+        let browser_peer = new_browser_peer().await;
+        let browser_audio = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_OPUS.to_owned(),
+                clock_rate: BROWSER_OPUS_SAMPLE_RATE,
+                channels: 1,
+                ..Default::default()
+            },
+            "audio".to_owned(),
+            "browser-live".to_owned(),
+        ));
+        let browser_audio_track: Arc<dyn TrackLocal + Send + Sync> = browser_audio;
+        let _sender = browser_peer.add_track(browser_audio_track).await.unwrap();
+        let offer = browser_peer.create_offer(None).await.unwrap();
+        let mut gathering_complete = browser_peer.gathering_complete_promise().await;
+        browser_peer.set_local_description(offer).await.unwrap();
+        let _ = gathering_complete.recv().await;
+        let offer_sdp = browser_peer.local_description().await.unwrap().sdp;
+
+        state
+            .answer_offer(channel_id.clone(), offer_sdp)
+            .await
+            .unwrap();
+        assert_eq!(state.peer_count().await, 1);
+        assert_eq!(state.pending_answer_count().await, 1);
+
+        state.close_peer_checked(&channel_id).await.unwrap();
+        assert_eq!(state.peer_count().await, 0);
+        assert_eq!(state.pending_answer_count().await, 0);
+        assert_eq!(state.published_peer_lifecycle_count(), 0);
+        browser_peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn answer_result_rejection_after_answer_offer_leaves_no_orphaned_peer() {
         ensure_test_crypto_provider();
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
@@ -3389,6 +3466,10 @@ mod tests {
             0,
             "the exact rejected answer cleanup obligation must be retired"
         );
+        assert!(
+            !state.retains_physical_peer_custody(&channel_id).await,
+            "typed Closed retires physical custody even when close reports a subcomponent error"
+        );
     }
 
     #[tokio::test]
@@ -3433,6 +3514,10 @@ mod tests {
 
         assert_eq!(state.peer_count().await, 1);
         assert_eq!(state.pending_answer_count().await, 1);
+        assert!(
+            state.retains_physical_peer_custody(&channel_id).await,
+            "a peer that did not reach typed Closed must retain physical custody"
+        );
         let repeated_error = state
             .close_rejected_answer_peer(&channel_id, sequence)
             .await

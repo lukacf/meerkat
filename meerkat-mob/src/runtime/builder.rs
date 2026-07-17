@@ -592,7 +592,7 @@ struct SharedControllingAcceptorRegistration {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub(super) struct ControllingAcceptorRegistrationLease {
-    pubkey: meerkat_comms::PubKey,
+    pub(super) pubkey: meerkat_comms::PubKey,
     pub(super) advertised_address: String,
     key: String,
     pub(super) token: Arc<()>,
@@ -778,7 +778,9 @@ impl ControllingAcceptorConfig {
 
     /// Resolve the process host-ingress composition from effective config.
     /// The same `[mob_host]` listener facts serve both a dedicated member-host
-    /// daemon and a controlling process that owns local mob members.
+    /// daemon and a controlling process. In the controlling process the one
+    /// shared listener carries supervisor request callbacks immediately, then
+    /// any local-member reverse lanes registered by cross-host wiring.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_mob_host_config(
         config: &meerkat_core::config::MobHostConfig,
@@ -843,6 +845,16 @@ impl ControllingAcceptorConfig {
         lease: &ControllingAcceptorRegistrationLease,
     ) -> Result<(), MobError> {
         self.shared.remove(lease).await
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(super) async fn registration_count_for_test(&self) -> usize {
+        self.shared
+            .live
+            .lock()
+            .await
+            .as_ref()
+            .map_or(0, |live| live.leases.len())
     }
 }
 
@@ -7027,7 +7039,7 @@ impl MobBuilder {
                 ))
             })?;
         let supervisor_bridge = Arc::new(
-            MobSupervisorBridge::new(
+            MobSupervisorBridge::new_with_controlling_acceptor(
                 &definition.id,
                 supervisor_authority.clone(),
                 definition
@@ -7035,6 +7047,7 @@ impl MobBuilder {
                     .external
                     .as_ref()
                     .and_then(|external| external.supervisor_bridge.clone()),
+                controlling_acceptor.clone(),
             )
             .await?,
         );
@@ -7306,7 +7319,7 @@ impl MobBuilder {
             }
         };
         let supervisor_bridge = Arc::new(
-            MobSupervisorBridge::new(
+            MobSupervisorBridge::new_with_controlling_acceptor(
                 &definition.id,
                 supervisor_authority,
                 definition
@@ -7314,6 +7327,7 @@ impl MobBuilder {
                     .external
                     .as_ref()
                     .and_then(|external| external.supervisor_bridge.clone()),
+                controlling_acceptor.clone(),
             )
             .await?,
         );
@@ -9730,6 +9744,191 @@ mod tests {
                 .leases
                 .contains_key(&replacement.key)
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn supervisor_bridge_uses_shared_process_ingress_and_rotates_exactly() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let current = crate::store::SupervisorAuthorityRecord::generate(
+            super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        let mut next = crate::store::SupervisorAuthorityRecord::generate(
+            super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        next.epoch = current.epoch + 1;
+        let bridge = super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+            &MobId::from(format!("shared-supervisor-{}", uuid::Uuid::new_v4())),
+            current,
+            None,
+            Some(config.clone()),
+        )
+        .await
+        .expect("shared-ingress supervisor bridge");
+
+        assert!(
+            bridge
+                .runtime()
+                .await
+                .bound_tcp_listener_address()
+                .is_none(),
+            "shared mode must not bind a second private supervisor listener"
+        );
+        let before = bridge
+            .routable_supervisor_spec()
+            .await
+            .expect("shared routable supervisor descriptor");
+        assert_eq!(
+            before.address.transport(),
+            meerkat_core::comms::PeerTransport::Tcp
+        );
+        tokio::net::TcpStream::connect(before.address.endpoint())
+            .await
+            .expect("shared supervisor endpoint must already accept TCP before member wiring");
+        let before_key = meerkat_comms::PubKey::new(before.pubkey).to_pubkey_string();
+        {
+            let live = config.shared.live.lock().await;
+            let live = live.as_ref().expect("shared listener is live");
+            assert_eq!(live.leases.len(), 1);
+            assert!(live.leases.contains_key(&before_key));
+        }
+
+        bridge.rotate(next).await.expect("supervisor rotation");
+        let after = bridge
+            .routable_supervisor_spec()
+            .await
+            .expect("rotated shared supervisor descriptor");
+        let after_key = meerkat_comms::PubKey::new(after.pubkey).to_pubkey_string();
+        assert_eq!(after.address, before.address);
+        assert_ne!(after_key, before_key);
+        {
+            let live = config.shared.live.lock().await;
+            let live = live.as_ref().expect("shared listener remains live");
+            assert_eq!(live.leases.len(), 1);
+            assert!(!live.leases.contains_key(&before_key));
+            assert!(live.leases.contains_key(&after_key));
+        }
+
+        bridge.shutdown().await;
+        let live = config.shared.live.lock().await;
+        assert!(
+            live.as_ref()
+                .expect("process listener remains config-owned")
+                .leases
+                .is_empty(),
+            "bridge shutdown must compare-remove its exact supervisor lease"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sibling_supervisors_share_one_process_listener_and_shutdown_independently() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let bridge_a =
+            super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+                &MobId::from(format!("shared-supervisor-a-{}", uuid::Uuid::new_v4())),
+                crate::store::SupervisorAuthorityRecord::generate(
+                    super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                ),
+                None,
+                Some(config.clone()),
+            )
+            .await
+            .expect("first shared supervisor");
+        let bridge_b =
+            super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+                &MobId::from(format!("shared-supervisor-b-{}", uuid::Uuid::new_v4())),
+                crate::store::SupervisorAuthorityRecord::generate(
+                    super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                ),
+                None,
+                Some(config.clone()),
+            )
+            .await
+            .expect("second shared supervisor");
+        let spec_a = bridge_a
+            .routable_supervisor_spec()
+            .await
+            .expect("first shared descriptor");
+        let spec_b = bridge_b
+            .routable_supervisor_spec()
+            .await
+            .expect("second shared descriptor");
+        assert_eq!(spec_a.address, spec_b.address);
+        assert_ne!(spec_a.pubkey, spec_b.pubkey);
+        assert_eq!(
+            config
+                .shared
+                .live
+                .lock()
+                .await
+                .as_ref()
+                .expect("shared listener")
+                .leases
+                .len(),
+            2
+        );
+
+        bridge_a.shutdown().await;
+        assert_eq!(
+            config
+                .shared
+                .live
+                .lock()
+                .await
+                .as_ref()
+                .expect("shared listener")
+                .leases
+                .len(),
+            1,
+            "stopping one mob must preserve its sibling's supervisor ingress"
+        );
+        tokio::net::TcpStream::connect(spec_b.address.endpoint())
+            .await
+            .expect("sibling supervisor endpoint remains reachable");
+
+        bridge_b.shutdown().await;
+        assert!(
+            config
+                .shared
+                .live
+                .lock()
+                .await
+                .as_ref()
+                .expect("shared listener")
+                .leases
+                .is_empty()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn supervisor_endpoint_config_conflicts_with_process_ingress() {
+        let config = ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoAcceptorMaterial),
+        );
+        let error = super::supervisor_bridge::MobSupervisorBridge::new_with_controlling_acceptor(
+            &MobId::from(format!("conflicting-supervisor-{}", uuid::Uuid::new_v4())),
+            crate::store::SupervisorAuthorityRecord::generate(
+                super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            ),
+            Some(crate::definition::SupervisorBridgeEndpointConfig::default()),
+            Some(config),
+        )
+        .await
+        .err()
+        .expect("two supervisor TCP ingress owners must fail closed");
+        assert!(error.to_string().contains("single TCP listener"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

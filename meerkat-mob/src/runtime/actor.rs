@@ -30,16 +30,14 @@ use meerkat_core::comms::{
     CommsTrustMutation, CommsTrustMutationAuthority, CommsTrustMutationResult, PeerAddress,
     PeerLifecycleKind, PeerName, PeerRoute, SendError, TrustedPeerDescriptor,
 };
-use meerkat_core::time_compat::{Instant, SystemTime};
+use meerkat_core::time_compat::{Duration, Instant, SystemTime};
 use meerkat_machine_kernels::generated::mob::command_capabilities as generated_mob_command_capabilities;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 
-const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(25);
-const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: std::time::Duration =
-    std::time::Duration::from_secs(10);
+const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostOrphanReleaseReservation {
@@ -10482,13 +10480,12 @@ impl MobActor {
             );
             return;
         }
-        let autonomous_stop_deadline =
-            tokio::time::Instant::now() + STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE;
+        let autonomous_stop_deadline = Instant::now() + STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE;
         loop {
             match self.stop_all_autonomous_members().await {
                 Ok(()) => break,
                 Err(stop_error @ MobError::AutonomousStopInterruptsPending { .. }) => {
-                    let now = tokio::time::Instant::now();
+                    let now = Instant::now();
                     if now >= autonomous_stop_deadline {
                         tracing::warn!(
                             mob_id = %self.definition.id,

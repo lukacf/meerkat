@@ -120,6 +120,29 @@ pub(crate) struct MobSupervisorBridge {
     /// add/remove can advance the projection epoch and make the first call's
     /// exact generated obligation stale before it mints mutation authority.
     trust_reconcile_gate: Mutex<()>,
+    /// Process-scoped TCP ingress shared with local mob-member identities.
+    /// When present, the bridge runtime itself owns no TCP listener: this
+    /// exact lease is the single routable projection of its signing identity.
+    #[cfg(not(target_arch = "wasm32"))]
+    controlling_acceptor: Mutex<Option<SupervisorControllingAcceptorBinding>>,
+    /// Synchronous address projection used while constructing signed peer
+    /// descriptors and request reply endpoints. It is published only after the
+    /// matching identity lease has been installed on the shared acceptor.
+    #[cfg(not(target_arch = "wasm32"))]
+    controlling_reply_endpoint: StdRwLock<Option<PeerAddress>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SupervisorControllingAcceptorBinding {
+    config: super::builder::ControllingAcceptorConfig,
+    lease: super::builder::ControllingAcceptorRegistrationLease,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct TemporarySupervisorControllingAcceptorBinding {
+    config: super::builder::ControllingAcceptorConfig,
+    lease: super::builder::ControllingAcceptorRegistrationLease,
+    reply_endpoint: PeerAddress,
 }
 
 /// Typed reachability domain for the supervisor bridge's advertised
@@ -184,10 +207,61 @@ impl MobSupervisorBridge {
         authority: SupervisorAuthorityRecord,
         endpoint_config: Option<SupervisorBridgeEndpointConfig>,
     ) -> Result<Self, MobError> {
+        Self::new_with_controlling_acceptor(mob_id, authority, endpoint_config, None).await
+    }
+
+    pub(crate) async fn new_with_controlling_acceptor(
+        mob_id: &crate::MobId,
+        authority: SupervisorAuthorityRecord,
+        endpoint_config: Option<SupervisorBridgeEndpointConfig>,
+        controlling_acceptor: Option<super::builder::ControllingAcceptorConfig>,
+    ) -> Result<Self, MobError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if controlling_acceptor.is_some() && endpoint_config.is_some() {
+            return Err(MobError::WiringError(
+                "mob supervisor bridge cannot configure both backend.external.supervisor_bridge and process [mob_host] ingress; the process acceptor is the single TCP listener"
+                    .to_string(),
+            ));
+        }
         let participant_name = format!("{mob_id}/__mob_supervisor__");
         let endpoint_config = endpoint_config.unwrap_or_default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let uses_controlling_acceptor = controlling_acceptor.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (runtime, dsl) = Self::build_runtime_with_tcp_listener(
+            &participant_name,
+            &authority,
+            &endpoint_config,
+            !uses_controlling_acceptor,
+        )
+        .await?;
+        #[cfg(target_arch = "wasm32")]
         let (runtime, dsl) =
             Self::build_runtime(&participant_name, &authority, &endpoint_config).await?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let (controlling_acceptor, controlling_reply_endpoint) =
+            if let Some(config) = controlling_acceptor {
+                let registration = Self::acceptor_registration_for_runtime(&runtime)?;
+                let lease = config
+                    .register(participant_name.clone(), registration)
+                    .await?;
+                let reply_endpoint =
+                    match Self::validated_controlling_reply_endpoint(&lease.advertised_address) {
+                        Ok(endpoint) => endpoint,
+                        Err(error) => {
+                            let _ = config.remove(&lease).await;
+                            return Err(error);
+                        }
+                    };
+                (
+                    Some(SupervisorControllingAcceptorBinding { config, lease }),
+                    Some(reply_endpoint),
+                )
+            } else {
+                (None, None)
+            };
+
         Ok(Self {
             participant_name,
             endpoint_config,
@@ -198,6 +272,10 @@ impl MobSupervisorBridge {
             intake_notify: Arc::new(tokio::sync::Notify::new()),
             authority_gate: RwLock::new(()),
             trust_reconcile_gate: Mutex::new(()),
+            #[cfg(not(target_arch = "wasm32"))]
+            controlling_acceptor: Mutex::new(controlling_acceptor),
+            #[cfg(not(target_arch = "wasm32"))]
+            controlling_reply_endpoint: StdRwLock::new(controlling_reply_endpoint),
         })
     }
 
@@ -205,6 +283,40 @@ impl MobSupervisorBridge {
         participant_name: &str,
         authority: &SupervisorAuthorityRecord,
         endpoint_config: &SupervisorBridgeEndpointConfig,
+    ) -> Result<
+        (
+            Arc<meerkat_comms::CommsRuntime>,
+            Arc<meerkat_runtime::HandleDslAuthority>,
+        ),
+        MobError,
+    > {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::build_runtime_with_tcp_listener(
+                participant_name,
+                authority,
+                endpoint_config,
+                true,
+            )
+            .await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::build_runtime_with_tcp_listener(
+                participant_name,
+                authority,
+                endpoint_config,
+                false,
+            )
+            .await
+        }
+    }
+
+    async fn build_runtime_with_tcp_listener(
+        participant_name: &str,
+        authority: &SupervisorAuthorityRecord,
+        endpoint_config: &SupervisorBridgeEndpointConfig,
+        start_tcp_listener: bool,
     ) -> Result<
         (
             Arc<meerkat_comms::CommsRuntime>,
@@ -226,28 +338,30 @@ impl MobSupervisorBridge {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut runtime = runtime;
-            let bind_address = Self::supervisor_bind_address(endpoint_config)?;
-            runtime
-                .set_listen_tcp_for_unstarted_runtime(bind_address)
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "failed to configure mob supervisor comms listener '{participant_name}': {error}"
-                    ))
-                })?;
-            if let Some(advertised_address) = endpoint_config.advertised_address.clone() {
+            if start_tcp_listener {
+                let bind_address = Self::supervisor_bind_address(endpoint_config)?;
                 runtime
-                    .set_advertise_address_for_unstarted_runtime(advertised_address)
+                    .set_listen_tcp_for_unstarted_runtime(bind_address)
                     .map_err(|error| {
                         MobError::Internal(format!(
-                            "failed to configure mob supervisor advertised address '{participant_name}': {error}"
+                            "failed to configure mob supervisor comms listener '{participant_name}': {error}"
                         ))
                     })?;
+                if let Some(advertised_address) = endpoint_config.advertised_address.clone() {
+                    runtime
+                        .set_advertise_address_for_unstarted_runtime(advertised_address)
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "failed to configure mob supervisor advertised address '{participant_name}': {error}"
+                            ))
+                        })?;
+                }
+                runtime.start_listeners().await.map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to start mob supervisor comms listener '{participant_name}': {error}"
+                    ))
+                })?;
             }
-            runtime.start_listeners().await.map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to start mob supervisor comms listener '{participant_name}': {error}"
-                ))
-            })?;
             let runtime = Arc::new(runtime);
             let dsl = Self::install_supervisor_peer_request_response_authority(
                 &runtime,
@@ -257,6 +371,7 @@ impl MobSupervisorBridge {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = start_tcp_listener;
             let runtime = Arc::new(runtime);
             let dsl = Self::install_supervisor_peer_request_response_authority(
                 &runtime,
@@ -264,6 +379,187 @@ impl MobSupervisorBridge {
             )?;
             Ok((runtime, dsl))
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn acceptor_registration_for_runtime(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+    ) -> Result<super::builder::MemberAcceptorRegistration, MobError> {
+        let payload = CoreCommsRuntime::host_acceptor_registration_payload(runtime.as_ref())
+            .ok_or_else(|| {
+                MobError::WiringError(
+                    "mob supervisor comms runtime did not expose host-acceptor registration material"
+                        .to_string(),
+                )
+            })?;
+        let material = payload
+            .downcast::<meerkat_comms::HostAcceptorRegistrationMaterial>()
+            .map_err(|_| {
+                MobError::WiringError(
+                    "mob supervisor comms runtime exposed incompatible host-acceptor registration material"
+                        .to_string(),
+                )
+            })?;
+        Ok(super::builder::MemberAcceptorRegistration {
+            pubkey: material.pubkey,
+            keypair: Arc::clone(&material.keypair),
+            inbox_sender: material.inbox_sender.clone(),
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validated_controlling_reply_endpoint(address: &str) -> Result<PeerAddress, MobError> {
+        let endpoint = PeerAddress::parse(address).map_err(|error| {
+            MobError::WiringError(format!(
+                "invalid process host-ingress advertised address '{address}': {error}"
+            ))
+        })?;
+        if endpoint.transport() != PeerTransport::Tcp {
+            return Err(MobError::WiringError(format!(
+                "process host-ingress advertised address must use tcp transport, got '{}'",
+                endpoint.transport()
+            )));
+        }
+        let port = endpoint
+            .endpoint()
+            .rsplit_once(':')
+            .and_then(|(host, port)| (!host.is_empty()).then_some(port))
+            .and_then(|port| port.parse::<u16>().ok());
+        if port.is_none_or(|port| port == 0) {
+            return Err(MobError::WiringError(format!(
+                "process host-ingress advertised address '{endpoint}' has no valid nonzero TCP port"
+            )));
+        }
+        Ok(endpoint)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn uses_controlling_acceptor(&self) -> bool {
+        self.controlling_reply_endpoint
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn uses_controlling_acceptor(&self) -> bool {
+        false
+    }
+
+    async fn build_live_runtime(
+        &self,
+        authority: &SupervisorAuthorityRecord,
+    ) -> Result<
+        (
+            Arc<meerkat_comms::CommsRuntime>,
+            Arc<meerkat_runtime::HandleDslAuthority>,
+        ),
+        MobError,
+    > {
+        Self::build_runtime_with_tcp_listener(
+            &self.participant_name,
+            authority,
+            &self.endpoint_config,
+            !self.uses_controlling_acceptor(),
+        )
+        .await
+    }
+
+    async fn build_probe_runtime(
+        &self,
+        participant_name: &str,
+        authority: &SupervisorAuthorityRecord,
+    ) -> Result<
+        (
+            Arc<meerkat_comms::CommsRuntime>,
+            Arc<meerkat_runtime::HandleDslAuthority>,
+        ),
+        MobError,
+    > {
+        Self::build_runtime_with_tcp_listener(
+            participant_name,
+            authority,
+            &self.endpoint_config,
+            !self.uses_controlling_acceptor(),
+        )
+        .await
+    }
+
+    /// Replace the exact shared-acceptor lease before publishing a replacement
+    /// live runtime. The authority write gate prevents outbound sends during
+    /// this interval; inbound traffic can safely queue on the replacement inbox
+    /// before the infallible runtime/authority swap completes.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn refresh_controlling_acceptor_registration(
+        &self,
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+    ) -> Result<(), MobError> {
+        let registration = Self::acceptor_registration_for_runtime(runtime)?;
+        let mut binding = self.controlling_acceptor.lock().await;
+        let Some(binding) = binding.as_mut() else {
+            return Ok(());
+        };
+        let replacement = binding
+            .config
+            .register(self.participant_name.clone(), registration)
+            .await?;
+        let reply_endpoint =
+            match Self::validated_controlling_reply_endpoint(&replacement.advertised_address) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    let _ = binding.config.remove(&replacement).await;
+                    return Err(error);
+                }
+            };
+        if let Err(error) = binding.config.remove(&binding.lease).await {
+            let _ = binding.config.remove(&replacement).await;
+            return Err(error);
+        }
+        binding.lease = replacement;
+        *self
+            .controlling_reply_endpoint
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reply_endpoint);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn register_temporary_controlling_acceptor_runtime(
+        &self,
+        logical_owner: String,
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+    ) -> Result<Option<TemporarySupervisorControllingAcceptorBinding>, MobError> {
+        let config = self
+            .controlling_acceptor
+            .lock()
+            .await
+            .as_ref()
+            .map(|binding| binding.config.clone());
+        let Some(config) = config else {
+            return Ok(None);
+        };
+        let registration = Self::acceptor_registration_for_runtime(runtime)?;
+        let lease = config.register(logical_owner, registration).await?;
+        let reply_endpoint =
+            match Self::validated_controlling_reply_endpoint(&lease.advertised_address) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    let _ = config.remove(&lease).await;
+                    return Err(error);
+                }
+            };
+        Ok(Some(TemporarySupervisorControllingAcceptorBinding {
+            config,
+            lease,
+            reply_endpoint,
+        }))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn remove_temporary_controlling_acceptor_runtime(
+        binding: TemporarySupervisorControllingAcceptorBinding,
+    ) -> Result<(), MobError> {
+        binding.config.remove(&binding.lease).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -495,10 +791,7 @@ impl MobSupervisorBridge {
         let prebuilt = if Self::has_fixed_supervisor_bind_port(&self.endpoint_config)? {
             None
         } else {
-            Some(
-                Self::build_runtime(&self.participant_name, &authority, &self.endpoint_config)
-                    .await?,
-            )
+            Some(self.build_live_runtime(&authority).await?)
         };
         Ok(PreparedSupervisorBridgeRotation {
             authority,
@@ -540,14 +833,12 @@ impl MobSupervisorBridge {
                         "fault-injected fixed-port supervisor bridge rebuild failure".to_string(),
                     ));
                 }
-                Self::build_runtime(
-                    &self.participant_name,
-                    &prepared.authority,
-                    &self.endpoint_config,
-                )
-                .await?
+                self.build_live_runtime(&prepared.authority).await?
             }
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_controlling_acceptor_registration(&runtime)
+            .await?;
         *self
             .authority
             .write()
@@ -573,6 +864,15 @@ impl MobSupervisorBridge {
         let _authority_guard = self.authority_gate.write().await;
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some(binding) = self.controlling_acceptor.lock().await.take() {
+                *self
+                    .controlling_reply_endpoint
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                if let Err(error) = binding.config.remove(&binding.lease).await {
+                    tracing::warn!(%error, "failed to remove mob supervisor from process host ingress at shutdown");
+                }
+            }
             let runtime = self.runtime_with_gate_held().await;
             runtime.stop_listeners_for_rebind().await;
         }
@@ -593,8 +893,10 @@ impl MobSupervisorBridge {
         if Self::has_fixed_supervisor_bind_port(&self.endpoint_config)? {
             runtime_guard.stop_listeners_for_rebind().await;
         }
-        let (runtime, dsl) =
-            Self::build_runtime(&self.participant_name, &authority, &self.endpoint_config).await?;
+        let (runtime, dsl) = self.build_live_runtime(&authority).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.refresh_controlling_acceptor_registration(&runtime)
+            .await?;
         *self
             .authority
             .write()
@@ -888,6 +1190,15 @@ impl MobSupervisorBridge {
         &self,
         runtime: &meerkat_comms::CommsRuntime,
     ) -> Result<String, MobError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(endpoint) = self
+            .controlling_reply_endpoint
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            return Ok(endpoint.to_string());
+        }
         if let Some(address) = self.endpoint_config.advertised_address.as_deref() {
             let parsed = PeerAddress::parse(address).map_err(|error| {
                 MobError::WiringError(format!(
@@ -1085,8 +1396,9 @@ impl MobSupervisorBridge {
             self.participant_name,
             uuid::Uuid::new_v4()
         );
-        let (runtime, dsl) =
-            Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config).await?;
+        let (runtime, dsl) = self
+            .build_probe_runtime(&probe_participant_name, authority)
+            .await?;
         let _install = Self::apply_bridge_trust(
             &self.trust_reconcile_gate,
             &runtime,
@@ -1094,7 +1406,29 @@ impl MobSupervisorBridge {
             recipient.clone(),
         )
         .await?;
-        Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let temporary = self
+                .register_temporary_controlling_acceptor_runtime(probe_participant_name, &runtime)
+                .await?;
+            let send_result =
+                Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await;
+            let cleanup_result = match temporary {
+                Some(binding) => Self::remove_temporary_controlling_acceptor_runtime(binding).await,
+                None => Ok(()),
+            };
+            match (send_result, cleanup_result) {
+                (result, Ok(())) => result,
+                (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+                (Err(send_error), Err(cleanup_error)) => Err(MobError::Internal(format!(
+                    "alternate-authority supervisor delivery failed: {send_error}; additionally failed to remove its process-ingress lease: {cleanup_error}"
+                ))),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::send_supervisor_delivery_with_runtime(&runtime, recipient, delivery).await
+        }
     }
 
     pub(crate) async fn send_bridge_command_as_authority(
@@ -1165,8 +1499,9 @@ impl MobSupervisorBridge {
             self.participant_name,
             uuid::Uuid::new_v4()
         );
-        let (runtime, dsl) =
-            Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config).await?;
+        let (runtime, dsl) = self
+            .build_probe_runtime(&probe_participant_name, authority)
+            .await?;
         let _install = Self::apply_bridge_trust(
             &self.trust_reconcile_gate,
             &runtime,
@@ -1175,20 +1510,49 @@ impl MobSupervisorBridge {
         )
         .await?;
         #[cfg(not(target_arch = "wasm32"))]
-        let reply_endpoint = Self::ephemeral_probe_reply_endpoint(&runtime, &self.endpoint_config)?;
+        let temporary = self
+            .register_temporary_controlling_acceptor_runtime(probe_participant_name, &runtime)
+            .await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let reply_endpoint = temporary
+            .as_ref()
+            .map(|binding| binding.reply_endpoint.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                Self::ephemeral_probe_reply_endpoint(&runtime, &self.endpoint_config)
+            })?;
         #[cfg(not(target_arch = "wasm32"))]
         let reply_endpoint = SupervisorRequestReplyEndpoint::EphemeralProbe(reply_endpoint);
         #[cfg(target_arch = "wasm32")]
         let reply_endpoint = SupervisorRequestReplyEndpoint::Live;
-        self.request_json_with_runtime(
-            &runtime,
-            recipient,
-            super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT,
-            command,
-            reply_endpoint,
-            timeout,
-        )
-        .await
+        let request_result = self
+            .request_json_with_runtime(
+                &runtime,
+                recipient,
+                super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT,
+                command,
+                reply_endpoint,
+                timeout,
+            )
+            .await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let cleanup_result = match temporary {
+                Some(binding) => Self::remove_temporary_controlling_acceptor_runtime(binding).await,
+                None => Ok(()),
+            };
+            match (request_result, cleanup_result) {
+                (result, Ok(())) => result,
+                (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+                (Err(request_error), Err(cleanup_error)) => Err(MobError::Internal(format!(
+                    "alternate-authority supervisor request failed: {request_error}; additionally failed to remove its process-ingress lease: {cleanup_error}"
+                ))),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            request_result
+        }
     }
 
     /// Alternate-authority request preserving the transport send boundary.
@@ -1266,10 +1630,10 @@ impl MobSupervisorBridge {
             self.participant_name,
             uuid::Uuid::new_v4()
         );
-        let (runtime, dsl) =
-            Self::build_runtime(&probe_participant_name, authority, &self.endpoint_config)
-                .await
-                .map_err(BridgeRequestFailure::BeforeSend)?;
+        let (runtime, dsl) = self
+            .build_probe_runtime(&probe_participant_name, authority)
+            .await
+            .map_err(BridgeRequestFailure::BeforeSend)?;
         Self::apply_bridge_trust(
             &self.trust_reconcile_gate,
             &runtime,
@@ -1279,21 +1643,58 @@ impl MobSupervisorBridge {
         .await
         .map_err(BridgeRequestFailure::BeforeSend)?;
         #[cfg(not(target_arch = "wasm32"))]
-        let reply_endpoint = Self::ephemeral_probe_reply_endpoint(&runtime, &self.endpoint_config)
+        let temporary = self
+            .register_temporary_controlling_acceptor_runtime(probe_participant_name, &runtime)
+            .await
+            .map_err(BridgeRequestFailure::BeforeSend)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let reply_endpoint = temporary
+            .as_ref()
+            .map(|binding| binding.reply_endpoint.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                Self::ephemeral_probe_reply_endpoint(&runtime, &self.endpoint_config)
+            })
             .map_err(BridgeRequestFailure::BeforeSend)?;
         #[cfg(not(target_arch = "wasm32"))]
         let reply_endpoint = SupervisorRequestReplyEndpoint::EphemeralProbe(reply_endpoint);
         #[cfg(target_arch = "wasm32")]
         let reply_endpoint = SupervisorRequestReplyEndpoint::Live;
-        self.request_json_with_runtime_classified(
-            &runtime,
-            recipient,
-            super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT,
-            command,
-            reply_endpoint,
-            timeout,
-        )
-        .await
+        let request_result = self
+            .request_json_with_runtime_classified(
+                &runtime,
+                recipient,
+                super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT,
+                command,
+                reply_endpoint,
+                timeout,
+            )
+            .await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let cleanup_result = match temporary {
+                Some(binding) => Self::remove_temporary_controlling_acceptor_runtime(binding).await,
+                None => Ok(()),
+            };
+            match (request_result, cleanup_result) {
+                (result, Ok(())) => result,
+                (Ok(_), Err(cleanup_error)) => Err(BridgeRequestFailure::AfterSend(cleanup_error)),
+                (Err(BridgeRequestFailure::BeforeSend(request_error)), Err(cleanup_error)) => Err(
+                    BridgeRequestFailure::BeforeSend(MobError::Internal(format!(
+                        "alternate-authority supervisor request failed before send: {request_error}; additionally failed to remove its process-ingress lease: {cleanup_error}"
+                    ))),
+                ),
+                (Err(BridgeRequestFailure::AfterSend(request_error)), Err(cleanup_error)) => Err(
+                    BridgeRequestFailure::AfterSend(MobError::Internal(format!(
+                        "alternate-authority supervisor request failed after send: {request_error}; additionally failed to remove its process-ingress lease: {cleanup_error}"
+                    ))),
+                ),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            request_result
+        }
     }
 
     /// Install recipient trust ahead of a routed bridge send.
@@ -1886,6 +2287,20 @@ mod tests {
     use meerkat_core::handles::PeerInteractionHandle as _;
     use meerkat_core::interaction::{InboxInteraction, InteractionId, ResponseStatus};
 
+    #[cfg(not(target_arch = "wasm32"))]
+    struct NoLocalAcceptorMaterial;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl super::super::builder::LocalMemberAcceptorMaterialSource for NoLocalAcceptorMaterial {
+        async fn registration_for(
+            &self,
+            _session_id: &meerkat_core::types::SessionId,
+        ) -> Option<super::super::builder::MemberAcceptorRegistration> {
+            None
+        }
+    }
+
     fn response_candidate(
         request_envelope_id: uuid::Uuid,
         status: ResponseStatus,
@@ -2082,6 +2497,152 @@ mod tests {
         );
         MobSupervisorBridge::record_request_timed_out(&runtime, request_envelope_id)
             .expect("test request lifecycle should clean up");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn shared_process_ingress_delivers_remote_envelope_to_supervisor_inbox() {
+        let suffix = uuid::Uuid::new_v4();
+        let config = super::super::builder::ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoLocalAcceptorMaterial),
+        );
+        let bridge = MobSupervisorBridge::new_with_controlling_acceptor(
+            &crate::MobId::from(format!("mob/shared-supervisor-ingress-{suffix}")),
+            SupervisorAuthorityRecord::generate(
+                super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            ),
+            None,
+            Some(config),
+        )
+        .await
+        .expect("shared-ingress supervisor bridge should build");
+        let remote_name = format!("remote-host-{suffix}");
+        let remote_authority = SupervisorAuthorityRecord::generate(
+            super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        let (remote_runtime, remote_dsl) = MobSupervisorBridge::build_runtime(
+            &remote_name,
+            &remote_authority,
+            &SupervisorBridgeEndpointConfig::default(),
+        )
+        .await
+        .expect("remote runtime should build");
+        let remote = TrustedPeerDescriptor::unsigned_with_pubkey(
+            remote_name,
+            remote_runtime.public_key().to_peer_id().to_string(),
+            *remote_runtime.public_key().as_bytes(),
+            remote_runtime.advertised_address(),
+        )
+        .expect("remote descriptor should be valid");
+        bridge
+            .trust_recipient(&remote)
+            .await
+            .expect("supervisor should trust remote sender");
+        let supervisor = bridge
+            .supervisor_spec_for_recipient(&remote)
+            .await
+            .expect("remote should receive shared supervisor endpoint");
+        assert_eq!(supervisor.address.transport(), PeerTransport::Tcp);
+        let live_runtime = bridge.runtime().await;
+        assert_eq!(
+            bridge
+                .live_runtime_reply_endpoint(live_runtime.as_ref())
+                .expect("signed callback endpoint"),
+            supervisor.address,
+            "the peer descriptor and signed request callback must name the same shared listener"
+        );
+        MobSupervisorBridge::apply_bridge_trust(
+            &bridge.trust_reconcile_gate,
+            &remote_runtime,
+            &remote_dsl,
+            supervisor.clone(),
+        )
+        .await
+        .expect("remote should trust shared supervisor identity");
+
+        let receipt = remote_runtime
+            .send(CommsCommand::PeerMessage {
+                objective_id: None,
+                to: PeerRoute::with_display_name(supervisor.peer_id, supervisor.name.clone()),
+                body: "shared-ingress-probe".to_string(),
+                blocks: None,
+                content_taint: None,
+                handling_mode: HandlingMode::Queue,
+            })
+            .await
+            .expect("remote envelope should traverse the shared TCP listener");
+        assert!(matches!(receipt, SendReceipt::PeerMessageSent { .. }));
+        let candidates = live_runtime.drain_peer_input_candidates().await;
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            &candidates[0].interaction.content,
+            InteractionContent::Message { body, .. } if body == "shared-ingress-probe"
+        ));
+
+        bridge.shutdown().await;
+        remote_runtime.stop_listeners_for_rebind().await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn alternate_authority_probe_shared_ingress_lease_cleans_exactly() {
+        let suffix = uuid::Uuid::new_v4();
+        let config = super::super::builder::ControllingAcceptorConfig::new(
+            "127.0.0.1:0".parse().expect("loopback address"),
+            None,
+            Arc::new(NoLocalAcceptorMaterial),
+        );
+        let bridge = MobSupervisorBridge::new_with_controlling_acceptor(
+            &crate::MobId::from(format!("mob/shared-probe-cleanup-{suffix}")),
+            SupervisorAuthorityRecord::generate(
+                super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            ),
+            None,
+            Some(config.clone()),
+        )
+        .await
+        .expect("shared-ingress supervisor bridge should build");
+        assert_eq!(config.registration_count_for_test().await, 1);
+
+        let alternate = SupervisorAuthorityRecord::generate(
+            super::super::bridge_protocol::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        );
+        let probe_name = format!(
+            "{}/pending-supervisor-probe/{suffix}",
+            bridge.participant_name
+        );
+        let (probe_runtime, _probe_dsl) = bridge
+            .build_probe_runtime(&probe_name, &alternate)
+            .await
+            .expect("listenerless alternate-authority probe");
+        assert!(probe_runtime.bound_tcp_listener_address().is_none());
+        let temporary = bridge
+            .register_temporary_controlling_acceptor_runtime(probe_name, &probe_runtime)
+            .await
+            .expect("temporary probe registration")
+            .expect("shared mode must mint a temporary lease");
+        assert_eq!(config.registration_count_for_test().await, 2);
+
+        MobSupervisorBridge::remove_temporary_controlling_acceptor_runtime(temporary)
+            .await
+            .expect("temporary probe lease cleanup");
+        assert_eq!(
+            config.registration_count_for_test().await,
+            1,
+            "temporary cleanup must preserve the durable live supervisor lease"
+        );
+        let live = bridge
+            .routable_supervisor_spec()
+            .await
+            .expect("live supervisor remains routable");
+        tokio::net::TcpStream::connect(live.address.endpoint())
+            .await
+            .expect("live shared endpoint remains reachable after probe cleanup");
+
+        bridge.shutdown().await;
+        assert_eq!(config.registration_count_for_test().await, 0);
     }
 
     #[tokio::test]

@@ -1484,6 +1484,29 @@ async fn placed_stop_drains_inflight_open_then_closes_on_the_owning_host() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn shutdown_does_not_probe_an_offline_placed_member_without_a_live_channel() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let gateway = Arc::new(LifecycleBarrierMemberLiveHost::default());
+    let (fixture, controlling, _host_id) =
+        placed_lifecycle_live_fixture("xhl-placed-shutdown-offline", Arc::clone(&gateway)).await;
+
+    // Process shutdown is not the public Stop lifecycle. Once the placed
+    // member's owning host is offline, the controlling process has no local
+    // live-channel custody and must not issue an unnamed status probe merely
+    // because the member remains in the durable roster.
+    fixture.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(2), controlling.handle.shutdown())
+        .await
+        .expect("controller shutdown must not wait on an offline placed member")
+        .expect("controller shutdown must not probe an offline placed member");
+
+    assert!(
+        gateway.calls().is_empty(),
+        "no live channel was opened, so shutdown has no exact live custody to close"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dropped_local_open_caller_is_exactly_cleaned_by_actor_custody() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
     let gateway = Arc::new(LifecycleBarrierMemberLiveHost::default());

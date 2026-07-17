@@ -17786,7 +17786,9 @@ impl MobActor {
                         continue;
                     }
                     if let Err(error) = self
-                        .close_all_member_live_channels_for_lifecycle("shutdown mob runtime")
+                        .close_controller_local_member_live_channels_for_shutdown(
+                            "shutdown mob runtime",
+                        )
                         .await
                     {
                         let _ = reply_tx.send(Err(error));
@@ -25184,6 +25186,39 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster
                 .list_all()
+                .map(|entry| entry.agent_identity.clone())
+                .collect::<Vec<_>>()
+        };
+        self.close_member_live_channels_for_lifecycle(identities, context)
+            .await
+    }
+
+    fn member_live_ref_is_controller_local(member_ref: &MemberRef) -> bool {
+        matches!(member_ref, MemberRef::Session { .. })
+    }
+
+    /// Close only live channels owned by this controlling process during actor
+    /// shutdown.
+    ///
+    /// Placed live channels are owned by their member hosts, and MobMachine
+    /// deliberately carries no controlling-side channel map. An unnamed status
+    /// probe for every placed roster member would therefore turn ordinary
+    /// process shutdown into a remote liveness gate. Exact channels retained by
+    /// an admitted Open cleanup remain covered by
+    /// `drain_member_live_mutations_for_lifecycle` before this method runs; all
+    /// other placed channel state remains with its owning host across a
+    /// controlling-process restart. `BackendPeer` is likewise never local
+    /// session ownership, even when legacy replay projects a stale bridge
+    /// session ID onto it.
+    async fn close_controller_local_member_live_channels_for_shutdown(
+        &self,
+        context: &'static str,
+    ) -> Result<(), MobError> {
+        let identities = {
+            let roster = self.roster.read().await;
+            roster
+                .list_all()
+                .filter(|entry| Self::member_live_ref_is_controller_local(&entry.member_ref))
                 .map(|entry| entry.agent_identity.clone())
                 .collect::<Vec<_>>()
         };
@@ -44766,6 +44801,8 @@ mod member_live_cleanup_tests {
     use super::super::bridge_protocol::BridgeRejectionCause;
     use super::MobActor;
     use crate::MobError;
+    use crate::event::MemberRef;
+    use meerkat_core::types::SessionId;
 
     fn rejection(cause: BridgeRejectionCause, reason: &str) -> MobError {
         MobError::BridgeCommandRejected {
@@ -44804,6 +44841,27 @@ mod member_live_cleanup_tests {
         ] {
             assert!(!MobActor::member_live_cleanup_proves_absent(&error));
             assert!(!MobActor::member_live_status_proves_absent(&error));
+        }
+    }
+
+    #[test]
+    fn shutdown_live_cleanup_selects_only_controller_owned_session_members() {
+        assert!(MobActor::member_live_ref_is_controller_local(
+            &MemberRef::Session {
+                session_id: SessionId::new(),
+            }
+        ));
+
+        for session_id in [None, Some(SessionId::new())] {
+            assert!(!MobActor::member_live_ref_is_controller_local(
+                &MemberRef::BackendPeer {
+                    peer_id: "external-peer".to_string(),
+                    address: "tcp://127.0.0.1:1".to_string(),
+                    pubkey: [0; 32],
+                    bootstrap_token: None,
+                    session_id,
+                }
+            ));
         }
     }
 }

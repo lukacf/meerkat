@@ -248,7 +248,171 @@ struct PublishedPeerTeardown {
     channel_id: LiveChannelId,
     peer: Weak<RTCPeerConnection>,
     peer_tasks: Weak<WebrtcPeerTaskControl>,
+}
+
+type PublishedPeerCloseFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), LiveWebrtcError>> + Send + 'static>,
+>;
+type PublishedPeerCloseOperation =
+    Box<dyn FnOnce(Arc<RTCPeerConnection>) -> PublishedPeerCloseFuture + Send + 'static>;
+
+#[derive(Clone, Debug)]
+struct PublishedPeerCleanupOutcome {
+    removed_current: bool,
+    error_detail: Option<Arc<str>>,
+}
+
+impl PublishedPeerCleanupOutcome {
+    fn into_result(self) -> Result<bool, LiveWebrtcError> {
+        match self.error_detail {
+            Some(detail) => Err(LiveWebrtcError::PeerClose {
+                detail: detail.to_string(),
+            }),
+            None => Ok(self.removed_current),
+        }
+    }
+}
+
+struct PublishedPeerCleanupContext {
+    channel_id: LiveChannelId,
+    answer_observation_sequence: u64,
+    peer: Weak<RTCPeerConnection>,
+    peer_registry: WeakLiveWebrtcPeerRegistry,
+    pending_answers: WeakLiveWebrtcPendingAnswerRegistry,
+    published_peer_lifecycle: Weak<PublishedPeerLifecycleOwner>,
     runtime: tokio::runtime::Handle,
+}
+
+/// The one physical-close owner for an answer-published peer.
+///
+/// Callers only subscribe to the result. The first request moves the one-shot
+/// rust-webrtc close into a runtime-owned task, so cancelling a checked close
+/// can never cancel the physical effect after the cleanup claim is sticky.
+/// Every later request joins the same outcome instead of racing a second
+/// `RTCPeerConnection::close` call.
+struct PublishedPeerCleanupCoordinator {
+    context: PublishedPeerCleanupContext,
+    started: AtomicBool,
+    outcome_tx: watch::Sender<Option<PublishedPeerCleanupOutcome>>,
+}
+
+impl PublishedPeerCleanupCoordinator {
+    fn new(context: PublishedPeerCleanupContext) -> Arc<Self> {
+        let (outcome_tx, _outcome_rx) = watch::channel(None);
+        Arc::new(Self {
+            context,
+            started: AtomicBool::new(false),
+            outcome_tx,
+        })
+    }
+
+    fn start(self: &Arc<Self>) -> watch::Receiver<Option<PublishedPeerCleanupOutcome>> {
+        self.start_with(Box::new(|peer| {
+            Box::pin(async move {
+                peer.close()
+                    .await
+                    .map_err(|error| LiveWebrtcError::PeerClose {
+                        detail: error.to_string(),
+                    })
+            })
+        }))
+    }
+
+    fn start_with(
+        self: &Arc<Self>,
+        close: PublishedPeerCloseOperation,
+    ) -> watch::Receiver<Option<PublishedPeerCleanupOutcome>> {
+        let outcome_rx = self.outcome_tx.subscribe();
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return outcome_rx;
+        }
+
+        let coordinator = Arc::clone(self);
+        // Capture physical custody before yielding to the runtime. In
+        // particular, `LiveWebrtcState::drop` starts this coordinator and then
+        // immediately releases the registry roots; upgrading inside the task
+        // would race those drops and could skip the required peer close.
+        let peer = self.context.peer.upgrade();
+        let runtime = self.context.runtime.clone();
+        runtime.spawn(async move {
+            let outcome = coordinator.run(close, peer).await;
+            if let Some(detail) = &outcome.error_detail {
+                tracing::warn!(
+                    channel = %coordinator.context.channel_id,
+                    answer_observation_sequence = coordinator.context.answer_observation_sequence,
+                    error = %detail,
+                    "owned WebRTC peer cleanup did not complete cleanly"
+                );
+            }
+            coordinator.outcome_tx.send_replace(Some(outcome));
+        });
+        outcome_rx
+    }
+
+    async fn run(
+        &self,
+        close: PublishedPeerCloseOperation,
+        peer: Option<Arc<RTCPeerConnection>>,
+    ) -> PublishedPeerCleanupOutcome {
+        let Some(peer) = peer else {
+            if let Some(owner) = self.context.published_peer_lifecycle.upgrade() {
+                owner.remove_dead(self.context.answer_observation_sequence);
+            }
+            return PublishedPeerCleanupOutcome {
+                removed_current: false,
+                error_detail: None,
+            };
+        };
+
+        let close_result = close(Arc::clone(&peer)).await;
+        let reached_closed = peer.connection_state() == RTCPeerConnectionState::Closed;
+        let removed_current = if reached_closed {
+            retire_closed_peer_custody_from_registries(
+                &self.context.peer_registry,
+                &self.context.pending_answers,
+                &self.context.published_peer_lifecycle,
+                &self.context.channel_id,
+                self.context.answer_observation_sequence,
+                peer.as_ref(),
+            )
+            .await
+        } else {
+            false
+        };
+        let error_detail = match close_result {
+            Err(error) => Some(Arc::<str>::from(error.to_string())),
+            Ok(()) if !reached_closed => Some(Arc::<str>::from(
+                "peer close returned success without reaching closed state",
+            )),
+            Ok(()) => None,
+        };
+        PublishedPeerCleanupOutcome {
+            removed_current,
+            error_detail,
+        }
+    }
+
+    async fn wait_for_outcome(
+        mut outcome_rx: watch::Receiver<Option<PublishedPeerCleanupOutcome>>,
+    ) -> PublishedPeerCleanupOutcome {
+        loop {
+            if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
+                return outcome;
+            }
+            if outcome_rx.changed().await.is_err() {
+                return PublishedPeerCleanupOutcome {
+                    removed_current: false,
+                    error_detail: Some(Arc::<str>::from(
+                        "owned WebRTC peer cleanup ended without an outcome",
+                    )),
+                };
+            }
+        }
+    }
 }
 
 /// The synchronous owner for every task set and physical peer that crossed
@@ -281,7 +445,6 @@ impl PublishedPeerLifecycleOwner {
                     channel_id,
                     peer: Arc::downgrade(peer),
                     peer_tasks: Arc::downgrade(peer_tasks),
-                    runtime: tokio::runtime::Handle::current(),
                 },
             );
     }
@@ -305,6 +468,20 @@ impl PublishedPeerLifecycleOwner {
         remove
     }
 
+    fn remove_dead(&self, answer_observation_sequence: u64) -> bool {
+        let mut peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = peers
+            .get(&answer_observation_sequence)
+            .is_some_and(|entry| entry.peer.upgrade().is_none());
+        if remove {
+            peers.remove(&answer_observation_sequence);
+        }
+        remove
+    }
+
     fn shutdown_all(&self) {
         let peers = std::mem::take(
             &mut *self
@@ -313,30 +490,22 @@ impl PublishedPeerLifecycleOwner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         for (answer_observation_sequence, teardown) in peers {
-            let owns_cleanup = teardown.peer_tasks.upgrade().is_none_or(|peer_tasks| {
-                let owns_cleanup = peer_tasks.claim_cleanup();
-                peer_tasks.shutdown();
-                owns_cleanup
-            });
-            // Another exact cleanup owner may already be closing this peer.
-            // Signal its tasks above, but preserve rust-webrtc's one-shot
-            // physical-close contract instead of racing it with a second call.
-            if !owns_cleanup {
-                continue;
-            }
-            let Some(peer) = teardown.peer.upgrade() else {
+            let Some(peer_tasks) = teardown.peer_tasks.upgrade() else {
+                tracing::warn!(
+                    channel = %teardown.channel_id,
+                    answer_observation_sequence,
+                    "published WebRTC cleanup coordinator disappeared before owner teardown"
+                );
                 continue;
             };
-            teardown.runtime.spawn(async move {
-                if let Err(error) = peer.close().await {
-                    tracing::warn!(
-                        channel = %teardown.channel_id,
-                        answer_observation_sequence,
-                        error = %error,
-                        "failed to close WebRTC peer during owner teardown"
-                    );
-                }
-            });
+            peer_tasks.shutdown();
+            if peer_tasks.start_published_cleanup().is_none() {
+                tracing::warn!(
+                    channel = %teardown.channel_id,
+                    answer_observation_sequence,
+                    "published WebRTC peer had no installed cleanup coordinator"
+                );
+            }
         }
     }
 
@@ -425,8 +594,9 @@ impl LiveWebrtcConstructionRegistry {
 
 struct WebrtcPeerTaskControl {
     shutdown_tx: watch::Sender<bool>,
-    cleanup_started: AtomicBool,
+    terminal_cleanup_started: AtomicBool,
     answer_observation_sequence: AtomicU64,
+    published_cleanup: StdMutex<Option<Arc<PublishedPeerCleanupCoordinator>>>,
 }
 
 impl WebrtcPeerTaskControl {
@@ -434,8 +604,9 @@ impl WebrtcPeerTaskControl {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         Self {
             shutdown_tx,
-            cleanup_started: AtomicBool::new(false),
+            terminal_cleanup_started: AtomicBool::new(false),
             answer_observation_sequence: AtomicU64::new(0),
+            published_cleanup: StdMutex::new(None),
         }
     }
 
@@ -457,10 +628,60 @@ impl WebrtcPeerTaskControl {
         (sequence != 0).then_some(sequence)
     }
 
-    fn claim_cleanup(&self) -> bool {
-        self.cleanup_started
+    fn claim_terminal_cleanup(&self) -> bool {
+        self.terminal_cleanup_started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    fn install_published_cleanup(
+        &self,
+        context: PublishedPeerCleanupContext,
+    ) -> Arc<PublishedPeerCleanupCoordinator> {
+        let mut cleanup = self
+            .published_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cleanup) = cleanup.as_ref() {
+            debug_assert_eq!(
+                cleanup.context.answer_observation_sequence,
+                context.answer_observation_sequence
+            );
+            return Arc::clone(cleanup);
+        }
+        let coordinator = PublishedPeerCleanupCoordinator::new(context);
+        *cleanup = Some(Arc::clone(&coordinator));
+        coordinator
+    }
+
+    fn start_published_cleanup(
+        &self,
+    ) -> Option<watch::Receiver<Option<PublishedPeerCleanupOutcome>>> {
+        // A coordinator-started close must not be reclassified as a fresh
+        // remote disconnect when rust-webrtc reports its own Closed state.
+        // Remote/error paths claim this bit before their owned semantic-close
+        // task; checked/rejected/owner paths claim it here to suppress that
+        // callback while preserving their existing authority ordering.
+        let _ = self.claim_terminal_cleanup();
+        self.shutdown();
+        self.published_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(PublishedPeerCleanupCoordinator::start)
+    }
+
+    fn start_published_cleanup_with(
+        &self,
+        close: PublishedPeerCloseOperation,
+    ) -> Option<watch::Receiver<Option<PublishedPeerCleanupOutcome>>> {
+        let _ = self.claim_terminal_cleanup();
+        self.shutdown();
+        self.published_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|coordinator| coordinator.start_with(close))
     }
 }
 
@@ -961,6 +1182,12 @@ impl LiveWebrtcState {
         // both destination locks held. Cancellation can observe either the
         // construction owner or both published owners, never neither.
         peer_tasks.publish(answer_observation_sequence);
+        self.install_published_peer_cleanup(
+            &channel_id,
+            answer_observation_sequence,
+            &peer,
+            &peer_tasks,
+        );
         construction.disarm_after_publication();
         drop(pending_answers);
         drop(peers);
@@ -1047,8 +1274,8 @@ impl LiveWebrtcState {
         close: C,
     ) -> Result<(), LiveWebrtcError>
     where
-        C: FnOnce(Arc<RTCPeerConnection>) -> F,
-        F: std::future::Future<Output = Result<(), LiveWebrtcError>>,
+        C: FnOnce(Arc<RTCPeerConnection>) -> F + Send + 'static,
+        F: std::future::Future<Output = Result<(), LiveWebrtcError>> + Send + 'static,
     {
         let exact_peer = {
             let pending_answers = self.pending_answers.lock().await;
@@ -1061,40 +1288,40 @@ impl LiveWebrtcState {
             return Ok(());
         };
 
-        let _ = peer_tasks.claim_cleanup();
-        peer_tasks.shutdown();
-        let close_result = close(Arc::clone(&exact_peer)).await;
-        if exact_peer.connection_state() != RTCPeerConnectionState::Closed {
-            return close_result.and_then(|()| {
-                Err(LiveWebrtcError::PeerClose {
-                    detail: "peer close returned success without reaching closed state".to_string(),
-                })
-            });
-        }
-
-        self.retire_closed_peer_custody(channel_id, answer_observation_sequence, &exact_peer)
-            .await;
-        close_result
+        self.install_published_peer_cleanup(
+            channel_id,
+            answer_observation_sequence,
+            &exact_peer,
+            &peer_tasks,
+        );
+        let outcome_rx = peer_tasks
+            .start_published_cleanup_with(Box::new(move |peer| Box::pin(close(peer))))
+            .expect("published cleanup was installed before start");
+        PublishedPeerCleanupCoordinator::wait_for_outcome(outcome_rx)
+            .await
+            .into_result()
+            .map(|_| ())
     }
 
-    /// Remove only the registry/pending entries proven to refer to this exact
-    /// logically closed peer. The sequence and Arc identity jointly fence a
-    /// concurrent replacement.
-    async fn retire_closed_peer_custody(
+    /// Install or recover the one cleanup coordinator for an exact published
+    /// peer. Tests that build registry fixtures by hand route through this
+    /// same seam; production installs it atomically during publication.
+    fn install_published_peer_cleanup(
         &self,
         channel_id: &LiveChannelId,
         answer_observation_sequence: u64,
-        exact_peer: &Arc<RTCPeerConnection>,
-    ) -> bool {
-        retire_closed_peer_custody_from_registries(
-            &Arc::downgrade(&self.peers),
-            &Arc::downgrade(&self.pending_answers),
-            &Arc::downgrade(&self.published_peer_lifecycle),
-            channel_id,
+        peer: &Arc<RTCPeerConnection>,
+        peer_tasks: &Arc<WebrtcPeerTaskControl>,
+    ) -> Arc<PublishedPeerCleanupCoordinator> {
+        peer_tasks.install_published_cleanup(PublishedPeerCleanupContext {
+            channel_id: channel_id.clone(),
             answer_observation_sequence,
-            exact_peer.as_ref(),
-        )
-        .await
+            peer: Arc::downgrade(peer),
+            peer_registry: Arc::downgrade(&self.peers),
+            pending_answers: Arc::downgrade(&self.pending_answers),
+            published_peer_lifecycle: Arc::downgrade(&self.published_peer_lifecycle),
+            runtime: tokio::runtime::Handle::current(),
+        })
     }
 
     /// Invoke the transport's one-shot close and retire only an exact peer that
@@ -1103,6 +1330,15 @@ impl LiveWebrtcState {
     pub async fn close_peer_checked(
         &self,
         channel_id: &LiveChannelId,
+    ) -> Result<(), LiveWebrtcError> {
+        self.close_peer_checked_with_operation(channel_id, None)
+            .await
+    }
+
+    async fn close_peer_checked_with_operation(
+        &self,
+        channel_id: &LiveChannelId,
+        mut close: Option<PublishedPeerCloseOperation>,
     ) -> Result<(), LiveWebrtcError> {
         loop {
             let peer = self.peers.lock().await.get(channel_id).map(|entry| {
@@ -1115,26 +1351,20 @@ impl LiveWebrtcState {
             let Some((peer, answer_observation_sequence, peer_tasks)) = peer else {
                 return Ok(());
             };
-            let _ = peer_tasks.claim_cleanup();
-            peer_tasks.shutdown();
-            let close_result = peer
-                .close()
-                .await
-                .map_err(|error| LiveWebrtcError::PeerClose {
-                    detail: error.to_string(),
-                });
-            if peer.connection_state() != RTCPeerConnectionState::Closed {
-                return close_result.and_then(|()| {
-                    Err(LiveWebrtcError::PeerClose {
-                        detail: "peer close returned success without reaching closed state"
-                            .to_string(),
-                    })
-                });
+            self.install_published_peer_cleanup(
+                channel_id,
+                answer_observation_sequence,
+                &peer,
+                &peer_tasks,
+            );
+            let outcome_rx = match close.take() {
+                Some(close) => peer_tasks.start_published_cleanup_with(close),
+                None => peer_tasks.start_published_cleanup(),
             }
-            let removed_current = self
-                .retire_closed_peer_custody(channel_id, answer_observation_sequence, &peer)
-                .await;
-            close_result?;
+            .expect("published cleanup was installed before start");
+            let removed_current = PublishedPeerCleanupCoordinator::wait_for_outcome(outcome_rx)
+                .await
+                .into_result()?;
             if removed_current {
                 return Ok(());
             }
@@ -1252,10 +1482,11 @@ fn spawn_peer_disconnect_cleanup(context: PeerDisconnectContext) {
     // A zero sequence is pre-publication construction custody. Its Drop owner
     // performs physical cleanup without generating a semantic channel close.
     if context.peer_tasks.answer_observation_sequence().is_none()
-        || !context.peer_tasks.claim_cleanup()
+        || !context.peer_tasks.claim_terminal_cleanup()
     {
         return;
     }
+    context.peer_tasks.shutdown();
     tokio::spawn(async move {
         cleanup_peer_after_disconnect(context).await;
     });
@@ -1293,26 +1524,40 @@ async fn cleanup_peer_after_disconnect(context: PeerDisconnectContext) {
         .await;
     }
 
-    let close_result = peer.close().await;
-    if peer.connection_state() == RTCPeerConnectionState::Closed {
-        retire_closed_peer_custody_from_registries(
-            &context.peer_registry,
-            &context.pending_answers,
-            &context.published_peer_lifecycle,
-            &context.channel_id,
-            answer_observation_sequence,
-            &peer,
-        )
-        .await;
+    install_cleanup_from_disconnect_context(&context, &peer, answer_observation_sequence);
+    if let Some(outcome_rx) = context.peer_tasks.start_published_cleanup() {
+        let _ = PublishedPeerCleanupCoordinator::wait_for_outcome(outcome_rx).await;
     }
-    if let Err(error) = close_result {
-        tracing::warn!(
-            channel = %context.channel_id,
+}
+
+fn install_cleanup_from_disconnect_context(
+    context: &PeerDisconnectContext,
+    peer: &Arc<RTCPeerConnection>,
+    answer_observation_sequence: u64,
+) -> Arc<PublishedPeerCleanupCoordinator> {
+    context
+        .peer_tasks
+        .install_published_cleanup(PublishedPeerCleanupContext {
+            channel_id: context.channel_id.clone(),
             answer_observation_sequence,
-            error = %error,
-            "WebRTC disconnect cleanup failed to close the exact peer"
-        );
-    }
+            peer: Arc::downgrade(peer),
+            peer_registry: context.peer_registry.clone(),
+            pending_answers: context.pending_answers.clone(),
+            published_peer_lifecycle: context.published_peer_lifecycle.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        })
+}
+
+fn start_physical_cleanup(context: &PeerDisconnectContext) {
+    context.peer_tasks.shutdown();
+    let Some(answer_observation_sequence) = context.peer_tasks.answer_observation_sequence() else {
+        return;
+    };
+    let Some(peer) = context.peer.upgrade() else {
+        return;
+    };
+    install_cleanup_from_disconnect_context(context, &peer, answer_observation_sequence);
+    let _ = context.peer_tasks.start_published_cleanup();
 }
 
 fn install_data_channel_handler(context: DataChannelPumpContext) {
@@ -1454,12 +1699,11 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
                                     reject_failed_input_handoff(
                                         &cleanup_context,
                                         &data_channel,
-                                    )
-                                    .await;
+                                    );
                                 }
                             }
                             None => {
-                                reject_invalid_live_frame(&cleanup_context, &data_channel).await;
+                                reject_invalid_live_frame(&cleanup_context, &data_channel);
                             }
                         }
                     }
@@ -1572,7 +1816,7 @@ fn install_incoming_audio_handler(
                                 error = %err,
                                 "failed to lower WebRTC barge-in into the interrupt seam; closing before discarding output audio"
                             );
-                            reject_failed_audio_input_handoff(&cleanup_context).await;
+                            reject_failed_audio_input_handoff(&cleanup_context);
                             break;
                         }
                     };
@@ -1609,7 +1853,7 @@ fn install_incoming_audio_handler(
                         error = %err,
                         "WebRTC audio send_input failed; closing"
                     );
-                    reject_failed_audio_input_handoff(&cleanup_context).await;
+                    reject_failed_audio_input_handoff(&cleanup_context);
                     break;
                 }
             }
@@ -1647,30 +1891,21 @@ async fn pump_observations_to_data_channel(
         #[cfg(test)]
             construction_test_state: _,
     } = context;
+    let cleanup_context = PeerDisconnectContext {
+        host: Arc::clone(&host),
+        channel_id: channel_id.clone(),
+        peer: peer.clone(),
+        peer_registry: peer_registry.clone(),
+        pending_answers: pending_answers.clone(),
+        published_peer_lifecycle: published_peer_lifecycle.clone(),
+        close_feedback: Arc::clone(&close_feedback),
+        peer_tasks: Arc::clone(&peer_tasks),
+    };
     let mut bridge = match WebrtcAudioBridge::new() {
         Ok(bridge) => bridge,
         Err(err) => {
             tracing::warn!(channel = %channel_id, error = %err, "failed to initialize WebRTC output audio bridge");
-            let _ = peer_tasks.claim_cleanup();
-            peer_tasks.shutdown();
-            close_channel_with_generated_feedback(
-                host.as_ref(),
-                close_feedback.as_ref(),
-                &channel_id,
-            )
-            .await;
-            if let Some(peer) = peer.upgrade() {
-                close_and_deregister_peer(
-                    &peer_registry,
-                    &pending_answers,
-                    &published_peer_lifecycle,
-                    &channel_id,
-                    &data_channel,
-                    peer.as_ref(),
-                    &peer_tasks,
-                )
-                .await;
-            }
+            spawn_peer_disconnect_cleanup(cleanup_context);
             return;
         }
     };
@@ -1787,18 +2022,7 @@ async fn pump_observations_to_data_channel(
                         )
                         .await
                     {
-                        if let Some(peer) = peer.upgrade() {
-                            close_and_deregister_peer(
-                                &peer_registry,
-                                &pending_answers,
-                                &published_peer_lifecycle,
-                                &channel_id,
-                                &data_channel,
-                                peer.as_ref(),
-                                &peer_tasks,
-                            )
-                            .await;
-                        }
+                        start_physical_cleanup(&cleanup_context);
                         return;
                     }
                 }
@@ -1846,23 +2070,10 @@ async fn pump_observations_to_data_channel(
         }
     }
 
-    let _ = peer_tasks.claim_cleanup();
-    peer_tasks.shutdown();
-    if !close_feedback_recorded {
-        close_channel_with_generated_feedback(host.as_ref(), close_feedback.as_ref(), &channel_id)
-            .await;
-    }
-    if let Some(peer) = peer.upgrade() {
-        close_and_deregister_peer(
-            &peer_registry,
-            &pending_answers,
-            &published_peer_lifecycle,
-            &channel_id,
-            &data_channel,
-            peer.as_ref(),
-            &peer_tasks,
-        )
-        .await;
+    if close_feedback_recorded {
+        start_physical_cleanup(&cleanup_context);
+    } else {
+        spawn_peer_disconnect_cleanup(cleanup_context);
     }
 }
 
@@ -2064,62 +2275,6 @@ async fn retire_closed_peer_custody_from_registries(
     removed_current
 }
 
-async fn close_and_deregister_peer(
-    peer_registry: &WeakLiveWebrtcPeerRegistry,
-    pending_answers: &WeakLiveWebrtcPendingAnswerRegistry,
-    published_peer_lifecycle: &Weak<PublishedPeerLifecycleOwner>,
-    channel_id: &LiveChannelId,
-    data_channel: &RTCDataChannel,
-    peer: &RTCPeerConnection,
-    peer_tasks: &WebrtcPeerTaskControl,
-) {
-    let _ = peer_tasks.claim_cleanup();
-    peer_tasks.shutdown();
-    let _ = data_channel.close().await;
-    close_registered_peer(
-        peer_registry,
-        pending_answers,
-        published_peer_lifecycle,
-        channel_id,
-        peer,
-        peer_tasks,
-    )
-    .await;
-}
-
-async fn close_registered_peer(
-    peer_registry: &WeakLiveWebrtcPeerRegistry,
-    pending_answers: &WeakLiveWebrtcPendingAnswerRegistry,
-    published_peer_lifecycle: &Weak<PublishedPeerLifecycleOwner>,
-    channel_id: &LiveChannelId,
-    peer: &RTCPeerConnection,
-    peer_tasks: &WebrtcPeerTaskControl,
-) {
-    let _ = peer_tasks.claim_cleanup();
-    peer_tasks.shutdown();
-    let close_result = peer.close().await;
-    if peer.connection_state() == RTCPeerConnectionState::Closed
-        && let Some(answer_observation_sequence) = peer_tasks.answer_observation_sequence()
-    {
-        retire_closed_peer_custody_from_registries(
-            peer_registry,
-            pending_answers,
-            published_peer_lifecycle,
-            channel_id,
-            answer_observation_sequence,
-            peer,
-        )
-        .await;
-    }
-    if let Err(error) = close_result {
-        tracing::warn!(
-            channel = %channel_id,
-            error = %error,
-            "failed to close exact registered WebRTC peer"
-        );
-    }
-}
-
 fn webrtc_host_error_frame_json(err: &LiveAdapterHostError) -> String {
     serde_json::to_string(&WebrtcErrorFrame {
         error: err.to_string(),
@@ -2151,69 +2306,32 @@ async fn send_webrtc_input_error_frame(data_channel: &RTCDataChannel, err: &Live
 /// routes the WebRTC reject through the same generated close authority and then
 /// tears down the peer/data-channel so the outcome matches WS: invalid frame =>
 /// generated close.
-async fn reject_invalid_live_frame(
+fn reject_invalid_live_frame(
     cleanup_context: &PeerDisconnectContext,
     data_channel: &RTCDataChannel,
 ) {
-    reject_failed_data_channel(cleanup_context, data_channel).await;
+    reject_failed_data_channel(cleanup_context, data_channel);
 }
 
 /// Terminalize a live channel after a parsed WebRTC input cannot be handed to
 /// the live host. This mirrors the malformed-frame path with one extra client
 /// error frame when the data channel is available.
-async fn reject_failed_input_handoff(
+fn reject_failed_input_handoff(
     cleanup_context: &PeerDisconnectContext,
     data_channel: &RTCDataChannel,
 ) {
-    reject_failed_data_channel(cleanup_context, data_channel).await;
+    reject_failed_data_channel(cleanup_context, data_channel);
 }
 
-async fn reject_failed_data_channel(
+fn reject_failed_data_channel(
     cleanup_context: &PeerDisconnectContext,
-    data_channel: &RTCDataChannel,
+    _data_channel: &RTCDataChannel,
 ) {
-    let _ = cleanup_context.peer_tasks.claim_cleanup();
-    cleanup_context.peer_tasks.shutdown();
-    let _ = close_channel_with_generated_feedback(
-        cleanup_context.host.as_ref(),
-        cleanup_context.close_feedback.as_ref(),
-        &cleanup_context.channel_id,
-    )
-    .await;
-    if let Some(peer) = cleanup_context.peer.upgrade() {
-        close_and_deregister_peer(
-            &cleanup_context.peer_registry,
-            &cleanup_context.pending_answers,
-            &cleanup_context.published_peer_lifecycle,
-            &cleanup_context.channel_id,
-            data_channel,
-            peer.as_ref(),
-            &cleanup_context.peer_tasks,
-        )
-        .await;
-    }
+    spawn_peer_disconnect_cleanup(cleanup_context.clone());
 }
 
-async fn reject_failed_audio_input_handoff(cleanup_context: &PeerDisconnectContext) {
-    let _ = cleanup_context.peer_tasks.claim_cleanup();
-    cleanup_context.peer_tasks.shutdown();
-    let _ = close_channel_with_generated_feedback(
-        cleanup_context.host.as_ref(),
-        cleanup_context.close_feedback.as_ref(),
-        &cleanup_context.channel_id,
-    )
-    .await;
-    if let Some(peer) = cleanup_context.peer.upgrade() {
-        close_registered_peer(
-            &cleanup_context.peer_registry,
-            &cleanup_context.pending_answers,
-            &cleanup_context.published_peer_lifecycle,
-            &cleanup_context.channel_id,
-            peer.as_ref(),
-            &cleanup_context.peer_tasks,
-        )
-        .await;
-    }
+fn reject_failed_audio_input_handoff(cleanup_context: &PeerDisconnectContext) {
+    spawn_peer_disconnect_cleanup(cleanup_context.clone());
 }
 
 fn spawn_outgoing_audio_track_pump(
@@ -3274,7 +3392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_answer_cleanup_retains_custody_until_peer_is_closed() {
+    async fn rejected_answer_cleanup_retains_custody_without_racing_one_shot_retry() {
         ensure_test_crypto_provider();
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(host);
@@ -3301,8 +3419,11 @@ mod tests {
             },
         );
 
+        let close_attempts = Arc::new(AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&close_attempts);
         state
-            .close_rejected_answer_peer_with(&channel_id, sequence, |_peer| async {
+            .close_rejected_answer_peer_with(&channel_id, sequence, move |_peer| async move {
+                observed_attempts.fetch_add(1, Ordering::SeqCst);
                 Err(LiveWebrtcError::PeerClose {
                     detail: "injected failure before closed state".to_string(),
                 })
@@ -3312,12 +3433,23 @@ mod tests {
 
         assert_eq!(state.peer_count().await, 1);
         assert_eq!(state.pending_answer_count().await, 1);
-        state
+        let repeated_error = state
             .close_rejected_answer_peer(&channel_id, sequence)
             .await
-            .unwrap();
-        assert_eq!(state.peer_count().await, 0);
-        assert_eq!(state.pending_answer_count().await, 0);
+            .expect_err("a consumed one-shot close must return its recorded failure");
+        assert!(repeated_error.to_string().contains("injected failure"));
+        assert_eq!(
+            close_attempts.load(Ordering::SeqCst),
+            1,
+            "later callers must join the exact outcome, not race another peer close"
+        );
+        assert_eq!(state.peer_count().await, 1);
+        assert_eq!(state.pending_answer_count().await, 1);
+
+        // Test-only fixture cleanup. Production preserves this custody because
+        // rust-webrtc's one-shot close cannot be retried truthfully after a
+        // non-Closed failure.
+        peer.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -3415,8 +3547,6 @@ mod tests {
                 answer_observation_sequence: replacement_sequence,
             },
         );
-        assert!(stale_tasks.claim_cleanup());
-
         cleanup_peer_after_disconnect(PeerDisconnectContext {
             host: Arc::clone(&host),
             channel_id: channel_id.clone(),
@@ -3632,6 +3762,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timed_out_checked_close_keeps_owned_cleanup_running_to_exact_retirement() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = host
+            .open_channel_with_generated_test_machine_authority(SessionId::new())
+            .await
+            .unwrap();
+        let (adapter, _command_rx, observation_tx) = RecordingAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.commit_status_with_generated_test_machine_authority(
+            &channel_id,
+            LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
+
+        let state = Arc::new(LiveWebrtcState::new_for_test_with_generated_close_feedback(
+            host,
+        ));
+        state
+            .construction_test_state
+            .capture_data_channel
+            .store(true, Ordering::SeqCst);
+        let browser_peer = new_browser_peer().await;
+        let browser_data_channel = browser_peer
+            .create_data_channel("meerkat.live", None)
+            .await
+            .unwrap();
+        let (open_tx, mut open_rx) = mpsc::channel::<()>(1);
+        browser_data_channel.on_open(Box::new(move || {
+            let open_tx = open_tx.clone();
+            Box::pin(async move {
+                let _ = open_tx.send(()).await;
+            })
+        }));
+
+        connect_browser_peer(&browser_peer, &state, &channel_id).await;
+        tokio::time::timeout(Duration::from_secs(5), open_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_observation_pump_to_start(&state).await;
+        let server_peer = {
+            let peers = state.peers.lock().await;
+            Arc::downgrade(
+                &peers
+                    .get(&channel_id)
+                    .expect("connected server peer must be registered")
+                    .peer,
+            )
+        };
+        let server_data_channel = state
+            .construction_test_state
+            .last_data_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("server data channel must be captured after open");
+
+        let close_started = Arc::new(Notify::new());
+        let release_close = Arc::new(Notify::new());
+        let close_attempts = Arc::new(AtomicUsize::new(0));
+        let close_state = Arc::clone(&state);
+        let close_channel_id = channel_id.clone();
+        let observed_started = Arc::clone(&close_started);
+        let observed_release = Arc::clone(&release_close);
+        let observed_attempts = Arc::clone(&close_attempts);
+        let timed_close = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                close_state.close_peer_checked_with_operation(
+                    &close_channel_id,
+                    Some(Box::new(move |peer| {
+                        Box::pin(async move {
+                            observed_attempts.fetch_add(1, Ordering::SeqCst);
+                            observed_started.notify_one();
+                            observed_release.notified().await;
+                            peer.close()
+                                .await
+                                .map_err(|error| LiveWebrtcError::PeerClose {
+                                    detail: error.to_string(),
+                                })
+                        })
+                    })),
+                ),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), close_started.notified())
+            .await
+            .expect("owned close task must start before the caller timeout");
+        assert!(
+            timed_close.await.unwrap().is_err(),
+            "the checked-close waiter must be cancelled while physical close is parked"
+        );
+        assert_eq!(close_attempts.load(Ordering::SeqCst), 1);
+
+        // The timeout dropped only the subscriber. The exact runtime-owned
+        // coordinator still owns the one physical close and its retirement.
+        release_close.notify_one();
+        wait_for_peer_count(&state, 0).await;
+        wait_for_peer_tasks_to_stop(&state).await;
+        assert_eq!(state.pending_answer_count().await, 0);
+        assert_eq!(state.published_peer_lifecycle_count(), 0);
+        assert_eq!(close_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.host.channel_status(&channel_id).await.unwrap(),
+            LiveAdapterStatus::Ready,
+            "checked physical close must not mint remote-disconnect semantic authority"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while server_peer.upgrade().is_some() || server_data_channel.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled checked close must still reclaim the exact peer and channel graph");
+
+        drop(observation_tx);
+        browser_peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn remote_data_channel_disconnect_closes_host_and_reclaims_exact_peer_tasks() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let channel_id = host
@@ -3790,7 +4043,7 @@ mod tests {
         // data channel, while the peer callback graph retains both registries.
         drop(state);
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let reclaimed = tokio::time::timeout(Duration::from_secs(5), async {
             while active_audio_pumps.load(Ordering::SeqCst) != 0
                 || active_observation_pumps.load(Ordering::SeqCst) != 0
                 || active_incoming_audio_tasks.load(Ordering::SeqCst) != 0
@@ -3803,8 +4056,19 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         })
-        .await
-        .expect("owner drop must reclaim every published WebRTC registry, peer, channel, and task");
+        .await;
+        assert!(
+            reclaimed.is_ok(),
+            "owner drop must reclaim every published WebRTC registry, peer, channel, and task: audio={}, observations={}, incoming={}, peer={}, channel={}, peers={}, pending={}, lifecycle={}",
+            active_audio_pumps.load(Ordering::SeqCst),
+            active_observation_pumps.load(Ordering::SeqCst),
+            active_incoming_audio_tasks.load(Ordering::SeqCst),
+            server_peer.upgrade().is_some(),
+            server_data_channel.upgrade().is_some(),
+            peer_registry.upgrade().is_some(),
+            pending_answers.upgrade().is_some(),
+            published_peer_lifecycle.upgrade().is_some(),
+        );
 
         drop(observation_tx);
         browser_peer.close().await.unwrap();

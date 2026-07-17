@@ -155,6 +155,20 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- Rejected atomic runtime commits now abort every pre-commit session
+  projection—not only compaction—including the live transcript/checkpointer
+  and pending context events before recovery checkpoints can reload the prior
+  authority. Failed compaction aborts retain the exact live retry carrier for
+  teardown recovery instead of partially discarding the rejected run.
+- Explicit JSON `null` payloads in typed system-notice blocks now remain
+  present across deserialize/serialize round trips, preventing persisted
+  transcript bytes and digests from changing when nullable comms, external,
+  runtime, or unknown notice payloads are reloaded.
+- Cold recovery of a Running local autonomous mob member now republishes the
+  existing exact runtime/fence startup-ready transition after its comms drain
+  and interaction injector are observed. Recovery does not synthesize a
+  second kickoff; placed, turn-driven, and Stopped members retain their prior
+  readiness semantics.
 - Delivery-time Mob member revival now carries an explicit machine-authorized
   missing-live-materialization intent. Exact ownerless `Idle` or `Attached`
   records with `Queuing` or orphaned `Active` registration are re-driven

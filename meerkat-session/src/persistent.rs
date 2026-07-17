@@ -2264,6 +2264,15 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// stored-only session is rebuilt at most once and archived snapshots
     /// cannot become writable again through rehydration races.
     recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
+    /// Mechanical cancellation carrier for rejected runtime-run cleanup.
+    ///
+    /// A successful compaction abort must be remembered before the cleanup
+    /// future reaches another await: actor discard removes the only live agent
+    /// capable of repeating that abort. Entries are read and mutated only while
+    /// holding the matching `recovery_gates` lock, and the synchronous mutex
+    /// keeps insertion/removal themselves free of cancellation points. This is
+    /// progress bookkeeping, not semantic session authority.
+    rejected_run_compaction_aborted: std::sync::Mutex<HashSet<SessionId>>,
     /// Stable outer boundary for every overlapping live/durable mutation of
     /// one session. Runtime-loop turns hold it through terminal publication;
     /// direct turns and non-turn writers acquire it before the recovery gate.
@@ -4586,6 +4595,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.discard_live_session_unfenced(id).await
     }
 
+    /// Converge the live actor and every persistent sidecar while the caller
+    /// owns the mutation fences appropriate to its operation.
     async fn discard_live_session_unfenced(&self, id: &SessionId) -> Result<(), SessionError> {
         let result = self.inner.discard_live_session(id).await;
         self.checkpointer_gates.lock().await.remove(id);
@@ -5097,6 +5108,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             projector: None,
             checkpointer_gates: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
+            rejected_run_compaction_aborted: std::sync::Mutex::new(HashSet::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
             event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
             event_projection_gates: Arc::new(Mutex::new(HashMap::new())),
@@ -6875,6 +6887,59 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         )
     }
 
+    /// Read rejected-run cleanup progress while the caller holds this
+    /// session's recovery gate.
+    fn rejected_run_compaction_aborted_under_recovery_gate(&self, id: &SessionId) -> bool {
+        self.rejected_run_compaction_aborted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(id)
+    }
+
+    /// Publish observed compaction-abort completion without introducing a
+    /// cancellation point. The caller must hold this session's recovery gate.
+    fn mark_rejected_run_compaction_aborted_under_recovery_gate(&self, id: &SessionId) {
+        self.rejected_run_compaction_aborted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone());
+    }
+
+    /// Clear the retry carrier only after actor and sidecar cleanup converges.
+    /// The caller must hold this session's recovery gate.
+    fn clear_rejected_run_compaction_aborted_under_recovery_gate(&self, id: &SessionId) {
+        self.rejected_run_compaction_aborted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
+    }
+
+    /// Finish a cancelled rejected-run discard before publishing a replacement
+    /// actor for the same logical SessionId. The observed compaction-abort
+    /// carrier is authoritative only for the old incarnation; allowing it to
+    /// cross materialization would let a later rejected run skip its own abort.
+    /// The caller must hold this session's recovery gate.
+    async fn converge_rejected_run_cleanup_before_materialization_under_recovery_gate(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        if !self.rejected_run_compaction_aborted_under_recovery_gate(id) {
+            return Ok(());
+        }
+
+        let result = self.discard_live_session_unfenced(id).await;
+        if matches!(&result, Ok(()) | Err(SessionError::NotFound { .. })) {
+            // The recovery gate still fences this SessionId, and there is no
+            // await between full convergence and this clear. Old-incarnation
+            // progress therefore cannot cross the materialization boundary.
+            self.clear_rejected_run_compaction_aborted_under_recovery_gate(id);
+        }
+        match result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn turn_finalization_gate_for_session(&self, id: &SessionId) -> Arc<Mutex<()>> {
         let mut gates = self.turn_finalization_gates.lock().await;
         // Opportunistically reap idle keys as new work arrives. A weak entry
@@ -7976,6 +8041,40 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    /// Abort every pre-commit session projection after the machine rejects a
+    /// runtime boundary. The runtime loop already owns the stable outer turn
+    /// boundary; this method takes the per-session recovery gate while it
+    /// removes the live transcript, checkpointer sidecar, pending context
+    /// events, and any invisible compaction stage.
+    pub async fn abort_rejected_runtime_run_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock_owned().await;
+
+        // The live SessionTask/agent is the retry carrier for an invisible
+        // compaction stage. Preserve it if that stage cannot be aborted. Once
+        // the abort succeeds, synchronously publish the mechanical retry
+        // carrier before actor discard reaches another await. A cancelled retry
+        // may then skip only the abort whose success was actually observed.
+        if !self.rejected_run_compaction_aborted_under_recovery_gate(id) {
+            self.abort_uncommitted_compaction_projections(id).await?;
+            self.mark_rejected_run_compaction_aborted_under_recovery_gate(id);
+        }
+
+        let result = self.discard_live_session_unfenced(id).await;
+        if matches!(&result, Ok(()) | Err(SessionError::NotFound { .. })) {
+            // This synchronous carrier clear is part of the same
+            // recovery-gated cleanup transaction as the actor/sidecar discard.
+            self.clear_rejected_run_compaction_aborted_under_recovery_gate(id);
+        }
+        match result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn create_session_with_admission(
         &self,
         mut req: CreateSessionRequest,
@@ -8119,6 +8218,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .recovery_gate_for_session(materialization_session_id)
                     .await;
                 let guard = recovery_gate.lock_owned().await;
+                self.converge_rejected_run_cleanup_before_materialization_under_recovery_gate(
+                    materialization_session_id,
+                )
+                .await?;
                 if let Some(resume_session_id) = resume_session_id.as_ref()
                     && let Some(session) = self
                         .load_authoritative_session_base(resume_session_id)
@@ -8595,6 +8698,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
     ) -> Result<(), SessionError> {
         PersistentSessionService::abort_uncommitted_compaction_projections(self, id).await
+    }
+
+    async fn abort_rejected_runtime_run_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        PersistentSessionService::abort_rejected_runtime_run_projections(self, id).await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -11933,6 +12043,7 @@ mod tests {
         flow_overlay_failure: Option<String>,
         callback_pending_after_run: bool,
         execution_snapshot: Option<meerkat_core::AgentExecutionSnapshot>,
+        compaction_abort_failure: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -11998,6 +12109,15 @@ mod tests {
                 });
             }
             Ok(result)
+        }
+
+        async fn abort_uncommitted_compaction_projections(
+            &mut self,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            match self.compaction_abort_failure.take() {
+                Some(message) => Err(meerkat_core::error::AgentError::InternalError(message)),
+                None => Ok(()),
+            }
         }
 
         fn take_runtime_terminal_failure_witness(
@@ -12637,6 +12757,7 @@ mod tests {
                     flow_overlay_failure: None,
                     callback_pending_after_run: false,
                     execution_snapshot: None,
+                    compaction_abort_failure: None,
                 },
                 comms,
                 injector,
@@ -12668,6 +12789,38 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
+            })
+        }
+    }
+
+    struct FailOnceCompactionAbortBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for FailOnceCompactionAbortBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: test_system_context_state_handle(system_context_state),
+                run_failure: None,
+                flow_overlay_failure: None,
+                callback_pending_after_run: false,
+                execution_snapshot: None,
+                compaction_abort_failure: Some(
+                    "synthetic rejected-run compaction abort failure".to_string(),
+                ),
             })
         }
     }
@@ -12699,6 +12852,7 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
             })
         }
     }
@@ -12727,6 +12881,7 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: true,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
             })
         }
     }
@@ -12755,6 +12910,7 @@ mod tests {
                 flow_overlay_failure: Some("synthetic flow overlay failure".to_string()),
                 callback_pending_after_run: false,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
             })
         }
     }
@@ -12849,6 +13005,7 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
             })
         }
     }
@@ -12918,6 +13075,7 @@ mod tests {
                     flow_overlay_failure: None,
                     callback_pending_after_run: false,
                     execution_snapshot: None,
+                    compaction_abort_failure: None,
                 },
                 entered_runs: Arc::clone(&self.entered_runs),
                 entered_notify: Arc::clone(&self.entered_notify),
@@ -13058,6 +13216,7 @@ mod tests {
                     flow_overlay_failure: None,
                     callback_pending_after_run: false,
                     execution_snapshot: None,
+                    compaction_abort_failure: None,
                 },
             })
         }
@@ -13087,6 +13246,7 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
             })
         }
     }
@@ -13145,6 +13305,7 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
                 execution_snapshot: Some(machine_terminal_tool_failure_snapshot()),
+                compaction_abort_failure: None,
             })
         }
     }
@@ -13172,6 +13333,7 @@ mod tests {
                     flow_overlay_failure: None,
                     callback_pending_after_run: false,
                     execution_snapshot: Some(machine_terminal_tool_failure_snapshot()),
+                    compaction_abort_failure: None,
                 },
             })
         }
@@ -13214,6 +13376,7 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
             })
         }
     }
@@ -13473,6 +13636,7 @@ mod tests {
                 flow_overlay_failure: None,
                 callback_pending_after_run: false,
                 execution_snapshot: None,
+                compaction_abort_failure: None,
             })
         }
     }
@@ -18648,6 +18812,385 @@ mod tests {
                 !format!("{message:?}").contains("context-only apply waits for machine commit")
             }),
             "durable runtime authority must not expose staged context before the machine commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_runtime_run_aborts_every_precommit_projection_before_recovery_checkpoint() {
+        use futures::StreamExt;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            1,
+            Arc::clone(&store),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id);
+        let authoritative_snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("load baseline runtime snapshot")
+            .expect("deferred session creation must publish a runtime snapshot");
+        let mut events = service
+            .subscribe_session_events(&session_id)
+            .await
+            .expect("subscribe before rejected run staging");
+
+        let output = service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "rejected context must be rolled back".to_string(),
+                    ),
+                    source: Some("peer_response_terminal:test:null".to_string()),
+                    idempotency_key: Some("peer_response_terminal:test:null".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("stage rejected runtime output");
+        assert_ne!(
+            output.session_snapshot.as_deref(),
+            Some(authoritative_snapshot.as_slice()),
+            "the staged output must differ from the prior committed authority"
+        );
+        assert!(
+            service
+                .pending_runtime_context_events
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "the context lifecycle projection must be staged before commit"
+        );
+
+        service
+            .abort_rejected_runtime_run_projections(&session_id)
+            .await
+            .expect("rejected boundary must abort every staged projection");
+
+        assert!(
+            !service
+                .pending_runtime_context_events
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "rejected context lifecycle projection must be cleared"
+        );
+        assert!(
+            !service
+                .has_live_session(&session_id)
+                .await
+                .expect("live session status after rejected output"),
+            "the uncommitted live transcript must be discarded"
+        );
+        service
+            .checkpoint_committed_runtime_session_snapshot(&session_id, &authoritative_snapshot)
+            .await
+            .expect("startup recovery checkpoint must accept prior runtime authority");
+        let event =
+            tokio::time::timeout(std::time::Duration::from_millis(100), events.next()).await;
+        assert!(
+            matches!(event, Err(_) | Ok(None)),
+            "rejected context lifecycle events must never publish: {event:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_runtime_run_preserves_retry_carrier_when_compaction_abort_fails() {
+        let service = PersistentSessionService::new(
+            FailOnceCompactionAbortBuilder,
+            1,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "retryable rejected context".to_string(),
+                    ),
+                    source: Some("retryable-rejected-context".to_string()),
+                    idempotency_key: Some("retryable-rejected-context".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("stage rejected runtime output");
+
+        let error = service
+            .abort_rejected_runtime_run_projections(&session_id)
+            .await
+            .expect_err("synthetic compaction abort must fail the first cleanup attempt");
+        assert!(
+            matches!(
+                error,
+                SessionError::Agent(AgentError::InternalError(ref message))
+                    if message == "synthetic rejected-run compaction abort failure"
+            ),
+            "the typed compaction abort failure must propagate unchanged: {error}"
+        );
+        assert!(
+            service
+                .has_live_session(&session_id)
+                .await
+                .expect("live session status after failed abort"),
+            "failed compaction cleanup must preserve the live retry carrier"
+        );
+        assert!(
+            service
+                .pending_runtime_context_events
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "failed compaction cleanup must preserve every staged projection for retry"
+        );
+
+        service
+            .abort_rejected_runtime_run_projections(&session_id)
+            .await
+            .expect("a later cleanup attempt must use the preserved carrier");
+        assert!(
+            !service
+                .has_live_session(&session_id)
+                .await
+                .expect("live session status after successful retry"),
+            "successful retry must discard the rejected live projection"
+        );
+        assert!(
+            !service
+                .pending_runtime_context_events
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "successful retry must clear pending context events"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_runtime_run_abort_retry_converges_after_actor_removal() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            1,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "cancelled rejected-run cleanup must remain retryable".to_string(),
+                    ),
+                    source: Some("cancelled-rejected-run-cleanup".to_string()),
+                    idempotency_key: Some("cancelled-rejected-run-cleanup".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("stage rejected runtime output");
+
+        let recovery_gate = service.recovery_gate_for_session(&session_id).await;
+        let interrupted_cleanup_guard = recovery_gate.lock_owned().await;
+        service
+            .abort_uncommitted_compaction_projections(&session_id)
+            .await
+            .expect("first cleanup attempt aborts the invisible compaction stage");
+        service.mark_rejected_run_compaction_aborted_under_recovery_gate(&session_id);
+        service
+            .inner
+            .discard_live_session(&session_id)
+            .await
+            .expect("simulate cancellation after actor removal but before sidecar cleanup");
+        assert!(
+            service.rejected_run_compaction_aborted_under_recovery_gate(&session_id),
+            "the synchronous progress carrier must survive the interrupted actor discard"
+        );
+        assert!(
+            service
+                .pending_runtime_context_events
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "the interrupted cleanup state must retain its pending event sidecar"
+        );
+        assert!(
+            service
+                .checkpointer_gates
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "the interrupted cleanup state must retain its checkpointer sidecar"
+        );
+        drop(interrupted_cleanup_guard);
+
+        service
+            .abort_rejected_runtime_run_projections(&session_id)
+            .await
+            .expect("retry must use observed compaction-abort progress despite the absent actor");
+        assert!(
+            !service
+                .pending_runtime_context_events
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "retry must clear the rejected pending event sidecar"
+        );
+        assert!(
+            !service
+                .checkpointer_gates
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "retry must clear the rejected checkpointer sidecar"
+        );
+        assert!(
+            !service
+                .has_live_session(&session_id)
+                .await
+                .expect("live session status after converged retry"),
+            "retry must converge on no live rejected projection"
+        );
+        assert!(
+            !service.rejected_run_compaction_aborted_under_recovery_gate(&session_id),
+            "the progress carrier must clear only after every rejected projection converges"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_runtime_run_carrier_cannot_cross_same_id_rematerialization() {
+        let service = PersistentSessionService::new(
+            FailOnceCompactionAbortBuilder,
+            1,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        let resume_source = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load same-id resume source")
+            .expect("created session must have durable authority");
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                        "old incarnation rejected context".to_string(),
+                    ),
+                    source: Some("old-incarnation-rejected-context".to_string()),
+                    idempotency_key: Some("old-incarnation-rejected-context".to_string()),
+                    source_kind: meerkat_core::session::SystemContextSource::Normal,
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    peer_response_terminal: None,
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("stage old-incarnation rejected output");
+
+        let recovery_gate = service.recovery_gate_for_session(&session_id).await;
+        let interrupted_cleanup_guard = recovery_gate.lock_owned().await;
+        service
+            .abort_uncommitted_compaction_projections(&session_id)
+            .await
+            .expect_err("old actor's fail-once abort must be consumed first");
+        service
+            .abort_uncommitted_compaction_projections(&session_id)
+            .await
+            .expect("old actor's observed compaction abort succeeds on retry");
+        service.mark_rejected_run_compaction_aborted_under_recovery_gate(&session_id);
+        service
+            .inner
+            .discard_live_session(&session_id)
+            .await
+            .expect("simulate cancellation after old actor removal");
+        assert!(
+            service.rejected_run_compaction_aborted_under_recovery_gate(&session_id),
+            "old-incarnation cleanup progress must remain until sidecars converge"
+        );
+        drop(interrupted_cleanup_guard);
+
+        let rematerialized = service
+            .create_session(resume_request(resume_source))
+            .await
+            .expect("canonical materialization must first converge old cleanup");
+        assert_eq!(rematerialized.session_id, session_id);
+        assert!(
+            !service.rejected_run_compaction_aborted_under_recovery_gate(&session_id),
+            "old cleanup progress must clear before the replacement actor is published"
+        );
+        assert!(
+            !service
+                .pending_runtime_context_events
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "old pending context sidecars must not cross rematerialization"
+        );
+
+        let error = service
+            .abort_rejected_runtime_run_projections(&session_id)
+            .await
+            .expect_err("replacement incarnation must execute its own fail-once compaction abort");
+        assert!(
+            matches!(
+                error,
+                SessionError::Agent(AgentError::InternalError(ref message))
+                    if message == "synthetic rejected-run compaction abort failure"
+            ),
+            "stale progress must never let a replacement skip its own abort: {error}"
+        );
+        assert!(
+            service
+                .has_live_session(&session_id)
+                .await
+                .expect("replacement live status after failed abort"),
+            "failed replacement abort must retain the replacement retry carrier"
         );
     }
 

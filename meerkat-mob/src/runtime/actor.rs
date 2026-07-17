@@ -36,6 +36,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 
+const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(25);
+const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostOrphanReleaseReservation {
     InFlight,
@@ -10477,13 +10482,38 @@ impl MobActor {
             );
             return;
         }
-        if let Err(stop_error) = self.stop_all_autonomous_members().await {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                error = %stop_error,
-                "startup failure Stop remains pending on autonomous cleanup"
-            );
-            return;
+        let autonomous_stop_deadline =
+            tokio::time::Instant::now() + STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE;
+        loop {
+            match self.stop_all_autonomous_members().await {
+                Ok(()) => break,
+                Err(stop_error @ MobError::AutonomousStopInterruptsPending { .. }) => {
+                    let now = tokio::time::Instant::now();
+                    if now >= autonomous_stop_deadline {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            error = %stop_error,
+                            failure_label,
+                            "startup failure Stop did not prove exact autonomous cleanup before its deadline"
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(
+                        STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL
+                            .min(autonomous_stop_deadline - now),
+                    )
+                    .await;
+                }
+                Err(stop_error) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %stop_error,
+                        failure_label,
+                        "startup failure Stop remains pending on autonomous cleanup"
+                    );
+                    return;
+                }
+            }
         }
         if let Err(error) = self.commit_stopped_lifecycle_after_cleanup().await {
             tracing::warn!(
@@ -12376,26 +12406,39 @@ impl MobActor {
                 return Ok(());
             };
 
-            if let Some(adapter) = self.runtime_adapter.clone()
-                && let Some(comms_runtime) = self.provisioner.comms_runtime(member_ref).await
-            {
-                let mob_id =
-                    meerkat_runtime::meerkat_machine::dsl::MobId::from(self.definition.id.as_ref());
-                let spawned = adapter
-                    .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
-                    .await
-                    .map_err(|err| {
-                        MobError::Internal(format!(
-                            "mob comms drain spawn failed for session {bridge_session_id}: {err}"
-                        ))
+            let adapter =
+                self.runtime_adapter
+                    .clone()
+                    .ok_or_else(|| MobError::MissingMemberCapability {
+                        member_id: agent_identity.clone(),
+                        capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                        context: "local member comms-drain runtime adapter",
                     })?;
-                if spawned {
-                    tracing::debug!(
-                        agent_identity = %agent_identity,
-                        session_id = %bridge_session_id,
-                        "updated peer ingress for mob member"
-                    );
-                }
+            let comms_runtime = self
+                .provisioner
+                .comms_runtime(member_ref)
+                .await
+                .ok_or_else(|| MobError::MissingMemberCapability {
+                    member_id: agent_identity.clone(),
+                    capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                    context: "local member comms-drain startup",
+                })?;
+            let mob_id =
+                meerkat_runtime::meerkat_machine::dsl::MobId::from(self.definition.id.as_ref());
+            let spawned = adapter
+                .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
+                .await
+                .map_err(|err| {
+                    MobError::Internal(format!(
+                        "mob comms drain spawn failed for session {bridge_session_id}: {err}"
+                    ))
+                })?;
+            if spawned {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    session_id = %bridge_session_id,
+                    "updated peer ingress for mob member"
+                );
             }
         }
 
@@ -13252,9 +13295,12 @@ impl MobActor {
     ///
     /// Called on mob startup and resume. Does NOT fire synthetic kickoff turns —
     /// the keep-alive runtime infrastructure is sufficient. On resume, the
-    /// member's session already has its conversation history.
+    /// member's session already has its conversation history. Once a recovered
+    /// local autonomous member's drain and injector have both been observed,
+    /// publish that exact runtime/fence through MobMachine's existing startup
+    /// readiness transition. Durable membership alone is not readiness.
     async fn ensure_autonomous_runtimes_from_roster(
-        &self,
+        &mut self,
         allow_stopped_resume_reopen: bool,
     ) -> Result<(), MobError> {
         let lifecycle = self.dsl_authority.state();
@@ -13395,6 +13441,41 @@ impl MobActor {
                 );
                 if first_error.is_none() {
                     first_error = Some(error);
+                }
+                continue;
+            }
+
+            // Cold Running recovery rebuilds session runtime mechanics before
+            // the actor starts, then reaches this shared check without the
+            // volatile startup marker created by the original process. Feed
+            // the successful observation through the same exact-runtime/fence
+            // machine transition used by fresh spawn. Never infer this from
+            // the durable roster, and never apply it while the mob is Stopped:
+            // same-handle resume performs these checks before its durable
+            // Resume commit, while a rebuilt attachment checks again after it.
+            if self.state() == MobState::Running {
+                let runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+                if !self
+                    .dsl_authority
+                    .state()
+                    .member_startup_ready
+                    .contains(&runtime_id)
+                    && let Err(error) = self.apply_dsl_input(
+                        mob_dsl::MobMachineInput::StartupMarkReady {
+                            agent_runtime_id: runtime_id,
+                            fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                        },
+                        "ensure_autonomous_runtimes_from_roster/startup_mark_ready",
+                    )
+                {
+                    tracing::warn!(
+                        agent_identity = %entry.agent_identity,
+                        error = %error,
+                        "failed publishing autonomous runtime startup readiness"
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
                 }
             }
         }
@@ -15437,6 +15518,11 @@ impl MobActor {
                     error = %error,
                     "failed to start autonomous host loops during actor startup; entering Stopped"
                 );
+                // Per-session recovery failures are actor-owned lifecycle
+                // facts. Persist Stop and retain the handle so an explicit
+                // MobHandle::resume retry can return the original typed
+                // capability failure; startup must not make an Ok builder
+                // result look Running or ready.
                 self.fail_startup_to_stopped("autonomous runtime startup failure")
                     .await;
             }

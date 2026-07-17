@@ -938,6 +938,15 @@ impl SessionService for RpcMobSessionService {
             .await
     }
 
+    async fn abort_rejected_runtime_run_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.service
+            .abort_rejected_runtime_run_projections(id)
+            .await
+    }
+
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(format!(
             "interrupt for runtime-backed session {id} must route through SessionRuntime::interrupt / MeerkatMachine::hard_cancel_current_run"

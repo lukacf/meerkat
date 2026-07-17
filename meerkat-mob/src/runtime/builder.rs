@@ -7070,6 +7070,15 @@ impl MobBuilder {
     /// - Recover definition from `MobCreated`.
     /// - Rebuild roster by replaying structural events.
     /// - Start actor/runtime in Running state.
+    ///
+    /// Composition failures known before actor creation (for example, a
+    /// missing runtime adapter for a recovered local session-backed member of
+    /// a Running mob) return directly from this method. Per-session mechanical
+    /// failures discovered by the recovered actor are durably fail-stopped
+    /// instead: this returns a `Stopped` handle, and [`MobHandle::resume`] is
+    /// the canonical typed retry surface. Returning that handle preserves
+    /// lifecycle and diagnostic authority rather than losing it with the
+    /// startup task.
     #[cfg(feature = "runtime-adapter")]
     pub async fn resume(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
@@ -7136,22 +7145,6 @@ impl MobBuilder {
         // Validate authority-operation journals before definition/spec sync
         // or any other recovery mutation/repair write.
         super::actor::validate_host_authority_anchor_epoch_boundaries(&mob_events)?;
-        // §8: AutonomousHost profiles require a runtime adapter. Same check
-        // as create(), but deferred until after definition recovery from events.
-        let has_autonomous = definition
-            .profiles
-            .values()
-            .filter_map(|b| b.as_inline())
-            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
-        if has_autonomous && runtime_adapter.is_none() {
-            return Err(MobError::Internal(
-                "definition contains AutonomousHost profiles but no runtime adapter is available; \
-                 provide one via with_runtime_adapter() or use a session service that implements \
-                 runtime_adapter()"
-                    .to_string(),
-            ));
-        }
-
         Self::sync_definition_with_spec_store(
             storage.specs.clone(),
             definition.id.clone(),
@@ -7418,6 +7411,28 @@ impl MobBuilder {
         let mut roster = Roster::project(&mob_events);
         #[cfg(not(target_arch = "wasm32"))]
         Self::normalize_sessionless_backend_runtime_modes(&mut roster);
+        if resumed_state == MobState::Running
+            && recovered_completion_lifecycle_intent.is_none()
+            && !super::actor::lifecycle_origin_fenced(initial_dsl_authority.state())
+            && runtime_adapter.is_none()
+        {
+            if let Some(entry) = roster.list().find(|entry| {
+                entry.member_ref.bridge_session_id().is_some()
+                    && !super::member_runtime_is_host_owned(
+                        initial_dsl_authority.state(),
+                        &entry.agent_identity,
+                    )
+            }) {
+                // A missing composition dependency is known before the actor
+                // exists, so cold resume rejects synchronously and identifies
+                // the exact local member that cannot own an outbound drain.
+                return Err(MobError::MissingMemberCapability {
+                    member_id: entry.agent_identity.clone(),
+                    capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                    context: "local member comms-drain runtime adapter",
+                });
+            }
+        }
         let seeded_restore_diagnostics = HashMap::new();
         // Prepare shared runtime components early so resume reconciliation can
         // wire tool dispatchers for recreated sessions to the final actor channel.

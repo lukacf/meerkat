@@ -339,6 +339,12 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
         self.inner.abort_uncommitted_compaction_projections().await
     }
 
+    async fn abort_rejected_run_projections(
+        &mut self,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.inner.abort_rejected_run_projections().await
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[meerkat_core::event::AgentEvent],
@@ -435,13 +441,14 @@ mod machine_managed_executor_forwarding_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct CompactionForwardingProbe {
+    struct ProjectionForwardingProbe {
         reconciles: Arc<AtomicUsize>,
-        aborts: Arc<AtomicUsize>,
+        compaction_aborts: Arc<AtomicUsize>,
+        rejected_run_aborts: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
-    impl meerkat_core::lifecycle::CoreExecutor for CompactionForwardingProbe {
+    impl meerkat_core::lifecycle::CoreExecutor for ProjectionForwardingProbe {
         async fn apply(
             &mut self,
             _run_id: meerkat_core::RunId,
@@ -467,7 +474,14 @@ mod machine_managed_executor_forwarding_tests {
         async fn abort_uncommitted_compaction_projections(
             &mut self,
         ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
-            self.aborts.fetch_add(1, Ordering::SeqCst);
+            self.compaction_aborts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn abort_rejected_run_projections(
+            &mut self,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            self.rejected_run_aborts.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -487,13 +501,15 @@ mod machine_managed_executor_forwarding_tests {
     }
 
     #[tokio::test]
-    async fn machine_managed_post_stop_decorator_forwards_compaction_contract() {
+    async fn machine_managed_post_stop_decorator_forwards_projection_contract() {
         let reconciles = Arc::new(AtomicUsize::new(0));
-        let aborts = Arc::new(AtomicUsize::new(0));
+        let compaction_aborts = Arc::new(AtomicUsize::new(0));
+        let rejected_run_aborts = Arc::new(AtomicUsize::new(0));
         let mut executor = MachineManagedPostStopExecutor {
-            inner: Box::new(CompactionForwardingProbe {
+            inner: Box::new(ProjectionForwardingProbe {
                 reconciles: Arc::clone(&reconciles),
-                aborts: Arc::clone(&aborts),
+                compaction_aborts: Arc::clone(&compaction_aborts),
+                rejected_run_aborts: Arc::clone(&rejected_run_aborts),
             }),
             machine: std::sync::Weak::new(),
             session_id: SessionId::new(),
@@ -512,9 +528,13 @@ mod machine_managed_executor_forwarding_tests {
         )
         .await
         .expect("decorator must forward rejected-boundary compaction cleanup");
+        meerkat_core::lifecycle::CoreExecutor::abort_rejected_run_projections(&mut executor)
+            .await
+            .expect("decorator must forward whole rejected-run projection cleanup");
 
         assert_eq!(reconciles.load(Ordering::SeqCst), 1);
-        assert_eq!(aborts.load(Ordering::SeqCst), 1);
+        assert_eq!(compaction_aborts.load(Ordering::SeqCst), 1);
+        assert_eq!(rejected_run_aborts.load(Ordering::SeqCst), 1);
     }
 }
 

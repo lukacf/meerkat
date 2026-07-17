@@ -843,6 +843,20 @@ pub trait CoreExecutor: Send + Sync {
         Ok(())
     }
 
+    /// Abort every executor-owned projection staged by a run whose atomic
+    /// runtime boundary was rejected.
+    ///
+    /// The default preserves compatibility with executors that can stage only
+    /// compaction. Runtime-backed session executors override this to also
+    /// remove any uncommitted live transcript and context-event projections.
+    /// Implementations must be cancellation-safe and retry-idempotent: once an
+    /// attempt observes one sub-projection aborted, cancellation before the
+    /// whole cleanup returns must leave enough mechanical progress to continue
+    /// without requiring an already-discarded live carrier.
+    async fn abort_rejected_run_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.abort_uncommitted_compaction_projections().await
+    }
+
     /// Durably publish exact per-input Interaction terminal events after
     /// generated runtime completion authority has observed finalization.
     /// Implementations must make replay idempotent by interaction ID and

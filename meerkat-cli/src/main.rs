@@ -8923,6 +8923,19 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             })
     }
 
+    async fn abort_rejected_run_projections(
+        &mut self,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .abort_rejected_runtime_run_projections(&self.session_id)
+            .await
+            .map_err(|error| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::Internal(
+                    error.to_string(),
+                )
+            })
+    }
+
     #[cfg(feature = "session-store")]
     async fn checkpoint_committed_session_snapshot(
         &mut self,
@@ -9114,6 +9127,13 @@ impl SessionService for RunMobSessionService {
         self.inner
             .abort_uncommitted_compaction_projections(id)
             .await
+    }
+
+    async fn abort_rejected_runtime_run_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.abort_rejected_runtime_run_projections(id).await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
@@ -12059,6 +12079,13 @@ impl SessionService for MobCliSessionService {
         self.inner
             .abort_uncommitted_compaction_projections(id)
             .await
+    }
+
+    async fn abort_rejected_runtime_run_projections(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.abort_rejected_runtime_run_projections(id).await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {

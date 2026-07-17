@@ -5905,6 +5905,13 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn abort_rejected_run_projections(&mut self) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .abort_rejected_runtime_run_projections(&self.bridge_session_id)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[meerkat_core::event::AgentEvent],

@@ -1356,6 +1356,12 @@ struct MockSessionService {
     comms_behaviors: RwLock<HashMap<String, MockCommsBehavior>>,
     /// Sessions whose comms runtime should appear unavailable.
     missing_comms_sessions: RwLock<HashSet<SessionId>>,
+    /// Successful comms-runtime observations remaining before every runtime
+    /// becomes unavailable. Test-only seam separating builder reconciliation
+    /// from a later actor-owned operational startup failure.
+    comms_runtime_failure_after_successes_enabled: AtomicBool,
+    comms_runtime_successes_before_missing: AtomicUsize,
+    comms_runtime_observations: AtomicUsize,
     /// Sessions whose archive() call should fail.
     archive_fail_sessions: RwLock<HashSet<SessionId>>,
     archive_calls: RwLock<HashMap<SessionId, u64>>,
@@ -1475,6 +1481,9 @@ impl MockSessionService {
             external_tools_by_session: RwLock::new(HashMap::new()),
             comms_behaviors: RwLock::new(HashMap::new()),
             missing_comms_sessions: RwLock::new(HashSet::new()),
+            comms_runtime_failure_after_successes_enabled: AtomicBool::new(false),
+            comms_runtime_successes_before_missing: AtomicUsize::new(0),
+            comms_runtime_observations: AtomicUsize::new(0),
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_calls: RwLock::new(HashMap::new()),
             archive_not_found_sessions: RwLock::new(HashSet::new()),
@@ -1741,6 +1750,13 @@ impl MockSessionService {
             .write()
             .await
             .insert(session_id.clone());
+    }
+
+    fn set_comms_runtime_missing_after_successes(&self, successful_observations: usize) {
+        self.comms_runtime_successes_before_missing
+            .store(successful_observations, Ordering::Release);
+        self.comms_runtime_failure_after_successes_enabled
+            .store(true, Ordering::Release);
     }
 
     async fn set_archive_failure(&self, session_id: &SessionId) {
@@ -2925,12 +2941,26 @@ impl SubscribableInjector for CountingInjector {
 #[async_trait]
 impl SessionServiceCommsExt for MockSessionService {
     async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
+        self.comms_runtime_observations
+            .fetch_add(1, Ordering::Relaxed);
         if self
             .missing_comms_sessions
             .read()
             .await
             .contains(session_id)
         {
+            return None;
+        }
+        let unavailable_after_reconciliation = self
+            .comms_runtime_failure_after_successes_enabled
+            .load(Ordering::Acquire)
+            && self
+                .comms_runtime_successes_before_missing
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_err();
+        if unavailable_after_reconciliation {
             return None;
         }
         let sessions = self.sessions.read().await;
@@ -18902,6 +18932,301 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
         ))
         .await
         .expect("the actor provisioner must own the attachment sidecar committed by recovery");
+}
+
+#[tokio::test]
+async fn test_cold_running_resume_reestablishes_autonomous_startup_ready_without_kickoff() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runs = storage.runs.clone();
+    let specs = storage.specs.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let realm_profiles = storage.realm_profiles.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let member = AgentIdentity::from("cold-ready-autonomous");
+
+    handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn autonomous member");
+    handle
+        .wait_for_members_ready(std::slice::from_ref(&member), Some(Duration::from_secs(2)))
+        .await
+        .expect("fresh member reaches startup readiness");
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
+    assert_eq!(
+        service.keep_alive_start_turn_call_count(),
+        1,
+        "fresh spawn must execute exactly one kickoff turn"
+    );
+
+    // Rebuild from durable state using a process-restart-faithful service.
+    // Its live runtime mechanics and counters start empty, so readiness after
+    // `for_resume` can only come from checks performed by the recovered actor.
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let _ = restarted_service.enable_runtime_adapter();
+    drop(handle);
+    drop(service);
+
+    let resumed = MobBuilder::for_resume(MobStorage {
+        events,
+        runs,
+        specs,
+        runtime_metadata,
+        realm_profiles,
+    })
+    .with_session_service(restarted_service.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("cold resume running mob");
+
+    let ready = resumed
+        .wait_for_members_ready(
+            std::slice::from_ref(&member),
+            Some(Duration::from_millis(250)),
+        )
+        .await
+        .expect("recovered live autonomous member must become startup-ready");
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].0, member);
+    assert_eq!(ready[0].1.status, MobMemberStatus::Active);
+    assert_eq!(
+        restarted_service.keep_alive_start_turn_call_count(),
+        0,
+        "cold readiness recovery must not synthesize a second kickoff turn"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum ColdLocalReadinessFault {
+    RuntimeAdapter,
+    TurnDrivenRuntimeAdapter,
+    CommsRuntime,
+}
+
+async fn wait_for_keep_alive_start_turn_count(service: &MockSessionService, expected: u64) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while service.keep_alive_start_turn_call_count() < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("keep-alive kickoff observation timed out");
+}
+
+fn assert_missing_outbound_comms_capability(
+    error: MobError,
+    expected_member: &AgentIdentity,
+    expected_context: &'static str,
+) {
+    match error {
+        MobError::MissingMemberCapability {
+            member_id,
+            capability,
+            context,
+        } => {
+            assert_eq!(&member_id, expected_member);
+            assert_eq!(
+                capability,
+                crate::error::MobMemberCapability::OutboundCommsRuntime
+            );
+            assert_eq!(context, expected_context);
+        }
+        other => panic!("expected typed missing outbound comms capability, got {other:?}"),
+    }
+}
+
+async fn assert_cold_running_local_resume_fails_closed(
+    fault: ColdLocalReadinessFault,
+    expected_context: &'static str,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runs = storage.runs.clone();
+    let specs = storage.specs.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let realm_profiles = storage.realm_profiles.clone();
+    let mut definition = sample_definition();
+    if matches!(fault, ColdLocalReadinessFault::TurnDrivenRuntimeAdapter) {
+        for profile in definition
+            .profiles
+            .values_mut()
+            .filter_map(|profile| profile.as_inline_mut())
+        {
+            profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+        }
+    }
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let member = AgentIdentity::from(match fault {
+        ColdLocalReadinessFault::RuntimeAdapter => "cold-missing-runtime-adapter",
+        ColdLocalReadinessFault::TurnDrivenRuntimeAdapter => {
+            "cold-turn-driven-missing-runtime-adapter"
+        }
+        ColdLocalReadinessFault::CommsRuntime => "cold-missing-comms-runtime",
+    });
+
+    handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn local member");
+    handle
+        .wait_for_members_ready(std::slice::from_ref(&member), Some(Duration::from_secs(2)))
+        .await
+        .expect("fresh member reaches startup readiness");
+    if !matches!(fault, ColdLocalReadinessFault::TurnDrivenRuntimeAdapter) {
+        wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
+    }
+    let member_entry = handle
+        .get_member(&member)
+        .await
+        .expect("fresh member lookup")
+        .expect("fresh member roster entry");
+    assert!(
+        member_entry.member_ref.bridge_session_id().is_some(),
+        "local member must be session-backed before cold restart"
+    );
+
+    let restarted_service = Arc::new(service.cold_restart_preserving_durable_state().await);
+    match fault {
+        ColdLocalReadinessFault::RuntimeAdapter
+        | ColdLocalReadinessFault::TurnDrivenRuntimeAdapter => {}
+        ColdLocalReadinessFault::CommsRuntime => {
+            let _ = restarted_service.enable_runtime_adapter();
+            // Cold builder reconciliation observes the live runtime four
+            // times while rebuilding endpoint/trust projections. The fifth
+            // observation is the recovered actor's readiness check.
+            restarted_service.set_comms_runtime_missing_after_successes(4);
+        }
+    }
+    drop(handle);
+    drop(service);
+
+    let resume_result = MobBuilder::for_resume(MobStorage {
+        events: events.clone(),
+        runs,
+        specs,
+        runtime_metadata,
+        realm_profiles,
+    })
+    .with_session_service(restarted_service.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await;
+
+    if matches!(
+        fault,
+        ColdLocalReadinessFault::RuntimeAdapter | ColdLocalReadinessFault::TurnDrivenRuntimeAdapter
+    ) {
+        let error = match resume_result {
+            Ok(_) => panic!("missing composition adapter must reject cold resume synchronously"),
+            Err(error) => error,
+        };
+        assert_missing_outbound_comms_capability(error, &member, expected_context);
+        assert_eq!(
+            restarted_service.keep_alive_start_turn_call_count(),
+            0,
+            "a synchronous composition failure must not start a replacement kickoff turn"
+        );
+        return;
+    }
+
+    // Per-session comms is discovered only after durable reconstruction. The
+    // recovered actor owns that lifecycle failure: it commits Stopped and
+    // retains the handle, whose explicit resume is the canonical typed retry.
+    let resumed = resume_result
+        .expect("per-session readiness failure must return its durably fail-stopped handle");
+
+    let resumed_status = resumed.status().await.expect("failed cold-resume status");
+    let comms_observations = restarted_service
+        .comms_runtime_observations
+        .load(Ordering::Relaxed);
+    let remaining_successes = restarted_service
+        .comms_runtime_successes_before_missing
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        resumed_status,
+        MobState::Stopped,
+        "local cold resume must fail closed when comms-drain readiness is unavailable; observations={comms_observations}, remaining_successes={remaining_successes}"
+    );
+    let durable_events = events
+        .replay_all()
+        .await
+        .expect("replay startup fail-stop events");
+    assert_eq!(
+        durable_events
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::MobStopped))
+            .count(),
+        1,
+        "polling a pending exact interrupt must commit one structural Stop transition"
+    );
+    assert_eq!(
+        durable_events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::MemberKickoffUpdated {
+                        member: event_member,
+                        kickoff,
+                    } if event_member == &member
+                        && kickoff.phase == crate::MobMemberKickoffPhase::Cancelled
+                )
+            })
+            .count(),
+        1,
+        "polling the retained interrupt receiver must not duplicate its durable kickoff cancellation"
+    );
+    let error = resumed
+        .resume()
+        .await
+        .expect_err("explicit retry must preserve the typed missing capability failure");
+    assert_missing_outbound_comms_capability(error, &member, expected_context);
+    assert_eq!(
+        restarted_service.keep_alive_start_turn_call_count(),
+        0,
+        "a readiness failure must not synthesize a replacement kickoff turn"
+    );
+}
+
+#[tokio::test]
+async fn test_cold_running_resume_fails_closed_without_runtime_adapter() {
+    assert_cold_running_local_resume_fails_closed(
+        ColdLocalReadinessFault::RuntimeAdapter,
+        "local member comms-drain runtime adapter",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_cold_running_turn_driven_resume_fails_closed_without_runtime_adapter() {
+    assert_cold_running_local_resume_fails_closed(
+        ColdLocalReadinessFault::TurnDrivenRuntimeAdapter,
+        "local member comms-drain runtime adapter",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_cold_running_resume_fails_closed_without_comms_runtime() {
+    assert_cold_running_local_resume_fails_closed(
+        ColdLocalReadinessFault::CommsRuntime,
+        "local member comms-drain startup",
+    )
+    .await;
 }
 
 #[tokio::test]

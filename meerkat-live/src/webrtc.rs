@@ -72,6 +72,7 @@ const WEBRTC_AUDIO_PACKET_MS: u64 = 20;
 const WEBRTC_AUDIO_PACKET_DURATION: Duration = Duration::from_millis(WEBRTC_AUDIO_PACKET_MS);
 const WEBRTC_AUDIO_QUEUE_CAPACITY: usize = 1_800;
 const LOCAL_BARGE_IN_RMS_THRESHOLD: f32 = 0.035;
+const WEBRTC_PEER_CLEANUP_WAIT_CEILING: Duration = Duration::from_secs(15);
 
 fn webrtc_data_channel_image_rejection() -> LiveAdapterObservation {
     LiveAdapterObservation::CommandRejected {
@@ -397,20 +398,40 @@ impl PublishedPeerCleanupCoordinator {
     }
 
     async fn wait_for_outcome(
-        mut outcome_rx: watch::Receiver<Option<PublishedPeerCleanupOutcome>>,
+        outcome_rx: watch::Receiver<Option<PublishedPeerCleanupOutcome>>,
     ) -> PublishedPeerCleanupOutcome {
-        loop {
-            if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
-                return outcome;
+        Self::wait_for_outcome_with_ceiling(outcome_rx, WEBRTC_PEER_CLEANUP_WAIT_CEILING).await
+    }
+
+    async fn wait_for_outcome_with_ceiling(
+        mut outcome_rx: watch::Receiver<Option<PublishedPeerCleanupOutcome>>,
+        wait_ceiling: Duration,
+    ) -> PublishedPeerCleanupOutcome {
+        match tokio::time::timeout(wait_ceiling, async {
+            loop {
+                if let Some(outcome) = outcome_rx.borrow_and_update().clone() {
+                    return outcome;
+                }
+                if outcome_rx.changed().await.is_err() {
+                    return PublishedPeerCleanupOutcome {
+                        removed_current: false,
+                        error_detail: Some(Arc::<str>::from(
+                            "owned WebRTC peer cleanup ended without an outcome",
+                        )),
+                    };
+                }
             }
-            if outcome_rx.changed().await.is_err() {
-                return PublishedPeerCleanupOutcome {
-                    removed_current: false,
-                    error_detail: Some(Arc::<str>::from(
-                        "owned WebRTC peer cleanup ended without an outcome",
-                    )),
-                };
-            }
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => PublishedPeerCleanupOutcome {
+                removed_current: false,
+                error_detail: Some(Arc::<str>::from(format!(
+                    "timed out after {}s waiting for owned WebRTC peer cleanup; physical cleanup remains owned",
+                    wait_ceiling.as_secs_f64()
+                ))),
+            },
         }
     }
 }
@@ -562,25 +583,33 @@ impl LiveWebrtcConstructionRegistry {
         remove
     }
 
-    async fn wait_for_channel_absent(&self, channel_id: &LiveChannelId) {
-        loop {
-            let changed = self.changed.notified();
-            tokio::pin!(changed);
-            // `notify_waiters` does not retain a permit. Register this waiter
-            // before inspecting the registry so removal cannot land between
-            // the check and the first poll and strand a lifecycle lease.
-            changed.as_mut().enable();
-            let present = self
-                .peers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .values()
-                .any(|entry| entry.channel_id == *channel_id);
-            if !present {
-                return;
+    async fn wait_for_channel_absent(
+        &self,
+        channel_id: &LiveChannelId,
+        wait_ceiling: Duration,
+    ) -> bool {
+        tokio::time::timeout(wait_ceiling, async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                // `notify_waiters` does not retain a permit. Register this waiter
+                // before inspecting the registry so removal cannot land between
+                // the check and the first poll and strand a lifecycle lease.
+                changed.as_mut().enable();
+                let present = self
+                    .peers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .values()
+                    .any(|entry| entry.channel_id == *channel_id);
+                if !present {
+                    return;
+                }
+                changed.as_mut().await;
             }
-            changed.as_mut().await;
-        }
+        })
+        .await
+        .is_ok()
     }
 
     fn contains_channel(&self, channel_id: &LiveChannelId) -> bool {
@@ -732,22 +761,37 @@ impl AnswerConstructionCustody {
     }
 
     async fn close_after(mut self, operation: LiveWebrtcError) -> LiveWebrtcError {
-        let operation_detail = operation.to_string();
         let Some(cleanup) = self.spawn_cleanup_task() else {
             return LiveWebrtcError::ConstructionCleanup {
-                operation: operation_detail,
+                operation: operation.to_string(),
                 close_detail: "construction cleanup custody was already transferred".to_string(),
             };
         };
-        match cleanup.await {
-            Ok(Ok(())) => operation,
-            Ok(Err(close_error)) => LiveWebrtcError::ConstructionCleanup {
+        Self::resolve_cleanup_task(cleanup, operation, WEBRTC_PEER_CLEANUP_WAIT_CEILING).await
+    }
+
+    async fn resolve_cleanup_task(
+        cleanup: tokio::task::JoinHandle<Result<(), LiveWebrtcError>>,
+        operation: LiveWebrtcError,
+        wait_ceiling: Duration,
+    ) -> LiveWebrtcError {
+        let operation_detail = operation.to_string();
+        match tokio::time::timeout(wait_ceiling, cleanup).await {
+            Ok(Ok(Ok(()))) => operation,
+            Ok(Ok(Err(close_error))) => LiveWebrtcError::ConstructionCleanup {
                 operation: operation_detail,
                 close_detail: close_error.to_string(),
             },
-            Err(join_error) => LiveWebrtcError::ConstructionCleanup {
+            Ok(Err(join_error)) => LiveWebrtcError::ConstructionCleanup {
                 operation: operation_detail,
                 close_detail: format!("cleanup task failed: {join_error}"),
+            },
+            Err(_) => LiveWebrtcError::ConstructionCleanup {
+                operation: operation_detail,
+                close_detail: format!(
+                    "timed out after {}s waiting for owned cleanup; physical cleanup remains owned",
+                    wait_ceiling.as_secs_f64()
+                ),
             },
         }
     }
@@ -780,8 +824,8 @@ impl Drop for AnswerConstructionCustody {
         if self.peer.is_some() {
             // Dropping the answer future means caller cancellation. Move the
             // physical close into an owned task so cancellation cannot cancel
-            // cleanup too. The RPC coordinator waits on the registry before
-            // releasing its lifecycle lease.
+            // cleanup too. The RPC coordinator waits boundedly; exact registry
+            // custody outlives an observer that reaches its ceiling.
             let _cleanup = self.spawn_cleanup_task();
         }
     }
@@ -1211,13 +1255,28 @@ impl LiveWebrtcState {
         });
     }
 
-    /// Wait until a cancelled answer future's detached construction cleanup
-    /// has either retired the exact physical peer or retained truthful custody
-    /// because the one-shot close did not reach typed `Closed`.
-    pub async fn wait_for_answer_construction_cleanup(&self, channel_id: &LiveChannelId) {
-        self.construction_peers
-            .wait_for_channel_absent(channel_id)
-            .await;
+    /// Wait for a cancelled answer future's detached construction cleanup.
+    ///
+    /// A timeout releases only this observer. The owned one-shot close and its
+    /// exact registry custody continue until the peer reaches typed `Closed`.
+    pub async fn wait_for_answer_construction_cleanup(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<(), LiveWebrtcError> {
+        if self
+            .construction_peers
+            .wait_for_channel_absent(channel_id, WEBRTC_PEER_CLEANUP_WAIT_CEILING)
+            .await
+        {
+            Ok(())
+        } else {
+            Err(LiveWebrtcError::PeerClose {
+                detail: format!(
+                    "timed out after {}s waiting for owned WebRTC answer construction cleanup; physical cleanup remains owned",
+                    WEBRTC_PEER_CLEANUP_WAIT_CEILING.as_secs_f64()
+                ),
+            })
+        }
     }
 
     /// Whether any construction, published-peer, or rejected-answer registry
@@ -1357,15 +1416,18 @@ impl LiveWebrtcState {
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<(), LiveWebrtcError> {
-        self.close_peer_checked_with_operation(channel_id, None)
+        self.close_peer_checked_with_operation(channel_id, None, WEBRTC_PEER_CLEANUP_WAIT_CEILING)
             .await
     }
 
     async fn close_peer_checked_with_operation(
         &self,
         channel_id: &LiveChannelId,
-        mut close: Option<PublishedPeerCloseOperation>,
+        close: Option<PublishedPeerCloseOperation>,
+        wait_ceiling: Duration,
     ) -> Result<(), LiveWebrtcError> {
+        let mut close = close;
+        let deadline = tokio::time::Instant::now() + wait_ceiling;
         loop {
             let peer = self.peers.lock().await.get(channel_id).map(|entry| {
                 (
@@ -1375,7 +1437,7 @@ impl LiveWebrtcState {
                 )
             });
             let Some((peer, answer_observation_sequence, peer_tasks)) = peer else {
-                return Ok(());
+                break;
             };
             self.install_published_peer_cleanup(
                 channel_id,
@@ -1388,15 +1450,28 @@ impl LiveWebrtcState {
                 None => peer_tasks.start_published_cleanup(),
             }
             .expect("published cleanup was installed before start");
-            let removed_current = PublishedPeerCleanupCoordinator::wait_for_outcome(outcome_rx)
-                .await
-                .into_result()?;
+            let removed_current = PublishedPeerCleanupCoordinator::wait_for_outcome_with_ceiling(
+                outcome_rx,
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await
+            .into_result()?;
             if removed_current {
-                return Ok(());
+                break;
             }
             // A concurrent replacement is still physical custody for the
             // same channel. Close that exact peer too; never report absence
             // from closing only a stale Arc.
+        }
+
+        if self.retains_physical_peer_custody(channel_id).await {
+            Err(LiveWebrtcError::PeerClose {
+                detail: format!(
+                    "checked close completed while physical WebRTC custody remains for channel {channel_id}"
+                ),
+            })
+        } else {
+            Ok(())
         }
     }
 
@@ -3157,6 +3232,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn construction_cleanup_join_timeout_detaches_owned_task() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel::<()>();
+        let cleanup = tokio::spawn(async move {
+            let _ = release_rx.await;
+            let _ = finished_tx.send(());
+            Ok(())
+        });
+
+        let error = AnswerConstructionCustody::resolve_cleanup_task(
+            cleanup,
+            LiveWebrtcError::PeerCreation {
+                detail: "injected construction failure".to_string(),
+            },
+            Duration::from_millis(20),
+        )
+        .await;
+        assert!(matches!(
+            error,
+            LiveWebrtcError::ConstructionCleanup { close_detail, .. }
+                if close_detail.contains("timed out")
+                    && close_detail.contains("physical cleanup remains owned")
+        ));
+
+        release_tx
+            .send(())
+            .expect("owned cleanup task must still exist after observer timeout");
+        tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .expect("detached owned cleanup must remain runnable")
+            .expect("owned cleanup must report completion");
+    }
+
+    #[tokio::test]
+    async fn construction_registry_wait_is_bounded_without_releasing_custody() {
+        let registry = LiveWebrtcConstructionRegistry::default();
+        let channel_id = LiveChannelId::new("bounded-construction-wait");
+        let peer = Arc::new(new_browser_peer().await);
+        registry.insert(1, channel_id.clone(), Arc::clone(&peer));
+
+        assert!(
+            !registry
+                .wait_for_channel_absent(&channel_id, Duration::from_millis(20))
+                .await,
+            "a stuck construction peer must not block its observer forever"
+        );
+        assert!(
+            registry.contains_channel(&channel_id),
+            "observer timeout must not launder retained custody into absence"
+        );
+
+        assert!(registry.remove_exact(1, &peer));
+        assert!(
+            registry
+                .wait_for_channel_absent(&channel_id, Duration::from_millis(20))
+                .await,
+            "exact retirement must remain observable after an earlier timeout"
+        );
+        peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_close_rejects_construction_only_custody() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(host);
+        let channel_id = LiveChannelId::new("construction-only-custody");
+        let peer = Arc::new(new_browser_peer().await);
+        state
+            .construction_peers
+            .insert(1, channel_id.clone(), Arc::clone(&peer));
+
+        let error = state
+            .close_peer_checked(&channel_id)
+            .await
+            .expect_err("checked close must reject retained construction custody");
+        assert!(matches!(
+            error,
+            LiveWebrtcError::PeerClose { detail }
+                if detail.contains("physical WebRTC custody remains")
+        ));
+        assert_eq!(state.construction_peer_count(), 1);
+        assert!(state.retains_physical_peer_custody(&channel_id).await);
+
+        assert!(state.construction_peers.remove_exact(1, &peer));
+        peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_close_rejects_pending_only_custody() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let state = LiveWebrtcState::new_for_test_with_generated_close_feedback(host);
+        let channel_id = LiveChannelId::new("pending-only-custody");
+        let sequence = 1;
+        let peer = Arc::new(new_browser_peer().await);
+        state.pending_answers.lock().await.insert(
+            sequence,
+            LiveWebrtcPendingAnswer {
+                channel_id: channel_id.clone(),
+                peer: Arc::clone(&peer),
+                peer_tasks: dormant_peer_tasks(),
+            },
+        );
+
+        let error = state
+            .close_peer_checked(&channel_id)
+            .await
+            .expect_err("checked close must reject retained pending-answer custody");
+        assert!(matches!(
+            error,
+            LiveWebrtcError::PeerClose { detail }
+                if detail.contains("physical WebRTC custody remains")
+        ));
+        assert_eq!(state.peer_count().await, 0);
+        assert_eq!(state.pending_answer_count().await, 1);
+        assert!(state.retains_physical_peer_custody(&channel_id).await);
+
+        state.pending_answers.lock().await.remove(&sequence);
+        peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn malformed_offer_closes_construction_peer_without_self_cycle_or_audio_task() {
         ensure_test_crypto_provider();
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
@@ -3240,7 +3436,8 @@ mod tests {
         assert!(answer.await.unwrap_err().is_cancelled());
         state
             .wait_for_answer_construction_cleanup(&channel_id)
-            .await;
+            .await
+            .unwrap();
         assert_eq!(state.construction_peer_count(), 0);
         assert_eq!(state.peer_count().await, 0);
         assert_eq!(state.pending_answer_count().await, 0);
@@ -3323,7 +3520,8 @@ mod tests {
         assert_eq!(state.pending_answer_count().await, 0);
         state
             .wait_for_answer_construction_cleanup(&LiveChannelId::new("atomic-answer-publication"))
-            .await;
+            .await
+            .unwrap();
         assert_eq!(
             cleanup_peer.connection_state(),
             RTCPeerConnectionState::Closed
@@ -3847,7 +4045,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timed_out_checked_close_keeps_owned_cleanup_running_to_exact_retirement() {
+    async fn cancelled_and_bounded_checked_close_keep_one_owned_cleanup_running() {
         let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
         let channel_id = host
             .open_channel_with_generated_test_machine_authority(SessionId::new())
@@ -3930,6 +4128,7 @@ mod tests {
                                 })
                         })
                     })),
+                    WEBRTC_PEER_CLEANUP_WAIT_CEILING,
                 ),
             )
             .await
@@ -3944,8 +4143,25 @@ mod tests {
         );
         assert_eq!(close_attempts.load(Ordering::SeqCst), 1);
 
-        // The timeout dropped only the subscriber. The exact runtime-owned
-        // coordinator still owns the one physical close and its retirement.
+        let bounded_error = state
+            .close_peer_checked_with_operation(&channel_id, None, Duration::from_millis(50))
+            .await
+            .expect_err("a second observer must stop waiting at its transport ceiling");
+        assert!(
+            bounded_error.to_string().contains("timed out")
+                && bounded_error
+                    .to_string()
+                    .contains("physical cleanup remains owned")
+        );
+        assert_eq!(
+            close_attempts.load(Ordering::SeqCst),
+            1,
+            "bounded observers must join the owned one-shot close, never restart it"
+        );
+
+        // Both observer timeouts dropped only their subscriptions. The exact
+        // runtime-owned coordinator still owns one physical close and its
+        // retirement.
         release_close.notify_one();
         wait_for_peer_count(&state, 0).await;
         wait_for_peer_tasks_to_stop(&state).await;

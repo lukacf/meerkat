@@ -900,9 +900,10 @@ pub(crate) async fn handle_live_webrtc_answer(
 
     // Construction and cleanup run under one owned coordinator. If this RPC
     // future is dropped, liveness closes: the coordinator aborts negotiation,
-    // waits for detached construction cleanup, and only then releases the
-    // machine lifecycle lease. If publication won the race, the exact
-    // sequence-keyed peer is rejected through the same pending-answer path.
+    // waits boundedly for detached construction cleanup, and then releases the
+    // machine lifecycle lease. Exact registry custody outlives that observer.
+    // If publication won the race, the exact sequence-keyed peer is rejected
+    // through the same pending-answer path.
     let cleanup_task = tokio::spawn(async move {
         let answer_live_webrtc = Arc::clone(&coordinator_live_webrtc);
         let answer_channel_id = coordinator_channel_id.clone();
@@ -963,12 +964,12 @@ pub(crate) async fn handle_live_webrtc_answer(
                 }
             }
             Ok(Err(answer_error)) => {
-                // `answer_offer` does not return until pre-publication cleanup
-                // has completed, including surfacing any close failure. Record
-                // the generated rejection while this owned coordinator still
-                // retains the session lifecycle lease; handler cancellation
-                // therefore cannot reopen the lifecycle race between transport
-                // failure and machine-visible rejection.
+                // `answer_offer` does not return until its bounded
+                // pre-publication cleanup join has settled, including surfacing
+                // any close failure. Record the generated rejection while this
+                // owned coordinator still retains the session lifecycle lease;
+                // handler cancellation therefore cannot reopen the lifecycle
+                // race between transport failure and machine-visible rejection.
                 let response = live_webrtc_answer_error_response(
                     coordinator_response_id.clone(),
                     &coordinator_runtime,
@@ -979,13 +980,9 @@ pub(crate) async fn handle_live_webrtc_answer(
                 .await;
                 let _ =
                     answer_result_tx.send(LiveWebrtcAnswerCoordinatorResult::Rejection(response));
-                // Normal answer errors have already removed construction
-                // custody, so this returns immediately. A failed one-shot
-                // physical close intentionally leaves the exact construction
-                // entry present and keeps this lifecycle lease fail-closed.
-                coordinator_live_webrtc
-                    .wait_for_answer_construction_cleanup(&coordinator_channel_id)
-                    .await;
+                // `answer_offer` already awaited its bounded construction
+                // cleanup join. Any peer it could not retire remains in exact
+                // registry custody; the lifecycle mutex is free to release.
                 Ok(())
             }
             Err(join_error) => {
@@ -1007,13 +1004,12 @@ pub(crate) async fn handle_live_webrtc_answer(
                     let _ = answer_result_tx
                         .send(LiveWebrtcAnswerCoordinatorResult::Rejection(response));
                 }
-                // Wait for exact absence before releasing the lifecycle lease.
-                // A non-Closed peer intentionally retains custody and therefore
-                // retains the lease instead of making a false absence claim.
+                // Wait boundedly for exact absence. A non-Closed peer keeps
+                // exact registry custody, but the lifecycle mutex is not
+                // durable transport-fault state and must still be released.
                 coordinator_live_webrtc
                     .wait_for_answer_construction_cleanup(&coordinator_channel_id)
-                    .await;
-                Ok(())
+                    .await
             }
         };
         match cleanup_result {
@@ -1027,12 +1023,6 @@ pub(crate) async fn handle_live_webrtc_answer(
                     error = %cleanup_error,
                     "WebRTC answer cleanup reported a transport shutdown error"
                 );
-                if coordinator_live_webrtc
-                    .retains_physical_peer_custody(&coordinator_channel_id)
-                    .await
-                {
-                    std::future::pending::<()>().await;
-                }
                 drop(live_lifecycle_lease);
                 Err(cleanup_error)
             }
@@ -1047,10 +1037,9 @@ pub(crate) async fn handle_live_webrtc_answer(
         Ok(LiveWebrtcAnswerCoordinatorResult::Answer(answer)) => answer,
         Ok(LiveWebrtcAnswerCoordinatorResult::Rejection(response)) => {
             // Rejection authority has already acknowledged the answer fault.
-            // The owned coordinator may need to retain the lifecycle lease
-            // indefinitely for a construction peer that failed to reach typed
-            // Closed; detaching it returns the authorized error without
-            // laundering that physical custody into absence.
+            // Detaching leaves the bounded cleanup coordinator responsible for
+            // releasing the lifecycle lease; exact registry custody remains if
+            // the physical peer cannot reach typed Closed.
             drop(cleanup_task);
             return response.into();
         }
@@ -1204,12 +1193,11 @@ pub async fn handle_live_close(
     // peer (whose data-channel observation pump never started) cannot survive a
     // successful `live/close`. The checked primitive owns cancellation-safe,
     // one-shot physical shutdown and leaves semantic state active on failure;
-    // retained physical custody keeps the lifecycle gate fail-closed.
+    // retained physical custody stays visible in the WebRTC registries.
     #[cfg(feature = "live-webrtc")]
     if let Some(live_webrtc) = live_webrtc
         && let Err(close_error) = live_webrtc.close_peer_checked(&channel_id).await
     {
-        let custody_retained = live_webrtc.retains_physical_peer_custody(&channel_id).await;
         let request = meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::Close;
         let detail = format!("WebRTC peer close failed before semantic live close: {close_error}");
         let Some((session_id, lease)) = webrtc_close_authority else {
@@ -1239,19 +1227,10 @@ pub async fn handle_live_close(
                 format!("live WebRTC close rejection authority rejected result: {error}"),
             ),
         };
-        if custody_retained {
-            // rust-webrtc close is one-shot. If it did not reach typed Closed,
-            // retain the existing lifecycle gate fail-closed while returning
-            // the generated rejection; a later lifecycle must not infer absence.
-            tokio::spawn(async move {
-                std::future::pending::<()>().await;
-                drop(lease);
-            });
-        } else {
-            // A subcomponent error may accompany typed Closed. Exact custody
-            // is already retired in that case, so do not brick the session.
-            drop(lease);
-        }
+        // Exact WebRTC custody remains in its registries when the one-shot
+        // close cannot reach typed Closed. The lifecycle mutex is an exclusion
+        // witness, not durable transport-fault state, so always release it.
+        drop(lease);
         return response;
     }
 

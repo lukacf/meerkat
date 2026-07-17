@@ -357,10 +357,10 @@ binds to it.
 ```bash
 rkat mob pack <DIR> -o <OUT.mobpack> [--sign <KEY_FILE> --signer-id <ID>]
 rkat mob inspect <PACK.mobpack>
-rkat mob validate <PACK.mobpack>
-rkat mob run <PACK.mobpack|MOB_ID> [--flow <FLOW_ID>] [--param <KEY=VALUE>...] [--prompt <TEXT>] [--detach] [--json]
+rkat mob validate <PACK.mobpack> [--trust-policy <permissive|strict>]
+rkat mob run <PACK.mobpack|MOB_ID> [--flow <FLOW_ID>] [--param <KEY=VALUE>...] [--prompt <TEXT>] [--detach] [--json] [--trust-policy <permissive|strict>]
 rkat mob deploy <PACK.mobpack> <PROMPT> [--trust-policy <permissive|strict>] [--surface <cli|rpc>]
-rkat mob web build <PACK.mobpack> -o <OUT_DIR> --wasm <PKG_DIR|name_bg.wasm>
+rkat mob web build <PACK.mobpack> -o <OUT_DIR> --wasm <PKG_DIR|name_bg.wasm> [--trust-policy <permissive|strict>]
 rkat mob run-flow <MOB_ID> --flow <FLOW_ID> [--params <JSON>] [--stream|--no-stream]
 rkat mob flow-status <MOB_ID> <RUN_ID>
 rkat mob runs <MOB_ID> [--flow <FLOW_ID>] [--json]
@@ -422,11 +422,11 @@ Examples:
 ```bash
 rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
 rkat mob inspect dist/release-triage.mobpack
-rkat mob validate dist/release-triage.mobpack
-rkat mob run dist/release-triage.mobpack --prompt "triage the latest release regressions"
+rkat mob validate dist/release-triage.mobpack --trust-policy permissive
+rkat mob run dist/release-triage.mobpack --prompt "triage the latest release regressions" --trust-policy permissive
 rkat mob run release-triage --flow main --param severity='"high"' --detach
 rkat mob attach release-triage <RUN_ID>
-rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm sdks/web/wasm
+rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm ./meerkat-web-runtime/pkg --trust-policy permissive
 ```
 
 ### Trust policy
@@ -438,13 +438,14 @@ rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm
 
 The CLI does not compile wasm32 itself. `--wasm` is required and must point at
 the prebuilt meerkat-web-runtime artifacts — either the wasm-pack `--target web`
-output **directory** (which holds `meerkat_web_runtime.js` + `meerkat_web_runtime_bg.wasm`)
-or that `*_bg.wasm` file (the sibling `.js` glue is copied alongside). Use the
-committed `sdks/web/wasm`, or build it:
+output **directory** (which holds `meerkat_web_runtime.js` +
+`meerkat_web_runtime_bg.wasm`) or that `*_bg.wasm` file (the sibling `.js` glue
+is copied alongside). `mob web build` copies those artifacts into its output.
+wasm-pack is one way to generate the required input:
 
 ```bash
 cargo install wasm-pack
-wasm-pack build meerkat-web-runtime --target web --out-dir sdks/web/wasm
+wasm-pack build meerkat-web-runtime --target web --out-dir pkg
 ```
 
 The emitted bundle is self-contained and runnable: serve the output directory and
@@ -511,7 +512,8 @@ Checks:
 - config readability
 - common provider API keys
 - MCP config loading
-- `wasm-pack` availability for `mob web build`
+- `wasm-pack` availability as one way to generate the required `--wasm`
+  artifacts; `mob web build` copies them and does not invoke wasm-pack
 
 ## init
 

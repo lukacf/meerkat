@@ -682,12 +682,13 @@ artifact:
 ```bash
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
 rkat mob inspect ./dist/release-triage.mobpack
-rkat mob validate ./dist/release-triage.mobpack
-rkat mob run ./dist/release-triage.mobpack --prompt "triage latest release regressions"
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest release regressions" --trust-policy permissive
 ```
 
 Use mobpacks when the mob should be versioned, signed, reviewed, deployed, or
-compiled for the browser.
+bundled for browser deployment. `mob web build` copies required prebuilt
+wasm-pack output into that bundle; it does not compile wasm32.
 
 ## Troubleshooting
 

@@ -27,7 +27,7 @@ Use this guide when you want to:
 ```bash
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack
 rkat mob inspect ./dist/release-triage.mobpack
-rkat mob validate ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
 ```
 
 Expected source files:
@@ -44,10 +44,12 @@ Sign at pack time:
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack --sign ./keys/release.key --signer-id release@example.com
 ```
 
-Run with strict trust:
+Signing embeds the public key but does not install the signer in the verifier's
+trust configuration. Use permissive mode for this immediate local path, then
+switch to strict after installing the signer as trusted:
 
 ```bash
-rkat mob run ./dist/release-triage.mobpack --prompt "triage release regressions" --trust-policy strict
+rkat mob run ./dist/release-triage.mobpack --prompt "triage release regressions" --trust-policy permissive
 ```
 
 Trust policy resolution:
@@ -69,7 +71,7 @@ Strict mode rejects:
 One-shot CLI run:
 
 ```bash
-rkat mob run ./dist/release-triage.mobpack --prompt "triage latest incidents"
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest incidents" --trust-policy permissive
 ```
 
 Detached reusable run:
@@ -81,18 +83,20 @@ rkat mob attach release-triage <RUN_ID>
 
 ## Browser target: `mob web build`
 
-The web build compiles the **real meerkat agent stack** to wasm32 — same agent loop, same LLM providers (Anthropic, OpenAI, Gemini), same streaming as CLI/RPC/REST. Not a simulation.
+The browser runtime is the **real meerkat agent stack** compiled to wasm32 —
+same agent loop, same LLM providers (Anthropic, OpenAI, Gemini), and same
+streaming as CLI/RPC/REST. `mob web build` does not compile it; the command
+copies the required prebuilt runtime artifacts into the browser bundle.
 
 Prerequisites: the prebuilt meerkat-web-runtime artifacts — the wasm-bindgen
 glue (`meerkat_web_runtime.js`) and its paired `meerkat_web_runtime_bg.wasm` —
-produced by `wasm-pack build meerkat-web-runtime --target web` (or the committed
-`sdks/web/wasm` directory). The CLI does not compile wasm32 itself and fails
-closed without them — it never emits a placeholder bundle. Pass either the
-wasm-pack output **directory** or the `*_bg.wasm` file (the sibling `.js` glue is
-copied alongside it):
+produced by `wasm-pack build meerkat-web-runtime --target web` or an equivalent
+wasm-bindgen pipeline. The CLI fails closed without them and never emits a
+placeholder bundle. Pass either the generated output **directory** or the
+`*_bg.wasm` file (the sibling `.js` glue is copied alongside it):
 
 ```bash
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --wasm ./sdks/web/wasm
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --wasm ./meerkat-web-runtime/pkg --trust-policy permissive
 ```
 
 Output is a self-contained, runnable bundle — serve the directory (e.g.

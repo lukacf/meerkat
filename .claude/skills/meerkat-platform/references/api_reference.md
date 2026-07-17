@@ -187,7 +187,7 @@ Primary CLI mob usage is tool-driven from `run`/`run --resume` prompts using `mo
 | `grant <mob_id> <principal> --scope ...` / `revoke-grant ...` / `grants <mob_id>` | Manage remote-console control scopes |
 | `member-history <mob_id> <agent_identity>` / `route-installs <mob_id>` | Read placed-member history and route-install obligations |
 | `live open\|close\|status\|control ...` | Operate a member live channel; there is intentionally no `live send` verb |
-| `run <pack_or_mob_id> [--flow] [--param] [--prompt] [--detach] [--json]` | Invoke a mobpack or installed mob as a typed callable run; `--prompt` binds `params.prompt` |
+| `run <pack_or_mob_id> [--flow] [--param] [--prompt] [--detach] [--json] [--trust-policy]` | Invoke a mobpack or installed mob as a typed callable run; `--prompt` binds `params.prompt` |
 | `runs <mob_id> [--flow] [--json]` | List persisted run resources for a mob |
 | `status <mob_id> <run_id> [--json]` | Read one run resource status |
 | `logs <mob_id> [--after-cursor] [--limit] [--json]` | Read mob event history for run diagnostics |
@@ -198,9 +198,18 @@ Primary CLI mob usage is tool-driven from `run`/`run --resume` prompts using `mo
 | `inspect <pack>` | Inspect a `.mobpack` archive |
 | `validate <pack> [--trust-policy permissive\|strict]` | Validate a `.mobpack` archive |
 | `deploy <pack> <prompt> [--model] [--max-total-tokens] [--max-duration] [--max-tool-calls] [--trust-policy] [--surface cli\|rpc]` | Validate/register/deploy a `.mobpack`; orchestrator-less packs warn that prompts are not delivered and flows are not started |
-| `web build <pack> -o <dir> [--trust-policy]` | Build a browser-deployable WASM bundle |
+| `web build <pack> -o <dir> --wasm <PKG_DIR\|name_bg.wasm> [--trust-policy]` | Build a browser-deployable WASM bundle from required prebuilt wasm-pack output |
 
 Lifecycle verbs that used to live on the CLI (`create`, `spawn`, `retire`, `wire`, `unwire`, `turn`, `stop`, `resume`, `complete`, `events`, `destroy`) are reached through the agent tools (`mob_create`, `mob_spawn_member`, `mob_wire`, ...) or through the RPC `mob/*` methods listed below.
+
+Signing a pack does not install its signer in a trust store. The executable
+local path for an uninstalled signer is explicit permissive mode:
+
+```bash
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
+rkat mob run ./dist/release-triage.mobpack --flow main --trust-policy permissive
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --wasm <PKG_DIR|name_bg.wasm> --trust-policy permissive
+```
 
 ---
 

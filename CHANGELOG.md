@@ -159,6 +159,10 @@ via cargo-semver-checks against the published baselines).
   retained cleanup sidecar while cancellation-safe retirement is still
   uncertain. Stale registration or attachment witnesses continue to fail
   closed instead of blocking the valid retry path.
+- CLI OAuth guidance now uses the inherited global binding, and embedded
+  `rkat help` includes the exact mobpack manifest, definition, wiring, flow,
+  required member-comms shapes, automatic flat-step role provisioning, and
+  executable local signed-pack trust and web-runtime arguments.
 - Rejected atomic runtime commits now abort every pre-commit session
   projection—not only compaction—including the live transcript/checkpointer
   and pending context events before recovery checkpoints can reload the prior

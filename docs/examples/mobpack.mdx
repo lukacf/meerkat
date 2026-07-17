@@ -29,6 +29,10 @@ rkat mob pack ./mobs/release-triage \
   --signer-id team@example.com
 ```
 
+Signing embeds the public key but does not install the signer as trusted. The
+local commands below therefore use permissive mode; use strict only after
+installing that signer in the verifier's trust configuration.
+
 ## Inspect a pack
 
 View the contents, metadata, and signature status of a `.mobpack` without deploying.
@@ -42,7 +46,7 @@ rkat mob inspect ./dist/release-triage.mobpack
 Check structural integrity, schema conformance, and signature validity.
 
 ```bash
-rkat mob validate ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
 ```
 
 ## Run a pack
@@ -53,7 +57,7 @@ before the flow starts; `--prompt` is sugar for `--param prompt=<text>`.
 ```bash
 rkat mob run ./dist/release-triage.mobpack \
   --prompt "triage latest regressions" \
-  --trust-policy strict \
+  --trust-policy permissive \
   --json
 ```
 

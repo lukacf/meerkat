@@ -102,11 +102,20 @@ Same realm means shared sessions, config, backend, credentials, schedules, blobs
 
 ```bash
 rkat auth login openai
-rkat auth profiles --realm dev
-rkat run --model gpt-5.6-sol --auth-binding dev:openai_oauth "Summarize this pull request"
+rkat auth profiles  # defaults to the reserved global realm
+rkat run --model gpt-5.6-sol "Summarize this pull request"
+
+# Optional: pin the login-created OAuth binding explicitly.
+rkat run --model gpt-5.6-sol --auth-binding global:openai_oauth "Summarize this pull request"
 ```
 
-Realm bindings also work through REST, JSON-RPC, SDKs, and mob member launches, so applications can scope credentials per tenant, session, or team member without hardcoding provider keys. Bindings are provider-checked against the selected model, so an OpenAI binding should be paired with an OpenAI model, an Anthropic binding with an Anthropic model, and so on.
+`rkat auth login` writes the reserved `global` realm, which workspace realms
+inherit automatically. Realm bindings also work through REST, JSON-RPC, SDKs,
+and mob member launches, so applications can scope credentials per tenant,
+session, or team member without hardcoding provider keys. Bindings are
+provider-checked against the selected model, so an OpenAI binding should be
+paired with an OpenAI model, an Anthropic binding with an Anthropic model, and
+so on.
 
 **Give it tools and let it work.** Enable shell access, MCP tools, schedules, comms, and mob orchestration with the `full` tool preset:
 
@@ -422,18 +431,21 @@ Build once, run in multiple environments with a portable `.mobpack`:
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
   --sign ./keys/release.key --signer-id release-team
 rkat mob inspect ./dist/release-triage.mobpack
-rkat mob validate ./dist/release-triage.mobpack
-rkat mob deploy ./dist/release-triage.mobpack "triage latest regressions" --trust-policy strict
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
+rkat mob run ./dist/release-triage.mobpack --flow main --trust-policy permissive
 ```
 
-Strict trust requires the signer ID and public key to be present in the user or project trusted-signers store before deploy.
+Packing embeds the signer identity and public key but does not install that
+signer in a trust store. The local commands above therefore opt into permissive
+trust explicitly; the signature is still verified and an unknown-signer warning
+is reported. Use strict trust after installing the signer ID and public key in
+the user or project trusted-signers store.
 
 Browser target from the same artifact:
 
 ```bash
-cargo install wasm-pack
-export PATH="$HOME/.cargo/bin:$PATH"
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web \
+  --wasm <PKG_DIR|name_bg.wasm> --trust-policy permissive
 ```
 
 See full guide: [Mobpack and Web Deployment](https://docs.rkat.ai/guides/mobpack).

@@ -163,6 +163,12 @@ via cargo-semver-checks against the published baselines).
   `rkat help` includes the exact mobpack manifest, definition, wiring, flow,
   required member-comms shapes, automatic flat-step role provisioning, and
   executable local signed-pack trust and web-runtime arguments.
+- Added an explicit, dry-run-first `rkat session migrate` path for exact
+  v0.6.34 completed-idle SQLite sessions. Apply mode refuses live/unknown realm
+  leases, translates lifecycle and terminal input state through current machine
+  authority in one transaction, and retains append-only original row bytes.
+  Operators must still stop all v0.6.34 processes because one-shot legacy CLI
+  runs did not consistently publish lease evidence.
 - Rejected atomic runtime commits now abort every pre-commit session
   projection—not only compaction—including the live transcript/checkpointer
   and pending context events before recovery checkpoints can reload the prior

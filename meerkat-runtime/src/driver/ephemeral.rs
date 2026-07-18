@@ -665,6 +665,42 @@ impl EphemeralRuntimeDriver {
         )
     }
 
+    /// Compile the exact v0.6.34 completed-idle compatibility observation
+    /// through generated recovery authority before minting durable lifecycle
+    /// bytes. The migration caller supplies no binding or supervisor facts;
+    /// the returned record projects only the facts accepted and recovered by
+    /// MeerkatMachine.
+    #[cfg(feature = "sqlite-store")]
+    pub(crate) fn recover_v0_6_34_completed_idle_lifecycle_record(
+        &mut self,
+    ) -> Result<crate::store::MachineLifecycleStoreRecord, RuntimeDriverError> {
+        let session_id = self.session_authority_id_for_recovery();
+        self.recover_runtime_authority_from_binding_observation(
+            session_id,
+            RuntimeState::Idle,
+            None,
+            None,
+            None,
+            None,
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+        )?;
+        let durable_state =
+            crate::meerkat_machine::classify_runtime_lifecycle_durable_state_with_pre_run_phase(
+                crate::traits::RuntimeDriver::runtime_state(self),
+                self.pre_run_phase(),
+            )
+            .map_err(RuntimeDriverError::Internal)?;
+        Ok(
+            crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                durable_state,
+                self.machine_lifecycle_binding_facts(),
+                self.supervisor_authority_snapshot(),
+                None,
+            )
+            .store_record(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn recover_runtime_authority_from_binding_observation_with_silent_intents(
         &mut self,

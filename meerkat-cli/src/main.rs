@@ -2221,6 +2221,16 @@ enum SessionCommands {
         /// Session ID to interrupt
         session_id: String,
     },
+
+    /// Inspect or migrate exact v0.6.34 completed-idle session state
+    Migrate {
+        /// Atomically apply eligible migrations (dry-run is the default)
+        #[arg(long)]
+        apply: bool,
+        /// Emit the migration report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3438,6 +3448,9 @@ async fn main() -> anyhow::Result<ExitCode> {
             SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
             SessionCommands::Interrupt { session_id } => {
                 interrupt_session(&session_id, &cli_scope).await
+            }
+            SessionCommands::Migrate { apply, json } => {
+                migrate_legacy_sessions(apply, json, &cli_scope).await
             }
         },
         Commands::Blob { command } => handle_blob_command(command, &cli_scope).await,
@@ -12648,6 +12661,107 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             mob_id,
         )
         .await
+    }
+}
+
+/// Inspect or explicitly migrate the exact completed-idle persistence shape
+/// emitted by rkat v0.6.34. Ordinary session loading deliberately remains
+/// fail-closed; compatibility is available only through this command.
+async fn migrate_legacy_sessions(
+    apply: bool,
+    json: bool,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    #[cfg(not(feature = "session-store"))]
+    {
+        let _ = (apply, json, scope);
+        anyhow::bail!("session migration requires rkat built with session-store support");
+    }
+    #[cfg(feature = "session-store")]
+    {
+        let paths =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
+        let manifest_bytes = tokio::fs::read(&paths.manifest_path)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to read realm manifest {}: {error}",
+                    paths.manifest_path.display()
+                )
+            })?;
+        let manifest: meerkat_store::RealmManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| anyhow::anyhow!("Failed to parse realm manifest: {error}"))?;
+        if manifest.realm != scope.locator.realm {
+            anyhow::bail!(
+                "Realm manifest identity '{}' does not match requested realm '{}'",
+                manifest.realm,
+                scope.locator.realm
+            );
+        }
+
+        if apply {
+            let leases = meerkat_store::inspect_realm_leases_in(
+                &scope.locator.state_root,
+                scope.locator.realm.as_str(),
+                true,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to inspect realm leases: {error}"))?;
+            if leases.blocks_destructive_prune() {
+                anyhow::bail!(
+                    "Realm '{}' may still be in use ({} active lease(s), {} unreadable lease file(s)); stop every process using it before applying migration",
+                    scope.locator.realm,
+                    leases.active.len(),
+                    leases.unparseable.len()
+                );
+            }
+        }
+
+        let database_path = match manifest.backend.as_str() {
+            "sqlite" => paths.sessions_sqlite_path,
+            "jsonl" => paths.runtime_sqlite_path,
+            backend => anyhow::bail!(
+                "Realm '{}' uses backend '{backend}', which has no durable SQLite runtime state to migrate",
+                scope.locator.realm
+            ),
+        };
+        let report = tokio::task::spawn_blocking(move || {
+            meerkat_runtime::store::SqliteRuntimeStore::migrate_v0_6_34_completed_idle(
+                database_path,
+                apply,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Session migration task failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("Session migration failed: {error}"))?;
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            let migration_count = report.migration_count();
+            let blocked_count = report.blocked_count();
+            let action = if report.applied {
+                "migrated"
+            } else {
+                "would migrate"
+            };
+            println!("{migration_count} session runtime(s) {action}; {blocked_count} blocked");
+            for item in report.items {
+                println!(
+                    "  {}: {:?}{}",
+                    item.runtime_id,
+                    item.disposition,
+                    item.detail
+                        .as_deref()
+                        .map(|detail| format!(" ({detail})"))
+                        .unwrap_or_default()
+                );
+            }
+            if !apply && migration_count > 0 {
+                println!("Run again with --apply after stopping every process using this realm.");
+            }
+        }
+        Ok(())
     }
 }
 

@@ -24,7 +24,7 @@ use meerkat_mob::{
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 #[cfg(not(target_arch = "wasm32"))]
 use ::tokio::{
@@ -62,6 +62,57 @@ const TOOL_MOB_PROFILE_LIST: &str = "mob_profile_list";
 const TOOL_MOB_PROFILE_UPDATE: &str = "mob_profile_update";
 const TOOL_MOB_PROFILE_DELETE: &str = "mob_profile_delete";
 const TOOL_MOB_PROFILE_LIST_SOURCES: &str = "mob_profile_list_sources";
+
+#[cfg(not(target_arch = "wasm32"))]
+type AgentDispatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<meerkat_core::ToolDispatchOutcome, ToolError>> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type AgentDispatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<meerkat_core::ToolDispatchOutcome, ToolError>> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type AgentOperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type AgentOperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type MobCreateFuture = Pin<Box<dyn Future<Output = Result<MobId, MobError>> + Send + 'static>>;
+#[cfg(target_arch = "wasm32")]
+type MobCreateFuture = Pin<Box<dyn Future<Output = Result<MobId, MobError>> + 'static>>;
+
+// Construct each large concrete async state machine behind an inline-resistant
+// heap boundary. `Box::pin(self.dispatch_...)` inside the dispatch match still
+// materializes the concrete future as a stack temporary in debug builds.
+macro_rules! boxed_agent_dispatch {
+    ($boxed:ident, $inner:ident $(, $arg:ident : $arg_ty:ty)*) => {
+        #[inline(never)]
+        fn $boxed<'a>(
+            &'a self,
+            call: ToolCallView<'a>,
+            $($arg: $arg_ty),*
+        ) -> AgentDispatchFuture<'a> {
+            Box::pin(self.$inner(call, $($arg),*))
+        }
+    };
+}
+
+#[inline(never)]
+fn mob_create_with_owner_bridge_boxed(
+    state: Arc<MobMcpState>,
+    definition: MobDefinition,
+    owner_bridge_session_id: SessionId,
+) -> MobCreateFuture {
+    Box::pin(async move {
+        state
+            .mob_create_definition_with_owner_bridge_session(
+                definition,
+                owner_bridge_session_id,
+                true,
+                false,
+            )
+            .await
+    })
+}
 
 // ─── ResolvedSpawnTooling ────────────────────────────────────────────────
 
@@ -102,6 +153,16 @@ fn lower_wire_placement(placement: Option<WireHostRef>) -> Option<HostId> {
 
 // ─── AgentMobToolSurface ─────────────────────────────────────────────────
 
+#[derive(Clone)]
+enum ParentToolAccessPolicySource {
+    /// AgentFactory supplied the already-resolved effective parent policy
+    /// through its opaque parent-composition authority.
+    Resolved(Option<meerkat_core::ops::ToolAccessPolicy>),
+    /// Compatibility path for public constructors that predate the opaque
+    /// authority handoff. Resolve from durable session metadata at dispatch.
+    LegacySessionMetadata,
+}
+
 /// Agent-internal tool surface for mob delegation and orchestration.
 ///
 /// Composed by `build_agent()` into the tool gateway. Provides 8 tools
@@ -116,6 +177,7 @@ pub struct AgentMobToolSurface {
     /// (via apply_session_effects). Falls back to a local RwLock when no shared
     /// handle is provided (non-runtime test paths).
     effective_authority: Arc<std::sync::RwLock<MobToolAuthorityContext>>,
+    parent_tool_access_policy_source: ParentToolAccessPolicySource,
     tools: Arc<[Arc<ToolDef>]>,
     owner_bridge_session_id: SessionId,
     /// Model name inherited by implicit mob helpers.
@@ -274,6 +336,33 @@ impl AgentMobToolSurface {
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
         snapshot_context: meerkat_core::service::MobToolSnapshotContext,
     ) -> Self {
+        Self::new_with_effective_authority_and_policy_source(
+            state,
+            implicit_mob_id,
+            effective_authority,
+            ParentToolAccessPolicySource::LegacySessionMetadata,
+            model,
+            owner_bridge_session_id,
+            comms_name,
+            comms_peer_id,
+            comms_runtime,
+            snapshot_context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_effective_authority_and_policy_source(
+        state: Arc<MobMcpState>,
+        implicit_mob_id: Option<MobId>,
+        effective_authority: Arc<std::sync::RwLock<MobToolAuthorityContext>>,
+        parent_tool_access_policy_source: ParentToolAccessPolicySource,
+        model: String,
+        owner_bridge_session_id: SessionId,
+        comms_name: Option<String>,
+        comms_peer_id: Option<PeerId>,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+        snapshot_context: meerkat_core::service::MobToolSnapshotContext,
+    ) -> Self {
         let has_profile_store = state.realm_profile_store().is_some();
         let has_snapshot_provider = matches!(
             &snapshot_context,
@@ -297,6 +386,7 @@ impl AgentMobToolSurface {
             state,
             cached_implicit_mob_id: RwLock::new(implicit_mob_id),
             effective_authority,
+            parent_tool_access_policy_source,
             tools,
             owner_bridge_session_id,
             model,
@@ -674,50 +764,79 @@ impl AgentMobToolSurface {
 
     /// Resolve the spawned child's effective tool access policy.
     ///
-    /// `Inherit`/absent resolves to this (parent) session's effective policy
-    /// from `SessionMetadata.tooling.tool_access_policy` — the same field the
-    /// factory stamps at build. Every backend exposes the parent through the
-    /// metadata-only `load_persisted_session_metadata` seam: the persistent
-    /// service projects the durable metadata row and the ephemeral service
-    /// derives the view from the LIVE session (a restricted ephemeral parent
-    /// must never mint unrestricted children because its policy was invisible
-    /// to the read seam). A metadata READ FAULT — including corrupt durable
-    /// metadata, which the seam surfaces as `Err`, never `Ok(None)` — fails
-    /// the spawn closed rather than silently minting an ungated child; a
-    /// genuinely absent parent session (host/operator-authored spawn)
-    /// resolves to unrestricted.
-    async fn resolve_child_tool_access_policy(
-        &self,
-        tool_name: &str,
+    /// Factory-built surfaces resolve from their immutable composition
+    /// authority. Legacy public constructors retain their metadata-read
+    /// behavior, but that branch stays erased so it cannot inflate the
+    /// factory spawn future or re-enter a factory-owned live parent.
+    #[inline(never)]
+    fn resolve_child_tool_access_policy_boxed<'a>(
+        &'a self,
+        tool_name: &'a str,
         requested: Option<meerkat_core::ops::ToolAccessPolicy>,
-    ) -> Result<Option<meerkat_core::ops::ToolAccessPolicy>, ToolError> {
+    ) -> AgentOperationFuture<'a, Result<Option<meerkat_core::ops::ToolAccessPolicy>, ToolError>>
+    {
+        // Preserve the historical explicit-policy fast path: an admitted
+        // AllowList/DenyList never needs parent metadata.
         if matches!(
-            requested,
+            requested.as_ref(),
             Some(
                 meerkat_core::ops::ToolAccessPolicy::AllowList(_)
                     | meerkat_core::ops::ToolAccessPolicy::DenyList(_)
             )
         ) {
-            return Ok(effective_child_tool_access_policy(requested, None));
+            return Box::pin(std::future::ready(Ok(requested)));
         }
-        let parent_view = self
-            .state
-            .session_service()
-            .load_persisted_session_metadata(&self.owner_bridge_session_id)
-            .await
-            .map_err(|error| {
-                ToolError::execution_failed(format!(
-                    "tool '{tool_name}' parent tool access policy read failed; \
-                     refusing to resolve the child tool access policy: {error}"
-                ))
-            })?;
-        let parent_effective = parent_view
-            .and_then(|view| view.session_metadata)
-            .and_then(|metadata| metadata.tooling.tool_access_policy);
-        Ok(effective_child_tool_access_policy(
-            requested,
-            parent_effective,
-        ))
+
+        match &self.parent_tool_access_policy_source {
+            ParentToolAccessPolicySource::Resolved(parent_effective) => {
+                let result = if matches!(
+                    parent_effective,
+                    Some(meerkat_core::ops::ToolAccessPolicy::Inherit)
+                ) {
+                    Err(ToolError::execution_failed(format!(
+                        "tool '{tool_name}' parent tool access policy was not resolved at build"
+                    )))
+                } else {
+                    Ok(effective_child_tool_access_policy(
+                        requested,
+                        parent_effective.clone(),
+                    ))
+                };
+                Box::pin(std::future::ready(result))
+            }
+            ParentToolAccessPolicySource::LegacySessionMetadata => {
+                self.resolve_child_tool_access_policy_from_metadata_boxed(tool_name, requested)
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn resolve_child_tool_access_policy_from_metadata_boxed<'a>(
+        &'a self,
+        tool_name: &'a str,
+        requested: Option<meerkat_core::ops::ToolAccessPolicy>,
+    ) -> AgentOperationFuture<'a, Result<Option<meerkat_core::ops::ToolAccessPolicy>, ToolError>>
+    {
+        Box::pin(async move {
+            let parent_view = self
+                .state
+                .session_service()
+                .load_persisted_session_metadata(&self.owner_bridge_session_id)
+                .await
+                .map_err(|error| {
+                    ToolError::execution_failed(format!(
+                        "tool '{tool_name}' parent tool access policy read failed; \
+                         refusing to resolve the child tool access policy: {error}"
+                    ))
+                })?;
+            let parent_effective = parent_view
+                .and_then(|view| view.session_metadata)
+                .and_then(|metadata| metadata.tooling.tool_access_policy);
+            Ok(effective_child_tool_access_policy(
+                requested,
+                parent_effective,
+            ))
+        })
     }
 
     async fn record_successful_operator_action(
@@ -991,10 +1110,10 @@ impl AgentMobToolSurface {
         spec.override_profile = resolved.override_profile;
 
         // Transitive containment: the delegate surface carries no explicit
-        // policy, so the helper inherits this (parent) session's persisted
-        // effective tool access policy.
+        // policy, so the helper inherits the parent's resolved policy from
+        // the factory authority or the legacy metadata seam.
         spec.tool_access_policy = self
-            .resolve_child_tool_access_policy(call.name, spec.tool_access_policy.take())
+            .resolve_child_tool_access_policy_boxed(call.name, spec.tool_access_policy.take())
             .await?;
 
         // Spawn via MobMcpState
@@ -1063,25 +1182,29 @@ impl AgentMobToolSurface {
         let session_effects =
             vec![meerkat_core::SessionEffect::ReplaceMobToolAuthorityContext { authority_context }];
 
-        let mob_id = self
-            .state
-            .mob_create_definition_with_owner_bridge_session(
-                args.definition,
-                self.owner_bridge_session_id.clone(),
-                true,
-                false,
-            )
-            .await
-            .map_err(|e| Self::map_mob_error(call, e))?;
-
+        let mob_id = mob_create_with_owner_bridge_boxed(
+            Arc::clone(&self.state),
+            args.definition,
+            self.owner_bridge_session_id.clone(),
+        )
+        .await
+        .map_err(|e| Self::map_mob_error(call, e))?;
         if let Ok(handle) = self.bound_handle(&mob_id).await {
-            self.record_successful_operator_action(&handle, call.name)
+            self.record_successful_operator_action_boxed(&handle, call.name)
                 .await;
         }
-
         // The outcome and the grant computed from the same intended mob id are
         // returned as a single atomic effect bundle for the turn owner to commit.
         Self::encode_result_with_effects(call, json!({"mob_id": mob_id}), session_effects)
+    }
+
+    #[inline(never)]
+    fn record_successful_operator_action_boxed<'a>(
+        &'a self,
+        handle: &'a MobHandle,
+        tool_name: &'a str,
+    ) -> AgentOperationFuture<'a, ()> {
+        Box::pin(self.record_successful_operator_action(handle, tool_name))
     }
 
     async fn dispatch_mob_destroy(
@@ -1133,21 +1256,14 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id.clone());
 
-        self.ensure_spawn_member_scope(call.name, &mob_id, &args)
+        self.ensure_spawn_member_scope_boxed(call.name, &mob_id, &args)
             .await?;
         let audit_handle = self
             .bound_handle(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-
         if let Some(objective_id) = objective_id {
-            let owner_identity = self
-                .state
-                .objective_principal_for_mob_owner_session(&mob_id, &self.owner_bridge_session_id)
-                .await
-                .map_err(|error| Self::map_mob_error(call, error))?;
-            self.state
-                .mob_bind_objective_owner(&mob_id, owner_identity, objective_id)
+            self.bind_spawn_objective_owner_boxed(&mob_id, objective_id)
                 .await
                 .map_err(|error| Self::map_mob_error(call, error))?;
         }
@@ -1165,30 +1281,77 @@ impl AgentMobToolSurface {
             spec.auto_wire_parent = auto_wire;
         }
         if let Some(tooling) = args.tooling {
-            let resolved = self.resolve_spawn_tooling(&tooling).await?;
+            let resolved = self.resolve_spawn_tooling_boxed(&tooling).await?;
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
         }
         // Transitive containment: this spawn surface accepts no explicit
-        // policy argument, so `Inherit`/absent resolves to this (parent)
-        // session's persisted effective tool access policy.
+        // policy argument, so `Inherit`/absent resolves to the parent's
+        // effective policy through the selected compatibility source.
         spec.tool_access_policy = self
-            .resolve_child_tool_access_policy(call.name, spec.tool_access_policy.take())
+            .resolve_child_tool_access_policy_boxed(call.name, spec.tool_access_policy.take())
             .await?;
         if let Some(cref) = args.auth_binding {
             // Reconstruct origin: Configured server-side (client cannot forge it).
             spec.auth_binding = Some(cref.into());
         }
 
-        let spawn_result = audit_handle
-            .spawn_spec_with_generated_owner_context(spec, self.owner_bridge_session_id.clone())
+        let spawn_result = self
+            .spawn_spec_with_generated_owner_context_boxed(&audit_handle, spec)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
-
-        self.record_successful_operator_action(&audit_handle, call.name)
+        self.record_successful_operator_action_boxed(&audit_handle, call.name)
             .await;
-
         Self::encode_result(call, Self::spawn_result_payload(&mob_id, &spawn_result))
+    }
+
+    #[inline(never)]
+    fn ensure_spawn_member_scope_boxed<'a>(
+        &'a self,
+        tool_name: &'a str,
+        mob_id: &'a MobId,
+        args: &'a SpawnMemberArgs,
+    ) -> AgentOperationFuture<'a, Result<(), ToolError>> {
+        Box::pin(self.ensure_spawn_member_scope(tool_name, mob_id, args))
+    }
+
+    #[inline(never)]
+    fn bind_spawn_objective_owner_boxed<'a>(
+        &'a self,
+        mob_id: &'a MobId,
+        objective_id: meerkat_core::interaction::ObjectiveId,
+    ) -> AgentOperationFuture<'a, Result<(), MobError>> {
+        Box::pin(async move {
+            let owner_identity = self
+                .state
+                .objective_principal_for_mob_owner_session(mob_id, &self.owner_bridge_session_id)
+                .await?;
+            self.state
+                .mob_bind_objective_owner(mob_id, owner_identity, objective_id)
+                .await
+        })
+    }
+
+    #[inline(never)]
+    fn resolve_spawn_tooling_boxed<'a>(
+        &'a self,
+        tooling: &'a meerkat_mob::SpawnTooling,
+    ) -> AgentOperationFuture<'a, Result<ResolvedSpawnTooling, ToolError>> {
+        Box::pin(self.resolve_spawn_tooling(tooling))
+    }
+
+    #[inline(never)]
+    fn spawn_spec_with_generated_owner_context_boxed<'a>(
+        &'a self,
+        handle: &'a MobHandle,
+        spec: SpawnMemberSpec,
+    ) -> AgentOperationFuture<'a, Result<meerkat_mob::SpawnResult, MobError>> {
+        Box::pin(
+            handle.spawn_spec_with_generated_owner_context(
+                spec,
+                self.owner_bridge_session_id.clone(),
+            ),
+        )
     }
 
     async fn dispatch_conclude_objective(
@@ -1541,6 +1704,95 @@ impl AgentMobToolSurface {
             .collect();
         Self::encode_result(call, json!({"sources": sources}))
     }
+
+    boxed_agent_dispatch!(
+        dispatch_delegate_boxed,
+        dispatch_delegate,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>
+    );
+    boxed_agent_dispatch!(
+        dispatch_conclude_objective_boxed,
+        dispatch_conclude_objective,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>
+    );
+    boxed_agent_dispatch!(dispatch_mob_create_boxed, dispatch_mob_create);
+    boxed_agent_dispatch!(dispatch_mob_destroy_boxed, dispatch_mob_destroy);
+    boxed_agent_dispatch!(
+        dispatch_mob_spawn_member_boxed,
+        dispatch_mob_spawn_member,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>
+    );
+    boxed_agent_dispatch!(dispatch_mob_retire_member_boxed, dispatch_mob_retire_member);
+    boxed_agent_dispatch!(dispatch_mob_check_member_boxed, dispatch_mob_check_member);
+    boxed_agent_dispatch!(dispatch_mob_list_members_boxed, dispatch_mob_list_members);
+    boxed_agent_dispatch!(dispatch_mob_list_boxed, dispatch_mob_list);
+    boxed_agent_dispatch!(dispatch_mob_wire_boxed, dispatch_mob_wire);
+    boxed_agent_dispatch!(dispatch_mob_unwire_boxed, dispatch_mob_unwire);
+    boxed_agent_dispatch!(
+        dispatch_mob_profile_create_boxed,
+        dispatch_mob_profile_create
+    );
+    boxed_agent_dispatch!(dispatch_mob_profile_get_boxed, dispatch_mob_profile_get);
+    boxed_agent_dispatch!(dispatch_mob_profile_list_boxed, dispatch_mob_profile_list);
+    boxed_agent_dispatch!(
+        dispatch_mob_profile_update_boxed,
+        dispatch_mob_profile_update
+    );
+    boxed_agent_dispatch!(
+        dispatch_mob_profile_delete_boxed,
+        dispatch_mob_profile_delete
+    );
+    boxed_agent_dispatch!(
+        dispatch_mob_profile_list_sources_boxed,
+        dispatch_mob_profile_list_sources
+    );
+
+    async fn dispatch_with_context_stack_bounded(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let objective_id = context
+            .turn_metadata(meerkat_core::agent::TOOL_DISPATCH_OBJECTIVE_ID_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "{}: invalid objective correlation in dispatch context: {error}",
+                    call.name
+                ))
+            })?
+            .map(meerkat_core::interaction::ObjectiveId);
+        match call.name {
+            TOOL_DELEGATE => self.dispatch_delegate_boxed(call, objective_id).await,
+            TOOL_CONCLUDE_OBJECTIVE => {
+                self.dispatch_conclude_objective_boxed(call, objective_id)
+                    .await
+            }
+            TOOL_MOB_CREATE => self.dispatch_mob_create_boxed(call).await,
+            TOOL_MOB_DESTROY => self.dispatch_mob_destroy_boxed(call).await,
+            TOOL_MOB_SPAWN_MEMBER => {
+                self.dispatch_mob_spawn_member_boxed(call, objective_id)
+                    .await
+            }
+            TOOL_MOB_RETIRE_MEMBER => self.dispatch_mob_retire_member_boxed(call).await,
+            TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member_boxed(call).await,
+            TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members_boxed(call).await,
+            TOOL_MOB_LIST => self.dispatch_mob_list_boxed(call).await,
+            TOOL_MOB_WIRE => self.dispatch_mob_wire_boxed(call).await,
+            TOOL_MOB_UNWIRE => self.dispatch_mob_unwire_boxed(call).await,
+            TOOL_MOB_PROFILE_CREATE => self.dispatch_mob_profile_create_boxed(call).await,
+            TOOL_MOB_PROFILE_GET => self.dispatch_mob_profile_get_boxed(call).await,
+            TOOL_MOB_PROFILE_LIST => self.dispatch_mob_profile_list_boxed(call).await,
+            TOOL_MOB_PROFILE_UPDATE => self.dispatch_mob_profile_update_boxed(call).await,
+            TOOL_MOB_PROFILE_DELETE => self.dispatch_mob_profile_delete_boxed(call).await,
+            TOOL_MOB_PROFILE_LIST_SOURCES => {
+                self.dispatch_mob_profile_list_sources_boxed(call).await
+            }
+            _ => Err(ToolError::not_found(call.name)),
+        }
+    }
 }
 
 // ─── MobToolsFactory implementation ─────────────────────────────────────
@@ -1590,10 +1842,30 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
         let effective_authority_handle = args
             .effective_authority
             .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(authority_context)));
-        let surface = AgentMobToolSurface::new_with_effective_authority(
+        let parent_tool_access_policy_source = match &args.snapshot_context {
+            meerkat_core::service::MobToolSnapshotContext::ParentOwned(authority) => {
+                ParentToolAccessPolicySource::Resolved(authority.resolved_tool_access_policy())
+            }
+            meerkat_core::service::MobToolSnapshotContext::Standalone => {
+                ParentToolAccessPolicySource::LegacySessionMetadata
+            }
+        };
+        if matches!(
+            &parent_tool_access_policy_source,
+            ParentToolAccessPolicySource::Resolved(Some(
+                meerkat_core::ops::ToolAccessPolicy::Inherit
+            ))
+        ) {
+            return Err(std::io::Error::other(
+                "mob tool creator policy must be resolved before surface construction",
+            )
+            .into());
+        }
+        let surface = AgentMobToolSurface::new_with_effective_authority_and_policy_source(
             Arc::clone(&self.state),
             implicit_mob_id,
             effective_authority_handle,
+            parent_tool_access_policy_source,
             args.model,
             args.session_id,
             args.comms_name,
@@ -1642,40 +1914,8 @@ impl AgentToolDispatcher for AgentMobToolSurface {
         call: ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let objective_id = context
-            .turn_metadata(meerkat_core::agent::TOOL_DISPATCH_OBJECTIVE_ID_KEY)
-            .and_then(serde_json::Value::as_str)
-            .map(uuid::Uuid::parse_str)
-            .transpose()
-            .map_err(|error| {
-                ToolError::execution_failed(format!(
-                    "{}: invalid objective correlation in dispatch context: {error}",
-                    call.name
-                ))
-            })?
-            .map(meerkat_core::interaction::ObjectiveId);
-        match call.name {
-            TOOL_DELEGATE => Box::pin(self.dispatch_delegate(call, objective_id)).await,
-            TOOL_CONCLUDE_OBJECTIVE => self.dispatch_conclude_objective(call, objective_id).await,
-            TOOL_MOB_CREATE => self.dispatch_mob_create(call).await,
-            TOOL_MOB_DESTROY => self.dispatch_mob_destroy(call).await,
-            TOOL_MOB_SPAWN_MEMBER => {
-                Box::pin(self.dispatch_mob_spawn_member(call, objective_id)).await
-            }
-            TOOL_MOB_RETIRE_MEMBER => self.dispatch_mob_retire_member(call).await,
-            TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member(call).await,
-            TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members(call).await,
-            TOOL_MOB_LIST => self.dispatch_mob_list(call).await,
-            TOOL_MOB_WIRE => self.dispatch_mob_wire(call).await,
-            TOOL_MOB_UNWIRE => self.dispatch_mob_unwire(call).await,
-            TOOL_MOB_PROFILE_CREATE => self.dispatch_mob_profile_create(call).await,
-            TOOL_MOB_PROFILE_GET => self.dispatch_mob_profile_get(call).await,
-            TOOL_MOB_PROFILE_LIST => self.dispatch_mob_profile_list(call).await,
-            TOOL_MOB_PROFILE_UPDATE => self.dispatch_mob_profile_update(call).await,
-            TOOL_MOB_PROFILE_DELETE => self.dispatch_mob_profile_delete(call).await,
-            TOOL_MOB_PROFILE_LIST_SOURCES => self.dispatch_mob_profile_list_sources(call).await,
-            _ => Err(ToolError::not_found(call.name)),
-        }
+        self.dispatch_with_context_stack_bounded(call, context)
+            .await
     }
 
     fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
@@ -1698,6 +1938,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             state: this.state,
             cached_implicit_mob_id: this.cached_implicit_mob_id,
             effective_authority: this.effective_authority,
+            parent_tool_access_policy_source: this.parent_tool_access_policy_source,
             control_principal: this.control_principal,
             tools: this.tools,
             owner_bridge_session_id,
@@ -3012,6 +3253,8 @@ mod tests {
 
     struct RealCommsSessionSvc {
         sessions: tokio::sync::RwLock<HashMap<SessionId, RealCommsSessionActor>>,
+        persisted_sessions: tokio::sync::RwLock<HashMap<SessionId, meerkat_core::Session>>,
+        persisted_metadata_loads: AtomicU64,
         actor_registry: meerkat_session::LiveSessionActorRegistry,
         counter: AtomicU64,
         runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
@@ -3023,6 +3266,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 sessions: tokio::sync::RwLock::new(HashMap::new()),
+                persisted_sessions: tokio::sync::RwLock::new(HashMap::new()),
+                persisted_metadata_loads: AtomicU64::new(0),
                 actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
                 counter: AtomicU64::new(0),
                 runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
@@ -3041,6 +3286,13 @@ mod tests {
 
         async fn register_external_comms(&self, name: &str) -> Arc<TestCommsRuntime> {
             TestCommsRuntime::new(name, Arc::clone(&self.registry)).await
+        }
+
+        async fn seed_persisted_session(&self, session: meerkat_core::Session) {
+            self.persisted_sessions
+                .write()
+                .await
+                .insert(session.id().clone(), session);
         }
 
         async fn create_session_with_actor_slot(
@@ -3362,9 +3614,38 @@ mod tests {
 
         async fn load_persisted_session(
             &self,
-            _session_id: &SessionId,
+            session_id: &SessionId,
         ) -> Result<Option<meerkat_core::Session>, SessionError> {
-            Ok(None)
+            Ok(self
+                .persisted_sessions
+                .read()
+                .await
+                .get(session_id)
+                .cloned())
+        }
+
+        async fn load_persisted_session_metadata(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+            self.persisted_metadata_loads
+                .fetch_add(1, Ordering::Relaxed);
+            let Some(session) = self
+                .persisted_sessions
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            meerkat_core::PersistedSessionMetadataView::try_from_session(&session)
+                .map(Some)
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id} metadata projection failed in test service: {error}"
+                    )))
+                })
         }
 
         async fn apply_runtime_turn(
@@ -3755,6 +4036,18 @@ mod tests {
             name: "unknown_tool",
             args: &args_raw,
         };
+
+        // Guard the concrete dispatcher future itself. Large-stack CI lanes
+        // can otherwise mask a compiler-generated aggregate branch frame.
+        let context = meerkat_core::ToolDispatchContext::default();
+        let dispatch_future = surface.dispatch_with_context_stack_bounded(call, &context);
+        let dispatch_future_size = std::mem::size_of_val(&dispatch_future);
+        assert!(
+            dispatch_future_size <= 1024,
+            "agent mob dispatcher future grew beyond its stack budget: {dispatch_future_size} bytes"
+        );
+        drop(dispatch_future);
+
         let result = surface.dispatch(call).await;
         assert!(matches!(result, Err(ToolError::NotFound { .. })));
     }
@@ -5194,6 +5487,81 @@ mod tests {
 
     fn deny_policy(names: &[&str]) -> meerkat_core::ops::ToolAccessPolicy {
         meerkat_core::ops::ToolAccessPolicy::DenyList(names.iter().copied().collect())
+    }
+
+    /// Public constructors predate the opaque AgentFactory composition
+    /// authority. They must continue to inherit a restricted parent's durable
+    /// policy, while explicit child policy remains a metadata-free fast path.
+    #[tokio::test]
+    async fn public_constructor_preserves_restricted_parent_policy_containment() {
+        let service = Arc::new(RealCommsSessionSvc::new());
+        let parent_session_id = SessionId::new();
+        let parent_policy = allow_policy(&["read_file"]);
+        let mut parent_session = meerkat_core::Session::with_id(parent_session_id.clone());
+        parent_session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: meerkat_core::config::default_structured_output_retries(
+                ),
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling {
+                    tool_access_policy: Some(parent_policy.clone()),
+                    ..meerkat_core::SessionTooling::default()
+                },
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .expect("restricted parent metadata must serialize");
+        service.seed_persisted_session(parent_session).await;
+        let session_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
+        let state = Arc::new(MobMcpState::new(
+            session_service,
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
+        let surface = AgentMobToolSurface::new(
+            state,
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            parent_session_id,
+            None,
+            None,
+            None,
+        );
+
+        let inherited = surface
+            .resolve_child_tool_access_policy_boxed(TOOL_MOB_SPAWN_MEMBER, None)
+            .await
+            .expect("legacy constructor must resolve persisted parent policy");
+        assert_eq!(inherited, Some(parent_policy));
+        assert_eq!(
+            service.persisted_metadata_loads.load(Ordering::Relaxed),
+            1,
+            "inherited policy must use the legacy metadata seam exactly once"
+        );
+
+        let explicit = deny_policy(&["bash"]);
+        let explicit_result = surface
+            .resolve_child_tool_access_policy_boxed(TOOL_MOB_SPAWN_MEMBER, Some(explicit.clone()))
+            .await
+            .expect("explicit child policy remains admitted");
+        assert_eq!(explicit_result, Some(explicit));
+        assert_eq!(
+            service.persisted_metadata_loads.load(Ordering::Relaxed),
+            1,
+            "explicit child policy must bypass the parent metadata read"
+        );
     }
 
     /// Escape regression: a restricted parent + `Inherit` (or absent) child

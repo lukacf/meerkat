@@ -826,14 +826,18 @@ pub struct ParentToolCompositionAuthority {
 
 struct ParentToolCompositionAuthorityInner {
     tool_scope: RwLock<Option<crate::ToolScope>>,
+    resolved_tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
 }
 
 impl ParentToolCompositionAuthority {
     #[cfg_attr(not(meerkat_internal_agent_factory_build), allow(dead_code))]
-    fn new_from_agent_factory_composition() -> Self {
+    fn new_from_agent_factory_composition(
+        resolved_tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    ) -> Self {
         Self {
             inner: Arc::new(ParentToolCompositionAuthorityInner {
                 tool_scope: RwLock::new(None),
+                resolved_tool_access_policy,
             }),
         }
     }
@@ -891,6 +895,14 @@ impl ParentToolCompositionAuthority {
     /// Returns the tool definitions currently visible to the parent agent.
     pub fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
         self.visible_tool_snapshot_result().unwrap_or_default()
+    }
+
+    /// Returns the parent's factory-resolved call-level tool access policy.
+    ///
+    /// `None` is authoritative unrestricted access. AgentFactory rejects an
+    /// unresolved `Inherit` before the built agent can execute a turn.
+    pub fn resolved_tool_access_policy(&self) -> Option<crate::ops::ToolAccessPolicy> {
+        self.inner.resolved_tool_access_policy.clone()
     }
 
     /// Authorize an inherited child visibility filter from this parent-owned
@@ -979,14 +991,19 @@ fn validate_agent_factory_parent_tool_composition_bridge_token(
 #[doc(hidden)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
-    "__meerkat_agent_factory_parent_tool_composition_authority_new_v1_",
+    "__meerkat_agent_factory_parent_tool_composition_authority_new_v2_",
     env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
 ))]
 pub(crate) extern "Rust" fn agent_factory_parent_tool_composition_authority_new(
     token: &'static (dyn std::any::Any + Send + Sync),
+    resolved_tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
 ) -> Result<ParentToolCompositionAuthority, String> {
     validate_agent_factory_parent_tool_composition_bridge_token(token)?;
-    Ok(ParentToolCompositionAuthority::new_from_agent_factory_composition())
+    Ok(
+        ParentToolCompositionAuthority::new_from_agent_factory_composition(
+            resolved_tool_access_policy,
+        ),
+    )
 }
 
 #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
@@ -2603,7 +2620,12 @@ mod tests {
             provenance: None,
         })]);
         let tool_scope = crate::ToolScope::new(tools);
-        let authority = ParentToolCompositionAuthority::new_from_agent_factory_composition();
+        let policy = crate::ops::ToolAccessPolicy::DenyList(
+            ["restricted".to_string()].into_iter().collect(),
+        );
+        let authority = ParentToolCompositionAuthority::new_from_agent_factory_composition(Some(
+            policy.clone(),
+        ));
         authority.set_tool_scope_from_agent_factory_composition(&tool_scope);
         let ctx = MobToolSnapshotContext::ParentOwned(authority);
         match ctx {
@@ -2611,6 +2633,7 @@ mod tests {
                 let snapshot = p.snapshot_visible_tools();
                 assert_eq!(snapshot.len(), 1);
                 assert_eq!(snapshot[0].name, "test_tool");
+                assert_eq!(p.resolved_tool_access_policy(), Some(policy));
             }
             MobToolSnapshotContext::Standalone => panic!("expected ParentOwned"),
         }

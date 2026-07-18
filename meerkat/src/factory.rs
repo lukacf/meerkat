@@ -225,11 +225,12 @@ unsafe extern "Rust" {
     ) -> CoreAgentFactoryBuildFuture;
 
     #[link_name = concat!(
-        "__meerkat_agent_factory_parent_tool_composition_authority_new_v1_",
+        "__meerkat_agent_factory_parent_tool_composition_authority_new_v2_",
         env!("MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX")
     )]
     fn core_agent_factory_parent_tool_composition_authority_new(
         factory_bridge_token: &'static (dyn Any + Send + Sync),
+        resolved_tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     ) -> Result<meerkat_core::service::ParentToolCompositionAuthority, String>;
 
     #[link_name = concat!(
@@ -5558,6 +5559,7 @@ impl AgentFactory {
             let parent_tool_authority = unsafe {
                 core_agent_factory_parent_tool_composition_authority_new(
                     agent_factory_policy_bridge_token(),
+                    build_config.tool_access_policy.clone(),
                 )
             }
             .map_err(|err| {
@@ -6653,6 +6655,7 @@ mod tests {
         let authority = unsafe {
             core_agent_factory_parent_tool_composition_authority_new(
                 agent_factory_policy_bridge_token(),
+                None,
             )
         }
         .expect("test parent tool composition authority should mint through AgentFactory bridge");

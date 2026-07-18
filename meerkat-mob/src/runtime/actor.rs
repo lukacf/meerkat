@@ -13,6 +13,51 @@ use super::scope_gate::{RoutedMobCommand, ScopeAdmission};
 use super::terminalization::{FlowFailureCause, TerminalizationOutcome, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
+
+#[cfg(not(target_arch = "wasm32"))]
+type ActorCommandFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type ActorCommandFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActorLoopControl {
+    ProceedBoundary,
+    SkipBoundary,
+    BreakActor,
+}
+
+// Expand the command match synchronously so each arm constructs and erases
+// its own async future. A single async block around the whole match recreates
+// the aggregate command-loop poll frame this boundary exists to avoid.
+macro_rules! boxed_actor_dispatch {
+    ($cmd:expr, {
+        $($(#[$meta:meta])* $pattern:pat => $body:block)*
+        @control
+        $($(#[$control_meta:meta])* $control_pattern:pat => $control_body:block)*
+    }) => {{
+        match $cmd {
+            $(
+                $(#[$meta])*
+                $pattern => {
+                    let future: ActorCommandFuture<'_, ActorLoopControl> = Box::pin(async move {
+                        $body
+                        ActorLoopControl::ProceedBoundary
+                    });
+                    future
+                }
+            )*
+            $(
+                $(#[$control_meta])*
+                $control_pattern => {
+                    let future: ActorCommandFuture<'_, ActorLoopControl> =
+                        Box::pin(async move $control_body);
+                    future
+                }
+            )*
+        }
+    }};
+}
 use crate::control_policy::{
     CommandAuthority, CommandAuthorityKind, MemberOperatorExecutionFence, MobControlPrincipal,
     ResolvedControlPolicy, ScopeDenial,
@@ -15466,118 +15511,38 @@ impl MobActor {
         self.shutdown_actor_owned_background_work().await;
     }
 
-    /// Main actor loop: process commands sequentially until Shutdown.
-    pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<RoutedMobCommand>) {
-        if matches!(self.dsl_state(), MobState::Running) {
-            if let Err(error) = self.restore_generated_member_operation_bindings().await {
-                tracing::error!(
-                    mob_id = %self.definition.id,
-                    error = %error,
-                    "failed to restore generated mob member operation bindings during actor startup; entering Stopped"
-                );
-                self.fail_startup_to_stopped("mob member operation binding restore failure")
-                    .await;
-            }
-        }
-        if let Err(error) = self.recover_durable_member_live_open_cleanups().await {
-            tracing::error!(
-                mob_id = %self.definition.id,
-                error = %error,
-                "durable member-live Open cleanup recovery failed; fail-stopping before command admission"
-            );
-            self.quiesce_volatile_producers_after_fail_stop().await;
-            return;
-        }
-        // Prune only after generated member bindings have recovered: before
-        // that point the machine snapshot may not yet contain every current
-        // session/residency atom, and treating absence as stale would evict a
-        // valid replay row. A failed binding restore transitions to Stopped
-        // and deliberately skips pruning this incomplete snapshot.
-        if matches!(self.state(), MobState::Running)
-            && let Err(error) = self.prune_stale_member_operator_requests().await
-        {
-            tracing::error!(
-                mob_id = %self.definition.id,
-                error = %error,
-                "failed to prune stale member-operator ledger rows during actor recovery"
-            );
-            self.fail_startup_to_stopped("member-operator ledger recovery pruning failure")
-                .await;
-        }
-        if matches!(self.state(), MobState::Running) {
-            if let Err(error) = self.ensure_autonomous_runtimes_from_roster(false).await {
-                tracing::error!(
-                    mob_id = %self.definition.id,
-                    error = %error,
-                    "failed to start autonomous host loops during actor startup; entering Stopped"
-                );
-                // Per-session recovery failures are actor-owned lifecycle
-                // facts. Persist Stop and retain the handle so an explicit
-                // MobHandle::resume retry can return the original typed
-                // capability failure; startup must not make an Ok builder
-                // result look Running or ready.
-                self.fail_startup_to_stopped("autonomous runtime startup failure")
-                    .await;
-            }
-        }
-        let mut deferred_commands: VecDeque<RoutedMobCommand> = VecDeque::new();
-        let mut host_status_polls_in_flight = BTreeSet::new();
-        let mut host_status_poll = tokio::time::interval(super::handle::HOST_STATUS_POLL_INTERVAL);
-        #[cfg(not(target_arch = "wasm32"))]
-        host_status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Consume interval's immediate first tick. Bind/rebind already perform
-        // an eager observation; the periodic driver starts one cadence later.
-        host_status_poll.tick().await;
-        'actor: loop {
-            self.drain_completed_actor_io_tasks();
-            self.drain_completed_peer_delivery_tasks();
-            let member_live_mutation_pending = !self.member_live_mutation_tasks.is_empty();
-            let routed = if let Some(routed) = deferred_commands.pop_front() {
-                routed
-            } else {
-                tokio::select! {
-                    routed = command_rx.recv() => {
-                        let Some(routed) = routed else {
-                            break;
-                        };
-                        routed
-                    }
-                    _tick = host_status_poll.tick() => {
-                        self.spawn_periodic_host_status_polls(&mut host_status_polls_in_flight).await;
-                        continue;
-                    }
-                    joined = self.member_live_mutation_tasks.join_next(),
-                        if member_live_mutation_pending =>
-                    {
-                        if let Some(joined) = joined
-                            && let Err(error) =
-                                self.reconcile_joined_member_live_mutation(
-                                    joined,
-                                    MemberLiveReconcileMode::Background,
-                                ).await
-                        {
-                            tracing::warn!(
-                                mob_id = %self.definition.id,
-                                error = %error,
-                                "mutating member-live completion reconciliation failed"
-                            );
-                        }
-                        continue;
-                    }
+    #[inline(never)]
+    fn dispatch_command_boxed<'a>(
+        &'a mut self,
+        authority: &'a CommandAuthority,
+        cmd: MobCommand,
+        command_rx: &'a mut mpsc::Receiver<RoutedMobCommand>,
+        deferred_commands: &'a mut VecDeque<RoutedMobCommand>,
+        host_status_polls_in_flight: &'a mut BTreeSet<mob_dsl::HostId>,
+    ) -> ActorCommandFuture<'a, ActorLoopControl> {
+        match cmd {
+            // Keep this catalog-classified fail-closed gate as ordinary AST so
+            // the machine-authority drift audit can verify the exact
+            // MobCommand -> MobMachineInput relationship.
+            MobCommand::SetSpawnPolicy { policy, reply_tx } => Box::pin(async move {
+                let enabled = policy.is_some();
+                let result = self
+                    .apply_dsl_input(
+                        mob_dsl::MobMachineInput::SetSpawnPolicy { enabled },
+                        "set_spawn_policy",
+                    )
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "SetSpawnPolicy rejected by MobMachine guards before shell policy write: {error}"
+                        ))
+                    });
+                if result.is_ok() {
+                    self.spawn_policy.set(policy).await;
                 }
-            };
-            // Chokepoint (a): resolve+require BEFORE any handler logic, on
-            // the actor's own serialized machine state (DEC-P5E-4). Deferred
-            // commands keep their authority and re-enter the gate here.
-            let RoutedMobCommand { authority, cmd } = routed;
-            tracing::debug!(command_kind = cmd.kind(), "MobActor received command");
-            let cmd = match self.admit_command_scope(&authority, cmd) {
-                ScopeAdmission::Admitted(cmd) => cmd,
-                // The typed denial was already sent down the command's own
-                // reply channel by `reject_scope_denied`.
-                ScopeAdmission::Denied => continue,
-            };
-            match cmd {
+                let _ = reply_tx.send(result);
+                ActorLoopControl::ProceedBoundary
+            }),
+            cmd => boxed_actor_dispatch!(cmd, {
                 MobCommand::Spawn {
                     spec,
                     spawn_source,
@@ -15694,7 +15659,7 @@ impl MobActor {
                             binding_incarnation,
                             "discarding stale periodic host-status response"
                         );
-                        continue;
+                        return ActorLoopControl::SkipBoundary;
                     }
                     match result {
                         Ok(status) => {
@@ -15808,7 +15773,7 @@ impl MobActor {
                             fence_token = key.fence_token.0,
                             "discarding orphan release completion from a superseded host binding"
                         );
-                        continue;
+                        return ActorLoopControl::SkipBoundary;
                     }
                     let succeeded = result.is_ok();
                     let completion_was_owned = Self::absorb_host_orphan_release_completion(
@@ -16174,7 +16139,7 @@ impl MobActor {
                                                 )
                                                 .await;
                                             });
-                                            continue;
+                                            return ActorLoopControl::SkipBoundary;
                                         }
                                     }
                                 }
@@ -16211,7 +16176,7 @@ impl MobActor {
                                             .await;
                                         });
                                     }
-                                    continue;
+                                    return ActorLoopControl::SkipBoundary;
                                 }
                             };
                             self.spawn_turn_completed_reply(
@@ -16339,7 +16304,7 @@ impl MobActor {
                 MobCommand::ProjectMachineInput { input, reply_tx } => {
                     if let Err(error) = Self::reject_raw_grant_machine_input(&input) {
                         let _ = reply_tx.send(Err(error));
-                        continue;
+                        return ActorLoopControl::SkipBoundary;
                     }
                     let result = self
                         .apply_dsl_input(*input, "project_machine_input")
@@ -16349,7 +16314,7 @@ impl MobActor {
                 MobCommand::ApplyMachineInputEffects { input, reply_tx } => {
                     if let Err(error) = Self::reject_raw_grant_machine_input(&input) {
                         let _ = reply_tx.send(Err(error));
-                        continue;
+                        return ActorLoopControl::SkipBoundary;
                     }
                     let result =
                         self.apply_dsl_input_collect_effects(*input, "apply_machine_input_effects");
@@ -17605,7 +17570,7 @@ impl MobActor {
                         // further commands are accepted.
                         self.lifecycle_tasks.abort_all();
                         while self.lifecycle_tasks.join_next().await.is_some() {}
-                        break 'actor;
+                        return ActorLoopControl::BreakActor;
                     }
                 }
                 MobCommand::Reset { reply_tx } => {
@@ -17822,24 +17787,18 @@ impl MobActor {
                     let result = self.handle_cancel_all_work(runtime_id, fence_token).await;
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::SetSpawnPolicy { policy, reply_tx } => {
-                    let enabled = policy.is_some();
-                    let result = self.apply_dsl_input(
-                        mob_dsl::MobMachineInput::SetSpawnPolicy { enabled },
-                        "set_spawn_policy",
-                    )
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "SetSpawnPolicy rejected by MobMachine guards before shell policy write: {error}"
-                        ))
-                    });
-                    if result.is_ok() {
-                        self.spawn_policy.set(policy).await;
-                    }
-                    let _ = reply_tx.send(result);
-                }
                 MobCommand::QueryPhase { reply_tx } => {
                     let _ = reply_tx.send(Ok(self.state()));
+                }
+                @control
+                MobCommand::SetSpawnPolicy { reply_tx, .. } => {
+                    // The outer AST-visible catalog gate owns this variant.
+                    // Keep the erased inner match safely exhaustive if that
+                    // ownership boundary is ever changed.
+                    let _ = reply_tx.send(Err(MobError::Internal(
+                        "SetSpawnPolicy escaped its catalog-gated dispatch arm".into(),
+                    )));
+                    ActorLoopControl::SkipBoundary
                 }
                 #[cfg(any(test, feature = "test-support"))]
                 MobCommand::CrashStopPreservingDurableWorkForTest { reply_tx } => {
@@ -17849,7 +17808,7 @@ impl MobActor {
                     // The exact stores remain the only restart authority.
                     self.quiesce_volatile_producers_after_fail_stop().await;
                     let _ = reply_tx.send(Ok(()));
-                    break;
+                    ActorLoopControl::BreakActor
                 }
                 MobCommand::Shutdown { reply_tx } => {
                     if let Err(error) = self.probe_command_admission(
@@ -17858,11 +17817,11 @@ impl MobActor {
                         "shutdown_command_admission",
                     ) {
                         let _ = reply_tx.send(Err(error));
-                        continue;
+                        return ActorLoopControl::SkipBoundary;
                     }
                     if let Err(error) = self.drain_member_live_mutations_for_lifecycle().await {
                         let _ = reply_tx.send(Err(error));
-                        continue;
+                        return ActorLoopControl::SkipBoundary;
                     }
                     if let Err(error) = self
                         .close_controller_local_member_live_channels_for_shutdown(
@@ -17871,7 +17830,7 @@ impl MobActor {
                         .await
                     {
                         let _ = reply_tx.send(Err(error));
-                        continue;
+                        return ActorLoopControl::SkipBoundary;
                     }
                     let mut result = self
                         .fail_all_pending_spawns("mob runtime is shutting down")
@@ -17881,7 +17840,7 @@ impl MobActor {
                             let _ = reply_tx.send(result);
                         }
                         if !self.durable_uncertainty_fail_stop {
-                            continue;
+                            return ActorLoopControl::SkipBoundary;
                         }
                     } else {
                         self.cancel_pending_peer_deliveries("mob runtime is shutting down")
@@ -17939,17 +17898,145 @@ impl MobActor {
                         }
                         if !self.durable_uncertainty_fail_stop {
                             if succeeded {
-                                break;
+                                return ActorLoopControl::BreakActor;
                             }
                             // Required teardown retains this actor as the
                             // retry owner. Never publish Stopped or exit while
                             // a runtime binding is unresolved.
-                            continue;
+                            return ActorLoopControl::SkipBoundary;
                         }
                     }
+                    ActorLoopControl::ProceedBoundary
                 }
-            }
+            }),
+        }
+    }
 
+    /// Main actor loop: process commands sequentially until Shutdown.
+    pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<RoutedMobCommand>) {
+        if matches!(self.dsl_state(), MobState::Running) {
+            if let Err(error) = self.restore_generated_member_operation_bindings().await {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "failed to restore generated mob member operation bindings during actor startup; entering Stopped"
+                );
+                self.fail_startup_to_stopped("mob member operation binding restore failure")
+                    .await;
+            }
+        }
+        if let Err(error) = self.recover_durable_member_live_open_cleanups().await {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "durable member-live Open cleanup recovery failed; fail-stopping before command admission"
+            );
+            self.quiesce_volatile_producers_after_fail_stop().await;
+            return;
+        }
+        // Prune only after generated member bindings have recovered: before
+        // that point the machine snapshot may not yet contain every current
+        // session/residency atom, and treating absence as stale would evict a
+        // valid replay row. A failed binding restore transitions to Stopped
+        // and deliberately skips pruning this incomplete snapshot.
+        if matches!(self.state(), MobState::Running)
+            && let Err(error) = self.prune_stale_member_operator_requests().await
+        {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "failed to prune stale member-operator ledger rows during actor recovery"
+            );
+            self.fail_startup_to_stopped("member-operator ledger recovery pruning failure")
+                .await;
+        }
+        if matches!(self.state(), MobState::Running) {
+            if let Err(error) = self.ensure_autonomous_runtimes_from_roster(false).await {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "failed to start autonomous host loops during actor startup; entering Stopped"
+                );
+                // Per-session recovery failures are actor-owned lifecycle
+                // facts. Persist Stop and retain the handle so an explicit
+                // MobHandle::resume retry can return the original typed
+                // capability failure; startup must not make an Ok builder
+                // result look Running or ready.
+                self.fail_startup_to_stopped("autonomous runtime startup failure")
+                    .await;
+            }
+        }
+        let mut deferred_commands: VecDeque<RoutedMobCommand> = VecDeque::new();
+        let mut host_status_polls_in_flight = BTreeSet::new();
+        let mut host_status_poll = tokio::time::interval(super::handle::HOST_STATUS_POLL_INTERVAL);
+        #[cfg(not(target_arch = "wasm32"))]
+        host_status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Consume interval's immediate first tick. Bind/rebind already perform
+        // an eager observation; the periodic driver starts one cadence later.
+        host_status_poll.tick().await;
+        'actor: loop {
+            self.drain_completed_actor_io_tasks();
+            self.drain_completed_peer_delivery_tasks();
+            let member_live_mutation_pending = !self.member_live_mutation_tasks.is_empty();
+            let routed = if let Some(routed) = deferred_commands.pop_front() {
+                routed
+            } else {
+                tokio::select! {
+                    routed = command_rx.recv() => {
+                        let Some(routed) = routed else {
+                            break;
+                        };
+                        routed
+                    }
+                    _tick = host_status_poll.tick() => {
+                        self.spawn_periodic_host_status_polls(&mut host_status_polls_in_flight).await;
+                        continue;
+                    }
+                    joined = self.member_live_mutation_tasks.join_next(),
+                        if member_live_mutation_pending =>
+                    {
+                        if let Some(joined) = joined
+                            && let Err(error) =
+                                self.reconcile_joined_member_live_mutation(
+                                    joined,
+                                    MemberLiveReconcileMode::Background,
+                                ).await
+                        {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                error = %error,
+                                "mutating member-live completion reconciliation failed"
+                            );
+                        }
+                        continue;
+                    }
+                }
+            };
+            // Chokepoint (a): resolve+require BEFORE any handler logic, on
+            // the actor's own serialized machine state (DEC-P5E-4). Deferred
+            // commands keep their authority and re-enter the gate here.
+            let RoutedMobCommand { authority, cmd } = routed;
+            tracing::debug!(command_kind = cmd.kind(), "MobActor received command");
+            let cmd = match self.admit_command_scope(&authority, cmd) {
+                ScopeAdmission::Admitted(cmd) => cmd,
+                // The typed denial was already sent down the command's own
+                // reply channel by `reject_scope_denied`.
+                ScopeAdmission::Denied => continue,
+            };
+            match self
+                .dispatch_command_boxed(
+                    &authority,
+                    cmd,
+                    &mut command_rx,
+                    &mut deferred_commands,
+                    &mut host_status_polls_in_flight,
+                )
+                .await
+            {
+                ActorLoopControl::ProceedBoundary => {}
+                ActorLoopControl::SkipBoundary => continue,
+                ActorLoopControl::BreakActor => break,
+            }
             if self.durable_uncertainty_fail_stop {
                 tracing::error!(
                     mob_id = %self.definition.id,

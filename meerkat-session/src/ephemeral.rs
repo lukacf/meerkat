@@ -23,7 +23,8 @@ use meerkat_core::service::{
     TurnToolOverlay,
 };
 use meerkat_core::session_document::{
-    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority,
+    SessionArchiveDisposition, SessionArchiveRuntimeObservation, SessionDocumentEffect,
+    SessionDocumentKey, SessionDocumentLifecycle, SessionDocumentMachineAuthority,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
@@ -65,6 +66,70 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// Capacity for session command channel.
 const COMMAND_CHANNEL_CAPACITY: usize = 8;
+
+/// Drive the canonical session-document archive authority for the standalone
+/// profile and require its exact mechanical action vector before the service
+/// mutates either live or archived registries.
+fn authorize_standalone_archive(id: &SessionId) -> Result<(), SessionError> {
+    let mut authority = SessionDocumentMachineAuthority::new();
+    let document_key = SessionDocumentKey::new(id.to_string());
+    authority
+        .recover_session_lifecycle_terminal(document_key.clone(), SessionDocumentLifecycle::Active)
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "generated session document authority rejected standalone lifecycle recovery for \
+                 session {id}: {error}"
+            )))
+        })?;
+    let effects = authority
+        .archive_session_document(
+            document_key,
+            false,
+            false,
+            SessionArchiveRuntimeObservation::Absent,
+        )
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "generated session document authority rejected standalone archive for session \
+                 {id}: {error}"
+            )))
+        })?;
+    require_standalone_archive_verdict(id, effects)
+}
+
+fn require_standalone_archive_verdict(
+    id: &SessionId,
+    effects: Vec<SessionDocumentEffect>,
+) -> Result<(), SessionError> {
+    match effects.as_slice() {
+        [
+            SessionDocumentEffect::SessionArchiveResolved {
+                disposition: SessionArchiveDisposition::Archive,
+                write_document: false,
+                retire_runtime: false,
+            },
+        ] => Ok(()),
+        [
+            SessionDocumentEffect::SessionArchiveResolved {
+                disposition,
+                write_document,
+                retire_runtime,
+            },
+        ] => Err(SessionError::Agent(AgentError::InternalError(format!(
+            "generated session document authority returned invalid standalone archive verdict \
+                 for session {id}: disposition={disposition:?}, \
+                 write_document={write_document}, retire_runtime={retire_runtime}"
+        )))),
+        [] => Err(SessionError::Agent(AgentError::InternalError(format!(
+            "generated session document authority returned no standalone archive verdict for \
+             session {id}"
+        )))),
+        _ => Err(SessionError::Agent(AgentError::InternalError(format!(
+            "generated session document authority returned an ambiguous or unexpected standalone \
+             archive effect vector for session {id}"
+        )))),
+    }
+}
 
 fn lag_aware_session_event_stream(
     session_id: SessionId,
@@ -4145,22 +4210,62 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        let mut sessions = self.sessions.write().await;
+        // Reserve shutdown capacity without retaining the global live-session
+        // registry. A saturated session must not block reads, interrupts, or
+        // unrelated session work while archive waits for its own actor.
+        let (mut sessions, shutdown_permit) = loop {
+            let expected_sender = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+                    .command_tx
+                    .clone()
+            };
+            let reserved = expected_sender.clone().reserve_owned().await;
+            let sessions = self.sessions.write().await;
+            let Some(current) = sessions.get(id) else {
+                return Err(SessionError::NotFound { id: id.clone() });
+            };
+            if !current.command_tx.same_channel(&expected_sender) {
+                // The logical session was rematerialized while capacity was
+                // pending. Drop any old-channel permit and retry against the
+                // exact current actor; stale capacity is never authority.
+                drop(sessions);
+                drop(reserved);
+                continue;
+            }
+            let shutdown_permit = reserved.map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task exited before archive shutdown could be reserved".to_string(),
+                ))
+            })?;
+            break (sessions, shutdown_permit);
+        };
+        // Every remaining awaitable realization resource is acquired before
+        // asking the document machine to authorize the lifecycle change.
+        // Cancellation while acquiring the archived-view guard therefore
+        // leaves both registries and every live-handle carrier untouched.
+        // Global lock order for the only operation that needs both registries:
+        // live sessions, then archived views. Readers never retain an archived
+        // view guard while acquiring the live registry.
+        let mut archived_views = self.archived_views.write().await;
+        // Standalone archive still changes the canonical session-document
+        // lifecycle fact. Obtain the generated Active -> Archived verdict
+        // only after effect realization can complete without another await.
+        authorize_standalone_archive(id)?;
         let handle = sessions
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let archived_view = Self::archived_view_from_handle(id, &handle);
+        archived_views.insert(id.clone(), archived_view);
+
         handle.actor_witness.revoke();
-        drop(sessions);
         // Clear the singular typed materialization record with the handle; a
         // staged session's registry-held permit drops with it, freeing the
         // reserved capacity.
         self.staged_registry.forget(id);
         handle.archive_snapshot_gate.close_for_snapshot();
-        let archived_view = Self::archived_view_from_handle(id, &handle);
-        self.archived_views
-            .write()
-            .await
-            .insert(id.clone(), archived_view);
 
         let projection = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
@@ -4169,7 +4274,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         if let Some(projection) = projection {
             handle.state_tx.send_replace(projection);
         }
-        let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
+        drop(archived_views);
+        drop(sessions);
+        // The reserved permit turns shutdown delivery into the final
+        // synchronous realization step: there is no post-verdict cancellation
+        // point that can strand the two registries in different lifecycles.
+        drop(shutdown_permit.send(SessionCommand::Shutdown));
         Ok(())
     }
 
@@ -7470,6 +7580,64 @@ mod archive_snapshot_gate_tests {
     use super::*;
 
     #[test]
+    fn standalone_archive_verdict_fails_closed_on_missing_ambiguous_or_wrong_effects() {
+        let session_id = SessionId::new();
+        assert!(require_standalone_archive_verdict(&session_id, Vec::new()).is_err());
+        assert!(
+            require_standalone_archive_verdict(
+                &session_id,
+                vec![SessionDocumentEffect::SessionArchiveResolved {
+                    disposition: SessionArchiveDisposition::AlreadyArchived,
+                    write_document: false,
+                    retire_runtime: false,
+                }],
+            )
+            .is_err()
+        );
+        assert!(
+            require_standalone_archive_verdict(
+                &session_id,
+                vec![SessionDocumentEffect::SessionArchiveResolved {
+                    disposition: SessionArchiveDisposition::Archive,
+                    write_document: true,
+                    retire_runtime: false,
+                }],
+            )
+            .is_err()
+        );
+        assert!(
+            require_standalone_archive_verdict(
+                &session_id,
+                vec![
+                    SessionDocumentEffect::SessionArchiveResolved {
+                        disposition: SessionArchiveDisposition::Archive,
+                        write_document: false,
+                        retire_runtime: false,
+                    },
+                    SessionDocumentEffect::SessionArchiveResolved {
+                        disposition: SessionArchiveDisposition::Archive,
+                        write_document: false,
+                        retire_runtime: false,
+                    },
+                ],
+            )
+            .is_err()
+        );
+        assert!(
+            require_standalone_archive_verdict(
+                &session_id,
+                vec![SessionDocumentEffect::SessionArchiveResolved {
+                    disposition: SessionArchiveDisposition::Archive,
+                    write_document: false,
+                    retire_runtime: false,
+                }],
+            )
+            .is_ok(),
+            "the exact standalone action vector is authorized"
+        );
+    }
+
+    #[test]
     fn archive_snapshot_gate_rejects_context_after_snapshot_close() {
         let gate = ArchiveSnapshotGate::open();
         let open_guard = gate.enter_apply();
@@ -8442,6 +8610,133 @@ mod archive_shutdown_drain_tests {
             matches!(result, Err(SessionError::NotFound { .. })),
             "post-archive context application must be a typed NotFound, got {result:?}"
         );
+
+        let rearchive = service.archive(&session_id).await;
+        assert!(
+            matches!(rearchive, Err(SessionError::NotFound { .. })),
+            "machine-authorized standalone archive must preserve re-archive NotFound, got \
+            {rearchive:?}"
+        );
+    }
+
+    /// Archive must not commit its machine-authorized lifecycle transition
+    /// until shutdown delivery and archived-view storage can both complete
+    /// without another await. Cancelling while the command queue is full must
+    /// therefore preserve the exact live registry state.
+    #[tokio::test]
+    async fn cancelled_archive_waiting_for_shutdown_capacity_preserves_live_session() {
+        let hooks = DrainProbeHooks::new();
+        let service = Arc::new(EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            2,
+        ));
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+        let session_id = created.session_id.clone();
+        let other_session_id = service
+            .create_session(create_request())
+            .await
+            .expect("create unrelated deferred session")
+            .session_id;
+        let command_tx = command_tx_for(service.as_ref(), &session_id).await;
+
+        // Hold the actor inside a run so its command receiver cannot drain.
+        let turn_service = Arc::clone(&service);
+        let turn_session = session_id.clone();
+        let turn = tokio::spawn(async move {
+            turn_service
+                .start_turn(&turn_session, start_turn_request())
+                .await
+        });
+        tokio::time::timeout(WAITER_TIMEOUT, hooks.entered_run.notified())
+            .await
+            .expect("turn should enter the probe run");
+
+        // Fill every command slot. Archive may snapshot A's actor sender, but
+        // it must remain lock-free and pre-verdict while reserving capacity.
+        let mut queued_context_replies = Vec::with_capacity(COMMAND_CHANNEL_CAPACITY);
+        for _ in 0..COMMAND_CHANNEL_CAPACITY {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            command_tx
+                .send(SessionCommand::ApplyRuntimeSystemContext {
+                    appends: Vec::new(),
+                    reply_tx,
+                })
+                .await
+                .expect("blocked actor keeps its command receiver alive");
+            queued_context_replies.push(reply_rx);
+        }
+
+        let mut archive = Box::pin(service.archive(&session_id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), archive.as_mut())
+                .await
+                .is_err(),
+            "archive must wait for reserved shutdown capacity"
+        );
+
+        // Waiting on A's saturated queue must not retain the global sessions
+        // writer. Unrelated session B stays promptly readable through both the
+        // public live-query and the read path used by interrupt dispatch.
+        let other_is_live = tokio::time::timeout(
+            Duration::from_secs(1),
+            service.has_live_session(&other_session_id),
+        )
+        .await
+        .expect("archive A must not block live-session reads for B")
+        .expect("B live-session query should succeed");
+        assert!(other_is_live);
+        let other_interrupt =
+            tokio::time::timeout(Duration::from_secs(1), service.interrupt(&other_session_id))
+                .await
+                .expect("archive A must not block interrupt-relevant registry access for B");
+        assert!(
+            matches!(other_interrupt, Err(SessionError::NotRunning { .. })),
+            "idle B should remain promptly readable and report NotRunning, got {other_interrupt:?}"
+        );
+        drop(archive);
+
+        // Dropping the pending future releases its locks and reservation wait;
+        // no machine verdict or registry/authority mutation may have happened.
+        {
+            let sessions = service.sessions.read().await;
+            let handle = sessions
+                .get(&session_id)
+                .expect("cancelled pre-verdict archive preserves live handle");
+            assert!(handle.actor_witness.is_live());
+            assert!(!handle.command_tx.is_closed());
+        }
+        assert!(
+            !service
+                .archived_views
+                .read()
+                .await
+                .contains_key(&session_id),
+            "cancelled pre-verdict archive must not publish an archived view"
+        );
+
+        // The preserved session remains fully operable and can subsequently be
+        // archived once the actor is allowed to drain the queued commands.
+        hooks.release_run.add_permits(1);
+        let run_result = tokio::time::timeout(WAITER_TIMEOUT, turn)
+            .await
+            .expect("turn task should finish")
+            .expect("turn task should not panic")
+            .expect("preserved turn must succeed");
+        assert_eq!(run_result.text, "ran");
+        service
+            .archive(&session_id)
+            .await
+            .expect("archive succeeds after capacity becomes available");
+        drop(queued_context_replies);
+        service
+            .archive(&other_session_id)
+            .await
+            .expect("cleanup unrelated session");
     }
 
     /// Regression (0.7.2): `discard_live_session` must be idempotent.

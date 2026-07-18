@@ -53,11 +53,26 @@ def error_response(request_id: int, code: int, message: str) -> str:
     return jline({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
 
 
+def agent_event_envelope(
+    event: dict, *, event_id: str = "00000000-0000-4000-8000-000000000010"
+) -> dict:
+    return {
+        "event_id": event_id,
+        "source": {"type": "callback"},
+        "seq": 0,
+        "timestamp_ms": 1,
+        "payload": event,
+    }
+
+
 def event_notification(session_id: str, event: dict) -> str:
     return jline({
         "jsonrpc": "2.0",
         "method": "session/event",
-        "params": {"session_id": session_id, "event": event},
+        "params": {
+            "session_id": session_id,
+            "event": agent_event_envelope(event),
+        },
     })
 
 
@@ -308,7 +323,7 @@ class TestStdoutDispatcher:
         d.start()
         queue = d.subscribe_events("s1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert event == ev
+        assert event == agent_event_envelope(ev)
         await d.stop()
 
     @pytest.mark.asyncio
@@ -353,9 +368,9 @@ class TestStdoutDispatcher:
 
         result = await future
         assert len(events) == 3
-        assert events[0]["type"] == "turn_started"
-        assert events[1]["type"] == "text_delta"
-        assert events[2]["type"] == "text_complete"
+        assert events[0]["payload"]["type"] == "turn_started"
+        assert events[1]["payload"]["type"] == "text_delta"
+        assert events[2]["payload"]["type"] == "text_complete"
         assert result["session_id"] == "s1"
         await d.stop()
 
@@ -393,9 +408,9 @@ class TestStdoutDispatcher:
         queue = d.subscribe_pending_stream(request_id=1)
         _ = d.expect_response(1)
         e1 = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert e1["type"] == "run_started"
+        assert e1["payload"]["type"] == "run_started"
         e2 = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert e2["type"] == "text_delta"
+        assert e2["payload"]["type"] == "text_delta"
         await d.stop()
 
     @pytest.mark.asyncio
@@ -412,7 +427,7 @@ class TestStdoutDispatcher:
         queue = d.subscribe_pending_stream(request_id=1)
         _ = d.expect_response(1)
         e = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert e["delta"] == "right"
+        assert e["payload"]["delta"] == "right"
         sentinel = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert sentinel is None
         await d.stop()
@@ -435,9 +450,9 @@ class TestStdoutDispatcher:
         _ = d.expect_response(1)
         _ = d.expect_response(2)
         ea = await asyncio.wait_for(queue_a.get(), timeout=1.0)
-        assert ea["delta"] == "A"
+        assert ea["payload"]["delta"] == "A"
         eb = await asyncio.wait_for(queue_b.get(), timeout=1.0)
-        assert eb["delta"] == "B"
+        assert eb["payload"]["delta"] == "B"
         await d.stop()
 
     @pytest.mark.asyncio
@@ -460,7 +475,7 @@ class TestStdoutDispatcher:
         with pytest.raises(MeerkatError):
             await asyncio.wait_for(future_a, timeout=1.0)
         eb = await asyncio.wait_for(queue_b.get(), timeout=1.0)
-        assert eb["delta"] == "B"
+        assert eb["payload"]["delta"] == "B"
         await d.stop()
 
     @pytest.mark.asyncio
@@ -475,8 +490,8 @@ class TestStdoutDispatcher:
         q2 = d.subscribe_events("s2")
         e1 = await asyncio.wait_for(q1.get(), timeout=1.0)
         e2 = await asyncio.wait_for(q2.get(), timeout=1.0)
-        assert e1["delta"] == "A"
-        assert e2["delta"] == "B"
+        assert e1["payload"]["delta"] == "A"
+        assert e2["payload"]["delta"] == "B"
         await d.stop()
 
     @pytest.mark.asyncio
@@ -720,7 +735,7 @@ class TestStandaloneSubscriptions:
 
     @pytest.mark.asyncio
     async def test_stream_notification_buffered_until_stream_queue_registered(self):
-        ev = {"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}}
+        ev = agent_event_envelope({"type": "text_delta", "delta": "hi"})
         reader = asyncio.StreamReader()
         d = _StdoutDispatcher(reader)
         d.start()
@@ -734,8 +749,14 @@ class TestStandaloneSubscriptions:
 
     @pytest.mark.asyncio
     async def test_stream_notifications_buffered_until_stream_queue_registered_preserve_order(self):
-        ev1 = {"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}}
-        ev2 = {"event_id": "e2", "payload": {"type": "text_delta", "delta": "there"}}
+        ev1 = agent_event_envelope(
+            {"type": "text_delta", "delta": "hi"},
+            event_id="00000000-0000-4000-8000-000000000011",
+        )
+        ev2 = agent_event_envelope(
+            {"type": "text_delta", "delta": "there"},
+            event_id="00000000-0000-4000-8000-000000000012",
+        )
         reader = asyncio.StreamReader()
         d = _StdoutDispatcher(reader)
         d.start()
@@ -786,7 +807,7 @@ class TestStandaloneSubscriptions:
 
     @pytest.mark.asyncio
     async def test_stream_notification_dispatched_to_stream_queue(self):
-        ev = {"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}}
+        ev = agent_event_envelope({"type": "text_delta", "delta": "hi"})
         reader = make_reader([stream_notification("stream-1", ev)])
         d = _StdoutDispatcher(reader)
         d.start()
@@ -798,7 +819,7 @@ class TestStandaloneSubscriptions:
     @pytest.mark.asyncio
     async def test_event_subscription_context_manager_closes_stream(self):
         queue: asyncio.Queue[dict | None] = asyncio.Queue()
-        queue.put_nowait({"event_id": "e1", "payload": {"type": "text_delta", "delta": "hi"}})
+        queue.put_nowait(agent_event_envelope({"type": "text_delta", "delta": "hi"}))
         dispatcher = type("Dispatcher", (), {"unsubscribe_stream": lambda self, _sid: None})()
         closed = []
 

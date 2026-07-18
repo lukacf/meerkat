@@ -218,7 +218,7 @@ import {
   type MobPeerTarget,
   type MobUnreachablePeer,
 } from "./mob.js";
-import { parseCoreEvent } from "./events.js";
+import { parseAgentEventEnvelope } from "./event-envelope.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { EventSubscription } from "./subscription.js";
 import type {
@@ -231,7 +231,6 @@ import type {
   ContentInput,
   ContentBlock,
   CreateScheduleRequest,
-  EventSourceIdentity,
   HelpOptions,
   ModelProfile,
   ModelsCatalog,
@@ -2997,9 +2996,20 @@ export class MeerkatClient {
       params.limit = options.limit;
     }
     const result = await this.request("mob/events", params);
-    const events = Array.isArray(result.events)
-      ? (result.events as Array<Record<string, unknown>>)
-      : [];
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      Array.isArray(result) ||
+      !Object.hasOwn(result, "events") ||
+      !Array.isArray(result.events)
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/events response: events must be an array",
+        result,
+      );
+    }
+    const events = result.events;
     return { events };
   }
 
@@ -3176,57 +3186,7 @@ export class MeerkatClient {
   }
 
   private static parseAgentEventEnvelope(raw: Record<string, unknown>): AgentEventEnvelope {
-    const eventId = MeerkatClient.parseOptionalString(raw.event_id ?? raw.eventId);
-    const source = MeerkatClient.parseEventSourceIdentity(raw.source);
-    const seq = MeerkatClient.parseOptionalNumber(raw.seq);
-    const timestampMs = MeerkatClient.parseOptionalNumber(raw.timestamp_ms ?? raw.timestampMs);
-    const payloadRaw = raw.payload;
-    const payload = payloadRaw && typeof payloadRaw === "object"
-      ? parseCoreEvent(payloadRaw as Record<string, unknown>)
-      : undefined;
-    return {
-      ...(eventId != null ? { eventId } : {}),
-      ...(source != null ? { source } : {}),
-      ...(seq != null ? { seq } : {}),
-      ...(timestampMs != null ? { timestampMs } : {}),
-      ...(payload ? { payload } : {}),
-    };
-  }
-
-  private static parseEventSourceIdentity(raw: unknown): EventSourceIdentity | undefined {
-    if (!raw || typeof raw !== "object") {
-      return undefined;
-    }
-    const record = raw as Record<string, unknown>;
-    const type = MeerkatClient.parseOptionalString(record.type);
-    switch (type) {
-      case "session": {
-        const sessionId = MeerkatClient.parseOptionalString(record.session_id ?? record.sessionId);
-        return sessionId != null ? { type: "session", sessionId } : undefined;
-      }
-      case "runtime": {
-        const runtimeId = MeerkatClient.parseOptionalString(record.runtime_id ?? record.runtimeId);
-        return runtimeId != null ? { type: "runtime", runtimeId } : undefined;
-      }
-      case "interaction": {
-        const interactionId = MeerkatClient.parseOptionalString(
-          record.interaction_id ?? record.interactionId,
-        );
-        return interactionId != null ? { type: "interaction", interactionId } : undefined;
-      }
-      case "callback":
-        return { type: "callback" };
-      case "external": {
-        const sourceId = MeerkatClient.parseOptionalString(record.source_id ?? record.sourceId);
-        return sourceId != null ? { type: "external", sourceId } : undefined;
-      }
-      default:
-        return undefined;
-    }
-  }
-
-  private static parseOptionalString(raw: unknown): string | undefined {
-    return typeof raw === "string" ? raw : undefined;
+    return parseAgentEventEnvelope(raw);
   }
 
   private static parseRequiredString(raw: unknown, context: string): string {
@@ -3234,10 +3194,6 @@ export class MeerkatClient {
       return raw;
     }
     throw new MeerkatError("INVALID_RESPONSE", context);
-  }
-
-  private static parseOptionalNumber(raw: unknown): number | undefined {
-    return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
   }
 
   private static parseAttributedMobEvent(raw: Record<string, unknown>): AttributedMobEvent {
@@ -3923,19 +3879,21 @@ export class MeerkatClient {
         return;
       }
       const sessionId = String(params.session_id ?? "");
-      const event = params.event as Record<string, unknown> | undefined;
-      if (event) {
-        const queue = this.eventQueues.get(sessionId);
-        if (queue) {
-          queue.put(event);
-        } else if (this.pendingStreamQueues.size > 0) {
-          // A stream is pending but its session_id is not yet bound. Buffer by
-          // session_id; the create response that binds this session_id drains
-          // exactly this buffer into the matching request's queue.
-          const buffered = this.unmatchedStreamBuffer.get(sessionId) ?? [];
-          buffered.push(event);
-          this.unmatchedStreamBuffer.set(sessionId, buffered);
-        }
+      const rawEvent = params.event;
+      const event: Record<string, unknown> =
+        typeof rawEvent === "object" && rawEvent !== null && !Array.isArray(rawEvent)
+          ? (rawEvent as Record<string, unknown>)
+          : { invalid_event_envelope: rawEvent };
+      const queue = this.eventQueues.get(sessionId);
+      if (queue) {
+        queue.put(event);
+      } else if (this.pendingStreamQueues.size > 0) {
+        // A stream is pending but its session_id is not yet bound. Buffer by
+        // session_id; the create response that binds this session_id drains
+        // exactly this buffer into the matching request's queue.
+        const buffered = this.unmatchedStreamBuffer.get(sessionId) ?? [];
+        buffered.push(event);
+        this.unmatchedStreamBuffer.set(sessionId, buffered);
       }
     }
   }

@@ -93,6 +93,64 @@ struct MachineAcceptedModelFallbackActivation {
     proof: crate::StickyModelFallbackActivationProof,
 }
 
+/// Rollback guard for the synchronous process-local transcript + memory pair.
+///
+/// `EphemeralImmediate` stores publish through a non-async trait method, so an
+/// agent run future cannot be dropped between installing the transcript rewrite
+/// and committing or rejecting its paired memory batch. The guard restores the
+/// pre-rewrite session on a returned store error or unwind; completed indexing
+/// errors retain the attempted cadence, matching the ordinary non-fatal
+/// compaction retry policy.
+struct EphemeralCompactionRewriteGuard<'a> {
+    session: &'a mut crate::Session,
+    cadence: &'a mut crate::compact::SessionCompactionCadence,
+    rollback_session: Option<crate::Session>,
+    rollback_cadence: Option<crate::compact::SessionCompactionCadence>,
+}
+
+impl<'a> EphemeralCompactionRewriteGuard<'a> {
+    fn install(
+        session: &'a mut crate::Session,
+        replacement: crate::Session,
+        cadence: &'a mut crate::compact::SessionCompactionCadence,
+        rollback_cadence: crate::compact::SessionCompactionCadence,
+    ) -> Self {
+        let rollback_session = std::mem::replace(session, replacement);
+        Self {
+            session,
+            cadence,
+            rollback_session: Some(rollback_session),
+            rollback_cadence: Some(rollback_cadence),
+        }
+    }
+
+    fn commit(mut self) {
+        self.rollback_session = None;
+        self.rollback_cadence = None;
+    }
+
+    fn rollback_index_error_preserving_attempt(mut self) {
+        if let Some(session) = self.rollback_session.take() {
+            *self.session = session;
+        }
+        // A completed indexing error is a real compaction attempt. Leave the
+        // live attempted cadence in place so the normal guard prevents an
+        // immediate retry; only cancellation restores the pre-attempt cadence.
+        self.rollback_cadence = None;
+    }
+}
+
+impl Drop for EphemeralCompactionRewriteGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.rollback_session.take() {
+            *self.session = session;
+        }
+        if let Some(cadence) = self.rollback_cadence.take() {
+            *self.cadence = cadence;
+        }
+    }
+}
+
 impl MachineAcceptedModelFallbackActivation {
     fn authorize(
         mut switch: AgentLlmFallbackSwitch,
@@ -1855,26 +1913,39 @@ where
                                                 (false, false)
                                             }
                                             crate::memory::CompactionProjectionPersistence::EphemeralImmediate => {
-                                                // Process-local only: publish
-                                                // the in-memory rewrite first,
-                                                // then index, and roll both
-                                                // local facts back on failure.
-                                                let original_session = std::mem::replace(
-                                                    &mut self.session,
-                                                    compacted_session,
-                                                );
-                                                let indexed = match self
-                                                    .compaction_memory_batch(&outcome.discarded)
-                                                {
+                                                // Process-local only: install
+                                                // the rewrite, synchronously
+                                                // publish its all-or-none memory
+                                                // batch, then commit/rollback the
+                                                // guard before the next await.
+                                                // Stores that advertise this
+                                                // mode but do not implement the
+                                                // synchronous contract fail
+                                                // closed via the trait default.
+                                                let batch = self
+                                                    .compaction_memory_batch(&outcome.discarded);
+                                                let rewrite_guard =
+                                                    EphemeralCompactionRewriteGuard::install(
+                                                        &mut self.session,
+                                                        compacted_session,
+                                                        &mut self.compaction_cadence,
+                                                        rollback_state
+                                                            .rollback_compaction_cadence
+                                                            .clone(),
+                                                    );
+                                                let indexed = match batch {
                                                     Ok(batch) => memory_store
-                                                        .index_scoped_batch(batch)
-                                                        .await,
+                                                        .publish_ephemeral_compaction_batch(batch),
                                                     Err(error) => Err(error),
                                                 };
                                                 match indexed {
-                                                    Ok(_) => (true, true),
+                                                    Ok(_) => {
+                                                        rewrite_guard.commit();
+                                                        (true, true)
+                                                    }
                                                     Err(error) => {
-                                                        self.session = original_session;
+                                                        rewrite_guard
+                                                            .rollback_index_error_preserving_attempt();
                                                         projection_failure = Some(error);
                                                         (false, false)
                                                     }
@@ -6069,17 +6140,8 @@ mod tests {
                 .filter_map(|(_, _, metadata)| metadata.source.source_range())
                 .collect()
         }
-    }
 
-    #[async_trait]
-    impl MemoryStore for RecordingMemoryStore {
-        fn compaction_projection_persistence(
-            &self,
-        ) -> crate::memory::CompactionProjectionPersistence {
-            crate::memory::CompactionProjectionPersistence::EphemeralImmediate
-        }
-
-        async fn index_scoped_batch(
+        fn record_batch(
             &self,
             batch: MemoryIndexBatch,
         ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
@@ -6103,6 +6165,68 @@ mod tests {
                 scope: receipt_scope,
                 indexed_entries,
             })
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for RecordingMemoryStore {
+        fn compaction_projection_persistence(
+            &self,
+        ) -> crate::memory::CompactionProjectionPersistence {
+            crate::memory::CompactionProjectionPersistence::EphemeralImmediate
+        }
+
+        async fn index_scoped_batch(
+            &self,
+            batch: MemoryIndexBatch,
+        ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+            self.record_batch(batch)
+        }
+
+        fn publish_ephemeral_compaction_batch(
+            &self,
+            batch: MemoryIndexBatch,
+        ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+            self.record_batch(batch)
+        }
+
+        async fn search(
+            &self,
+            _scope: &MemorySearchScope,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<MemoryResult>, MemoryStoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct MisdeclaredEphemeralMemoryStore {
+        async_index_entered: std::sync::atomic::AtomicBool,
+    }
+
+    impl MisdeclaredEphemeralMemoryStore {
+        fn new() -> Self {
+            Self {
+                async_index_entered: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for MisdeclaredEphemeralMemoryStore {
+        fn compaction_projection_persistence(
+            &self,
+        ) -> crate::memory::CompactionProjectionPersistence {
+            crate::memory::CompactionProjectionPersistence::EphemeralImmediate
+        }
+
+        async fn index_scoped_batch(
+            &self,
+            _batch: MemoryIndexBatch,
+        ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+            self.async_index_entered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending::<Result<MemoryIndexReceipt, MemoryStoreError>>().await
         }
 
         async fn search(
@@ -8481,6 +8605,48 @@ mod tests {
         assert_eq!(cadence.session_boundary_index, 2);
         assert_eq!(cadence.last_compaction_boundary_index, None);
         assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
+    }
+
+    #[tokio::test]
+    async fn misdeclared_ephemeral_store_never_enters_async_index_and_preserves_transcript() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let memory_store = Arc::new(MisdeclaredEphemeralMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .memory_store(memory_store.clone())
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent.run("second".into()),
+        )
+        .await
+        .expect("misdeclared store must fail synchronously, never await async indexing")
+        .expect("synchronous compaction publication rejection is a non-fatal attempt");
+
+        assert!(
+            !memory_store
+                .async_index_entered
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "EphemeralImmediate compaction must never fall back to the cancellable async index path"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "fail-closed synchronous publication must preserve discarded source history"
+        );
+        assert!(
+            !agent.session().messages().iter().any(|message| {
+                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
+            }),
+            "rejected synchronous publication must roll back the compaction summary"
+        );
     }
 
     #[tokio::test]

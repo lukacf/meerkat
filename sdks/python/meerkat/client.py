@@ -36,7 +36,8 @@ from urllib.error import URLError
 import urllib.request
 
 from .errors import CapabilityUnavailableError, MeerkatError
-from .events import Usage, parse_event
+from .event_envelope import parse_agent_event_envelope
+from .events import Usage
 from .generated.types import CONTRACT_VERSION
 from .generated.version_compat import (
     is_compatible_with as _generated_is_compatible_with,
@@ -250,7 +251,6 @@ from .types import (
     ScheduleToolsResult,
     ScheduleToolCall,
     EventEnvelope,
-    EventSourceIdentity,
     McpLiveOpResponse,
     ResolvedModelCapabilities,
     RunResult,
@@ -2407,8 +2407,12 @@ class MeerkatClient:
                 "limit": limit,
             },
         )
+        if not isinstance(raw, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", "Invalid mob/events response: expected object"
+            )
         return {
-            "events": MeerkatClient._require_list_field(
+            "events": MeerkatClient._require_present_list_field(
                 raw, "events", "Invalid mob/events response"
             )
         }
@@ -3500,55 +3504,7 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_agent_event_envelope(raw: dict[str, Any]) -> EventEnvelope:
-        # Only parse a payload that is actually present as an object. An absent
-        # or non-object payload leaves `payload=None` (mirrors the TS envelope
-        # parser) rather than synthesizing a typeless frame that the
-        # fail-closed `parse_event` would (correctly) reject.
-        payload = raw.get("payload")
-        return EventEnvelope(
-            event_id=str(raw.get("event_id", "")),
-            source=MeerkatClient._parse_event_source_identity(raw.get("source")),
-            seq=int(raw.get("seq", 0)),
-            timestamp_ms=int(raw.get("timestamp_ms", 0)),
-            payload=parse_event(payload) if isinstance(payload, dict) else None,
-        )
-
-    @staticmethod
-    def _parse_event_source_identity(raw: Any) -> EventSourceIdentity | None:
-        if not isinstance(raw, dict):
-            return None
-        source_type = raw.get("type")
-        if source_type == "session":
-            session_id = raw.get("session_id", raw.get("sessionId"))
-            return (
-                EventSourceIdentity(type="session", session_id=session_id)
-                if isinstance(session_id, str)
-                else None
-            )
-        if source_type == "runtime":
-            runtime_id = raw.get("runtime_id", raw.get("runtimeId"))
-            return (
-                EventSourceIdentity(type="runtime", runtime_id=runtime_id)
-                if isinstance(runtime_id, str)
-                else None
-            )
-        if source_type == "interaction":
-            interaction_id = raw.get("interaction_id", raw.get("interactionId"))
-            return (
-                EventSourceIdentity(type="interaction", interaction_id=interaction_id)
-                if isinstance(interaction_id, str)
-                else None
-            )
-        if source_type == "callback":
-            return EventSourceIdentity(type="callback")
-        if source_type == "external":
-            source_id = raw.get("source_id", raw.get("sourceId"))
-            return (
-                EventSourceIdentity(type="external", source_id=source_id)
-                if isinstance(source_id, str)
-                else None
-            )
-        return None
+        return parse_agent_event_envelope(raw)
 
     @staticmethod
     def _parse_attributed_mob_event(raw: dict[str, Any]) -> AttributedEvent:

@@ -12,7 +12,7 @@
 //! - `init_runtime_from_config(config_json)` — bare-bones bootstrap without mobpack
 //! - `runtime_version()` → crate version string (for JS/WASM version mismatch detection)
 //!
-//! ### Session (runtime-backed session-handle façades)
+//! ### Session (standalone ephemeral session-handle façades)
 //! - `create_session(mobpack_bytes, config_json)` → handle
 //! - `start_turn(handle, prompt)` → JSON result
 //! - `get_session_state(handle)` → JSON
@@ -166,9 +166,11 @@ struct SessionConfig {
     /// Enable comms for this session (registers in InprocRegistry).
     #[serde(default)]
     comms_name: Option<String>,
-    /// Whether this session stays alive after the initial turn (enables comms drain loop).
-    #[serde(default)]
-    keep_alive: bool,
+    /// Rejection-only capture for the retired raw Web option. Presence is
+    /// rejected even when the supplied value is `false`: direct Web sessions
+    /// use the standalone ephemeral substrate and cannot own keep-alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<bool>,
     /// Application-defined labels (flow through mob spawn, not used at create_session level).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
@@ -296,14 +298,14 @@ fn build_bootstrap_config(
 // ═══════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════
-// Runtime-backed browser session-handle façade
+// Standalone ephemeral browser session-handle façade
 // ═══════════════════════════════════════════════════════════
 
 type WasmSessionEventReceiver = crate::tokio::sync::broadcast::Receiver<
     meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
 >;
 
-struct RuntimeHandleSession {
+struct StandaloneHandleSession {
     session_id: meerkat_core::SessionId,
     mob_id: String,
     event_rx: WasmSessionEventReceiver,
@@ -313,14 +315,14 @@ struct RuntimeHandleSession {
 // RuntimeState — service-based infrastructure
 // ═══════════════════════════════════════════════════════════
 
-type WasmSessionService = meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilder>;
+type WasmStandaloneSessionService = meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilder>;
 
 struct RuntimeState {
     mob_state: Arc<MobMcpState>,
     /// Concrete session service — needed for subscribe_session_events_raw.
-    session_service: Arc<WasmSessionService>,
-    /// Opaque browser-local handles mapped to runtime-owned sessions.
-    sessions: BTreeMap<u32, RuntimeHandleSession>,
+    session_service: Arc<WasmStandaloneSessionService>,
+    /// Opaque browser-local handles mapped to standalone ephemeral sessions.
+    sessions: BTreeMap<u32, StandaloneHandleSession>,
     next_handle: u32,
     /// Trust-verified bootstrap mobpack (definition id + skills), consumed when
     /// `create_session_simple` builds a standalone session so the verified pack
@@ -522,7 +524,7 @@ fn build_provider_base_urls(
 fn build_service_infrastructure(
     config: Config,
     max_sessions: usize,
-) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
+) -> Result<(Arc<WasmStandaloneSessionService>, Arc<MobMcpState>), JsValue> {
     // Plan §4d.wasm.1 closure — wire the JS external-auth callback into
     // the provider runtime registry. The resolver itself handles the
     // "no callback registered" case by returning `MissingSecret`; we
@@ -1454,10 +1456,25 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Exported WASM API — Session (runtime-backed session-handle façades)
+// Exported WASM API — Session (standalone ephemeral session-handle façades)
 // ═══════════════════════════════════════════════════════════
 
-fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
+const UNSUPPORTED_KEEP_ALIVE_CODE: &str = "unsupported_session_option";
+const UNSUPPORTED_KEEP_ALIVE_MESSAGE: &str = "`keep_alive` is unavailable for direct Web sessions because @rkat/web uses the standalone ephemeral substrate and has no runtime-owned keep-alive ingress or comms drain; omit `keep_alive` and drive turns explicitly";
+
+fn parse_standalone_session_config(config_json: &str) -> Result<SessionConfig, serde_json::Value> {
+    let config: SessionConfig =
+        serde_json::from_str(config_json).map_err(|error| err_value("invalid_config", error))?;
+    if config.keep_alive.is_some() {
+        return Err(err_value(
+            UNSUPPORTED_KEEP_ALIVE_CODE,
+            UNSUPPORTED_KEEP_ALIVE_MESSAGE,
+        ));
+    }
+    Ok(config)
+}
+
+fn next_standalone_handle(state: &mut RuntimeState) -> u32 {
     let handle = state.next_handle.max(1);
     state.next_handle = handle.wrapping_add(1);
     while state.next_handle == 0 || state.sessions.contains_key(&state.next_handle) {
@@ -1489,7 +1506,6 @@ fn build_session_request_with_auth_binding(
     }
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
-        build_config.keep_alive = config.keep_alive;
     }
     build_config.additional_instructions = config.additional_instructions.clone();
     build_config.app_context = config.app_context.clone();
@@ -1512,7 +1528,7 @@ fn build_session_request_with_auth_binding(
     })
 }
 
-fn create_runtime_backed_session(
+fn create_standalone_session(
     config: SessionConfig,
     system_prompt: Option<String>,
     mob_id: String,
@@ -1540,10 +1556,10 @@ fn create_runtime_backed_session(
     };
 
     with_runtime_state_mut(|state| {
-        let handle = next_runtime_handle(state);
+        let handle = next_standalone_handle(state);
         state.sessions.insert(
             handle,
-            RuntimeHandleSession {
+            StandaloneHandleSession {
                 session_id,
                 mob_id,
                 event_rx,
@@ -1555,7 +1571,7 @@ fn create_runtime_backed_session(
 
 /// Create a session from a mobpack + config.
 ///
-/// Allocates a real session through the initialized runtime-backed session
+/// Allocates a session through the initialized standalone ephemeral session
 /// service, then returns a browser-local session handle for convenience.
 ///
 /// The pack's skills/definition become session prompt truth here, so this
@@ -1569,15 +1585,14 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
     let parsed =
         extract_verify_and_parse_mobpack(mobpack_bytes, trust.policy, &trust.trusted_signers)
             .map_err(js_from_value)?;
-    let config: SessionConfig =
-        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+    let config = parse_standalone_session_config(config_json).map_err(js_from_value)?;
     let system_prompt = compile_system_prompt(
         &parsed.definition.id,
         &parsed.manifest.mobpack.name,
         &parsed.skills,
         config.system_prompt.as_deref(),
     );
-    create_runtime_backed_session(config, Some(system_prompt), parsed.definition.id)
+    create_standalone_session(config, Some(system_prompt), parsed.definition.id)
 }
 
 /// Create a standalone session through initialized runtime state.
@@ -1588,8 +1603,7 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
 /// than discarded.
 #[wasm_bindgen]
 pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
-    let config: SessionConfig =
-        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+    let config = parse_standalone_session_config(config_json).map_err(js_from_value)?;
     let (system_prompt, mob_id) = with_runtime_state(|state| {
         Ok(match &state.bootstrap_mobpack {
             Some(pack) => (
@@ -1599,7 +1613,7 @@ pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
             None => (config.system_prompt.clone(), String::new()),
         })
     })?;
-    create_runtime_backed_session(config, system_prompt, mob_id)
+    create_standalone_session(config, system_prompt, mob_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1706,7 +1720,7 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
     ))
 }
 
-/// Run a turn through the runtime-backed session service.
+/// Run a turn through the standalone ephemeral session service.
 ///
 /// On success, resolves (Ok) with a JSON-serialized [`meerkat_contracts::WireRunResult`]
 /// — the same canonical wire shape RPC's `turn/start` returns — exposing
@@ -1869,7 +1883,7 @@ fn err_web_destroy_session(error: WebDestroySessionError) -> JsValue {
 }
 
 async fn destroy_session_with_services(
-    session_service: Arc<WasmSessionService>,
+    session_service: Arc<WasmStandaloneSessionService>,
     mob_state: Arc<MobMcpState>,
     session_id: meerkat_core::SessionId,
 ) -> Result<(), WebDestroySessionError> {
@@ -2986,8 +3000,8 @@ mod tests {
         MobForkHelperOptions, MobSpawnHelperOptions, StreamRef, SubscriptionInner,
         close_subscription, merge_runtime_system_context_state, parse_js_tool_result,
         parse_mob_event_cursor, parse_mob_lifecycle_action_arg, parse_mobpack,
-        parse_prompt_content_input, poll_subscription, serialize_subscription_item,
-        session_error_envelope, stream_lagged_envelope,
+        parse_prompt_content_input, parse_standalone_session_config, poll_subscription,
+        serialize_subscription_item, session_error_envelope, stream_lagged_envelope,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -3016,6 +3030,48 @@ mod tests {
     use std::collections::HashMap;
     #[cfg(not(target_arch = "wasm32"))]
     use std::sync::Arc;
+
+    #[test]
+    fn raw_keep_alive_true_without_comms_is_rejected_at_parse_boundary() {
+        let error =
+            parse_standalone_session_config(r#"{"model":"claude-sonnet-4-5","keep_alive":true}"#)
+                .expect_err("raw keep_alive presence must be rejected");
+
+        assert_eq!(error["code"], "unsupported_session_option");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("typed error must include a message")
+                .contains("standalone ephemeral")
+        );
+    }
+
+    #[test]
+    fn raw_keep_alive_false_with_comms_is_rejected_at_parse_boundary() {
+        let error = parse_standalone_session_config(
+            r#"{"model":"claude-sonnet-4-5","comms_name":"browser-agent","keep_alive":false}"#,
+        )
+        .expect_err("raw keep_alive presence must be rejected regardless of value");
+
+        assert_eq!(error["code"], "unsupported_session_option");
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("typed error must include a message")
+                .contains("runtime-owned keep-alive ingress or comms drain")
+        );
+    }
+
+    #[test]
+    fn raw_keep_alive_omission_preserves_standalone_comms_config() {
+        let config = parse_standalone_session_config(
+            r#"{"model":"claude-sonnet-4-5","comms_name":"browser-agent"}"#,
+        )
+        .expect("comms without keep_alive remains supported");
+
+        assert_eq!(config.comms_name.as_deref(), Some("browser-agent"));
+        assert_eq!(config.keep_alive, None);
+    }
 
     fn request_from_append(
         append: &PendingSystemContextAppend,

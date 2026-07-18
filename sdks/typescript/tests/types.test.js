@@ -1275,26 +1275,71 @@ describe("Typed Events", () => {
     assert.deepEqual(event.raw, raw);
   });
 
-  it("should not fabricate standalone event envelope metadata or payload", () => {
-    const envelope = MeerkatClient.parseAgentEventEnvelope({
-      event_id: 3,
-      seq: "0",
-      timestamp_ms: "0",
-      payload: "not-an-object",
-    });
+  const validEnvelope = () => ({
+    event_id: "00000000-0000-4000-8000-000000000010",
+    source: { type: "callback" },
+    seq: 7,
+    timestamp_ms: 1_700_000_000_000,
+    payload: { type: "text_delta", delta: "hi" },
+  });
 
-    assert.equal(envelope.eventId, undefined);
-    assert.equal(envelope.seq, undefined);
-    assert.equal(envelope.timestampMs, undefined);
-    assert.equal(envelope.payload, undefined);
+  it("should reject every missing required standalone envelope fact", () => {
+    for (const field of ["event_id", "source", "seq", "timestamp_ms", "payload"]) {
+      const raw = validEnvelope();
+      delete raw[field];
+      assert.throws(
+        () => MeerkatClient.parseAgentEventEnvelope(raw),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes(field),
+      );
+    }
+  });
+
+  it("should reject malformed standalone envelope scalars", () => {
+    for (const [field, value] of [
+      ["event_id", 3],
+      ["seq", -1],
+      ["seq", 1.5],
+      ["timestamp_ms", "now"],
+    ]) {
+      const raw = validEnvelope();
+      raw[field] = value;
+      assert.throws(
+        () => MeerkatClient.parseAgentEventEnvelope(raw),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
+  });
+
+  it("should reject string-but-non-canonical event UUIDs", () => {
+    for (const eventId of [
+      "not-a-uuid",
+      "019e63c2000070008000000000000010",
+      "019E63C2-0000-7000-8000-000000000010",
+    ]) {
+      const raw = validEnvelope();
+      raw.event_id = eventId;
+      assert.throws(
+        () => MeerkatClient.parseAgentEventEnvelope(raw),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("event_id"),
+      );
+    }
   });
 
   it("should use typed event source without trusting legacy source id", () => {
     const envelope = MeerkatClient.parseAgentEventEnvelope({
+      event_id: "00000000-0000-4000-8000-000000000010",
       source: {
         type: "session",
         session_id: "00000000-0000-4000-8000-000000000001",
       },
+      seq: 7,
+      timestamp_ms: 1_700_000_000_000,
       payload: { type: "text_delta", delta: "hi" },
     });
 
@@ -1305,15 +1350,73 @@ describe("Typed Events", () => {
   });
 
   it("should not classify source from legacy session strings", () => {
-    const envelope = MeerkatClient.parseAgentEventEnvelope({
-      source_id: "session:00000000-0000-4000-8000-000000000001",
-      payload: { type: "text_delta", delta: "hi" },
-    });
+    const raw = validEnvelope();
+    delete raw.source;
+    raw.source_id = "session:00000000-0000-4000-8000-000000000001";
+    assert.throws(
+      () => MeerkatClient.parseAgentEventEnvelope(raw),
+      (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+    );
+  });
 
-    // The legacy envelope-level string never classifies a typed source and is
-    // no longer surfaced on the typed envelope.
-    assert.equal(envelope.source, undefined);
-    assert.equal(envelope.sourceId, undefined);
+  it("should reject malformed typed sources", () => {
+    for (const source of [null, "session", { type: "session" }, { type: "unknown" }]) {
+      const raw = validEnvelope();
+      raw.source = source;
+      assert.throws(
+        () => MeerkatClient.parseAgentEventEnvelope(raw),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
+  });
+
+  it("should reject string-but-non-UUID session and interaction sources", () => {
+    for (const source of [
+      { type: "session", session_id: "session-1" },
+      { type: "interaction", interaction_id: "interaction-1" },
+    ]) {
+      const raw = validEnvelope();
+      raw.source = source;
+      assert.throws(
+        () => MeerkatClient.parseAgentEventEnvelope(raw),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          String(error.message).includes("canonical UUID"),
+      );
+    }
+  });
+
+  it("should preserve the optional mob id", () => {
+    const raw = validEnvelope();
+    raw.mob_id = "00000000-0000-4000-8000-000000000020";
+
+    const envelope = MeerkatClient.parseAgentEventEnvelope(raw);
+
+    assert.equal(envelope.mobId, "00000000-0000-4000-8000-000000000020");
+  });
+});
+
+describe("Mob events response parsing", () => {
+  it("rejects missing and non-array events", async () => {
+    for (const response of [null, {}, { events: null }, { events: "not-an-array" }]) {
+      const client = new MeerkatClient();
+      client.request = async () => response;
+      await assert.rejects(
+        () => client.readMobEvents("mob-1"),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    }
+  });
+
+  it("preserves every canonical JSON value in a present events array", async () => {
+    const client = new MeerkatClient();
+    const expected = [null, 1, "event", { cursor: 2 }];
+    client.request = async () => ({ events: expected });
+
+    const result = await client.readMobEvents("mob-1");
+
+    assert.deepEqual(result.events, expected);
   });
 });
 
@@ -4508,7 +4611,10 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
   // role; nothing coalesced to "".
   describe("parseAttributedMobEvent", () => {
     const validEnvelope = {
+      event_id: "00000000-0000-4000-8000-000000000010",
       source: { type: "session", session_id: "00000000-0000-4000-8000-000000000001" },
+      seq: 7,
+      timestamp_ms: 1_700_000_000_000,
       payload: { type: "text_delta", delta: "hi" },
     };
 

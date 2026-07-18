@@ -103,6 +103,13 @@ const sessionConfig: SessionConfig = {
   additionalInstructions: ['Be concise.'],
 };
 
+const unsupportedKeepAliveSessionConfig: SessionConfig = {
+  model: 'claude-sonnet-4-5',
+  // @ts-expect-error direct Web sessions are standalone and expose no keep-alive mode.
+  keepAlive: true,
+};
+void unsupportedKeepAliveSessionConfig;
+
 // ─── Auth RPC helpers ───────────────────────────────────────────
 
 const authTransport: AuthTransport = {

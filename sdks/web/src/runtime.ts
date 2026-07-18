@@ -52,7 +52,6 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
     system_prompt: config.systemPrompt,
     max_tokens: config.maxTokens,
     comms_name: config.commsName,
-    keep_alive: config.keepAlive,
     labels: config.labels,
     additional_instructions: config.additionalInstructions,
     app_context: config.appContext,
@@ -384,7 +383,7 @@ export class MeerkatRuntime {
     return parseMobListResult(parseJsonPayload(json, 'Invalid mob/list response'));
   }
 
-  /** Create a direct session façade backed by a real runtime session identity. */
+  /** Create a direct session façade backed by a standalone ephemeral session. */
   createSession(config: SessionConfig): Session {
     const handle = this.wasm.create_session_simple(
       JSON.stringify(sessionToWasm(config)),

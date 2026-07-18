@@ -35,6 +35,24 @@ impl SimpleMemoryStore {
             entries: RwLock::new(Vec::new()),
         }
     }
+
+    fn prepare_batch(batch: MemoryIndexBatch) -> (MemoryIndexScope, Vec<MemoryEntry>) {
+        let (receipt_scope, requests) = batch.into_parts();
+        let entries = requests
+            .into_iter()
+            .filter_map(|request| {
+                let (scope, content, metadata) = request.into_parts();
+                // Store-side include/exclude gate (#319): skip content the
+                // producer marked non-indexable (Excluded), index the rest.
+                content.is_indexable().then(|| MemoryEntry {
+                    scope,
+                    content: content.into_indexable_text(),
+                    metadata,
+                })
+            })
+            .collect();
+        (receipt_scope, entries)
+    }
 }
 
 impl Default for SimpleMemoryStore {
@@ -48,8 +66,8 @@ impl MemoryStore for SimpleMemoryStore {
     fn compaction_projection_persistence(
         &self,
     ) -> meerkat_core::memory::CompactionProjectionPersistence {
-        // This implementation is process-local and has no durable crash
-        // window, so in-memory rewrite-then-index publication is safe.
+        // This implementation is process-local and supplies the mandatory
+        // synchronous all-or-none compaction publication method below.
         meerkat_core::memory::CompactionProjectionPersistence::EphemeralImmediate
     }
 
@@ -57,23 +75,29 @@ impl MemoryStore for SimpleMemoryStore {
         &self,
         batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
-        let (receipt_scope, requests) = batch.into_parts();
+        let (receipt_scope, prepared) = Self::prepare_batch(batch);
+        let indexed_entries = prepared.len();
         let mut entries = self.entries.write().await;
-        let mut indexed_entries = 0usize;
-        for request in requests {
-            let (scope, content, metadata) = request.into_parts();
-            // Store-side include/exclude gate (#319): skip content the producer
-            // marked non-indexable (Excluded), index the rest.
-            if !content.is_indexable() {
-                continue;
-            }
-            entries.push(MemoryEntry {
-                scope,
-                content: content.into_indexable_text(),
-                metadata,
-            });
-            indexed_entries += 1;
-        }
+        entries.extend(prepared);
+        Ok(MemoryIndexReceipt {
+            scope: receipt_scope,
+            indexed_entries,
+        })
+    }
+
+    fn publish_ephemeral_compaction_batch(
+        &self,
+        batch: MemoryIndexBatch,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        let (receipt_scope, prepared) = Self::prepare_batch(batch);
+        let indexed_entries = prepared.len();
+        let mut entries = self.entries.try_write().map_err(|_| {
+            MemoryStoreError::Storage(
+                "ephemeral compaction publication lock is busy; refusing cancellable fallback"
+                    .to_string(),
+            )
+        })?;
+        entries.extend(prepared);
         Ok(MemoryIndexReceipt {
             scope: receipt_scope,
             indexed_entries,
@@ -256,6 +280,39 @@ mod tests {
         let scope = MemorySearchScope::for_session(SessionId::new());
         let results = store.search(&scope, "anything", 10).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_compaction_publication_is_synchronous_and_fails_closed_on_contention() {
+        let store = SimpleMemoryStore::new();
+        let session_id = SessionId::new();
+        let scope = MemoryIndexScope::for_session(session_id.clone());
+
+        let held_entries = store.entries.write().await;
+        let blocked = store.publish_ephemeral_compaction_batch(
+            MemoryIndexBatch::new(
+                scope.clone(),
+                vec![request("must remain unpublished", &session_id)],
+            )
+            .unwrap(),
+        );
+        assert!(matches!(blocked, Err(MemoryStoreError::Storage(_))));
+        assert!(
+            held_entries.is_empty(),
+            "lock contention must publish none of the compaction batch"
+        );
+        drop(held_entries);
+
+        let receipt = store
+            .publish_ephemeral_compaction_batch(
+                MemoryIndexBatch::new(scope, vec![request("published synchronously", &session_id)])
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(receipt.indexed_entries, 1);
+        let entries = store.entries.read().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "published synchronously");
     }
 
     #[tokio::test]

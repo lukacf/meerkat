@@ -17,7 +17,8 @@
  */
 
 import type { StreamEvent } from "./events.js";
-import { isTextDelta, parseEvent } from "./events.js";
+import { isTextDelta } from "./events.js";
+import { parseAgentEventEnvelope } from "./event-envelope.js";
 import type { RunResult } from "./types.js";
 import type { Session } from "./session.js";
 import { MeerkatError } from "./generated/errors.js";
@@ -192,7 +193,7 @@ export class EventStream implements AsyncIterable<StreamEvent> {
           this._finalise(responseResult!);
           return;
         }
-        yield parseEvent(raw);
+        yield parseAgentEventEnvelope(raw).payload;
       } else {
         cancel();
       }
@@ -232,7 +233,7 @@ export class EventStream implements AsyncIterable<StreamEvent> {
           return;
         }
         yieldedEvent = true;
-        yield parseEvent(raw);
+        yield parseAgentEventEnvelope(raw).payload;
       }
 
       if (yieldedEvent) {

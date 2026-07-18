@@ -1054,35 +1054,33 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(Arc::clone(&materialization_claim_state));
         }
-        // A newly recovered entry has no in-process executor. When its
-        // durable binding names an older runtime epoch than the recovered
-        // ops entry, that binding is a dead-process fact: preserving it makes
-        // the caller's authoritative PrepareBindings guard-reject the fresh
-        // epoch. Drive the existing generated recovery ladder instead of
-        // clearing shell fields: RuntimeExecutorExited moves the supported
-        // live phases to Stopped, then RegisterSessionResumesStopped below
-        // clears the epoch-scoped binding and re-admits the same session.
-        // Warm/idempotent registration never enters this arm.
+        // A newly recovered entry has no in-process executor. Any machine-valid
+        // durable runtime binding on that cold entry belongs to the previous
+        // process, even when the recovered ops entry intentionally retains
+        // the same epoch. Preserving it makes a replacement runtime id/fence/
+        // generation guard-reject PrepareBindings. Drive the existing
+        // generated recovery ladder instead of clearing shell fields:
+        // RuntimeExecutorExited moves the supported live phases to Stopped,
+        // then RegisterSessionResumesStopped below clears the epoch-scoped
+        // binding and re-admits the same session. Warm/idempotent registration
+        // never enters this arm.
         let current_epoch = crate::meerkat_machine::dsl::RuntimeEpochId::from_domain(&epoch_id);
-        let recovered_stale_bound_epoch = inserted_by_call && !live_attachment && {
+        let recovered_dead_process_binding = inserted_by_call && !live_attachment && {
             let authority = dsl_authority_shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let phase = super::dsl_authority::runtime_phase_from_authority(&authority);
+            let state = authority.state();
             matches!(
                 phase,
                 RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Running
-            ) && authority
-                .state()
-                .active_runtime_epoch_id
-                .as_ref()
-                .is_some_and(|bound_epoch| bound_epoch != &current_epoch)
+            ) && state.active_runtime_id.is_some()
         };
-        if recovered_stale_bound_epoch {
+        if recovered_dead_process_binding {
             tracing::debug!(
                 %session_id,
                 ?current_epoch,
-                "cold recovery observed a stale bound runtime epoch; staging generated executor exit before re-registration"
+                "cold recovery observed a dead-process runtime binding; staging generated executor exit before re-registration"
             );
             let executor_exited = crate::meerkat_machine_types::
                 MeerkatMachineFieldlessRuntimeInternalInput::RuntimeExecutorExited;

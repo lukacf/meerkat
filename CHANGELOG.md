@@ -182,6 +182,11 @@ via cargo-semver-checks against the published baselines).
   publication is also cancellation-safe: the exact runtime-loop attachment,
   its initial backlog wake, and startup projection/persistence belong to the
   loop owner, preventing a false `Attached`/ready state without an executor.
+- Cold local-resource registration now treats every recovered runtime binding
+  as a prior-process fact, including bindings whose ops epoch is intentionally
+  retained. The existing generated executor-exit/readmission ladder clears the
+  dead tuple before a reset or reprofile binds its distinct runtime identity,
+  preventing a guard rejection followed by unbounded teardown.
 - Transcript revision history no longer retains a complete mechanical head
   snapshot after every ordinary append once any audited rewrite exists.
   Snapshots preserve genuine rewrite endpoints plus the live head, typed

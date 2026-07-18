@@ -7435,6 +7435,90 @@ async fn cold_recovery_rebinds_idle_placement_when_ops_epoch_was_not_persisted()
         .expect("the exact controller placement tuple rebinds under the fresh epoch");
 }
 
+/// A cold process has no live executor when a machine-valid prior-process
+/// binding survives in either durable `Idle` or `Attached`. When the ops snapshot
+/// carries the same epoch as that binding, registration must clear the dead
+/// owner before a distinct replacement tuple is prepared.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn cold_registration_reclaims_same_epoch_binding_from_idle_and_attached() {
+    for persisted_state in [RuntimeState::Idle, RuntimeState::Attached] {
+        for (fence_token, runtime_generation) in [(Some(19), Some(3)), (Some(19), None)] {
+            let store = Arc::new(crate::store::InMemoryRuntimeStore::new())
+                as Arc<dyn crate::store::RuntimeStore>;
+            let session_id = SessionId::new();
+            let runtime_id = runtime_id_for_session(&session_id);
+            let placement_runtime_id = LogicalRuntimeId::new("worker:same-epoch");
+
+            let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+            let first_bindings = first
+                .prepare_local_session_bindings(session_id.clone())
+                .await
+                .expect("first process prepares local session resources");
+            let first_epoch = first_bindings.epoch_id().clone();
+            let first_epoch_string = first_epoch.to_string();
+            crate::store::RuntimeStore::commit_machine_lifecycle(
+                store.as_ref(),
+                &runtime_id,
+                crate::store::MachineLifecycleCommit::new_with_binding(
+                    persisted_state,
+                    crate::store::MachineLifecycleBindingFacts::new(
+                        Some(placement_runtime_id.to_string()),
+                        fence_token,
+                        runtime_generation,
+                        Some(first_epoch_string.clone()),
+                    ),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                &[],
+            )
+            .await
+            .expect("seed the prior process's durable placement binding");
+
+            let durable = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
+                .await
+                .expect("load bound lifecycle")
+                .expect("bound lifecycle exists");
+            assert_eq!(durable.runtime_state(), persisted_state);
+            assert_eq!(
+                durable.binding().runtime_epoch_id(),
+                Some(first_epoch_string.as_str())
+            );
+            let durable_ops = store
+                .load_ops_lifecycle(&runtime_id)
+                .await
+                .expect("load matching ops lifecycle")
+                .expect("ops lifecycle exists");
+            assert_eq!(durable_ops.epoch_id, first_epoch);
+            drop(first_bindings);
+            drop(first);
+
+            let restarted = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+            let restarted_bindings = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                restarted.prepare_local_session_bindings(session_id.clone()),
+            )
+            .await
+            .expect("cold registration must not hang on a persisted bound row")
+            .expect("cold registration must recover the dead process binding");
+            assert_eq!(
+                restarted_bindings.epoch_id(),
+                &durable_ops.epoch_id,
+                "same-epoch durable ops authority remains canonical"
+            );
+            restarted
+                .prepare_runtime_placement_binding(
+                    session_id,
+                    LogicalRuntimeId::new("worker:replacement"),
+                    20,
+                    4,
+                )
+                .await
+                .expect("a distinct replacement placement tuple binds in the retained ops epoch");
+        }
+    }
+}
+
 /// Cold-revival class (the 0.7.25 identity-first field wedge): a process
 /// dies with a session durably Stopped AND still carrying its runtime
 /// binding (no unregister ran — the torn case). A fresh machine over the

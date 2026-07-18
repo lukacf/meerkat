@@ -1145,13 +1145,26 @@ impl MemberSessionDisposalArc {
         let Some(adapter) = &self.runtime_adapter else {
             return Ok(RuntimeSessionDisposalTarget::Absent);
         };
+        Self::capture_exact_runtime_state_for_disposal_with_adapter(
+            adapter,
+            &self.runtime_sessions,
+            session_id,
+        )
+        .await
+    }
+
+    async fn capture_exact_runtime_state_for_disposal_with_adapter(
+        adapter: &Arc<MeerkatMachine>,
+        runtime_sessions: &Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
+        session_id: &SessionId,
+    ) -> Result<RuntimeSessionDisposalTarget, SessionError> {
         let registration_before = adapter
             .current_session_registration_witness(session_id)
             .await;
         let current = adapter
             .current_executor_attachment_witness(session_id)
             .await;
-        let state = self.runtime_sessions.read().await.get(session_id).cloned();
+        let state = runtime_sessions.read().await.get(session_id).cloned();
         let registration = adapter
             .current_session_registration_witness(session_id)
             .await;
@@ -1161,7 +1174,7 @@ impl MemberSessionDisposalArc {
             )));
         }
         let retained_cleanup_is_exact = match (&current, &state, &registration) {
-            (None, Some(state), Some(registration)) if state.cleanup_scheduled() => {
+            (None, Some(state), Some(registration)) => {
                 adapter
                     .executor_attachment_cleanup_is_current_for_registration(
                         state.witness(),
@@ -4749,10 +4762,221 @@ mod tests {
         defer_turn_events_until_machine_completion, runtime_completion_to_mob_result,
         session_turn_error_to_mob_error,
     };
+    #[cfg(feature = "runtime-adapter")]
+    use super::{MemberSessionDisposalArc, RuntimeSessionDisposalTarget, RuntimeSessionState};
     use crate::error::MobError;
     use meerkat_core::service::SessionError;
     use meerkat_core::types::SessionId;
     use serde_json::json;
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn disposal_retry_readmits_exact_retirement_uncertain_draining_sidecar() {
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyOutput, CoreExecutor, CoreExecutorError, CoreExecutorPostStopCleanupHandle,
+        };
+        use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{Notify, RwLock};
+
+        struct BlockingCleanupHandle {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutorPostStopCleanupHandle for BlockingCleanupHandle {
+            async fn cleanup_after_runtime_stop_terminalized(
+                &self,
+            ) -> Result<(), CoreExecutorError> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(())
+            }
+        }
+
+        struct BlockingCleanupExecutor {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for BlockingCleanupExecutor {
+            fn machine_managed_post_stop_unregister(&self) -> bool {
+                true
+            }
+
+            fn post_stop_cleanup_handle(
+                &self,
+            ) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
+                Some(Arc::new(BlockingCleanupHandle {
+                    entered: Arc::clone(&self.entered),
+                    release: Arc::clone(&self.release),
+                }))
+            }
+
+            async fn apply(
+                &mut self,
+                _run_id: meerkat_core::RunId,
+                _primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                Err(CoreExecutorError::Internal(
+                    "disposal retry fixture must not apply turns".to_string(),
+                ))
+            }
+
+            async fn cancel_after_boundary(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_entered = Arc::new(Notify::new());
+        let cleanup_release = Arc::new(Notify::new());
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(BlockingCleanupExecutor {
+                    entered: Arc::clone(&cleanup_entered),
+                    release: Arc::clone(&cleanup_release),
+                }),
+            )
+            .await
+            .expect("register disposal retry fixture");
+        let witness = machine
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .expect("registered fixture must expose its serving attachment");
+        let state = Arc::new(RuntimeSessionState::for_attachment_without_actor_witness(
+            witness.clone(),
+        ));
+        state
+            .stage_attachment_activation(&witness)
+            .expect("activate exact sidecar")
+            .finalize();
+
+        let runtime_sessions = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            Arc::clone(&state),
+        )])));
+        assert!(state.mark_retirement_uncertain());
+        assert!(!state.cleanup_scheduled());
+
+        let unregister = {
+            let machine = Arc::clone(&machine);
+            let witness = witness.clone();
+            tokio::spawn(async move {
+                machine
+                    .unregister_executor_attachment_if_current(&witness)
+                    .await
+            })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cleanup_entered.notified(),
+        )
+        .await
+        .expect("canonical unregister must enter retained post-stop cleanup");
+        assert!(
+            machine
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .is_none(),
+            "Draining must hide the serving attachment projection"
+        );
+
+        let captured =
+            MemberSessionDisposalArc::capture_exact_runtime_state_for_disposal_with_adapter(
+                &machine,
+                &runtime_sessions,
+                &session_id,
+            )
+            .await
+            .expect("retry must accept the machine-proven retained cleanup sidecar");
+        match captured {
+            RuntimeSessionDisposalTarget::ExactAttachment {
+                witness: captured_witness,
+                sidecar: Some(captured_state),
+                ..
+            } => {
+                assert_eq!(captured_witness, witness);
+                assert!(Arc::ptr_eq(&captured_state, &state));
+            }
+            _ => panic!("retry did not recover the exact retained cleanup attachment"),
+        }
+
+        let foreign_machine = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let foreign_session_id = SessionId::new();
+        let foreign_cleanup_entered = Arc::new(Notify::new());
+        let foreign_cleanup_release = Arc::new(Notify::new());
+        foreign_cleanup_release.notify_one();
+        foreign_machine
+            .register_session_with_executor(
+                foreign_session_id.clone(),
+                Box::new(BlockingCleanupExecutor {
+                    entered: foreign_cleanup_entered,
+                    release: foreign_cleanup_release,
+                }),
+            )
+            .await
+            .expect("register stale-sidecar fixture");
+        let foreign_witness = foreign_machine
+            .current_executor_attachment_witness(&foreign_session_id)
+            .await
+            .expect("stale-sidecar fixture must expose its serving attachment");
+        runtime_sessions.write().await.insert(
+            session_id.clone(),
+            Arc::new(RuntimeSessionState::for_attachment_without_actor_witness(
+                foreign_witness,
+            )),
+        );
+        let stale_error =
+            match MemberSessionDisposalArc::capture_exact_runtime_state_for_disposal_with_adapter(
+                &machine,
+                &runtime_sessions,
+                &session_id,
+            )
+            .await
+            {
+                Ok(_) => panic!("machine validation accepted a stale sidecar witness"),
+                Err(error) => error,
+            };
+        assert!(
+            stale_error
+                .to_string()
+                .contains("cannot capture an exact machine/sidecar pair")
+        );
+        runtime_sessions
+            .write()
+            .await
+            .insert(session_id.clone(), Arc::clone(&state));
+        foreign_machine
+            .unregister_session(&foreign_session_id)
+            .await
+            .expect("clean stale-sidecar fixture");
+
+        cleanup_release.notify_one();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), unregister)
+                .await
+                .expect("released unregister must complete")
+                .expect("unregister task must not panic")
+                .expect("unregister must retain exact authority")
+        );
+    }
+
     #[test]
     fn runtime_callback_pending_maps_to_typed_mob_error() {
         let session_id = SessionId::new();

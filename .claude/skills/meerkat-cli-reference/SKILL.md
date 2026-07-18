@@ -291,7 +291,18 @@ rkat mob pack <dir> -o <pack> [--sign <key> --signer-id <id>]
 rkat mob inspect <pack>
 rkat mob validate <pack> [--trust-policy permissive|strict]
 rkat mob deploy <pack> <prompt> [--model <model>] [--max-total-tokens N] [--max-duration D] [--max-tool-calls N] [--trust-policy permissive|strict] [--surface cli|rpc]
-rkat mob web build <pack> -o <dir> [--trust-policy permissive|strict]
+rkat mob web build <pack> -o <dir> --wasm <PKG_DIR|name_bg.wasm> [--trust-policy permissive|strict]
+```
+
+Packing with `--sign` embeds the signer identity and public key but does not
+install that signer in a trust store. For a locally signed pack whose signer is
+not installed, use the explicit permissive posture (signature verification
+still runs and reports an unknown-signer warning):
+
+```bash
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
+rkat mob run ./dist/release-triage.mobpack --flow main --trust-policy permissive
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web --wasm <PKG_DIR|name_bg.wasm> --trust-policy permissive
 ```
 
 For `rkat run` prompts that need `mob_*` tools, use `--tools full` or config

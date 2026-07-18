@@ -325,7 +325,7 @@ rkat mob fork-helper team-mob lead-1 "Investigate the failing test cluster." --a
 rkat mob member-status team-mob lead-1 --json
 rkat mob force-cancel team-mob worker-1
 rkat mob respawn team-mob worker-1 --initial-message "restart"
-rkat mob run ./dist/release-triage.mobpack --prompt "triage latest regressions" --json
+rkat mob run ./dist/release-triage.mobpack --prompt "triage latest regressions" --trust-policy permissive --json
 rkat mob runs team-mob --json
 rkat mob status team-mob <run_id> --json
 rkat mob attach team-mob <run_id> --json
@@ -338,17 +338,16 @@ rkat mob run-flow team-mob --flow triage --stream
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
   --sign ./keys/release.key --signer-id team@example.com   # --sign requires --signer-id
 rkat mob inspect ./dist/release-triage.mobpack
-rkat mob validate ./dist/release-triage.mobpack
-rkat mob run ./dist/release-triage.mobpack --prompt "triage latest regressions" --trust-policy strict
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
+rkat mob run ./dist/release-triage.mobpack --flow main --trust-policy permissive
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web \
+  --wasm <PKG_DIR|name_bg.wasm> --trust-policy permissive
 ```
 
-Web build prerequisites:
-
-```bash
-cargo install wasm-pack
-export PATH="$HOME/.cargo/bin:$PATH"
-```
+Packing signs the artifact but does not install its signer. The explicit
+permissive policy is therefore the local posture until the signer is installed;
+signature verification still runs and warns that the signer is unknown.
+`--wasm` is required and names prebuilt wasm-pack `--target web` output.
 
 ### WASM browser surface
 

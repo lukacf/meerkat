@@ -160,6 +160,88 @@ mod tests {
     }
 
     #[test]
+    fn platform_skill_embeds_mobpack_authoring_contract() {
+        fn fenced_block<'a>(section: &'a str, language: &str) -> &'a str {
+            let opening = format!("```{language}\n");
+            section
+                .split_once(&opening)
+                .and_then(|(_, rest)| rest.split_once("\n```").map(|(body, _)| body))
+                .unwrap_or_else(|| panic!("missing {language} block in embedded mobpack help"))
+        }
+
+        let section = MEERKAT_PLATFORM_SKILL_BODY
+            .split_once("### Mobpack + web build quick paths")
+            .map(|(_, section)| section)
+            .expect("embedded help must contain the mobpack quick-path section");
+        let manifest: toml::Value = toml::from_str(fenced_block(section, "toml"))
+            .expect("embedded manifest.toml example must be valid TOML");
+        assert_eq!(manifest["mobpack"]["name"].as_str(), Some("review-team"));
+        assert_eq!(manifest["mobpack"]["version"].as_str(), Some("1.0.0"));
+
+        let definition: serde_json::Value = serde_json::from_str(fenced_block(section, "json"))
+            .expect("embedded definition.json example must be valid JSON");
+        assert_eq!(definition["id"].as_str(), Some("review-team"));
+        assert_eq!(
+            definition["profiles"]["lead"]["tools"]["comms"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            definition["profiles"]["reviewer"]["tools"]["comms"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            definition["wiring"]["auto_wire_orchestrator"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            definition["wiring"]["role_wiring"][0]["a"].as_str(),
+            Some("lead")
+        );
+        assert_eq!(
+            definition["wiring"]["role_wiring"][0]["b"].as_str(),
+            Some("reviewer")
+        );
+
+        assert!(MEERKAT_PLATFORM_SKILL_BODY.contains("# manifest.toml"));
+        assert!(MEERKAT_PLATFORM_SKILL_BODY.contains("`definition.json` is JSON"));
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains(r#""tools": { "builtins": true, "comms": true }"#),
+            "embedded help must state the required mob member comms capability"
+        );
+        assert!(MEERKAT_PLATFORM_SKILL_BODY.contains(r#""wiring": {"#));
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY
+                .contains(r#""role_wiring": [{ "a": "lead", "b": "reviewer" }]"#),
+            "embedded help must show the exact role wiring edge shape"
+        );
+        assert!(
+            MEERKAT_PLATFORM_SKILL_BODY.contains("`wiring` is an object, never an")
+                && MEERKAT_PLATFORM_SKILL_BODY.contains("array or boolean"),
+            "embedded help must reject the common wiring array/boolean misconception"
+        );
+        let quick_path = section
+            .split_once("### WASM runtime + Web SDK")
+            .map_or(section, |(quick_path, _)| quick_path);
+        let quick_path_commands = fenced_block(quick_path, "bash");
+        assert!(
+            quick_path.contains("automatically provision one turn-driven target")
+                && quick_path_commands
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("rkat mob run ")),
+            "mobpack help must describe and invoke automatic flat-step role provisioning"
+        );
+        assert!(
+            quick_path.contains("--trust-policy permissive")
+                && quick_path.contains("--wasm <PKG_DIR|name_bg.wasm>"),
+            "the local signed-pack path must use honest trust and a real prebuilt web runtime"
+        );
+        assert!(
+            MEERKAT_CLI_REFERENCE_SKILL_BODY.contains("--wasm <PKG_DIR|name_bg.wasm>"),
+            "the embedded exact CLI authority must make the web runtime artifact required"
+        );
+    }
+
+    #[test]
     fn platform_skill_pins_current_cli_help_facts() {
         for legacy_help_file in [
             "api_reference.md",

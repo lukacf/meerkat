@@ -4,7 +4,7 @@ description: "Browser deployment with the meerkat-web-runtime embedded surface."
 icon: "globe"
 ---
 
-The WASM runtime compiles the full Meerkat agent stack to wasm32 for browser deployment. It routes through the same `AgentFactory::build_agent()` pipeline as all other surfaces.
+The WASM runtime is the full Meerkat agent stack compiled to wasm32 for browser deployment. It routes through the same `AgentFactory::build_agent()` pipeline as all other surfaces.
 
 <Note>
 This page is intentionally browser/WASM-specific rather than a cross-surface tabbed page. Use [Examples: Mobpack](/examples/mobpack) first if you want the packaging/deployment path that usually leads into browser delivery.
@@ -14,12 +14,13 @@ This page is intentionally browser/WASM-specific rather than a cross-surface tab
 
 <Tabs>
   <Tab title="CLI">
-    Build a self-contained, runnable web bundle from a `.mobpack` artifact.
-    `--wasm` points at the prebuilt meerkat-web-runtime (the wasm-pack
-    `--target web` output dir, or the committed `sdks/web/wasm`):
+    Assemble a self-contained, runnable web bundle from a `.mobpack` artifact.
+    The command does not compile wasm32; it copies the required prebuilt
+    meerkat-web-runtime from the generated wasm-pack `--target web` output
+    directory named by `--wasm`:
 
     ```bash
-    rkat mob web build ./dist/my-mob.mobpack -o ./dist/web-bundle --wasm ./sdks/web/wasm
+    rkat mob web build ./dist/my-mob.mobpack -o ./dist/web-bundle --wasm ./meerkat-web-runtime/pkg --trust-policy permissive
     ```
 
     Then serve and open it: `python3 -m http.server -d ./dist/web-bundle`.

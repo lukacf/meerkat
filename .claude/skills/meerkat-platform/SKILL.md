@@ -304,25 +304,79 @@ rkat mob wait-kickoff <mob_id> [--member <agent_identity>...] [--timeout-ms N] [
 
 ### Mobpack + web build quick paths
 
+A mobpack source directory must contain these two files:
+
+```toml
+# manifest.toml
+[mobpack]
+name = "review-team"
+version = "1.0.0"
+```
+
+```json
+{
+  "id": "review-team",
+  "profiles": {
+    "lead": {
+      "model": "claude-sonnet-4-6",
+      "tools": { "builtins": true, "comms": true }
+    },
+    "reviewer": {
+      "model": "claude-sonnet-4-6",
+      "tools": { "builtins": true, "comms": true }
+    }
+  },
+  "wiring": {
+    "auto_wire_orchestrator": false,
+    "role_wiring": [{ "a": "lead", "b": "reviewer" }]
+  },
+  "flows": {
+    "main": {
+      "steps": {
+        "review": { "role": "lead", "message": "Review the change" }
+      }
+    }
+  }
+}
+```
+
+`manifest.toml` is TOML and requires the `[mobpack]` table with non-empty
+`name` and `version`. `definition.json` is JSON and requires a string `id`;
+`profiles`, `wiring`, and `flows` may be omitted. Portable mobpacks may use only
+inline profiles. A profile that will spawn a member must set `tools.comms` to
+`true`, because member construction rejects `comms=false`. When present,
+`wiring` is an object, never an array or boolean: `auto_wire_orchestrator` is a
+boolean and `role_wiring` is an array of
+`{ "a": "<profile>", "b": "<profile>" }` edges. Flow `steps` are objects keyed
+by step id; each flat step requires `role` and `message`. A flow dispatches to
+an existing runnable member of that role; declaring a profile does not spawn
+one at create or pack time. `rkat mob run` and `MobHandle::run_flow`
+automatically provision one turn-driven target for each missing flat-step role
+before dispatch. Pre-spawn through a host or SDK only when you need to choose
+the member identity or supply non-default spawn options.
+
 ```bash
 # Build portable artifact
 rkat mob pack ./mobs/release-triage -o ./dist/release-triage.mobpack \
   --sign ./keys/release.key --signer-id team@example.com   # --sign requires --signer-id
 rkat mob inspect ./dist/release-triage.mobpack
-rkat mob validate ./dist/release-triage.mobpack
+rkat mob validate ./dist/release-triage.mobpack --trust-policy permissive
+rkat mob run ./dist/release-triage.mobpack --flow main --trust-policy permissive
 
-# Invoke as a typed callable run
-rkat mob run ./dist/release-triage.mobpack --prompt "triage latest regressions" --trust-policy strict
-
-# Browser bundle
-cargo install wasm-pack
-rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web
+# Browser bundle from prebuilt wasm-pack output
+rkat mob web build ./dist/release-triage.mobpack -o ./dist/release-triage-web \
+  --wasm <PKG_DIR|name_bg.wasm> --trust-policy permissive
 ```
 
-Web build env overrides:
+Signing records the signer ID and public key in the artifact; it does not add
+that signer to the user or project trusted-signers store. The explicit
+`permissive` policy above is the local-development posture: the signature is
+still verified and the unknown signer produces a warning. Use `strict` only
+after installing the signer in a trusted-signers store.
 
-- `RKAT_WASM_PACK_BIN`: explicit wasm-pack binary path
-- `RKAT_WEB_RUNTIME_CRATE_DIR`: explicit web runtime crate directory for build
+`mob web build` requires `--wasm` pointing to a wasm-pack `--target web` output
+directory or its `*_bg.wasm` file with the sibling JavaScript glue. The CLI
+does not compile wasm32 itself.
 
 ### WASM runtime + Web SDK (browser embedded)
 

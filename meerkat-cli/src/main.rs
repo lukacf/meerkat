@@ -1970,7 +1970,7 @@ enum Commands {
 
     #[cfg(feature = "mob")]
     #[command(
-        after_help = "Examples:\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n  rkat mob inspect dist/release-triage.mobpack\n  rkat mob validate dist/release-triage.mobpack\n  rkat mob deploy dist/release-triage.mobpack \"triage the latest release regressions\"\n  rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web"
+        after_help = "Examples:\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n  rkat mob inspect dist/release-triage.mobpack\n  rkat mob validate dist/release-triage.mobpack --trust-policy permissive\n  rkat mob run dist/release-triage.mobpack --flow main --trust-policy permissive\n  rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web --wasm <PKG_DIR|name_bg.wasm> --trust-policy permissive"
     )]
     /// Mob orchestration commands
     Mob {
@@ -3158,10 +3158,10 @@ enum MobWebCommands {
         #[arg(short = 'o', long)]
         output: PathBuf,
         /// Prebuilt meerkat-web-runtime artifacts: either the wasm-pack `--target web` output
-        /// directory (e.g. `sdks/web/wasm`) or its `<name>_bg.wasm` file (the sibling
+        /// directory (e.g. generated `sdks/web/wasm`) or its `<name>_bg.wasm` file (the sibling
         /// `<name>.js` glue is copied alongside). Required: the CLI does not compile wasm32 itself.
         #[arg(long)]
-        wasm: Option<PathBuf>,
+        wasm: PathBuf,
         #[arg(long, value_enum)]
         trust_policy: Option<TrustPolicyArg>,
     },
@@ -7348,9 +7348,15 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
         .await;
     match wasm_pack {
         Ok(output) if output.status.success() => {
-            println!("ok\twasm-pack\tavailable");
+            println!(
+                "ok\twasm-pack\tavailable (one way to generate the prebuilt artifacts required \
+                 by `rkat mob web build --wasm`; the build command does not invoke wasm-pack)"
+            );
         }
-        _ => println!("warn\twasm-pack\tnot found (needed for `rkat mob web build`)"),
+        _ => println!(
+            "warn\twasm-pack\tnot found (one way to generate the prebuilt artifacts required by \
+             `rkat mob web build --wasm`; the build command does not invoke wasm-pack)"
+        ),
     }
 
     if ok {
@@ -14469,7 +14475,8 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
     {
         println!(
             "{}",
-            execute_mob_web_build(scope, pack, output, wasm.as_deref(), *trust_policy).await?
+            execute_mob_web_build(scope, pack, output, Some(wasm.as_path()), *trust_policy,)
+                .await?
         );
         return Ok(());
     }
@@ -15356,7 +15363,7 @@ async fn execute_mob_web_build(
         anyhow::anyhow!(
             "mob web build failed: missing --wasm <pkg-dir|name_bg.wasm>; pass the prebuilt \
              meerkat-web-runtime artifacts (e.g. `wasm-pack build meerkat-web-runtime --target \
-             web`, or the committed sdks/web/wasm dir). The CLI does not compile wasm32 itself."
+             web`, or the generated sdks/web/wasm dir). The CLI does not compile wasm32 itself."
         )
     })?;
     let (glue_path, wasm_path) = resolve_web_runtime_assets(wasm_arg)?;
@@ -21384,6 +21391,19 @@ url = "https://user.example/mcp"
     #[cfg(feature = "mob")]
     #[test]
     fn test_cli_mob_web_build_command_parses() {
+        assert!(
+            Cli::try_parse_from([
+                "rkat",
+                "mob",
+                "web",
+                "build",
+                "./fixture.mobpack",
+                "-o",
+                "./web-out",
+            ])
+            .is_err(),
+            "mob web build must require --wasm at parse time"
+        );
         let cli = Cli::try_parse_from([
             "rkat",
             "mob",
@@ -21392,6 +21412,8 @@ url = "https://user.example/mcp"
             "./fixture.mobpack",
             "-o",
             "./web-out",
+            "--wasm",
+            "./wasm-pkg",
         ])
         .expect("mob web build command should parse");
 
@@ -21410,7 +21432,7 @@ url = "https://user.example/mcp"
             } => {
                 assert_eq!(pack, PathBuf::from("./fixture.mobpack"));
                 assert_eq!(output, PathBuf::from("./web-out"));
-                assert_eq!(wasm, None);
+                assert_eq!(wasm, PathBuf::from("./wasm-pkg"));
                 assert_eq!(trust_policy, None);
             }
             _ => unreachable!("expected mob web build command"),

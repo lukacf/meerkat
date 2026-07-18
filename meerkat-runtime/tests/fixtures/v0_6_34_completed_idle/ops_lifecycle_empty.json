@@ -1,0 +1,1 @@
+{"epoch_id":"018f0000-0000-7000-8000-000000000004","authority_state":{"operations":{},"completed_order":[],"max_completed":256,"max_concurrent":null,"active_count":0,"wait_request_id":null,"wait_operation_ids":[],"next_completion_seq":0},"operation_specs":{},"completion_entries":[],"cursors":{"agent_applied_cursor":0,"runtime_observed_seq":0,"runtime_last_injected_seq":0}}

@@ -2,17 +2,26 @@
 
 #[cfg(feature = "sqlite-store")]
 mod inner {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     #[cfg(test)]
     use std::sync::atomic::{AtomicU8, Ordering};
+    use std::time::Duration;
 
+    use chrono::{DateTime, Utc};
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
     use meerkat_store::json_column::JsonColumnBytes;
     use meerkat_store::sqlite_store::{begin_immediate_transaction, open_connection};
-    use rusqlite::{Connection, OptionalExtension, Transaction, params};
+    use rusqlite::{
+        Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    };
+    use serde::{Deserialize, Serialize};
 
     use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
+    use crate::input_state::{
+        InputLifecycleState, InputState, InputStateHistoryEntry, InputStatePersistenceRecord,
+        InputStateSeed, InputTerminalOutcome, StoredInputState,
+    };
     use crate::store::{
         AuthOAuthFlowSnapshotUpdate, InputStateBatchCasOutcome, MachineLifecycleCommit,
         MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
@@ -118,6 +127,595 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
         bytes: &[u8],
     ) -> Result<StoredInputState, RuntimeStoreError> {
         serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+    }
+
+    /// Outcome for one runtime row inspected by the explicit v0.6.34
+    /// completed-idle migrator.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum LegacyV0_6_34MigrationDisposition {
+        WouldMigrate,
+        Migrated,
+        Current,
+        Blocked,
+    }
+
+    /// One deterministic row in a legacy-migration report.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+    pub struct LegacyV0_6_34MigrationItem {
+        pub runtime_id: String,
+        pub disposition: LegacyV0_6_34MigrationDisposition,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub detail: Option<String>,
+    }
+
+    /// Report returned by `rkat session migrate`. Dry-run is the default and
+    /// never creates or modifies SQLite state.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+    pub struct LegacyV0_6_34MigrationReport {
+        pub applied: bool,
+        pub items: Vec<LegacyV0_6_34MigrationItem>,
+    }
+
+    const CREATE_LEGACY_V0_6_34_AUDIT_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS runtime_legacy_v0_6_34_audit (
+    runtime_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    row_key TEXT NOT NULL,
+    original_record BLOB NOT NULL,
+    migrated_record BLOB,
+    action TEXT NOT NULL CHECK (action IN ('replace', 'delete')),
+    PRIMARY KEY (runtime_id, table_name, row_key)
+);
+CREATE TRIGGER IF NOT EXISTS runtime_legacy_v0_6_34_audit_no_update
+BEFORE UPDATE ON runtime_legacy_v0_6_34_audit
+BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS runtime_legacy_v0_6_34_audit_no_delete
+BEFORE DELETE ON runtime_legacy_v0_6_34_audit
+BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
+";
+
+    impl LegacyV0_6_34MigrationReport {
+        #[must_use]
+        pub fn migration_count(&self) -> usize {
+            self.items
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.disposition,
+                        LegacyV0_6_34MigrationDisposition::WouldMigrate
+                            | LegacyV0_6_34MigrationDisposition::Migrated
+                    )
+                })
+                .count()
+        }
+
+        #[must_use]
+        pub fn blocked_count(&self) -> usize {
+            self.items
+                .iter()
+                .filter(|item| item.disposition == LegacyV0_6_34MigrationDisposition::Blocked)
+                .count()
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyV0_6_34InputState {
+        input_id: InputId,
+        current_state: InputLifecycleState,
+        #[serde(default, rename = "policy")]
+        _policy: Option<serde_json::Value>,
+        #[serde(default, rename = "runtime_semantics")]
+        _runtime_semantics: Option<serde_json::Value>,
+        #[serde(default)]
+        terminal_outcome: Option<InputTerminalOutcome>,
+        #[serde(default)]
+        durability: Option<crate::input::InputDurability>,
+        #[serde(default)]
+        idempotency_key: Option<crate::identifiers::IdempotencyKey>,
+        #[serde(default)]
+        attempt_count: u32,
+        #[serde(default)]
+        recovery_count: u32,
+        #[serde(default)]
+        history: Vec<InputStateHistoryEntry>,
+        #[serde(default, rename = "reconstruction_source")]
+        _reconstruction_source: Option<serde_json::Value>,
+        #[serde(default, rename = "persisted_input")]
+        _persisted_input: Option<serde_json::Value>,
+        #[serde(default)]
+        last_run_id: Option<RunId>,
+        #[serde(default)]
+        last_boundary_sequence: Option<u64>,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyV0_6_34OpsSnapshot {
+        #[serde(rename = "epoch_id")]
+        _epoch_id: meerkat_core::RuntimeEpochId,
+        authority_state: LegacyV0_6_34OpsAuthority,
+        operation_specs: BTreeMap<String, serde_json::Value>,
+        completion_entries: Vec<serde_json::Value>,
+        cursors: LegacyV0_6_34OpsCursors,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyV0_6_34OpsAuthority {
+        operations: BTreeMap<String, serde_json::Value>,
+        completed_order: Vec<serde_json::Value>,
+        max_completed: usize,
+        max_concurrent: serde_json::Value,
+        active_count: usize,
+        wait_request_id: serde_json::Value,
+        wait_operation_ids: Vec<serde_json::Value>,
+        next_completion_seq: u64,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyV0_6_34OpsCursors {
+        agent_applied_cursor: u64,
+        runtime_observed_seq: u64,
+        runtime_last_injected_seq: u64,
+    }
+
+    struct PreparedLegacyInput {
+        input_id: String,
+        original_record: Vec<u8>,
+        migrated_record: Vec<u8>,
+    }
+
+    struct PreparedLegacyRuntime {
+        runtime_id: String,
+        original_lifecycle: Vec<u8>,
+        migrated_lifecycle: Vec<u8>,
+        inputs: Vec<PreparedLegacyInput>,
+        zero_ops_record: Option<Vec<u8>>,
+    }
+
+    struct LegacyMigrationPreflight {
+        items: Vec<LegacyV0_6_34MigrationItem>,
+        runtimes: Vec<PreparedLegacyRuntime>,
+    }
+
+    fn sqlite_table_exists(conn: &Connection, table_name: &str) -> Result<bool, RuntimeStoreError> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table_name],
+            |row| row.get(0),
+        )
+        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+    }
+
+    fn legacy_v0_6_34_terminal_input(bytes: &[u8]) -> Result<StoredInputState, String> {
+        let legacy: LegacyV0_6_34InputState = serde_json::from_slice(bytes)
+            .map_err(|error| format!("not a v0.6.34 input-state row: {error}"))?;
+        let terminal_pair = matches!(
+            (legacy.current_state, legacy.terminal_outcome.as_ref()),
+            (
+                InputLifecycleState::Consumed,
+                Some(InputTerminalOutcome::Consumed)
+            ) | (
+                InputLifecycleState::Superseded,
+                Some(InputTerminalOutcome::Superseded { .. })
+            ) | (
+                InputLifecycleState::Coalesced,
+                Some(InputTerminalOutcome::Coalesced { .. })
+            ) | (
+                InputLifecycleState::Abandoned,
+                Some(InputTerminalOutcome::Abandoned { .. })
+            )
+        );
+        if !terminal_pair {
+            return Err(format!(
+                "only terminal phase/outcome pairs are safe to migrate (observed {:?})",
+                legacy.current_state
+            ));
+        }
+        Ok(StoredInputState {
+            state: InputState {
+                input_id: legacy.input_id,
+                history: legacy.history,
+                updated_at: legacy.updated_at,
+                policy: None,
+                runtime_semantics: None,
+                durability: legacy.durability,
+                idempotency_key: legacy.idempotency_key,
+                recovery_count: legacy.recovery_count,
+                reconstruction_source: None,
+                interaction_terminal_outbox: None,
+                persisted_input: None,
+                created_at: legacy.created_at,
+            },
+            seed: InputStateSeed {
+                phase: legacy.current_state,
+                last_run_id: legacy.last_run_id,
+                last_boundary_sequence: legacy.last_boundary_sequence,
+                admission_sequence: None,
+                terminal_outcome: legacy.terminal_outcome,
+                attempt_count: legacy.attempt_count,
+                recovery_lane: None,
+            },
+        })
+    }
+
+    fn validate_zero_v0_6_34_ops(bytes: &[u8]) -> Result<(), String> {
+        let snapshot: LegacyV0_6_34OpsSnapshot = serde_json::from_slice(bytes)
+            .map_err(|error| format!("not a v0.6.34 ops snapshot: {error}"))?;
+        let authority = snapshot.authority_state;
+        let zero = authority.operations.is_empty()
+            && snapshot.operation_specs.is_empty()
+            && authority.completed_order.is_empty()
+            && snapshot.completion_entries.is_empty()
+            && authority.active_count == 0
+            && authority.wait_request_id.is_null()
+            && authority.wait_operation_ids.is_empty()
+            && authority.next_completion_seq == 0
+            && snapshot.cursors.agent_applied_cursor == 0
+            && snapshot.cursors.runtime_observed_seq == 0
+            && snapshot.cursors.runtime_last_injected_seq == 0;
+        if !zero {
+            return Err("ops snapshot contains live or completed operation authority".into());
+        }
+        if authority.max_completed != meerkat_core::ops_lifecycle::DEFAULT_MAX_COMPLETED
+            || !authority.max_concurrent.is_null()
+        {
+            return Err("ops snapshot contains nondefault capacity policy".into());
+        }
+        Ok(())
+    }
+
+    fn validate_legacy_session_snapshot(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), String> {
+        if !sqlite_table_exists(conn, "runtime_session_snapshots").map_err(|e| e.to_string())? {
+            return Ok(());
+        }
+        let bytes = conn
+            .query_row(
+                "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                params![runtime_id_text(runtime_id)],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some(bytes) = bytes else {
+            return Ok(());
+        };
+        let session: meerkat_core::Session =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        let owner = LogicalRuntimeId::for_session(session.id());
+        if owner != *runtime_id {
+            return Err(format!(
+                "session {} belongs to runtime {owner}, not {runtime_id}",
+                session.id()
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_legacy_receipts(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), String> {
+        if !sqlite_table_exists(conn, "runtime_boundary_receipts").map_err(|e| e.to_string())? {
+            return Ok(());
+        }
+        let mut statement = conn
+            .prepare(
+                "SELECT run_id, sequence, receipt_json FROM runtime_boundary_receipts WHERE runtime_id = ?1 ORDER BY run_id, sequence",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![runtime_id_text(runtime_id)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, JsonColumnBytes>(2)?.into_bytes(),
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        for (run_id, sequence, bytes) in rows {
+            let receipt: RunBoundaryReceipt =
+                serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            let payload_sequence = i64::try_from(receipt.sequence)
+                .map_err(|_| format!("receipt sequence {} is out of range", receipt.sequence))?;
+            if receipt.run_id.0.to_string() != run_id || payload_sequence != sequence {
+                return Err(format!(
+                    "receipt payload identity {}:{} does not match row {run_id}:{sequence}",
+                    receipt.run_id.0, payload_sequence
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_legacy_companions(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(Vec<PreparedLegacyInput>, Option<Vec<u8>>), String> {
+        validate_legacy_session_snapshot(conn, runtime_id)?;
+        validate_legacy_receipts(conn, runtime_id)?;
+
+        let input_rows = if sqlite_table_exists(conn, "runtime_input_states")
+            .map_err(|e| e.to_string())?
+        {
+            let mut statement = conn
+                .prepare(
+                    "SELECT input_id, state_json FROM runtime_input_states WHERE runtime_id = ?1 ORDER BY input_id",
+                )
+                .map_err(|error| error.to_string())?;
+            statement
+                .query_map(params![runtime_id_text(runtime_id)], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                    ))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
+
+        let mut driver = crate::driver::EphemeralRuntimeDriver::new(runtime_id.clone());
+        let mut inputs = Vec::new();
+        for (input_id, bytes) in input_rows {
+            if deserialize_persisted_input_state(&bytes).is_ok() {
+                return Err(format!(
+                    "input {input_id}: mixed current-format companion under a bare v0.6.34 lifecycle is unsupported"
+                ));
+            }
+            let bundle = legacy_v0_6_34_terminal_input(&bytes)
+                .map_err(|detail| format!("input {input_id}: {detail}"))?;
+            if bundle.state.input_id.0.to_string() != input_id {
+                return Err(format!(
+                    "input {input_id}: payload id does not match row key"
+                ));
+            }
+            let record = driver
+                .recover_input_state_persistence_record(bundle)
+                .map_err(|error| {
+                    format!("input {input_id}: generated recovery rejected it: {error}")
+                })?;
+            let migrated_record = serde_json::to_vec(record.as_stored())
+                .map_err(|error| format!("input {input_id}: encode failed: {error}"))?;
+            deserialize_persisted_input_state(&migrated_record).map_err(|error| {
+                format!("input {input_id}: migrated record is invalid: {error}")
+            })?;
+            inputs.push(PreparedLegacyInput {
+                input_id,
+                original_record: bytes,
+                migrated_record,
+            });
+        }
+
+        let ops =
+            if sqlite_table_exists(conn, "runtime_ops_lifecycle").map_err(|e| e.to_string())? {
+                conn.query_row(
+                    "SELECT state_json FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                    params![runtime_id_text(runtime_id)],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+            } else {
+                None
+            };
+        let zero_ops_record = if let Some(bytes) = ops {
+            if serde_json::from_slice::<crate::ops_lifecycle::PersistedOpsSnapshot>(&bytes).is_ok()
+            {
+                return Err(
+                    "mixed current-format ops authority under a bare v0.6.34 lifecycle is unsupported"
+                        .into(),
+                );
+            }
+            validate_zero_v0_6_34_ops(&bytes)?;
+            Some(bytes)
+        } else {
+            None
+        };
+        Ok((inputs, zero_ops_record))
+    }
+
+    fn preflight_legacy_v0_6_34(
+        conn: &Connection,
+    ) -> Result<LegacyMigrationPreflight, RuntimeStoreError> {
+        if !sqlite_table_exists(conn, "runtime_states")? {
+            return Ok(LegacyMigrationPreflight {
+                items: Vec::new(),
+                runtimes: Vec::new(),
+            });
+        }
+        let rows = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT runtime_id, runtime_state_json FROM runtime_states ORDER BY runtime_id",
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                    ))
+                })
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+        };
+
+        let mut items = Vec::with_capacity(rows.len());
+        let mut runtimes = Vec::new();
+        for (runtime_id, bytes) in rows {
+            if crate::store::decode_machine_lifecycle_store_record(&bytes).is_ok() {
+                items.push(LegacyV0_6_34MigrationItem {
+                    runtime_id,
+                    disposition: LegacyV0_6_34MigrationDisposition::Current,
+                    detail: None,
+                });
+                continue;
+            }
+            if bytes != b"\"idle\"" {
+                items.push(LegacyV0_6_34MigrationItem {
+                    runtime_id,
+                    disposition: LegacyV0_6_34MigrationDisposition::Blocked,
+                    detail: Some("not the exact v0.6.34 bare \"idle\" record".into()),
+                });
+                continue;
+            }
+
+            let logical_runtime_id = LogicalRuntimeId(runtime_id.clone());
+            let companions = prepare_legacy_companions(conn, &logical_runtime_id);
+            let (inputs, zero_ops_record) = match companions {
+                Ok(prepared) => prepared,
+                Err(detail) => {
+                    items.push(LegacyV0_6_34MigrationItem {
+                        runtime_id,
+                        disposition: LegacyV0_6_34MigrationDisposition::Blocked,
+                        detail: Some(detail),
+                    });
+                    continue;
+                }
+            };
+            let mut lifecycle_driver =
+                crate::driver::EphemeralRuntimeDriver::new(logical_runtime_id.clone());
+            let migrated_lifecycle = lifecycle_driver
+                .recover_v0_6_34_completed_idle_lifecycle_record()
+                .map_err(|error| RuntimeStoreError::Internal(error.to_string()))?
+                .encode()?;
+            items.push(LegacyV0_6_34MigrationItem {
+                runtime_id: runtime_id.clone(),
+                disposition: LegacyV0_6_34MigrationDisposition::WouldMigrate,
+                detail: None,
+            });
+            runtimes.push(PreparedLegacyRuntime {
+                runtime_id,
+                original_lifecycle: bytes,
+                migrated_lifecycle,
+                inputs,
+                zero_ops_record,
+            });
+        }
+        Ok(LegacyMigrationPreflight { items, runtimes })
+    }
+
+    fn open_existing_legacy_database(
+        path: &Path,
+        apply: bool,
+    ) -> Result<Connection, RuntimeStoreError> {
+        if !path.is_file() {
+            return Err(RuntimeStoreError::ReadFailed(format!(
+                "runtime database does not exist: {}",
+                path.display()
+            )));
+        }
+        let flags = if apply {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        };
+        let conn = Connection::open_with_flags(path, flags).map_err(|error| {
+            if apply {
+                RuntimeStoreError::WriteFailed(error.to_string())
+            } else {
+                RuntimeStoreError::ReadFailed(error.to_string())
+            }
+        })?;
+        conn.busy_timeout(Duration::ZERO)
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        Ok(conn)
+    }
+
+    fn apply_legacy_v0_6_34(
+        path: &Path,
+    ) -> Result<LegacyV0_6_34MigrationReport, RuntimeStoreError> {
+        let mut conn = open_existing_legacy_database(path, true)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Exclusive)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        let mut preflight = preflight_legacy_v0_6_34(&tx)?;
+        let blocked = preflight
+            .items
+            .iter()
+            .filter(|item| item.disposition == LegacyV0_6_34MigrationDisposition::Blocked)
+            .map(|item| item.runtime_id.as_str())
+            .collect::<Vec<_>>();
+        if !blocked.is_empty() {
+            return Err(RuntimeStoreError::ReadFailed(format!(
+                "legacy migration blocked for runtime(s): {}",
+                blocked.join(", ")
+            )));
+        }
+        if !preflight.runtimes.is_empty() {
+            tx.execute_batch(CREATE_LEGACY_V0_6_34_AUDIT_SQL)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        for runtime in &preflight.runtimes {
+            tx.execute(
+                "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_states', 'singleton', ?2, ?3, 'replace')",
+                params![
+                    runtime.runtime_id,
+                    runtime.original_lifecycle,
+                    runtime.migrated_lifecycle,
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            tx.execute(
+                "UPDATE runtime_states SET runtime_state_json = ?1 WHERE runtime_id = ?2",
+                params![runtime.migrated_lifecycle, runtime.runtime_id],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            for input in &runtime.inputs {
+                tx.execute(
+                    "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_input_states', ?2, ?3, ?4, 'replace')",
+                    params![
+                        runtime.runtime_id,
+                        input.input_id,
+                        input.original_record,
+                        input.migrated_record,
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                tx.execute(
+                    "UPDATE runtime_input_states SET state_json = ?1 WHERE runtime_id = ?2 AND input_id = ?3",
+                    params![input.migrated_record, runtime.runtime_id, input.input_id],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            }
+            if let Some(original_ops) = runtime.zero_ops_record.as_ref() {
+                tx.execute(
+                    "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_ops_lifecycle', 'singleton', ?2, NULL, 'delete')",
+                    params![runtime.runtime_id, original_ops],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                tx.execute(
+                    "DELETE FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                    params![runtime.runtime_id],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            }
+        }
+        tx.commit()
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        for item in &mut preflight.items {
+            if item.disposition == LegacyV0_6_34MigrationDisposition::WouldMigrate {
+                item.disposition = LegacyV0_6_34MigrationDisposition::Migrated;
+            }
+        }
+        Ok(LegacyV0_6_34MigrationReport {
+            applied: true,
+            items: preflight.items,
+        })
     }
 
     /// Encode a `u64` boundary-receipt sequence into the durable `INTEGER`
@@ -498,6 +1096,30 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
                 path,
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
+            })
+        }
+
+        /// Inspect or atomically migrate the exact completed-idle persistence
+        /// shape emitted by v0.6.34. This is deliberately a concrete SQLite
+        /// maintenance API: ordinary RuntimeStore reads remain fail-closed and
+        /// other backends do not inherit a compatibility contract.
+        ///
+        /// `apply = true` requires the caller to stop every process that can
+        /// access this database. The transaction is atomic, but it cannot
+        /// fence a pre-v0.8 process from writing legacy rows after commit.
+        pub fn migrate_v0_6_34_completed_idle(
+            path: impl AsRef<Path>,
+            apply: bool,
+        ) -> Result<LegacyV0_6_34MigrationReport, RuntimeStoreError> {
+            let path = path.as_ref();
+            if apply {
+                return apply_legacy_v0_6_34(path);
+            }
+            let conn = open_existing_legacy_database(path, false)?;
+            let preflight = preflight_legacy_v0_6_34(&conn)?;
+            Ok(LegacyV0_6_34MigrationReport {
+                applied: false,
+                items: preflight.items,
             })
         }
 
@@ -1964,6 +2586,7 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
         use super::*;
         use crate::identifiers::LogicalRuntimeId;
         use crate::runtime_state::RuntimeState;
+        use crate::traits::RuntimeDriver as _;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
         use meerkat_core::session_store::SessionStore as _;
@@ -4669,8 +5292,326 @@ CREATE TABLE IF NOT EXISTS runtime_mob_host_revocations (
                 );
             }
         }
+
+        fn legacy_fixture(name: &str) -> Vec<u8> {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/v0_6_34_completed_idle")
+                .join(name);
+            let mut bytes = std::fs::read(path).unwrap();
+            // Repository text fixtures end with LF, while v0.6.34 persisted
+            // the exact compact bytes emitted by `serde_json::to_vec`.
+            if bytes.last() == Some(&b'\n') {
+                bytes.pop();
+            }
+            bytes
+        }
+
+        #[derive(Deserialize)]
+        struct LegacySessionRow {
+            session_id: String,
+            created_at_ms: i64,
+            updated_at_ms: i64,
+            message_count: i64,
+            total_tokens: i64,
+            metadata_json: String,
+        }
+
+        fn create_complete_v0_6_34_realm_database(path: &Path) -> LogicalRuntimeId {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(include_str!(
+                "../../tests/fixtures/v0_6_34_completed_idle/schema.sql"
+            ))
+            .unwrap();
+            let session: LegacySessionRow =
+                serde_json::from_slice(&legacy_fixture("session_row.json")).unwrap();
+            let runtime_id = LogicalRuntimeId(format!("rt:session:{}", session.session_id));
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, total_tokens, metadata_json, session_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    session.session_id,
+                    session.created_at_ms,
+                    session.updated_at_ms,
+                    session.message_count,
+                    session.total_tokens,
+                    session.metadata_json,
+                    legacy_fixture("session_snapshot.json"),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runtime_states (runtime_id, runtime_state_json) VALUES (?1, ?2)",
+                params![runtime_id.0, legacy_fixture("runtime_state.json")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runtime_session_snapshots (runtime_id, session_snapshot) VALUES (?1, ?2)",
+                params![runtime_id.0, legacy_fixture("session_snapshot.json")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runtime_input_states (runtime_id, input_id, state_json) VALUES (?1, ?2, ?3)",
+                params![
+                    runtime_id.0,
+                    "018f0000-0000-7000-8000-000000000002",
+                    legacy_fixture("input_state_consumed.json"),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runtime_boundary_receipts (runtime_id, run_id, sequence, receipt_json) VALUES (?1, ?2, 1, ?3)",
+                params![
+                    runtime_id.0,
+                    "018f0000-0000-7000-8000-000000000003",
+                    legacy_fixture("boundary_receipt.json"),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runtime_ops_lifecycle (runtime_id, state_json) VALUES (?1, ?2)",
+                params![runtime_id.0, legacy_fixture("ops_lifecycle_empty.json")],
+            )
+            .unwrap();
+            drop(conn);
+            runtime_id
+        }
+
+        fn raw_fixture_row(path: &Path, table: &str, column: &str, runtime_id: &str) -> Vec<u8> {
+            let conn = Connection::open(path).unwrap();
+            conn.query_row(
+                &format!("SELECT {column} FROM {table} WHERE runtime_id = ?1"),
+                params![runtime_id],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .unwrap()
+        }
+
+        fn raw_audit_row(
+            path: &Path,
+            runtime_id: &str,
+            table_name: &str,
+            row_key: &str,
+        ) -> Vec<u8> {
+            let conn = Connection::open(path).unwrap();
+            conn.query_row(
+                "SELECT original_record FROM runtime_legacy_v0_6_34_audit WHERE runtime_id = ?1 AND table_name = ?2 AND row_key = ?3",
+                params![runtime_id, table_name, row_key],
+                |row| row.get(0),
+            )
+            .unwrap()
+        }
+
+        fn raw_session_store_row(path: &Path, session_id: &str) -> Vec<u8> {
+            let conn = Connection::open(path).unwrap();
+            conn.query_row(
+                "SELECT session_json FROM sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn explicit_v0_6_34_completed_idle_migration_is_atomic_and_idempotent() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let runtime_id = create_complete_v0_6_34_realm_database(&path);
+            let original_session = raw_fixture_row(
+                &path,
+                "runtime_session_snapshots",
+                "session_snapshot",
+                &runtime_id.0,
+            );
+            let original_session_store =
+                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001");
+            let original_receipt = raw_fixture_row(
+                &path,
+                "runtime_boundary_receipts",
+                "receipt_json",
+                &runtime_id.0,
+            );
+
+            let ordinary = SqliteRuntimeStore::new(&path).unwrap();
+            assert!(
+                crate::store::load_runtime_state(&ordinary, &runtime_id)
+                    .await
+                    .is_err()
+            );
+            drop(ordinary);
+
+            let dry_run = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, false).unwrap();
+            assert!(!dry_run.applied);
+            assert_eq!(dry_run.migration_count(), 1, "{:?}", dry_run.items);
+            assert_eq!(
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
+                b"\"idle\""
+            );
+
+            let applied = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).unwrap();
+            assert!(applied.applied);
+            assert_eq!(applied.migration_count(), 1);
+            assert_eq!(
+                raw_audit_row(
+                    &path,
+                    &runtime_id.0,
+                    "runtime_input_states",
+                    "018f0000-0000-7000-8000-000000000002",
+                ),
+                legacy_fixture("input_state_consumed.json")
+            );
+            assert_eq!(
+                raw_audit_row(&path, &runtime_id.0, "runtime_states", "singleton"),
+                legacy_fixture("runtime_state.json")
+            );
+            assert_eq!(
+                raw_audit_row(&path, &runtime_id.0, "runtime_ops_lifecycle", "singleton",),
+                legacy_fixture("ops_lifecycle_empty.json")
+            );
+            let audit_conn = Connection::open(&path).unwrap();
+            assert!(
+                audit_conn
+                    .execute(
+                        "DELETE FROM runtime_legacy_v0_6_34_audit WHERE runtime_id = ?1",
+                        params![runtime_id.0],
+                    )
+                    .is_err(),
+                "migration audit rows must reject deletion"
+            );
+            drop(audit_conn);
+            assert_eq!(
+                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001",),
+                original_session_store
+            );
+            assert_eq!(
+                raw_fixture_row(
+                    &path,
+                    "runtime_session_snapshots",
+                    "session_snapshot",
+                    &runtime_id.0,
+                ),
+                original_session
+            );
+            assert_eq!(
+                raw_fixture_row(
+                    &path,
+                    "runtime_boundary_receipts",
+                    "receipt_json",
+                    &runtime_id.0,
+                ),
+                original_receipt
+            );
+            let reopened = SqliteRuntimeStore::new(&path).unwrap();
+            assert_eq!(
+                crate::store::load_runtime_state(&reopened, &runtime_id)
+                    .await
+                    .unwrap(),
+                Some(RuntimeState::Idle)
+            );
+            assert_eq!(
+                reopened.load_input_states(&runtime_id).await.unwrap().len(),
+                1
+            );
+            assert!(
+                reopened
+                    .load_ops_lifecycle(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(reopened);
+            let runtime_store: std::sync::Arc<dyn RuntimeStore> =
+                std::sync::Arc::new(SqliteRuntimeStore::new(&path).unwrap());
+            let blob_store: std::sync::Arc<dyn meerkat_core::BlobStore> =
+                std::sync::Arc::new(meerkat_store::MemoryBlobStore::new());
+            let mut recovered_driver = crate::driver::PersistentRuntimeDriver::new(
+                runtime_id.clone(),
+                runtime_store,
+                blob_store,
+            );
+            recovered_driver
+                .recover()
+                .await
+                .expect("migrated image must pass the real persistent recovery boundary");
+            assert_eq!(recovered_driver.runtime_state(), RuntimeState::Idle);
+
+            let session_store = SqliteSessionStore::open(&path).unwrap();
+            let sessions = session_store.list(Default::default()).await.unwrap();
+            assert_eq!(
+                sessions.len(),
+                1,
+                "the complete legacy sessions row survives"
+            );
+
+            let repeated = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).unwrap();
+            assert_eq!(repeated.migration_count(), 0);
+            assert_eq!(
+                repeated.items[0].disposition,
+                LegacyV0_6_34MigrationDisposition::Current
+            );
+        }
+
+        #[test]
+        fn legacy_migration_refuses_nonterminal_input_without_writes() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let runtime_id = create_complete_v0_6_34_realm_database(&path);
+            let conn = Connection::open(&path).unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&legacy_fixture("input_state_consumed.json")).unwrap();
+            value["current_state"] = serde_json::json!("accepted");
+            value["terminal_outcome"] = serde_json::Value::Null;
+            conn.execute(
+                "UPDATE runtime_input_states SET state_json = ?1 WHERE runtime_id = ?2",
+                params![serde_json::to_vec(&value).unwrap(), runtime_id.0],
+            )
+            .unwrap();
+            drop(conn);
+
+            let before =
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0);
+            let dry_run = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, false).unwrap();
+            assert_eq!(dry_run.blocked_count(), 1);
+            assert!(SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).is_err());
+            assert_eq!(
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
+                before
+            );
+        }
+
+        #[test]
+        fn legacy_migration_refuses_mixed_current_input_without_writes() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let runtime_id = create_complete_v0_6_34_realm_database(&path);
+            let current = StoredInputState::new_accepted(InputId::new());
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE runtime_input_states SET state_json = ?1 WHERE runtime_id = ?2",
+                params![serde_json::to_vec(&current).unwrap(), runtime_id.0],
+            )
+            .unwrap();
+            drop(conn);
+
+            let before =
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0);
+            let dry_run = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, false).unwrap();
+            assert_eq!(dry_run.blocked_count(), 1);
+            assert!(
+                dry_run.items[0]
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("mixed current-format companion"))
+            );
+            assert!(SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).is_err());
+            assert_eq!(
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
+                before
+            );
+        }
     }
 }
 
 #[cfg(feature = "sqlite-store")]
-pub use inner::SqliteRuntimeStore;
+pub use inner::{
+    LegacyV0_6_34MigrationDisposition, LegacyV0_6_34MigrationItem, LegacyV0_6_34MigrationReport,
+    SqliteRuntimeStore,
+};

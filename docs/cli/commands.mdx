@@ -243,9 +243,18 @@ rkat session list [--limit <N>] [--offset <N>] [--label <KEY=VALUE>]
 rkat session show <SESSION_ID>
 rkat session delete <SESSION_ID>
 rkat session interrupt <SESSION_ID>
+rkat session migrate [--apply] [--json]
 ```
 
 This is the human/operator session surface. CLI-internal control-plane session APIs are not exposed here.
+
+`session migrate` is a dry-run by default. It recognizes only the exact
+completed-idle SQLite shape emitted by rkat v0.6.34, retains append-only audit
+bytes for rewritten or removed runtime rows, and refuses detected live or
+unreadable lease evidence plus ambiguous/nonterminal state. v0.6.34 one-shot
+CLI runs did not always publish leases, so the probe is best-effort: stop every
+v0.6.34 CLI, RPC, REST, and MCP process using the realm before rerunning with
+`--apply`.
 
 ## config
 

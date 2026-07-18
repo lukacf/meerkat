@@ -187,8 +187,12 @@ pub enum CompactionProjectionPersistence {
     /// and explicit indexing may still work, but compaction must preserve the
     /// transcript rather than publishing an unpaired memory projection.
     Unsupported,
-    /// Process-local store with no durable crash window. The agent may publish
-    /// the batch immediately after its in-memory transcript rewrite succeeds.
+    /// Process-local store with no durable crash window. The store MUST
+    /// implement [`MemoryStore::publish_ephemeral_compaction_batch`] as a
+    /// synchronous all-or-none publication: on `Ok`, every admitted request is
+    /// visible before the method returns; on `Err`, none is visible. The agent
+    /// pairs that call with its in-memory transcript rewrite without crossing
+    /// an async cancellation point.
     EphemeralImmediate,
     /// Durable store. Batches must first be persisted invisibly, then finalized
     /// only after the runtime atomically commits the paired transcript rewrite.
@@ -741,6 +745,31 @@ pub trait MemoryStore: Send + Sync {
         &self,
         batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError>;
+
+    /// Synchronously publish an ephemeral compaction batch all-or-none.
+    ///
+    /// This is a separate contract from ordinary async indexing. A store that
+    /// advertises [`CompactionProjectionPersistence::EphemeralImmediate`] MUST
+    /// override this method and complete publication before returning `Ok`.
+    /// It MUST return `Err` without making any request visible when immediate
+    /// publication cannot be completed synchronously (for example, lock
+    /// contention). The agent installs the paired transcript rewrite, invokes
+    /// this method, and commits or rolls back that rewrite before its next
+    /// `.await`; therefore cancellation cannot observe only one side of the
+    /// transcript-memory pair.
+    ///
+    /// The default fails closed so a store cannot gain compaction support by
+    /// declaring `EphemeralImmediate` while implementing only the cancellable
+    /// [`MemoryStore::index_scoped_batch`] path.
+    fn publish_ephemeral_compaction_batch(
+        &self,
+        batch: MemoryIndexBatch,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        let _ = batch;
+        Err(MemoryStoreError::Unsupported {
+            operation: "publish_ephemeral_compaction_batch",
+        })
+    }
 
     /// Persist a compaction batch durably but invisibly.
     ///

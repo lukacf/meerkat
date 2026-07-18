@@ -4872,8 +4872,6 @@ export interface SessionConfig {
   maxTokens?: number;
   /** Enable comms for this session. */
   commsName?: string;
-  /** Whether this session runs in keep-alive mode. */
-  keepAlive?: boolean;
   /** Application-defined labels. */
   labels?: Record<string, string>;
   /** Additional instruction sections appended to the system prompt. */

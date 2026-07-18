@@ -26,6 +26,21 @@ def _make_member_ref(mob_id: str, agent_identity: str) -> str:
     )
 
 
+def _agent_event_envelope(
+    payload: dict, *, event_id: str = "00000000-0000-4000-8000-000000000010"
+) -> dict:
+    return {
+        "event_id": event_id,
+        "source": {
+            "type": "session",
+            "session_id": "00000000-0000-4000-8000-000000000001",
+        },
+        "seq": 7,
+        "timestamp_ms": 1_700_000_000_000,
+        "payload": payload,
+    }
+
+
 def test_runtime_host_capabilities_expose_typed_multi_host_feature_flags():
     from meerkat.generated.types import (
         ContractVersion,
@@ -2656,9 +2671,9 @@ def test_parse_attributed_mob_event_preserves_source_fence_token():
             "source": {"identity": "writer", "generation": 2},
             "source_fence_token": 7,
             "role": "worker",
-            "envelope": {
-                "payload": {"type": "text_delta", "delta": "hi"},
-            },
+            "envelope": _agent_event_envelope(
+                {"type": "text_delta", "delta": "hi"}
+            ),
         }
     )
 
@@ -2672,9 +2687,9 @@ def test_parse_attributed_mob_event_omitted_source_fence_token_is_none():
         {
             "source": {"identity": "writer", "generation": 0},
             "role": "worker",
-            "envelope": {
-                "payload": {"type": "text_delta", "delta": "hi"},
-            },
+            "envelope": _agent_event_envelope(
+                {"type": "text_delta", "delta": "hi"}
+            ),
         }
     )
 
@@ -2686,7 +2701,9 @@ def test_parse_attributed_mob_event_fails_closed_on_missing_source():
         MeerkatClient._parse_attributed_mob_event(
             {
                 "role": "worker",
-                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+                "envelope": _agent_event_envelope(
+                    {"type": "text_delta", "delta": "hi"}
+                ),
             }
         )
 
@@ -2699,7 +2716,9 @@ def test_parse_attributed_mob_event_rejects_legacy_string_source():
             {
                 "source": "writer",
                 "role": "worker",
-                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+                "envelope": _agent_event_envelope(
+                    {"type": "text_delta", "delta": "hi"}
+                ),
             }
         )
 
@@ -2710,7 +2729,9 @@ def test_parse_attributed_mob_event_requires_generation():
             {
                 "source": {"identity": "writer"},
                 "role": "worker",
-                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+                "envelope": _agent_event_envelope(
+                    {"type": "text_delta", "delta": "hi"}
+                ),
             }
         )
 
@@ -2721,7 +2742,9 @@ def test_parse_attributed_mob_event_rejects_negative_generation():
             {
                 "source": {"identity": "writer", "generation": -1},
                 "role": "worker",
-                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+                "envelope": _agent_event_envelope(
+                    {"type": "text_delta", "delta": "hi"}
+                ),
             }
         )
 
@@ -2743,38 +2766,140 @@ def test_parse_attributed_mob_event_fails_closed_on_non_number_fence():
                 "source": {"identity": "writer", "generation": 0},
                 "role": "worker",
                 "source_fence_token": "7",
-                "envelope": {"payload": {"type": "text_delta", "delta": "hi"}},
+                "envelope": _agent_event_envelope(
+                    {"type": "text_delta", "delta": "hi"}
+                ),
             }
         )
 
 
 def test_parse_event_envelope_uses_typed_source_not_legacy_source_id():
     event = MeerkatClient._parse_agent_event_envelope(
-        {
-            "source": {
-                "type": "session",
-                "session_id": "00000000-0000-4000-8000-000000000001",
-            },
-            "payload": {"type": "text_delta", "delta": "hi"},
-        }
+        _agent_event_envelope({"type": "text_delta", "delta": "hi"})
     )
 
-    assert event.source is not None
     assert event.source.type == "session"
     assert event.source.session_id == "00000000-0000-4000-8000-000000000001"
+    assert event.event_id == "00000000-0000-4000-8000-000000000010"
+    assert event.seq == 7
+    assert event.timestamp_ms == 1_700_000_000_000
 
 
-def test_parse_event_envelope_does_not_classify_legacy_session_string():
-    event = MeerkatClient._parse_agent_event_envelope(
-        {
-            "source_id": "session:00000000-0000-4000-8000-000000000001",
-            "payload": {"type": "text_delta", "delta": "hi"},
-        }
-    )
+@pytest.mark.parametrize(
+    "missing",
+    ["event_id", "source", "seq", "timestamp_ms", "payload"],
+)
+def test_parse_event_envelope_rejects_every_missing_required_fact(missing: str):
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    del raw[missing]
 
-    # The legacy envelope-level string key no longer exists on the typed
-    # envelope and never classifies a typed source.
-    assert event.source is None
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_agent_event_envelope(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert missing in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("event_id", 7), ("seq", -1), ("seq", 1.5), ("timestamp_ms", "now")],
+)
+def test_parse_event_envelope_rejects_malformed_scalars(field: str, value):
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    raw[field] = value
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_agent_event_envelope(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize("field", ["seq", "timestamp_ms"])
+def test_parse_event_envelope_rejects_values_above_u64(field: str):
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    raw[field] = 1 << 64
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_agent_event_envelope(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "unsigned 64-bit integer" in str(excinfo.value)
+
+
+def test_parse_event_envelope_accepts_u64_maximum():
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    raw["seq"] = (1 << 64) - 1
+    raw["timestamp_ms"] = (1 << 64) - 1
+
+    event = MeerkatClient._parse_agent_event_envelope(raw)
+
+    assert event.seq == (1 << 64) - 1
+    assert event.timestamp_ms == (1 << 64) - 1
+
+
+@pytest.mark.parametrize(
+    "event_id",
+    [
+        "not-a-uuid",
+        "019e63c2000070008000000000000010",
+        "019E63C2-0000-7000-8000-000000000010",
+    ],
+)
+def test_parse_event_envelope_rejects_non_canonical_event_uuid(event_id: str):
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    raw["event_id"] = event_id
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_agent_event_envelope(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "event_id" in str(excinfo.value)
+
+
+def test_parse_event_envelope_rejects_legacy_source_id_without_typed_source():
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    del raw["source"]
+    raw["source_id"] = "session:00000000-0000-4000-8000-000000000001"
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_agent_event_envelope(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "source" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [None, "session", {"type": "session"}, {"type": "unknown"}],
+)
+def test_parse_event_envelope_rejects_malformed_typed_source(source):
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    raw["source"] = source
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_agent_event_envelope(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"type": "session", "session_id": "session-1"},
+        {"type": "interaction", "interaction_id": "interaction-1"},
+    ],
+)
+def test_parse_event_envelope_rejects_non_uuid_typed_source(source):
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    raw["source"] = source
+
+    with pytest.raises(MeerkatError) as excinfo:
+        MeerkatClient._parse_agent_event_envelope(raw)
+    assert excinfo.value.code == "INVALID_RESPONSE"
+    assert "canonical UUID" in str(excinfo.value)
+
+
+def test_parse_event_envelope_preserves_optional_mob_id():
+    raw = _agent_event_envelope({"type": "text_delta", "delta": "hi"})
+    raw["mob_id"] = "00000000-0000-4000-8000-000000000020"
+
+    event = MeerkatClient._parse_agent_event_envelope(raw)
+
+    assert event.mob_id == "00000000-0000-4000-8000-000000000020"
 
 
 def test_parse_tool_config_changed():
@@ -6767,6 +6892,34 @@ async def test_read_mob_events_rejects_non_list_events() -> None:
 
     async def fake_request(_method, _params):
         return {"events": "not-a-list"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.read_mob_events("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_read_mob_events_rejects_missing_events() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as excinfo:
+        await client.read_mob_events("mob-1")
+    assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_read_mob_events_rejects_non_object_result() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return None
 
     client._request = fake_request  # type: ignore[method-assign]
 

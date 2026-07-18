@@ -8,6 +8,16 @@ import { DeferredSession, Session } from "../dist/session.js";
 import { MeerkatClient } from "../dist/client.js";
 import { MeerkatError } from "../dist/index.js";
 
+function agentEventEnvelope(payload, eventId = "00000000-0000-4000-8000-000000000010") {
+  return {
+    event_id: eventId,
+    source: { type: "callback" },
+    seq: 0,
+    timestamp_ms: 1,
+    payload,
+  };
+}
+
 describe("Skills v2.1", () => {
   it("Session.invokeSkill sends structured skillRefs to _startTurn", async () => {
     const calls = [];
@@ -279,7 +289,7 @@ describe("Skills v2.1", () => {
         method: "session/event",
         params: {
           session_id: "s-early",
-          event: { type: "text_delta", delta: "early" },
+          event: agentEventEnvelope({ type: "text_delta", delta: "early" }),
         },
       }),
     );
@@ -299,13 +309,17 @@ describe("Skills v2.1", () => {
   it("createSessionStreaming does not clear buffered standalone stream events", async () => {
     const client = new MeerkatClient();
     client.process = { stdin: { write() {} } };
-    client.unmatchedStandaloneStreamBuffer.set("stream-1", [{ event_id: "e1" }]);
+    client.unmatchedStandaloneStreamBuffer.set("stream-1", [{
+      event_id: "00000000-0000-4000-8000-000000000011",
+    }]);
     client.registerRequest = () => Promise.resolve({ session_id: "s-created" });
 
     client.createSessionStreaming("hello");
     await new Promise((resolve) => setImmediate(resolve));
 
-    assert.deepEqual(client.unmatchedStandaloneStreamBuffer.get("stream-1"), [{ event_id: "e1" }]);
+    assert.deepEqual(client.unmatchedStandaloneStreamBuffer.get("stream-1"), [{
+      event_id: "00000000-0000-4000-8000-000000000011",
+    }]);
   });
 
   it("concurrent createSessionStreaming calls are admitted and correlated by request id", async () => {
@@ -329,13 +343,25 @@ describe("Skills v2.1", () => {
     client.handleLine(
       JSON.stringify({
         method: "session/event",
-        params: { session_id: "s-A", event: { type: "text_delta", delta: "AA" } },
+        params: {
+          session_id: "s-A",
+          event: agentEventEnvelope(
+            { type: "text_delta", delta: "AA" },
+            "00000000-0000-4000-8000-000000000012",
+          ),
+        },
       }),
     );
     client.handleLine(
       JSON.stringify({
         method: "session/event",
-        params: { session_id: "s-B", event: { type: "text_delta", delta: "BB" } },
+        params: {
+          session_id: "s-B",
+          event: agentEventEnvelope(
+            { type: "text_delta", delta: "BB" },
+            "00000000-0000-4000-8000-000000000013",
+          ),
+        },
       }),
     );
 
@@ -573,7 +599,10 @@ describe("Skills v2.1", () => {
           method: "session/stream_event",
           params: {
             stream_id: "stream-1",
-            event: { event_id: "e1", payload: { type: "text_delta", delta: "hi" } },
+            event: agentEventEnvelope(
+              { type: "text_delta", delta: "hi" },
+              "00000000-0000-4000-8000-000000000014",
+            ),
           },
         }));
         return { stream_id: "stream-1" };
@@ -602,7 +631,10 @@ describe("Skills v2.1", () => {
           method: "session/stream_event",
           params: {
             stream_id: "stream-ordered",
-            event: { event_id: "e1", payload: { type: "text_delta", delta: "hi" } },
+            event: agentEventEnvelope(
+              { type: "text_delta", delta: "hi" },
+              "00000000-0000-4000-8000-000000000014",
+            ),
           },
         }));
         client.handleLine(JSON.stringify({
@@ -610,7 +642,10 @@ describe("Skills v2.1", () => {
           method: "session/stream_event",
           params: {
             stream_id: "stream-ordered",
-            event: { event_id: "e2", payload: { type: "text_delta", delta: "there" } },
+            event: agentEventEnvelope(
+              { type: "text_delta", delta: "there" },
+              "00000000-0000-4000-8000-000000000015",
+            ),
           },
         }));
         return { stream_id: "stream-ordered" };

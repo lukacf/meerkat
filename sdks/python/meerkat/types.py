@@ -653,7 +653,7 @@ class MobEventCursorEntry(TypedDict, total=False):
 
 
 class MobEventsResult(TypedDict):
-    events: list[MobEventCursorEntry]
+    events: list[Any]
 
 
 MobControlScope = Literal[
@@ -1001,7 +1001,7 @@ class SessionTranscriptRewriteResult:
 class EventSourceIdentity:
     """Typed source identity for session or runtime event semantics."""
 
-    type: str = ""
+    type: str
     session_id: str | None = None
     runtime_id: str | None = None
     interaction_id: str | None = None
@@ -1012,20 +1012,21 @@ class EventSourceIdentity:
 class EventEnvelope:
     """Session or agent event with delivery metadata."""
 
-    event_id: str = ""
-    source: EventSourceIdentity | None = None
-    seq: int = 0
-    timestamp_ms: int = 0
-    payload: Event | None = None
+    event_id: str
+    source: EventSourceIdentity
+    seq: int
+    timestamp_ms: int
+    payload: Event
+    mob_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class AttributedEvent:
     """Mob event annotated with the emitting member identity."""
 
-    source: str = ""
-    role: str = ""
-    envelope: EventEnvelope = field(default_factory=EventEnvelope)
+    source: str
+    role: str
+    envelope: EventEnvelope
     source_fence_token: int | None = None
 
 

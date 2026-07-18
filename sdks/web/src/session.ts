@@ -190,12 +190,12 @@ export class Session {
     } as TurnResult;
   }
 
-  /** Get the current runtime-backed session state. */
+  /** Get the current standalone session state. */
   getState(): SessionState {
     return JSON.parse(this.getStateFn(this.handle)) as SessionState;
   }
 
-  /** The authoritative runtime session ID behind this local browser handle. */
+  /** The authoritative standalone session ID behind this local browser handle. */
   get sessionId(): string {
     return this.getState().session_id;
   }

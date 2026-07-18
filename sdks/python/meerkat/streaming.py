@@ -12,8 +12,9 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
+from .event_envelope import parse_agent_event_envelope
 from .errors import MeerkatError, meerkat_error_from_jsonrpc_code
-from .events import Event, TextDelta, UnknownEvent, parse_event
+from .events import Event, TextDelta
 
 if TYPE_CHECKING:
     from .session import Session
@@ -221,6 +222,8 @@ class _StdoutDispatcher:
                     continue
                 session_id = params.get("session_id", "")
                 event = params.get("event")
+                if not isinstance(event, dict):
+                    event = {"invalid_event_envelope": event}
                 queue = self._event_queues.get(session_id)
                 if queue is not None:
                     await queue.put(event)
@@ -370,7 +373,7 @@ class EventStream:
                         raw = self._event_queue.get_nowait()
                         if raw is None:
                             break
-                        yield parse_event(raw)
+                        yield parse_agent_event_envelope(raw).payload
                     self._finalise(await response_task)
                     return
 
@@ -388,7 +391,7 @@ class EventStream:
                     if raw is None:
                         self._finalise(await response_task)
                         return
-                    yield parse_event(raw)
+                    yield parse_agent_event_envelope(raw).payload
         finally:
             if queue_get is not None and not queue_get.done():
                 queue_get.cancel()

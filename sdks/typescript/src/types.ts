@@ -484,6 +484,7 @@ export interface EventEnvelope<T = unknown> {
   readonly seq: number;
   readonly event_id: string;
   readonly payload: T;
+  readonly mob_id?: string;
 }
 
 export interface AttributedEvent {
@@ -678,7 +679,7 @@ export interface MobEventsOptions {
 }
 
 export interface MobEventsResult {
-  readonly events: readonly Record<string, unknown>[];
+  readonly events: readonly unknown[];
 }
 
 export interface MobStoredProfile {
@@ -1246,11 +1247,12 @@ export interface SessionOptions {
 
 /** Explicit standalone session-event envelope. */
 export interface AgentEventEnvelope {
-  readonly eventId?: string;
-  readonly source?: EventSourceIdentity;
-  readonly seq?: number;
-  readonly timestampMs?: number;
-  readonly payload?: import("./events.js").AgentEvent;
+  readonly eventId: string;
+  readonly source: EventSourceIdentity;
+  readonly seq: number;
+  readonly timestampMs: number;
+  readonly payload: import("./events.js").AgentEvent;
+  readonly mobId?: string;
 }
 
 /** Mob-wide attributed event emitted by member/mob observation streams. */

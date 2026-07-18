@@ -11,6 +11,16 @@ import {
   meerkatErrorFromSemanticCode,
 } from "../dist/index.js";
 
+function agentEventEnvelope(payload, eventId = "00000000-0000-4000-8000-000000000010") {
+  return {
+    event_id: eventId,
+    source: { type: "callback" },
+    seq: 0,
+    timestamp_ms: 1,
+    payload,
+  };
+}
+
 const MULTI_HOST_ERROR_CASES = [
   {
     rpcCode: -32025,
@@ -79,7 +89,7 @@ describe("EventStream late drain", () => {
       tool_calls: 0,
       usage: { input_tokens: 1, output_tokens: 1 },
     });
-    queue.put({ type: "text_delta", delta: "tail" });
+    queue.put(agentEventEnvelope({ type: "text_delta", delta: "tail" }));
 
     const result = await consume;
     assert.deepEqual(

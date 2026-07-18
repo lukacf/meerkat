@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 
 import readline from "node:readline";
+import { readFileSync } from "node:fs";
 
-const CONTRACT_VERSION = "0.4.6";
+const versionInfo = JSON.parse(
+  readFileSync(new URL("../../artifacts/schemas/version.json", import.meta.url), "utf8"),
+);
+const CONTRACT_VERSION = versionInfo.contract_version;
 
 function write(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -95,8 +99,18 @@ rl.on("line", (line) => {
   if (method === "session/stream_open") {
     const sessionId = String(params.session_id ?? "");
     if (sessionId === "buffered-session") {
-      write(streamEvent("stream-buffered", "e1", "hi", 1));
-      write(streamEvent("stream-buffered", "e2", "there", 2));
+      write(streamEvent(
+        "stream-buffered",
+        "00000000-0000-4000-8000-000000000010",
+        "hi",
+        1,
+      ));
+      write(streamEvent(
+        "stream-buffered",
+        "00000000-0000-4000-8000-000000000011",
+        "there",
+        2,
+      ));
       write(streamEnd("stream-buffered", "remote_end"));
       write({
         jsonrpc: "2.0",
@@ -160,8 +174,17 @@ rl.on("line", (line) => {
           params: {
             session_id: sessionId,
             event: {
-              type: "text_delta",
-              delta: "LATE_TAIL_PUBLIC",
+              event_id: "00000000-0000-4000-8000-000000000012",
+              source: {
+                type: "session",
+                session_id: "00000000-0000-4000-8000-000000000001",
+              },
+              seq: 3,
+              timestamp_ms: 3,
+              payload: {
+                type: "text_delta",
+                delta: "LATE_TAIL_PUBLIC",
+              },
             },
           },
         });

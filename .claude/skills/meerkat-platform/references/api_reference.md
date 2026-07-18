@@ -624,7 +624,7 @@ Mob methods:
 Type/parsing notes:
 
 - capability status may arrive as externally-tagged enum maps (e.g. `{"DisabledByPolicy": {...}}`) and is normalized to the tag string.
-- event parsing defaults missing fields to empty/zero values to keep partial stream payloads parseable.
+- event-envelope parsing requires canonical `event_id`, typed `source`, `seq`, `timestamp_ms`, and object `payload` facts; missing or malformed facts fail with `INVALID_RESPONSE` rather than being defaulted.
 - `RunResult.skill_diagnostics` is typed as `SkillRuntimeDiagnostics`.
 - generated image blocks preserve `image_id`, `blob_id`, `media_type`, `width`, `height`, `revised_prompt`, and provider `meta`.
 - image-generation wire contracts are exported as `WireGenerateImageRequest`, `WireGenerateImageExecutionPlan`, `WireImageGenerationToolResult`, `WireImageOperationPhase`, and `WireAssistantImageRef`.
@@ -714,7 +714,7 @@ Mob methods:
 Type/parsing notes:
 
 - capability status may arrive as externally-tagged enum maps (e.g. `{ DisabledByPolicy: {...} }`) and is normalized to the tag string.
-- event parsing defaults missing fields to empty/zero values to keep partial stream payloads parseable.
+- event-envelope parsing requires canonical `event_id`, typed `source`, `seq`, `timestamp_ms`, and object `payload` facts; missing or malformed facts fail with `INVALID_RESPONSE` rather than being defaulted.
 - `RunResult.skillDiagnostics` is typed as `SkillRuntimeDiagnostics`.
 - generated image blocks preserve `imageId`, `blobId`, `mediaType`, `width`, `height`, `revisedPrompt`, and provider `meta`.
 - image-generation wire contracts are exported as `WireGenerateImageRequest`, `WireGenerateImageExecutionPlan`, `WireImageGenerationToolResult`, `WireImageOperationPhase`, and `WireAssistantImageRef`.

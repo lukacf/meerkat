@@ -169,6 +169,10 @@ via cargo-semver-checks against the published baselines).
   authority in one transaction, and retains append-only original row bytes.
   Operators must still stop all v0.6.34 processes because one-shot legacy CLI
   runs did not consistently publish lease evidence.
+- Full-tools CLI `mob_create` followed by `mob_spawn_member` now stays within
+  the production 2 MiB Tokio worker-stack budget.
+- Direct `rkat mob run` and `rkat mob deploy` now complete the legacy OAuth
+  credential-read bootstrap before loading member runtime configuration.
 - Rejected atomic runtime commits now abort every pre-commit session
   projection—not only compaction—including the live transcript/checkpointer
   and pending context events before recovery checkpoints can reload the prior

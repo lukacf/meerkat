@@ -13,6 +13,31 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const MOB_COMMAND_CHANNEL_CAPACITY: usize = 4096;
 
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+type RuntimeStartFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<MobHandle, MobError>> + Send + 'static>,
+>;
+#[cfg(all(feature = "runtime-adapter", target_arch = "wasm32"))]
+type RuntimeStartFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<MobHandle, MobError>> + 'static>>;
+
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+type RuntimeActorFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+#[cfg(all(feature = "runtime-adapter", target_arch = "wasm32"))]
+type RuntimeActorFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static>>;
+
+// Erase the actor loop before passing it to the executor. Constructing the
+// concrete actor future in an already-large runtime-bootstrap poll frame can
+// otherwise exhaust a production-size worker stack before Tokio owns it.
+#[cfg(feature = "runtime-adapter")]
+#[inline(never)]
+fn runtime_actor_future(
+    actor: MobActor,
+    command_rx: mpsc::Receiver<super::scope_gate::RoutedMobCommand>,
+) -> RuntimeActorFuture {
+    Box::pin(actor.run(command_rx))
+}
+
 fn placed_orchestrator_resume_notification_is_non_gating(error: &MobError) -> bool {
     // This turn is informational and runs before the restored controller has
     // re-probed placed hosts. Any well-formed terminal response from the
@@ -7099,206 +7124,218 @@ impl MobBuilder {
     /// Create the mob: emit MobCreated event, start the actor, return handle.
     #[cfg(feature = "runtime-adapter")]
     pub async fn create(self) -> Result<MobHandle, MobError> {
-        let MobBuilder {
-            mode,
-            storage,
-            session_service,
-            #[cfg(feature = "runtime-adapter")]
-            runtime_adapter,
-            workgraph_service,
-            allow_ephemeral_sessions,
-            notify_orchestrator_on_resume,
-            tool_bundles,
-            default_llm_client,
-            default_external_tools_provider,
-            spawn_base_prompt_source,
-            spawn_member_customizer,
-            owner_bridge_session_create_authority,
-            realtime_session_factory,
-            controlling_acceptor,
-            member_live_host,
-        } = self;
-        #[cfg(not(feature = "runtime-adapter"))]
-        let runtime_adapter: RuntimeAdapterOption = None;
+        Self::create_boxed(self).await
+    }
 
-        let definition = match mode {
-            BuilderMode::Create(definition) => definition,
-            BuilderMode::Resume => {
+    // Keep the concrete create future out of callers such as agent-tool
+    // dispatch. The generated machine authority and runtime bootstrap make the
+    // un-erased debug future large enough to exhaust a production-size worker
+    // stack before its first suspension point.
+    #[cfg(feature = "runtime-adapter")]
+    #[inline(never)]
+    fn create_boxed(builder: Self) -> RuntimeStartFuture {
+        Box::pin(async move {
+            let MobBuilder {
+                mode,
+                storage,
+                session_service,
+                #[cfg(feature = "runtime-adapter")]
+                runtime_adapter,
+                workgraph_service,
+                allow_ephemeral_sessions,
+                notify_orchestrator_on_resume,
+                tool_bundles,
+                default_llm_client,
+                default_external_tools_provider,
+                spawn_base_prompt_source,
+                spawn_member_customizer,
+                owner_bridge_session_create_authority,
+                realtime_session_factory,
+                controlling_acceptor,
+                member_live_host,
+            } = builder;
+            #[cfg(not(feature = "runtime-adapter"))]
+            let runtime_adapter: RuntimeAdapterOption = None;
+
+            let definition = match mode {
+                BuilderMode::Create(definition) => definition,
+                BuilderMode::Resume => {
+                    return Err(MobError::Internal(
+                        "MobBuilder::create() cannot be used with for_resume(); call resume()"
+                            .to_string(),
+                    ));
+                }
+            };
+            MobSupervisorBridge::preflight_ingress_ownership(
+                definition
+                    .backend
+                    .external
+                    .as_ref()
+                    .and_then(|external| external.supervisor_bridge.as_ref()),
+                controlling_acceptor.as_ref(),
+            )?;
+            let mut diagnostics = crate::validate::validate_definition(&definition);
+            diagnostics.extend(crate::spec::SpecValidator::validate(&definition));
+            let (errors, warnings) = crate::validate::partition_diagnostics(diagnostics);
+            if !errors.is_empty() {
+                return Err(MobError::DefinitionError(errors));
+            }
+            for warning in warnings {
+                tracing::warn!(
+                    code = %warning.code,
+                    location = ?warning.location,
+                    "{}",
+                    warning.message
+                );
+            }
+            let session_service = session_service
+                .ok_or_else(|| MobError::Internal("session_service is required".into()))?;
+            if !allow_ephemeral_sessions && !session_service.supports_persistent_sessions() {
                 return Err(MobError::Internal(
-                    "MobBuilder::create() cannot be used with for_resume(); call resume()"
+                    "session_service must satisfy persistent-session contract (REQ-MOB-030)"
                         .to_string(),
                 ));
             }
-        };
-        MobSupervisorBridge::preflight_ingress_ownership(
-            definition
-                .backend
-                .external
-                .as_ref()
-                .and_then(|external| external.supervisor_bridge.as_ref()),
-            controlling_acceptor.as_ref(),
-        )?;
-        let mut diagnostics = crate::validate::validate_definition(&definition);
-        diagnostics.extend(crate::spec::SpecValidator::validate(&definition));
-        let (errors, warnings) = crate::validate::partition_diagnostics(diagnostics);
-        if !errors.is_empty() {
-            return Err(MobError::DefinitionError(errors));
-        }
-        for warning in warnings {
-            tracing::warn!(
-                code = %warning.code,
-                location = ?warning.location,
-                "{}",
-                warning.message
-            );
-        }
-        let session_service = session_service
-            .ok_or_else(|| MobError::Internal("session_service is required".into()))?;
-        if !allow_ephemeral_sessions && !session_service.supports_persistent_sessions() {
-            return Err(MobError::Internal(
-                "session_service must satisfy persistent-session contract (REQ-MOB-030)"
-                    .to_string(),
-            ));
-        }
-        let runtime_adapter =
-            canonical_runtime_adapter_for_session_service(&session_service, runtime_adapter)?;
+            let runtime_adapter =
+                canonical_runtime_adapter_for_session_service(&session_service, runtime_adapter)?;
 
-        // §8: AutonomousHost profiles require a runtime adapter. Validate at
-        // build time so Option<adapter> on the trait doesn't hide an ownership
-        // requirement that only surfaces at spawn time.
-        #[cfg(feature = "runtime-adapter")]
-        {
-            let has_autonomous = definition
-                .profiles
-                .values()
-                .filter_map(|b| b.as_inline())
-                .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
-            if has_autonomous && runtime_adapter.is_none() {
-                return Err(MobError::Internal(
+            // §8: AutonomousHost profiles require a runtime adapter. Validate at
+            // build time so Option<adapter> on the trait doesn't hide an ownership
+            // requirement that only surfaces at spawn time.
+            #[cfg(feature = "runtime-adapter")]
+            {
+                let has_autonomous = definition
+                    .profiles
+                    .values()
+                    .filter_map(|b| b.as_inline())
+                    .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
+                if has_autonomous && runtime_adapter.is_none() {
+                    return Err(MobError::Internal(
                     "definition contains AutonomousHost profiles but no runtime adapter is available; \
                      provide one via with_runtime_adapter() or use a session service that implements \
                      runtime_adapter()"
                         .to_string(),
                 ));
+                }
             }
-        }
 
-        let mut dsl_authority = Box::new(seed_mob_authority());
-        let owner_bridge_event = match owner_bridge_session_create_authority.as_ref() {
-            Some(binding) => bind_owner_bridge_session_authority_for_create(
+            let mut dsl_authority = Box::new(seed_mob_authority());
+            let owner_bridge_event = match owner_bridge_session_create_authority.as_ref() {
+                Some(binding) => bind_owner_bridge_session_authority_for_create(
+                    &mut dsl_authority,
+                    binding,
+                    "create_owner_bridge_session",
+                )?,
+                None => None,
+            };
+            seed_mob_definition_spawn_policy(
                 &mut dsl_authority,
-                binding,
-                "create_owner_bridge_session",
-            )?,
-            None => None,
-        };
-        seed_mob_definition_spawn_policy(
-            &mut dsl_authority,
-            &definition,
-            "create_definition_spawn_policy",
-        )?;
-        finish_seeded_mob_authority_phase(&mut dsl_authority, MobState::Running)?;
+                &definition,
+                "create_definition_spawn_policy",
+            )?;
+            finish_seeded_mob_authority_phase(&mut dsl_authority, MobState::Running)?;
 
-        // Emit MobCreated event first
-        let definition_for_event = (*definition).clone();
-        storage
-            .events
-            .append(NewMobEvent {
-                mob_id: definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MobCreated {
-                    definition: Box::new(definition_for_event),
-                },
-            })
-            .await?;
-        if let Some(owner_bridge_event) = owner_bridge_event {
+            // Emit MobCreated event first
+            let definition_for_event = (*definition).clone();
             storage
                 .events
                 .append(NewMobEvent {
                     mob_id: definition.id.clone(),
                     timestamp: None,
-                    kind: owner_bridge_event,
+                    kind: MobEventKind::MobCreated {
+                        definition: Box::new(definition_for_event),
+                    },
                 })
                 .await?;
-        }
-        Self::sync_definition_with_spec_store(
-            storage.specs.clone(),
-            definition.id.clone(),
-            definition.as_ref(),
-        )
-        .await?;
-        Self::ensure_supervisor_authority(
-            storage.runtime_metadata.clone(),
-            definition.id.clone(),
-            &mut dsl_authority,
-        )
-        .await?;
-        Self::recover_host_bindings(
-            storage.runtime_metadata.clone(),
-            &definition.id,
-            &mut dsl_authority,
-            "create_after_insert_race",
-        )
-        .await?;
-        let supervisor_authority = storage
-            .runtime_metadata
-            .load_supervisor_authority(&definition.id)
-            .await?
-            .ok_or_else(|| {
-                MobError::Internal(format!(
-                    "missing supervisor runtime metadata for newly created mob '{}'",
-                    definition.id
-                ))
-            })?;
-        let supervisor_bridge = Arc::new(
-            MobSupervisorBridge::new_with_controlling_acceptor(
-                &definition.id,
-                supervisor_authority.clone(),
-                definition
-                    .backend
-                    .external
-                    .as_ref()
-                    .and_then(|external| external.supervisor_bridge.clone()),
-                controlling_acceptor.clone(),
+            if let Some(owner_bridge_event) = owner_bridge_event {
+                storage
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: definition.id.clone(),
+                        timestamp: None,
+                        kind: owner_bridge_event,
+                    })
+                    .await?;
+            }
+            Self::sync_definition_with_spec_store(
+                storage.specs.clone(),
+                definition.id.clone(),
+                definition.as_ref(),
             )
-            .await?,
-        );
+            .await?;
+            Self::ensure_supervisor_authority(
+                storage.runtime_metadata.clone(),
+                definition.id.clone(),
+                &mut dsl_authority,
+            )
+            .await?;
+            Self::recover_host_bindings(
+                storage.runtime_metadata.clone(),
+                &definition.id,
+                &mut dsl_authority,
+                "create_after_insert_race",
+            )
+            .await?;
+            let supervisor_authority = storage
+                .runtime_metadata
+                .load_supervisor_authority(&definition.id)
+                .await?
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "missing supervisor runtime metadata for newly created mob '{}'",
+                        definition.id
+                    ))
+                })?;
+            let supervisor_bridge = Arc::new(
+                MobSupervisorBridge::new_with_controlling_acceptor(
+                    &definition.id,
+                    supervisor_authority.clone(),
+                    definition
+                        .backend
+                        .external
+                        .as_ref()
+                        .and_then(|external| external.supervisor_bridge.clone()),
+                    controlling_acceptor.clone(),
+                )
+                .await?,
+            );
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let supervisor_startup_guard =
-            SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
+            #[cfg(not(target_arch = "wasm32"))]
+            let supervisor_startup_guard =
+                SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
 
-        let start_result = Self::start_runtime(
-            definition,
-            Roster::new(),
-            dsl_authority,
-            storage.events.clone(),
-            storage.runs.clone(),
-            storage.runtime_metadata.clone(),
-            supervisor_bridge,
-            session_service,
-            runtime_adapter,
-            workgraph_service,
-            tool_bundles,
-            default_llm_client,
-            default_external_tools_provider,
-            spawn_base_prompt_source,
-            spawn_member_customizer,
-            storage.realm_profiles.clone(),
-            notify_orchestrator_on_resume,
-            realtime_session_factory,
-            controlling_acceptor,
-            member_live_host,
-        )
-        .await;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            supervisor_startup_guard.settle(start_result).await
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            start_result
-        }
+            let start_result = Self::start_runtime(
+                definition,
+                Roster::new(),
+                dsl_authority,
+                storage.events.clone(),
+                storage.runs.clone(),
+                storage.runtime_metadata.clone(),
+                supervisor_bridge,
+                session_service,
+                runtime_adapter,
+                workgraph_service,
+                tool_bundles,
+                default_llm_client,
+                default_external_tools_provider,
+                spawn_base_prompt_source,
+                spawn_member_customizer,
+                storage.realm_profiles.clone(),
+                notify_orchestrator_on_resume,
+                realtime_session_factory,
+                controlling_acceptor,
+                member_live_host,
+            )
+            .await;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                supervisor_startup_guard.settle(start_result).await
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                start_result
+            }
+        })
     }
 
     /// Resume a mob from persisted events.
@@ -9266,7 +9303,8 @@ impl MobBuilder {
 
     #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
-    async fn start_runtime(
+    #[inline(never)]
+    fn start_runtime(
         definition: Arc<MobDefinition>,
         initial_roster: Roster,
         mut dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
@@ -9287,83 +9325,88 @@ impl MobBuilder {
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
         controlling_acceptor: Option<ControllingAcceptorConfig>,
         member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
-    ) -> Result<MobHandle, MobError> {
-        // Row #320 seed: the orphan budget is machine state, seeded once from the
-        // definition's `max_orphaned_turns` limit. Covers both the create and
-        // resume runtime-start paths (both route through `start_runtime`).
-        let max_orphaned_turns = definition
-            .limits
-            .as_ref()
-            .and_then(|limits| limits.max_orphaned_turns)
-            .unwrap_or(8) as u64;
-        apply_seeded_mob_input(
-            dsl_authority.as_mut(),
-            crate::machines::mob_machine::MobMachineInput::SeedOrphanBudget {
-                budget: max_orphaned_turns,
-            },
-            "seed_orphan_budget",
-        )?;
-        let (machine_state_watch_tx, _machine_state_watch_rx) =
-            tokio::sync::watch::channel(dsl_authority.state().clone());
-        let provisioner: Arc<dyn MobProvisioner> = Arc::new(
-            MultiBackendProvisioner::new(
-                session_service.clone(),
-                runtime_adapter.clone(),
-                workgraph_service,
-                definition.backend.external.clone(),
-                Arc::clone(&supervisor_bridge),
-            )
-            .with_binding_persistence(definition.id.clone(), runtime_metadata.clone()),
-        );
-        let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
-        let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
-        let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
-        let wiring = RuntimeWiring {
-            roster,
-            dsl_authority,
-            machine_state_watch_tx,
-            reachability_observations: Arc::new(super::handle::ReachabilityObservations::default()),
-            restore_diagnostics,
-            runtime_metadata,
-            supervisor_bridge,
-            command_tx,
-            command_rx,
-        };
+    ) -> RuntimeStartFuture {
+        Box::pin(async move {
+            // Row #320 seed: the orphan budget is machine state, seeded once from the
+            // definition's `max_orphaned_turns` limit. Covers both the create and
+            // resume runtime-start paths (both route through `start_runtime`).
+            let max_orphaned_turns = definition
+                .limits
+                .as_ref()
+                .and_then(|limits| limits.max_orphaned_turns)
+                .unwrap_or(8) as u64;
+            apply_seeded_mob_input(
+                dsl_authority.as_mut(),
+                crate::machines::mob_machine::MobMachineInput::SeedOrphanBudget {
+                    budget: max_orphaned_turns,
+                },
+                "seed_orphan_budget",
+            )?;
+            let (machine_state_watch_tx, _machine_state_watch_rx) =
+                tokio::sync::watch::channel(dsl_authority.state().clone());
+            let provisioner: Arc<dyn MobProvisioner> = Arc::new(
+                MultiBackendProvisioner::new(
+                    session_service.clone(),
+                    runtime_adapter.clone(),
+                    workgraph_service,
+                    definition.backend.external.clone(),
+                    Arc::clone(&supervisor_bridge),
+                )
+                .with_binding_persistence(definition.id.clone(), runtime_metadata.clone()),
+            );
+            let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
+            let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
+            let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
+            let wiring = RuntimeWiring {
+                roster,
+                dsl_authority,
+                machine_state_watch_tx,
+                reachability_observations: Arc::new(
+                    super::handle::ReachabilityObservations::default(),
+                ),
+                restore_diagnostics,
+                runtime_metadata,
+                supervisor_bridge,
+                command_tx,
+                command_rx,
+            };
 
-        Self::start_runtime_with_components(
-            definition,
-            wiring,
-            events,
-            run_store,
-            session_service,
-            runtime_adapter,
-            provisioner,
-            tool_bundles,
-            default_llm_client,
-            default_external_tools_provider,
-            spawn_base_prompt_source,
-            spawn_member_customizer,
-            realm_profile_store,
-            notify_orchestrator_on_resume,
-            BTreeMap::new(),
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            BTreeSet::new(),
-            Vec::new(),
-            Vec::new(),
-            1,
-            true,
-            realtime_session_factory,
-            controlling_acceptor,
-            member_live_host,
-        )
-        .await
+            Self::start_runtime_with_components(
+                definition,
+                wiring,
+                events,
+                run_store,
+                session_service,
+                runtime_adapter,
+                provisioner,
+                tool_bundles,
+                default_llm_client,
+                default_external_tools_provider,
+                spawn_base_prompt_source,
+                spawn_member_customizer,
+                realm_profile_store,
+                notify_orchestrator_on_resume,
+                BTreeMap::new(),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                BTreeSet::new(),
+                Vec::new(),
+                Vec::new(),
+                1,
+                true,
+                realtime_session_factory,
+                controlling_acceptor,
+                member_live_host,
+            )
+            .await
+        })
     }
 
     #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
-    async fn start_runtime_with_components(
+    #[inline(never)]
+    fn start_runtime_with_components(
         definition: Arc<MobDefinition>,
         wiring: RuntimeWiring,
         events: Arc<dyn MobEventStore>,
@@ -9390,386 +9433,396 @@ impl MobBuilder {
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
         controlling_acceptor: Option<ControllingAcceptorConfig>,
         member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
-    ) -> Result<MobHandle, MobError> {
-        // Recover the actor-local idempotency index from durable public events
-        // before spawning any runtime-owned tasks. Private remote-turn custody
-        // is then overlaid below from the validated recovery material.
-        let durable_events = events.replay_all().await?;
-        #[cfg(test)]
-        let actor_runtime_id = register_actor_runtime_for_test(&definition.id);
-        let next_fence_token = combine_recovered_fence_token_seeds(
-            next_fence_token_seed(wiring.dsl_authority.state()),
-            recovered_fence_token_floor,
-        );
-        // Reverse-lane ingress is an explicit host-process composition fact.
-        // Never invent a loopback listener here: publishing it to a different
-        // machine would make route installation look converged while the peer
-        // dials itself. An absent capability fails the mixed-host route closed.
-        let run_store = authority_validating_mob_run_store(run_store);
-        let RuntimeWiring {
-            roster,
-            dsl_authority,
-            machine_state_watch_tx,
-            reachability_observations,
-            restore_diagnostics,
-            runtime_metadata,
-            supervisor_bridge,
-            command_tx,
-            command_rx,
-        } = wiring;
-        let handle_session_service = session_service.clone();
-        let wiring_public_phase = seeded_mob_public_phase(dsl_authority.state());
-        // Terminal-phase watch: seed with the initial phase so a status()
-        // call before any DSL transition returns the right answer.
-        let (phase_watch_tx_actor, phase_watch_rx) =
-            tokio::sync::watch::channel(wiring_public_phase);
-        let handle = MobHandle {
-            // Explicit launch-site mint (A16): the launching process IS the
-            // owning operator — not ambient inference (gotcha #19).
-            command_authority: crate::control_policy::CommandAuthority::principal(
-                crate::control_policy::MobControlPrincipal::Owner,
-            ),
-            command_tx: command_tx.clone(),
-            roster: roster.clone(),
-            definition: definition.clone(),
-            events: events.clone(),
-            run_store: run_store.clone(),
-            flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            session_service: handle_session_service.clone(),
-            runtime_adapter: runtime_adapter.clone(),
-            restore_diagnostics: restore_diagnostics.clone(),
-            supervisor_bridge: supervisor_bridge.clone(),
-            machine_state_watch_rx: machine_state_watch_tx.subscribe(),
-            reachability_observations: Arc::clone(&reachability_observations),
-            phase_watch_rx,
-            realtime_session_factory,
-        };
-        // Row #320: the orphan budget is MobMachine state (seeded once in
-        // `start_runtime` from `definition.limits.max_orphaned_turns`); the
-        // executor no longer holds a shell-side budget.
-        let actor_flow_executor = ActorFlowTurnExecutor::new(handle.clone(), provisioner.clone());
-        // Phase 6 (§7.4): the member event pump manager — one detached
-        // `PollMemberEvents` loop per placed member, durable cursors in the
-        // runtime metadata store (DEC-P6E-9/10/11).
-        let member_event_pumps = Arc::new(super::event_pump::MemberEventPumpManager::new(
-            definition.id.clone(),
-            supervisor_bridge.clone(),
-            runtime_metadata.clone(),
-            Arc::new(super::event_pump::HandleHostRuntimeIncarnationObserver {
-                handle: handle.clone(),
-            }),
-        ));
-        member_event_pumps
-            .install_reachability_observations(Arc::clone(&reachability_observations));
-        // Cross-lane hook wiring (ADJ-P6-10, FLAG-P6F-5): ONE
-        // RemoteFlowTicketRegistry per mob, shared by the executor
-        // (arm/disarm) and the pump (rows-then-sidecar feed); the A17
-        // pump-liveness hook routes through the actor's machine-fact
-        // material derivation.
-        member_event_pumps.install_outcome_sink(actor_flow_executor.remote_flow_ticket_registry());
-        member_event_pumps.install_obligation_probe(Arc::new(
-            super::event_pump::HandleObligationProbe {
-                handle: handle.clone(),
-            },
-        ));
-        actor_flow_executor.install_remote_turn_obligation_pump(Arc::new(
-            super::event_pump::HandleObligationPump {
-                handle: handle.clone(),
-            },
-        ));
-        // The actor holds the SAME registry Arc for member-lifetime
-        // boundaries (disposal lane drop, placed-respawn rematerializing
-        // mark).
-        let remote_flow_tickets = actor_flow_executor.remote_flow_ticket_registry();
-        let intent_reconciler_provisioner = provisioner.clone();
-        let intent_reconciler_tickets = remote_flow_tickets.clone();
-        let kickoff_reconciler_provisioner = provisioner.clone();
-        let kickoff_reconciler_metadata = runtime_metadata.clone();
-        let completion_reconciler_provisioner = provisioner.clone();
-        let flow_executor: Arc<dyn FlowTurnExecutor> = Arc::new(actor_flow_executor);
-        let topology_service = Arc::new(super::topology::MobTopologyService::new(
-            definition.topology.clone(),
-        ));
-        // Normalize public phase: fresh creation + stale Creating restores both
-        // become Running. Persisted Stopped/Completed/Destroyed are preserved.
-        let public_phase = match wiring_public_phase {
-            MobState::Creating => MobState::Running,
-            phase => phase,
-        };
-        // Plain mobs (orchestrator: None in the definition) skip orchestrator
-        // guards entirely. The coordinator-bound fact is MobMachine state
-        // (see `coordinator_bound` in the mob DSL), initialized to `true`
-        // by the machine's init block; no shell-side bind is needed.
-        let has_orchestrator = definition.orchestrator.is_some();
-        let flow_engine = FlowEngine::new(
-            flow_executor,
-            handle.clone(),
-            run_store.clone(),
-            events.clone(),
-            topology_service,
-        );
-        let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::with_policy(
-            super::spawn_policy::policy_from_definition_config(definition.spawn_policy.as_ref()),
-        ));
+    ) -> RuntimeStartFuture {
+        Box::pin(async move {
+            // Recover the actor-local idempotency index from durable public events
+            // before spawning any runtime-owned tasks. Private remote-turn custody
+            // is then overlaid below from the validated recovery material.
+            let durable_events = events.replay_all().await?;
+            #[cfg(test)]
+            let actor_runtime_id = register_actor_runtime_for_test(&definition.id);
+            let next_fence_token = combine_recovered_fence_token_seeds(
+                next_fence_token_seed(wiring.dsl_authority.state()),
+                recovered_fence_token_floor,
+            );
+            // Reverse-lane ingress is an explicit host-process composition fact.
+            // Never invent a loopback listener here: publishing it to a different
+            // machine would make route installation look converged while the peer
+            // dials itself. An absent capability fails the mixed-host route closed.
+            let run_store = authority_validating_mob_run_store(run_store);
+            let RuntimeWiring {
+                roster,
+                dsl_authority,
+                machine_state_watch_tx,
+                reachability_observations,
+                restore_diagnostics,
+                runtime_metadata,
+                supervisor_bridge,
+                command_tx,
+                command_rx,
+            } = wiring;
+            let handle_session_service = session_service.clone();
+            let wiring_public_phase = seeded_mob_public_phase(dsl_authority.state());
+            // Terminal-phase watch: seed with the initial phase so a status()
+            // call before any DSL transition returns the right answer.
+            let (phase_watch_tx_actor, phase_watch_rx) =
+                tokio::sync::watch::channel(wiring_public_phase);
+            let handle = MobHandle {
+                // Explicit launch-site mint (A16): the launching process IS the
+                // owning operator — not ambient inference (gotcha #19).
+                command_authority: crate::control_policy::CommandAuthority::principal(
+                    crate::control_policy::MobControlPrincipal::Owner,
+                ),
+                command_tx: command_tx.clone(),
+                roster: roster.clone(),
+                definition: definition.clone(),
+                events: events.clone(),
+                run_store: run_store.clone(),
+                flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+                session_service: handle_session_service.clone(),
+                runtime_adapter: runtime_adapter.clone(),
+                restore_diagnostics: restore_diagnostics.clone(),
+                supervisor_bridge: supervisor_bridge.clone(),
+                machine_state_watch_rx: machine_state_watch_tx.subscribe(),
+                reachability_observations: Arc::clone(&reachability_observations),
+                phase_watch_rx,
+                realtime_session_factory,
+            };
+            // Row #320: the orphan budget is MobMachine state (seeded once in
+            // `start_runtime` from `definition.limits.max_orphaned_turns`); the
+            // executor no longer holds a shell-side budget.
+            let actor_flow_executor =
+                ActorFlowTurnExecutor::new(handle.clone(), provisioner.clone());
+            // Phase 6 (§7.4): the member event pump manager — one detached
+            // `PollMemberEvents` loop per placed member, durable cursors in the
+            // runtime metadata store (DEC-P6E-9/10/11).
+            let member_event_pumps = Arc::new(super::event_pump::MemberEventPumpManager::new(
+                definition.id.clone(),
+                supervisor_bridge.clone(),
+                runtime_metadata.clone(),
+                Arc::new(super::event_pump::HandleHostRuntimeIncarnationObserver {
+                    handle: handle.clone(),
+                }),
+            ));
+            member_event_pumps
+                .install_reachability_observations(Arc::clone(&reachability_observations));
+            // Cross-lane hook wiring (ADJ-P6-10, FLAG-P6F-5): ONE
+            // RemoteFlowTicketRegistry per mob, shared by the executor
+            // (arm/disarm) and the pump (rows-then-sidecar feed); the A17
+            // pump-liveness hook routes through the actor's machine-fact
+            // material derivation.
+            member_event_pumps
+                .install_outcome_sink(actor_flow_executor.remote_flow_ticket_registry());
+            member_event_pumps.install_obligation_probe(Arc::new(
+                super::event_pump::HandleObligationProbe {
+                    handle: handle.clone(),
+                },
+            ));
+            actor_flow_executor.install_remote_turn_obligation_pump(Arc::new(
+                super::event_pump::HandleObligationPump {
+                    handle: handle.clone(),
+                },
+            ));
+            // The actor holds the SAME registry Arc for member-lifetime
+            // boundaries (disposal lane drop, placed-respawn rematerializing
+            // mark).
+            let remote_flow_tickets = actor_flow_executor.remote_flow_ticket_registry();
+            let intent_reconciler_provisioner = provisioner.clone();
+            let intent_reconciler_tickets = remote_flow_tickets.clone();
+            let kickoff_reconciler_provisioner = provisioner.clone();
+            let kickoff_reconciler_metadata = runtime_metadata.clone();
+            let completion_reconciler_provisioner = provisioner.clone();
+            let flow_executor: Arc<dyn FlowTurnExecutor> = Arc::new(actor_flow_executor);
+            let topology_service = Arc::new(super::topology::MobTopologyService::new(
+                definition.topology.clone(),
+            ));
+            // Normalize public phase: fresh creation + stale Creating restores both
+            // become Running. Persisted Stopped/Completed/Destroyed are preserved.
+            let public_phase = match wiring_public_phase {
+                MobState::Creating => MobState::Running,
+                phase => phase,
+            };
+            // Plain mobs (orchestrator: None in the definition) skip orchestrator
+            // guards entirely. The coordinator-bound fact is MobMachine state
+            // (see `coordinator_bound` in the mob DSL), initialized to `true`
+            // by the machine's init block; no shell-side bind is needed.
+            let has_orchestrator = definition.orchestrator.is_some();
+            let flow_engine = FlowEngine::new(
+                flow_executor,
+                handle.clone(),
+                run_store.clone(),
+                events.clone(),
+                topology_service,
+            );
+            let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::with_policy(
+                super::spawn_policy::policy_from_definition_config(
+                    definition.spawn_policy.as_ref(),
+                ),
+            ));
 
-        // Wave-c C-6c — flip the composition binding from `Standalone`
-        // to `Wired(_)` whenever a runtime adapter is present, wiring
-        // the mob producer into the `MeerkatConsumerSurface` on
-        // `MeerkatMachine`. Builds without `runtime-adapter` keep the
-        // standalone path (no consumer exists by construction).
-        #[cfg(feature = "runtime-adapter")]
-        let composition_binding = match &runtime_adapter {
-            Some(adapter) => {
-                let binding = super::composition::wired_binding_from_runtime_adapter(adapter);
-                super::composition::attach_signal_dispatcher_to_runtime_adapter(
-                    adapter,
-                    command_tx.clone(),
-                );
-                binding
-            }
-            None => meerkat_runtime::composition::CompositionBinding::Standalone,
-        };
-        #[cfg(not(feature = "runtime-adapter"))]
-        let composition_binding = meerkat_runtime::composition::CompositionBinding::Standalone;
-
-        let dsl_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
-            dsl_authority.state().topology_epoch,
-        ));
-        let dsl_authority_owner_token = dsl_authority.generated_authority_owner_token();
-
-        // DEC-U3: the member-operator upcall responder is spawned next to
-        // the actor and owned BY the actor (shut down when its run loop
-        // exits, Drop-abort backstop). It serves member upcalls arriving on
-        // the supervisor bridge runtime's inbox.
-        #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-        let upcall_responder = Some(super::upcall_responder::spawn_upcall_responder(
-            handle.clone(),
-            runtime_metadata.clone(),
-        ));
-
-        // Detached host I/O is actor-local, so recovered bound hosts start a
-        // fresh volatile binding incarnation. Every later successful
-        // bind/rebind/revoke boundary advances this fence and purges release
-        // reservations minted by its predecessor.
-        let host_binding_incarnations = dsl_authority
-            .state()
-            .host_bind_phase
-            .iter()
-            .filter(|(_, phase)| **phase == mob_dsl::HostBindPhase::Bound)
-            .map(|(host_id, _)| (host_id.clone(), 1_u64))
-            .collect();
-        let placed_completion_durable_index = Arc::new(std::sync::Mutex::new(
-            super::actor::PlacedCompletionDurableIndex::recover_with_private_remote_turns(
-                &durable_events,
-                &definition.id,
-                &recovered_private_remote_turns,
-            )?,
-        ));
-
-        let mut actor = MobActor {
-            definition,
-            roster,
-            events,
-            placed_completion_durable_index,
-            run_store,
-            provisioner,
-            flow_engine,
-            has_orchestrator,
-            notify_orchestrator_on_resume,
-            run_tasks: BTreeMap::new(),
-            run_cancel_tokens: BTreeMap::new(),
-            flow_streams: handle.flow_streams.clone(),
-            command_tx,
-            tool_bundles,
-            default_llm_client,
-            retired_event_index: Arc::new(RwLock::new(retired_event_index)),
-            retirement_started_event_index: Arc::new(RwLock::new(retirement_started_event_index)),
-            preserved_respawn_topology_event_index: Arc::new(RwLock::new(
-                preserved_respawn_topology_event_index,
-            )),
-            autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            autonomous_stop_interrupts: BTreeMap::new(),
-            autonomous_stop_interrupted: BTreeMap::new(),
-            autonomous_stop_interrupt_cursor: 0,
-            next_spawn_ticket: 0,
-            // ADJ-8 (multi-host fence reseed): the shell fence counter must
-            // sort ABOVE every replayed fence after a controlling restart —
-            // the member-host dedup ladder is ORDER-comparing (StaleFence on
-            // a tuple below the recorded row), so a reset-to-1 counter would
-            // draw spurious permanent rejects for legitimate re-issues. The
-            // machine still owns every fence guard; this is a mechanical
-            // monotonicity seed over both recovered machine maxima and every
-            // canonical placed carrier loaded at startup. Pending/terminal
-            // carriers may already have been exactly cleaned, so the explicit
-            // floor preserves their fence high-water after their machine maps
-            // are intentionally resolved.
-            next_fence_token: std::sync::atomic::AtomicU64::new(next_fence_token),
-            pending_spawns: PendingSpawnLineage::new(),
-            pending_spawn_cleanup_anchors: BTreeMap::new(),
-            edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
-            lifecycle_tasks: tokio::task::JoinSet::new(),
-            actor_io_tasks: tokio::task::JoinSet::new(),
-            member_live_mutation_tasks: tokio::task::JoinSet::new(),
-            member_live_open_cleanup_obligations: BTreeMap::new(),
-            member_live_open_cleanup_inflight: BTreeSet::new(),
-            next_member_live_open_cleanup_ticket: 0,
-            orphan_release_reservations: BTreeMap::new(),
-            host_binding_incarnations,
-            host_runtime_incarnations: BTreeMap::new(),
-            next_peer_delivery_ticket: 0,
-            peer_delivery_tasks: tokio::task::JoinSet::new(),
-            peer_delivery_inflight: BTreeMap::new(),
-            peer_delivery_permits: Arc::new(tokio::sync::Semaphore::new(
-                super::actor::MAX_PENDING_PEER_DELIVERIES,
-            )),
-            session_service: handle_session_service,
+            // Wave-c C-6c — flip the composition binding from `Standalone`
+            // to `Wired(_)` whenever a runtime adapter is present, wiring
+            // the mob producer into the `MeerkatConsumerSurface` on
+            // `MeerkatMachine`. Builds without `runtime-adapter` keep the
+            // standalone path (no consumer exists by construction).
             #[cfg(feature = "runtime-adapter")]
-            runtime_adapter,
-            restore_diagnostics,
-            member_revival_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            runtime_metadata,
-            supervisor_bridge,
-            member_live_host,
-            member_event_pumps,
-            remote_flow_tickets,
-            reachability_observations,
-            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-            upcall_responder,
-            spawn_policy,
-            dsl_authority: *dsl_authority,
-            dsl_topology_epoch,
-            dsl_authority_owner_token,
-            machine_state_watch_tx,
-            phase_watch_tx: phase_watch_tx_actor,
-            default_external_tools_provider,
-            per_spawn_external_tools: tokio::sync::RwLock::new(per_spawn_external_tools),
-            spawn_base_prompt_source,
-            spawn_member_customizer,
-            realm_profile_store,
-            composition_binding,
-            pending_routed_effects: Vec::new(),
-            destroy_cleanup_active: false,
-            durable_uncertainty_fail_stop: false,
-            respawn_topology_reply_withheld: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            controlling_acceptor: controlling_acceptor
-                .map(super::actor::ControllingAcceptorState::new),
-        };
-        #[cfg(target_arch = "wasm32")]
-        let _ = controlling_acceptor;
-        // A17 recovery trigger (DEC-P6E-11): obligations survive via event
-        // replay, subscriptions do not — re-derive pending remote-turn
-        // obligations from recovered machine state and keep their members'
-        // pumps alive so recovered flow terminals still drain.
-        let recovered_obligations: Vec<crate::ids::AgentIdentity> = actor
-            .dsl_authority
-            .state()
-            .pending_remote_turn_outcomes
-            .iter()
-            .chain(
-                actor
-                    .dsl_authority
-                    .state()
-                    .committed_remote_turn_outcomes
-                    .iter(),
-            )
-            .chain(
-                actor
-                    .dsl_authority
-                    .state()
-                    .resolved_remote_turn_outcomes
-                    .iter(),
-            )
-            .map(|obligation| crate::ids::AgentIdentity::from(obligation.agent_identity.0.as_str()))
-            .chain(
-                actor
-                    .dsl_authority
-                    .state()
-                    .pending_placed_kickoff_outcomes
-                    .iter()
-                    .chain(
-                        actor
-                            .dsl_authority
-                            .state()
-                            .resolved_placed_kickoff_outcomes
-                            .iter(),
-                    )
-                    .map(|obligation| {
-                        crate::ids::AgentIdentity::from(obligation.agent_identity.0.as_str())
-                    }),
-            )
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        // A durable MobDestroying marker is a retry anchor, not a completed
-        // destroy. Public authority is already closed by destroy_admitted,
-        // but the recovered actor must automatically resume the exact member,
-        // host, and storage cleanup rather than waiting for an operator verb.
-        let resume_destroy_cleanup = actor.dsl_authority.state().destroy_admitted
-            && actor.dsl_authority.state().lifecycle_phase
-                != crate::machines::mob_machine::MobPhase::Destroyed;
-        let recovered_lifecycle_retry_intent = match (
-            actor.dsl_authority.state().lifecycle_phase,
-            actor
-                .dsl_authority
-                .state()
-                .placed_completion_lifecycle_intent,
-        ) {
-            (
-                crate::machines::mob_machine::MobPhase::Stopped,
-                Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop),
-            )
-            | (
-                crate::machines::mob_machine::MobPhase::Completed,
-                Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Complete),
-            )
-            | (crate::machines::mob_machine::MobPhase::Destroyed, _) => None,
-            (_, intent) => intent,
-        };
-        let recovered_retirements = if resume_destroy_cleanup {
-            Vec::new()
-        } else {
-            actor
-                .dsl_authority
-                .state()
-                .identity_to_runtime
-                .iter()
-                .filter(|(_, runtime_id)| {
-                    matches!(
-                        actor
-                            .dsl_authority
-                            .state()
-                            .member_state_markers
-                            .get(*runtime_id),
-                        Some(crate::machines::mob_machine::MobMemberState::Retiring)
-                    )
-                })
-                .map(|(identity, _)| crate::ids::AgentIdentity::from(identity.0.as_str()))
-                .collect::<Vec<_>>()
-        };
-        // Cold-recovery convergence workers are owned by this actor instance.
-        // Register them before moving the actor into its run loop so every
-        // terminal path can abort and join them before command-channel closure.
-        if !recovered_obligations.is_empty() {
-            let pump_handle = handle.clone();
-            actor.actor_io_tasks.spawn(async move {
-                #[cfg(test)]
-                let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
-                for identity in recovered_obligations {
-                    if let Err(error) = pump_handle.ensure_pump_for_obligation(&identity).await {
-                        tracing::warn!(
-                            agent_identity = %identity,
-                            error = %error,
-                            "recovered remote-turn obligation could not keep its pump alive"
-                        );
-                    }
+            let composition_binding = match &runtime_adapter {
+                Some(adapter) => {
+                    let binding = super::composition::wired_binding_from_runtime_adapter(adapter);
+                    super::composition::attach_signal_dispatcher_to_runtime_adapter(
+                        adapter,
+                        command_tx.clone(),
+                    );
+                    binding
                 }
-            });
-        }
-        if !resume_destroy_cleanup {
-            for host_id in recovered_host_revocations {
-                let revoke_handle = handle.clone();
+                None => meerkat_runtime::composition::CompositionBinding::Standalone,
+            };
+            #[cfg(not(feature = "runtime-adapter"))]
+            let composition_binding = meerkat_runtime::composition::CompositionBinding::Standalone;
+
+            let dsl_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
+                dsl_authority.state().topology_epoch,
+            ));
+            let dsl_authority_owner_token = dsl_authority.generated_authority_owner_token();
+
+            // DEC-U3: the member-operator upcall responder is spawned next to
+            // the actor and owned BY the actor (shut down when its run loop
+            // exits, Drop-abort backstop). It serves member upcalls arriving on
+            // the supervisor bridge runtime's inbox.
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            let upcall_responder = Some(super::upcall_responder::spawn_upcall_responder(
+                handle.clone(),
+                runtime_metadata.clone(),
+            ));
+
+            // Detached host I/O is actor-local, so recovered bound hosts start a
+            // fresh volatile binding incarnation. Every later successful
+            // bind/rebind/revoke boundary advances this fence and purges release
+            // reservations minted by its predecessor.
+            let host_binding_incarnations = dsl_authority
+                .state()
+                .host_bind_phase
+                .iter()
+                .filter(|(_, phase)| **phase == mob_dsl::HostBindPhase::Bound)
+                .map(|(host_id, _)| (host_id.clone(), 1_u64))
+                .collect();
+            let placed_completion_durable_index = Arc::new(std::sync::Mutex::new(
+                super::actor::PlacedCompletionDurableIndex::recover_with_private_remote_turns(
+                    &durable_events,
+                    &definition.id,
+                    &recovered_private_remote_turns,
+                )?,
+            ));
+
+            let mut actor = MobActor {
+                definition,
+                roster,
+                events,
+                placed_completion_durable_index,
+                run_store,
+                provisioner,
+                flow_engine,
+                has_orchestrator,
+                notify_orchestrator_on_resume,
+                run_tasks: BTreeMap::new(),
+                run_cancel_tokens: BTreeMap::new(),
+                flow_streams: handle.flow_streams.clone(),
+                command_tx,
+                tool_bundles,
+                default_llm_client,
+                retired_event_index: Arc::new(RwLock::new(retired_event_index)),
+                retirement_started_event_index: Arc::new(RwLock::new(
+                    retirement_started_event_index,
+                )),
+                preserved_respawn_topology_event_index: Arc::new(RwLock::new(
+                    preserved_respawn_topology_event_index,
+                )),
+                autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+                autonomous_stop_interrupts: BTreeMap::new(),
+                autonomous_stop_interrupted: BTreeMap::new(),
+                autonomous_stop_interrupt_cursor: 0,
+                next_spawn_ticket: 0,
+                // ADJ-8 (multi-host fence reseed): the shell fence counter must
+                // sort ABOVE every replayed fence after a controlling restart —
+                // the member-host dedup ladder is ORDER-comparing (StaleFence on
+                // a tuple below the recorded row), so a reset-to-1 counter would
+                // draw spurious permanent rejects for legitimate re-issues. The
+                // machine still owns every fence guard; this is a mechanical
+                // monotonicity seed over both recovered machine maxima and every
+                // canonical placed carrier loaded at startup. Pending/terminal
+                // carriers may already have been exactly cleaned, so the explicit
+                // floor preserves their fence high-water after their machine maps
+                // are intentionally resolved.
+                next_fence_token: std::sync::atomic::AtomicU64::new(next_fence_token),
+                pending_spawns: PendingSpawnLineage::new(),
+                pending_spawn_cleanup_anchors: BTreeMap::new(),
+                edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
+                lifecycle_tasks: tokio::task::JoinSet::new(),
+                actor_io_tasks: tokio::task::JoinSet::new(),
+                member_live_mutation_tasks: tokio::task::JoinSet::new(),
+                member_live_open_cleanup_obligations: BTreeMap::new(),
+                member_live_open_cleanup_inflight: BTreeSet::new(),
+                next_member_live_open_cleanup_ticket: 0,
+                orphan_release_reservations: BTreeMap::new(),
+                host_binding_incarnations,
+                host_runtime_incarnations: BTreeMap::new(),
+                next_peer_delivery_ticket: 0,
+                peer_delivery_tasks: tokio::task::JoinSet::new(),
+                peer_delivery_inflight: BTreeMap::new(),
+                peer_delivery_permits: Arc::new(tokio::sync::Semaphore::new(
+                    super::actor::MAX_PENDING_PEER_DELIVERIES,
+                )),
+                session_service: handle_session_service,
+                #[cfg(feature = "runtime-adapter")]
+                runtime_adapter,
+                restore_diagnostics,
+                member_revival_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                runtime_metadata,
+                supervisor_bridge,
+                member_live_host,
+                member_event_pumps,
+                remote_flow_tickets,
+                reachability_observations,
+                #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+                upcall_responder,
+                spawn_policy,
+                dsl_authority: *dsl_authority,
+                dsl_topology_epoch,
+                dsl_authority_owner_token,
+                machine_state_watch_tx,
+                phase_watch_tx: phase_watch_tx_actor,
+                default_external_tools_provider,
+                per_spawn_external_tools: tokio::sync::RwLock::new(per_spawn_external_tools),
+                spawn_base_prompt_source,
+                spawn_member_customizer,
+                realm_profile_store,
+                composition_binding,
+                pending_routed_effects: Vec::new(),
+                destroy_cleanup_active: false,
+                durable_uncertainty_fail_stop: false,
+                respawn_topology_reply_withheld: false,
+                #[cfg(not(target_arch = "wasm32"))]
+                controlling_acceptor: controlling_acceptor
+                    .map(super::actor::ControllingAcceptorState::new),
+            };
+            #[cfg(target_arch = "wasm32")]
+            let _ = controlling_acceptor;
+            // A17 recovery trigger (DEC-P6E-11): obligations survive via event
+            // replay, subscriptions do not — re-derive pending remote-turn
+            // obligations from recovered machine state and keep their members'
+            // pumps alive so recovered flow terminals still drain.
+            let recovered_obligations: Vec<crate::ids::AgentIdentity> = actor
+                .dsl_authority
+                .state()
+                .pending_remote_turn_outcomes
+                .iter()
+                .chain(
+                    actor
+                        .dsl_authority
+                        .state()
+                        .committed_remote_turn_outcomes
+                        .iter(),
+                )
+                .chain(
+                    actor
+                        .dsl_authority
+                        .state()
+                        .resolved_remote_turn_outcomes
+                        .iter(),
+                )
+                .map(|obligation| {
+                    crate::ids::AgentIdentity::from(obligation.agent_identity.0.as_str())
+                })
+                .chain(
+                    actor
+                        .dsl_authority
+                        .state()
+                        .pending_placed_kickoff_outcomes
+                        .iter()
+                        .chain(
+                            actor
+                                .dsl_authority
+                                .state()
+                                .resolved_placed_kickoff_outcomes
+                                .iter(),
+                        )
+                        .map(|obligation| {
+                            crate::ids::AgentIdentity::from(obligation.agent_identity.0.as_str())
+                        }),
+                )
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            // A durable MobDestroying marker is a retry anchor, not a completed
+            // destroy. Public authority is already closed by destroy_admitted,
+            // but the recovered actor must automatically resume the exact member,
+            // host, and storage cleanup rather than waiting for an operator verb.
+            let resume_destroy_cleanup = actor.dsl_authority.state().destroy_admitted
+                && actor.dsl_authority.state().lifecycle_phase
+                    != crate::machines::mob_machine::MobPhase::Destroyed;
+            let recovered_lifecycle_retry_intent = match (
+                actor.dsl_authority.state().lifecycle_phase,
+                actor
+                    .dsl_authority
+                    .state()
+                    .placed_completion_lifecycle_intent,
+            ) {
+                (
+                    crate::machines::mob_machine::MobPhase::Stopped,
+                    Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Stop),
+                )
+                | (
+                    crate::machines::mob_machine::MobPhase::Completed,
+                    Some(mob_dsl::PlacedCompletionLifecycleIntentKind::Complete),
+                )
+                | (crate::machines::mob_machine::MobPhase::Destroyed, _) => None,
+                (_, intent) => intent,
+            };
+            let recovered_retirements = if resume_destroy_cleanup {
+                Vec::new()
+            } else {
+                actor
+                    .dsl_authority
+                    .state()
+                    .identity_to_runtime
+                    .iter()
+                    .filter(|(_, runtime_id)| {
+                        matches!(
+                            actor
+                                .dsl_authority
+                                .state()
+                                .member_state_markers
+                                .get(*runtime_id),
+                            Some(crate::machines::mob_machine::MobMemberState::Retiring)
+                        )
+                    })
+                    .map(|(identity, _)| crate::ids::AgentIdentity::from(identity.0.as_str()))
+                    .collect::<Vec<_>>()
+            };
+            // Cold-recovery convergence workers are owned by this actor instance.
+            // Register them before moving the actor into its run loop so every
+            // terminal path can abort and join them before command-channel closure.
+            if !recovered_obligations.is_empty() {
+                let pump_handle = handle.clone();
                 actor.actor_io_tasks.spawn(async move {
+                    #[cfg(test)]
+                    let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
+                    for identity in recovered_obligations {
+                        if let Err(error) = pump_handle.ensure_pump_for_obligation(&identity).await
+                        {
+                            tracing::warn!(
+                                agent_identity = %identity,
+                                error = %error,
+                                "recovered remote-turn obligation could not keep its pump alive"
+                            );
+                        }
+                    }
+                });
+            }
+            if !resume_destroy_cleanup {
+                for host_id in recovered_host_revocations {
+                    let revoke_handle = handle.clone();
+                    actor.actor_io_tasks.spawn(async move {
                     #[cfg(test)]
                     let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
                     let mut retry_delay = std::time::Duration::from_millis(25);
@@ -9793,11 +9846,11 @@ impl MobBuilder {
                         }
                     }
                 });
+                }
             }
-        }
-        for identity in recovered_retirements {
-            let retire_handle = handle.clone();
-            actor.actor_io_tasks.spawn(async move {
+            for identity in recovered_retirements {
+                let retire_handle = handle.clone();
+                actor.actor_io_tasks.spawn(async move {
                 #[cfg(test)]
                 let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
                 let mut retry_delay = std::time::Duration::from_millis(25);
@@ -9821,10 +9874,10 @@ impl MobBuilder {
                     }
                 }
             });
-        }
-        if resume_destroy_cleanup {
-            let destroy_handle = handle.clone();
-            actor.actor_io_tasks.spawn(async move {
+            }
+            if resume_destroy_cleanup {
+                let destroy_handle = handle.clone();
+                actor.actor_io_tasks.spawn(async move {
                 #[cfg(test)]
                 let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
                 let mut retry_delay = std::time::Duration::from_millis(25);
@@ -9849,55 +9902,56 @@ impl MobBuilder {
                     }
                 }
             });
-        } else if let Some(intent) = recovered_lifecycle_retry_intent {
-            let lifecycle_handle = handle.clone();
-            actor.actor_io_tasks.spawn(async move {
-                #[cfg(test)]
-                let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
-                drive_recovered_placed_lifecycle_intent(lifecycle_handle, intent).await;
-            });
-        }
-        if remote_intent_reconciler_enabled {
-            let completion_reconciler_task =
-                super::placed_completion_reconciler::PlacedCompletionReconciler::run_owned(
-                    handle.mob_id().clone(),
-                    handle.clone(),
-                    completion_reconciler_provisioner,
-                );
-            actor.actor_io_tasks.spawn(async move {
-                #[cfg(test)]
-                let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
-                completion_reconciler_task.await;
-            });
-            let kickoff_reconciler_task =
-                super::placed_kickoff_reconciler::PlacedKickoffReconciler::run_owned(
-                    handle.mob_id().clone(),
-                    handle.clone(),
-                    kickoff_reconciler_provisioner,
-                    kickoff_reconciler_metadata,
-                );
-            actor.actor_io_tasks.spawn(async move {
-                #[cfg(test)]
-                let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
-                kickoff_reconciler_task.await;
-            });
-            let reconciler_task =
-                super::remote_turn_reconciler::RemoteTurnIntentReconciler::run_owned(
-                    handle.mob_id().clone(),
-                    handle.clone(),
-                    intent_reconciler_provisioner,
-                    intent_reconciler_tickets,
-                    recovered_remote_intent_runs,
-                );
-            actor.actor_io_tasks.spawn(async move {
-                #[cfg(test)]
-                let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
-                reconciler_task.await;
-            });
-        }
-        tokio::spawn(actor.run(command_rx));
+            } else if let Some(intent) = recovered_lifecycle_retry_intent {
+                let lifecycle_handle = handle.clone();
+                actor.actor_io_tasks.spawn(async move {
+                    #[cfg(test)]
+                    let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
+                    drive_recovered_placed_lifecycle_intent(lifecycle_handle, intent).await;
+                });
+            }
+            if remote_intent_reconciler_enabled {
+                let completion_reconciler_task =
+                    super::placed_completion_reconciler::PlacedCompletionReconciler::run_owned(
+                        handle.mob_id().clone(),
+                        handle.clone(),
+                        completion_reconciler_provisioner,
+                    );
+                actor.actor_io_tasks.spawn(async move {
+                    #[cfg(test)]
+                    let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
+                    completion_reconciler_task.await;
+                });
+                let kickoff_reconciler_task =
+                    super::placed_kickoff_reconciler::PlacedKickoffReconciler::run_owned(
+                        handle.mob_id().clone(),
+                        handle.clone(),
+                        kickoff_reconciler_provisioner,
+                        kickoff_reconciler_metadata,
+                    );
+                actor.actor_io_tasks.spawn(async move {
+                    #[cfg(test)]
+                    let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
+                    kickoff_reconciler_task.await;
+                });
+                let reconciler_task =
+                    super::remote_turn_reconciler::RemoteTurnIntentReconciler::run_owned(
+                        handle.mob_id().clone(),
+                        handle.clone(),
+                        intent_reconciler_provisioner,
+                        intent_reconciler_tickets,
+                        recovered_remote_intent_runs,
+                    );
+                actor.actor_io_tasks.spawn(async move {
+                    #[cfg(test)]
+                    let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
+                    reconciler_task.await;
+                });
+            }
+            tokio::spawn(runtime_actor_future(actor, command_rx));
 
-        Ok(handle)
+            Ok(handle)
+        })
     }
 }
 

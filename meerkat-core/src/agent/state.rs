@@ -4047,56 +4047,15 @@ where
                         // expiry becomes a `ToolError::Timeout` so it flows
                         // through `terminal_tool_outcome_for_error` exactly like
                         // any other tool execution failure.
-                        let tool_dispatch_context = self.tool_dispatch_context.clone();
-                        let default_timeout = self.tools_config.default_timeout;
-                        let tool_timeouts = self.tools_config.tool_timeouts.clone();
-                        let max_concurrent = self.tools_config.max_concurrent.max(1);
-                        let dispatch_semaphore =
-                            Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-                        let dispatch_futures: Vec<_> = executable_tool_calls
-                            .into_iter()
-                            .map(|(tool_index, tc)| {
-                                let tools_ref = Arc::clone(&tools_ref);
-                                let tool_dispatch_context = tool_dispatch_context.clone();
-                                let dispatch_semaphore = Arc::clone(&dispatch_semaphore);
-                                let call_timeout = tool_timeouts
-                                    .get(tc.name.as_str())
-                                    .copied()
-                                    .unwrap_or(default_timeout);
-                                async move {
-                                    let start = crate::time_compat::Instant::now();
-                                    let dispatch_result = match dispatch_semaphore.acquire().await {
-                                        Ok(_permit) => {
-                                            match tokio::time::timeout(
-                                                call_timeout,
-                                                tools_ref.dispatch_with_context(
-                                                    tc.as_view(),
-                                                    &tool_dispatch_context,
-                                                ),
-                                            )
-                                            .await
-                                            {
-                                                Ok(result) => result,
-                                                Err(_) => Err(ToolError::timeout(
-                                                    tc.name.clone(),
-                                                    u64::try_from(call_timeout.as_millis())
-                                                        .unwrap_or(u64::MAX),
-                                                )),
-                                            }
-                                        }
-                                        Err(_) => Err(ToolError::execution_failed(
-                                            "tool dispatch concurrency semaphore closed",
-                                        )),
-                                    };
-                                    let duration_ms = start.elapsed().as_millis() as u64;
-                                    (tool_index, tc, dispatch_result, duration_ms)
-                                }
-                            })
-                            .collect();
-
-                        let mut dispatch_results =
-                            futures::future::join_all(dispatch_futures).await;
-                        dispatch_results.sort_by_key(|(tool_index, _, _, _)| *tool_index);
+                        let dispatch_results = dispatch_tool_calls_boxed(
+                            Arc::clone(&tools_ref),
+                            self.tool_dispatch_context.clone(),
+                            self.tools_config.default_timeout,
+                            self.tools_config.tool_timeouts.clone(),
+                            self.tools_config.max_concurrent.max(1),
+                            executable_tool_calls,
+                        )
+                        .await;
 
                         // Process results and emit events
                         let mut all_async_ops = Vec::<crate::ops::AsyncOpRef>::new();
@@ -4889,6 +4848,77 @@ impl ToolCallOwned {
             args: &self.args,
         }
     }
+}
+
+type ToolDispatchResult = (
+    usize,
+    ToolCallOwned,
+    Result<crate::ops::ToolDispatchOutcome, ToolError>,
+    u64,
+);
+
+#[cfg(not(target_arch = "wasm32"))]
+type ToolDispatchFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<ToolDispatchResult>> + Send + 'static>>;
+#[cfg(target_arch = "wasm32")]
+type ToolDispatchFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<ToolDispatchResult>> + 'static>>;
+
+// Keep construction and polling of the concrete tool-dispatch batch out of
+// the already-large agent run-loop poll frame.
+#[inline(never)]
+fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
+    tools_ref: Arc<T>,
+    tool_dispatch_context: super::ToolDispatchContext,
+    default_timeout: std::time::Duration,
+    tool_timeouts: std::collections::HashMap<String, std::time::Duration>,
+    max_concurrent: usize,
+    executable_tool_calls: Vec<(usize, ToolCallOwned)>,
+) -> ToolDispatchFuture {
+    Box::pin(async move {
+        let dispatch_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let dispatch_futures: Vec<_> = executable_tool_calls
+            .into_iter()
+            .map(|(tool_index, tc)| {
+                let tools_ref = Arc::clone(&tools_ref);
+                let tool_dispatch_context = tool_dispatch_context.clone();
+                let dispatch_semaphore = Arc::clone(&dispatch_semaphore);
+                let call_timeout = tool_timeouts
+                    .get(tc.name.as_str())
+                    .copied()
+                    .unwrap_or(default_timeout);
+                async move {
+                    let start = crate::time_compat::Instant::now();
+                    let dispatch_result = match dispatch_semaphore.acquire().await {
+                        Ok(_permit) => {
+                            match tokio::time::timeout(
+                                call_timeout,
+                                tools_ref
+                                    .dispatch_with_context(tc.as_view(), &tool_dispatch_context),
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => Err(ToolError::timeout(
+                                    tc.name.clone(),
+                                    u64::try_from(call_timeout.as_millis()).unwrap_or(u64::MAX),
+                                )),
+                            }
+                        }
+                        Err(_) => Err(ToolError::execution_failed(
+                            "tool dispatch concurrency semaphore closed",
+                        )),
+                    };
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    (tool_index, tc, dispatch_result, duration_ms)
+                }
+            })
+            .collect();
+
+        let mut dispatch_results = futures::future::join_all(dispatch_futures).await;
+        dispatch_results.sort_by_key(|(tool_index, _, _, _)| *tool_index);
+        dispatch_results
+    })
 }
 
 #[cfg(test)]

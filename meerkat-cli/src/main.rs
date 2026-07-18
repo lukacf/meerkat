@@ -3658,7 +3658,7 @@ async fn handle_run_command(
     // forward on the credential-READ path so users who upgraded but never
     // re-logged in are still migrated (the login-time trigger alone misses
     // them). Runs at most once per process; failures are logged, not fatal.
-    ensure_legacy_login_credentials_migrated_once(scope).await;
+    prepare_credential_reads(scope).await;
     let output = resolve_cli_output_selection(
         output,
         json,
@@ -6078,6 +6078,16 @@ async fn ensure_legacy_login_credentials_migrated_once(scope: &RuntimeScope) {
             return;
         }
     };
+    prepare_credential_reads_with_persistence(scope, persistence).await;
+}
+
+/// Execute the credential-read bootstrap against an already-open persistence
+/// authority. Production obtains this from the platform default backend; tests
+/// inject an isolated authority while traversing the exact command wrapper.
+async fn prepare_credential_reads_with_persistence(
+    scope: &RuntimeScope,
+    persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+) {
     let store = persistence.token_store();
     if let Err(e) =
         migrate_legacy_login_credentials_to_global(persistence.clone(), scope.auth_lease.clone())
@@ -6098,6 +6108,24 @@ async fn ensure_legacy_login_credentials_migrated_once(scope: &RuntimeScope) {
     }
     #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
     let _ = scope;
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_CREDENTIAL_READ_PERSISTENCE:
+        meerkat_providers::auth_store::ProviderAuthPersistence;
+}
+
+/// Shared bootstrap for CLI paths that are about to resolve provider
+/// credentials. Config-only and inspection commands intentionally do not call
+/// this helper.
+async fn prepare_credential_reads(scope: &RuntimeScope) {
+    #[cfg(test)]
+    if let Ok(persistence) = TEST_CREDENTIAL_READ_PERSISTENCE.try_with(Clone::clone) {
+        prepare_credential_reads_with_persistence(scope, persistence).await;
+        return;
+    }
+    ensure_legacy_login_credentials_migrated_once(scope).await;
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -9701,6 +9729,7 @@ fn compose_rpc_mob_external_tools(
 #[derive(Default)]
 struct CliServiceBuildDefaults {
     default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    default_workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     image_generation_machine: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     default_blob_store: Option<Arc<dyn meerkat_core::BlobStore>>,
     default_image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
@@ -9720,6 +9749,7 @@ fn build_cli_service_with_defaults(
     builder.default_blob_store = defaults.default_blob_store;
     builder.default_image_generation_executor = defaults.default_image_generation_executor;
     meerkat::surface::set_default_schedule_tools(&builder, defaults.default_schedule_tools);
+    meerkat::surface::set_default_workgraph_tools(&builder, defaults.default_workgraph_tools);
     meerkat::surface::build_embedded_service_from_builder(builder, max_sessions)
 }
 
@@ -16047,6 +16077,11 @@ async fn load_deploy_runtime_config(
     scope: &RuntimeScope,
     cli_overrides: CliOverrides,
 ) -> anyhow::Result<Config> {
+    // A direct `rkat mob run/deploy` can be the first credential-reading
+    // command after an upgrade. Finish the dev->global compatibility bootstrap
+    // before composing the global config tail used by member builds.
+    prepare_credential_reads(scope).await;
+
     // Read the head realm's own raw config doc (head of the chain).
     let mut head = Config::default();
     let config_path =
@@ -17723,6 +17758,61 @@ mod tests {
         );
     }
 
+    // A direct mobpack invocation can be the first credential-reading command
+    // after upgrading from 0.7.5. Its deploy-config loader must await the
+    // dev->global bootstrap before composing the inherited global tail.
+    #[cfg(all(
+        feature = "mob",
+        feature = "anthropic",
+        feature = "openai",
+        feature = "gemini"
+    ))]
+    #[tokio::test]
+    async fn direct_mob_config_load_bootstraps_legacy_dev_login_first() {
+        use meerkat_providers::auth_store::{TokenKey, TokenStore};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(temp.path().join("realms"), "mob-first");
+        let store: Arc<dyn TokenStore> = Arc::new(NonEnumerableTokenStore::new());
+        let persistence = test_provider_auth_persistence(Arc::clone(&store));
+        let dev_key = TokenKey::parse("dev", "openai_oauth").expect("legacy token key");
+        store
+            .save(&dev_key, &openai_oauth_tokens())
+            .await
+            .expect("seed legacy token");
+        assert!(
+            store.list().await.expect("list token keys").is_empty(),
+            "fixture must model a keyring backend that cannot enumerate"
+        );
+
+        let config = TEST_CREDENTIAL_READ_PERSISTENCE
+            .scope(
+                persistence,
+                load_deploy_runtime_config(&scope, CliOverrides::default()),
+            )
+            .await
+            .expect("direct mob config load through production wrapper");
+
+        let target = meerkat_core::resolve_auth_binding_or_default_for_provider(
+            &config,
+            meerkat_core::Provider::OpenAI,
+            None,
+            Some(&scope.locator.realm),
+            false,
+        )
+        .expect("mob member inherits migrated global binding");
+        assert_eq!(target.auth_binding.realm.as_str(), "global");
+        assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
+        assert!(
+            store
+                .load(&TokenKey::parse("global", "openai_oauth").unwrap())
+                .await
+                .unwrap()
+                .is_some(),
+            "bootstrap must copy the legacy token before config composition"
+        );
+    }
+
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
     async fn test_cli_auth_status_rehydrates_marked_oauth_token_after_restart() {
@@ -18521,6 +18611,107 @@ default_model = "gemma"
     struct CapturingLlmClient {
         captured_tool_names: Arc<Mutex<Vec<String>>>,
         captured_system_prompt: Arc<Mutex<Option<String>>>,
+    }
+
+    #[cfg(feature = "mob")]
+    struct ScriptedMobSpawnClient {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "mob")]
+    impl ScriptedMobSpawnClient {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl LlmClient for ScriptedMobSpawnClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let events = match call {
+                0 => vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "create-mob".into(),
+                        name: "mob_create".into(),
+                        args: serde_json::json!({
+                            "definition": {
+                                "id": "stack-budget-mob",
+                                "profiles": {
+                                    "worker": {
+                                        "model": "gpt-5.4",
+                                        "tools": { "comms": true },
+                                        "peer_description": "worker",
+                                        "runtime_mode": "turn_driven"
+                                    }
+                                }
+                            }
+                        }),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
+                        },
+                    }),
+                ],
+                1 => vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "spawn-worker".into(),
+                        name: "mob_spawn_member".into(),
+                        args: serde_json::json!({
+                            "mob_id": "stack-budget-mob",
+                            "profile": "worker",
+                            "member_id": "worker",
+                            "runtime_mode": "turn_driven",
+                            "auth_binding": {
+                                "realm": "global",
+                                "binding": "openai_oauth"
+                            }
+                        }),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
+                        },
+                    }),
+                ],
+                _ => vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "spawn complete".into(),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    }),
+                ],
+            };
+            Box::pin(stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
     }
 
     impl CapturingLlmClient {
@@ -23143,6 +23334,201 @@ capabilities = ["rpc"]
         assert!(system_prompt.contains("mob_list"));
         assert!(system_prompt.contains("mob_create"));
         assert!(system_prompt.contains("delegate"));
+    }
+
+    // The formal lifecycle model cannot express native Rust future size or a
+    // Tokio worker's stack budget. Exercise the real CLI full-tools surface,
+    // explicit auth binding, and mob_create -> mob_spawn_member dispatch on a
+    // literal production-scale caller stack plus one production-scale worker.
+    #[cfg(all(feature = "mob", feature = "openai"))]
+    #[test]
+    fn tools_full_with_explicit_auth_binding_can_spawn_within_production_stack_budget() {
+        let test_thread = std::thread::Builder::new()
+            .name("mob-spawn-small-stack".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .thread_stack_size(2 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("small-stack test runtime");
+                runtime.block_on(tools_full_with_explicit_auth_binding_stack_budget_scenario());
+            })
+            .expect("spawn small-stack mob regression thread");
+        test_thread
+            .join()
+            .expect("small-stack mob regression thread must not overflow");
+    }
+
+    #[cfg(all(feature = "mob", feature = "openai"))]
+    async fn tools_full_with_explicit_auth_binding_stack_budget_scenario() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[realm.global]
+default_binding = "openai_oauth"
+
+[realm.global.backend.openai]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.global.auth.inline]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "inline_secret", secret = "provider-free-test-secret" }
+
+[realm.global.binding.openai_oauth]
+backend_profile = "openai"
+auth_profile = "inline"
+default_model = "gpt-5.4"
+"#,
+            )
+            .expect("inline global binding config");
+
+        let tooling = resolve_tool_preset(ToolPreset::Full, false);
+        assert!(tooling.builtins && tooling.shell && tooling.workgraph && tooling.mob);
+        assert_eq!(tooling.memory, cfg!(feature = "memory-store-session"));
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(tooling.builtins)
+            .shell(tooling.shell)
+            .memory(tooling.memory)
+            .workgraph(tooling.workgraph)
+            .mob(tooling.mob);
+        let workgraph_service =
+            meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
+        let service = Arc::new(build_cli_service_with_defaults(
+            factory,
+            config,
+            CliServiceBuildDefaults {
+                default_workgraph_tools: Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+                    workgraph_service,
+                ))),
+                ..CliServiceBuildDefaults::default()
+            },
+        ));
+
+        let runtime_adapter =
+            <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
+                service.as_ref(),
+            )
+            .expect("embedded session service must expose its runtime adapter");
+        let parent_session = Session::new();
+        let parent_session_id = parent_session.id().clone();
+        let parent_bindings = runtime_adapter
+            .prepare_bindings(parent_session_id.clone())
+            .await
+            .expect("prepare exact parent runtime bindings");
+
+        let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(RunMobSessionService::new(Arc::clone(&service)));
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+            mob_service,
+            meerkat_mob::MobControlPrincipal::Owner,
+        ));
+        let mob_factory: Arc<dyn meerkat_core::service::MobToolsFactory> = Arc::new(
+            meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
+        );
+        let scripted_client = Arc::new(ScriptedMobSpawnClient::new());
+        let creator_tool_access_policy = meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["forbidden_child_tool"].into_iter().collect(),
+        );
+        let mut build = SessionBuildOptions {
+            resume_session: Some(parent_session),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(parent_bindings),
+            initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+                None,
+            )),
+            mob_tools: Some(mob_factory),
+            tool_access_policy: Some(creator_tool_access_policy.clone()),
+            auth_binding: Some(AuthBindingRef {
+                realm: meerkat_core::RealmId::global(),
+                binding: meerkat_core::BindingId::parse("openai_oauth").expect("binding id"),
+                profile: None,
+                origin: meerkat_core::connection::BindingOrigin::Configured,
+            }),
+            llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                scripted_client.clone(),
+            )),
+            ..SessionBuildOptions::default()
+        };
+        build.apply_generated_create_only_mob_operator_access(
+            meerkat_core::ToolCategoryOverride::Enable,
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            service.create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".into(),
+                prompt: "create the mob and spawn worker".into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(128),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(build),
+                labels: None,
+            }),
+        )
+        .await
+        .expect("explicit auth + mob spawn must complete within the regression timeout")
+        .expect("explicit auth + mob spawn must return safely");
+        assert_eq!(result.text, "spawn complete");
+        assert_eq!(result.session_id, parent_session_id);
+        assert_eq!(
+            scripted_client
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "script must traverse create, spawn, then completion"
+        );
+
+        let handle = mob_state
+            .handle_for(&meerkat_mob::MobId::from("stack-budget-mob"))
+            .await
+            .expect("created mob");
+        let roster = handle.roster().await;
+        let worker = roster
+            .get_by_identity(&meerkat_mob::AgentIdentity::from("worker"))
+            .expect("scripted mob_spawn_member must reach the real mob runtime");
+        assert!(
+            worker.bridge_session_id().is_some(),
+            "spawned worker must carry its backing session identity"
+        );
+        let worker_session_id = worker
+            .bridge_session_id()
+            .cloned()
+            .expect("spawned worker session identity");
+        drop(roster);
+
+        let parent_policy = <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
+            service.as_ref(),
+            &parent_session_id,
+        )
+        .await
+        .expect("non-reentrant parent session policy read")
+        .expect("live parent session")
+        .try_session_metadata()
+        .expect("typed parent session metadata")
+        .and_then(|metadata| metadata.tooling.tool_access_policy);
+        let child_policy = <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
+            service.as_ref(),
+            &worker_session_id,
+        )
+        .await
+        .expect("non-reentrant child session policy read")
+        .expect("live child session")
+        .try_session_metadata()
+        .expect("typed child session metadata")
+        .and_then(|metadata| metadata.tooling.tool_access_policy);
+        assert_eq!(parent_policy, Some(creator_tool_access_policy));
+        assert_eq!(
+            child_policy, parent_policy,
+            "spawn must propagate the exact factory-resolved parent policy"
+        );
     }
 
     #[cfg(feature = "mob")]

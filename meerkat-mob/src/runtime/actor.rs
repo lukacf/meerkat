@@ -12512,7 +12512,19 @@ impl MobActor {
                 // (0.7.2 D1): it aborts the comms drain task *and* awaits its
                 // quiescence before committing teardown, so a separate
                 // pre-unregister `abort_comms_drain` here is redundant.
-                if let Err(error) = adapter.unregister_session(&session_id).await {
+                let unregister_result = match adapter.unregister_session(&session_id).await {
+                    // Unregister is an independently-owned saga. Its caller
+                    // grace can race the final teardown acknowledgement, so
+                    // join (or deliberately retry) that exact registration
+                    // once more before classifying the binding as unresolved.
+                    // A second in-progress result remains a bounded,
+                    // retryable shutdown failure.
+                    Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }) => {
+                        adapter.unregister_session(&session_id).await
+                    }
+                    result => result,
+                };
+                if let Err(error) = unregister_result {
                     failures.push(format!(
                         "failed to unregister runtime session {session_id} during mob teardown: {error}"
                     ));

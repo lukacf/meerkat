@@ -1362,6 +1362,9 @@ struct MockSessionService {
     comms_runtime_failure_after_successes_enabled: AtomicBool,
     comms_runtime_successes_before_missing: AtomicUsize,
     comms_runtime_observations: AtomicUsize,
+    /// Sessions whose durable archive commit should fail before runtime
+    /// retirement begins.
+    archive_precommit_fail_sessions: RwLock<HashSet<SessionId>>,
     /// Sessions whose archive() call should fail.
     archive_fail_sessions: RwLock<HashSet<SessionId>>,
     archive_calls: RwLock<HashMap<SessionId, u64>>,
@@ -1484,6 +1487,7 @@ impl MockSessionService {
             comms_runtime_failure_after_successes_enabled: AtomicBool::new(false),
             comms_runtime_successes_before_missing: AtomicUsize::new(0),
             comms_runtime_observations: AtomicUsize::new(0),
+            archive_precommit_fail_sessions: RwLock::new(HashSet::new()),
             archive_fail_sessions: RwLock::new(HashSet::new()),
             archive_calls: RwLock::new(HashMap::new()),
             archive_not_found_sessions: RwLock::new(HashSet::new()),
@@ -1766,6 +1770,13 @@ impl MockSessionService {
             .insert(session_id.clone());
     }
 
+    async fn set_archive_precommit_failure(&self, session_id: &SessionId) {
+        self.archive_precommit_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+    }
+
     async fn archive_call_count(&self, session_id: &SessionId) -> u64 {
         self.archive_calls
             .read()
@@ -1826,6 +1837,13 @@ impl MockSessionService {
 
     async fn clear_archive_failure(&self, session_id: &SessionId) {
         self.archive_fail_sessions.write().await.remove(session_id);
+    }
+
+    async fn clear_archive_precommit_failure(&self, session_id: &SessionId) {
+        self.archive_precommit_fail_sessions
+            .write()
+            .await
+            .remove(session_id);
     }
 
     async fn set_archive_failure_for_comms_name(&self, comms_name: &str) {
@@ -3187,6 +3205,26 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
+        // PersistentSessionService commits the durable archive document before
+        // retiring the runtime. Keep this fault distinct from the existing
+        // post-retire archive projection fault: both partial-order shapes are
+        // intentional test contracts.
+        if self
+            .archive_precommit_fail_sessions
+            .read()
+            .await
+            .contains(session_id)
+        {
+            *self
+                .archive_calls
+                .write()
+                .await
+                .entry(session_id.clone())
+                .or_default() += 1;
+            return Err(SessionError::Store(Box::new(std::io::Error::other(
+                "mock archive precommit failure",
+            ))));
+        }
         if let Some(adapter) = self.runtime_adapter() {
             let session_present = self.sessions.read().await.contains_key(session_id);
             retire_test_runtime_archive(adapter.as_ref(), session_id, session_present).await?;
@@ -12289,7 +12327,9 @@ async fn test_destroy_autonomous_archive_failure_retry_reaches_archive_after_run
         .bridge_session_id()
         .cloned()
         .expect("autonomous worker bridge session");
-    service.set_archive_failure(&bridge_session_id).await;
+    service
+        .set_archive_precommit_failure(&bridge_session_id)
+        .await;
 
     let err = handle
         .destroy()
@@ -12301,7 +12341,7 @@ async fn test_destroy_autonomous_archive_failure_retry_reaches_archive_after_run
     };
     assert!(
         report.errors.iter().any(|error| {
-            error.contains("ArchiveSession") && error.contains("mock archive failure")
+            error.contains("ArchiveSession") && error.contains("mock archive precommit failure")
         }),
         "destroy should surface the failed archive step: {report:?}"
     );
@@ -12330,7 +12370,9 @@ async fn test_destroy_autonomous_archive_failure_retry_reaches_archive_after_run
         "failed archive must leave the bridge session available for retry"
     );
 
-    service.clear_archive_failure(&bridge_session_id).await;
+    service
+        .clear_archive_precommit_failure(&bridge_session_id)
+        .await;
     let retry_report = handle
         .destroy()
         .await

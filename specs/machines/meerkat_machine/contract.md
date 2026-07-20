@@ -942,12 +942,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `AuthorizeInteractionTerminalOutboxAdoption`
 - Transitions: `AuthorizeInteractionTerminalOutboxAdoptionInitializing`, `AuthorizeInteractionTerminalOutboxAdoptionIdle`, `AuthorizeInteractionTerminalOutboxAdoptionAttached`, `AuthorizeInteractionTerminalOutboxAdoptionRunning`, `AuthorizeInteractionTerminalOutboxAdoptionRetired`, `AuthorizeInteractionTerminalOutboxAdoptionStopped`
 - Guard Expansion:
-  - `AuthorizeInteractionTerminalOutboxAdoptionInitializing`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
-  - `AuthorizeInteractionTerminalOutboxAdoptionIdle`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
-  - `AuthorizeInteractionTerminalOutboxAdoptionAttached`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
-  - `AuthorizeInteractionTerminalOutboxAdoptionRunning`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
-  - `AuthorizeInteractionTerminalOutboxAdoptionRetired`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
-  - `AuthorizeInteractionTerminalOutboxAdoptionStopped`: `session_matches_current`, `current_runtime_binding_complete`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionInitializing`: `session_matches_current`, `current_runtime_binding_consistent`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionIdle`: `session_matches_current`, `current_runtime_binding_consistent`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionAttached`: `session_matches_current`, `current_runtime_binding_consistent`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionRunning`: `session_matches_current`, `current_runtime_binding_consistent`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionRetired`: `session_matches_current`, `current_runtime_binding_consistent`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
+  - `AuthorizeInteractionTerminalOutboxAdoptionStopped`: `session_matches_current`, `current_runtime_binding_consistent`, `runtime_lineage_matches`, `fence_not_regressed`, `generation_not_regressed`, `epoch_lineage_valid`, `batch_key_present`, `candidate_digest_present`
 - Command Effects: `InteractionTerminalOutboxAdoptionAuthorized`
 - Effect Closure:
   - `InteractionTerminalOutboxAdoptionAuthorized` via `AuthorizedInteractionTerminalOutboxAdoption` (DurableOutboxBindingAdoption) states: `Authorized`, `Attempted`, `Realized`, `Failed`, `Abandoned`
@@ -4339,7 +4339,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
 - Guards:
   - `session_matches_current`
-  - `current_runtime_binding_complete`
+  - `current_runtime_binding_consistent`
   - `runtime_lineage_matches`
   - `fence_not_regressed`
   - `generation_not_regressed`
@@ -4354,7 +4354,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
 - Guards:
   - `session_matches_current`
-  - `current_runtime_binding_complete`
+  - `current_runtime_binding_consistent`
   - `runtime_lineage_matches`
   - `fence_not_regressed`
   - `generation_not_regressed`
@@ -4369,7 +4369,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
 - Guards:
   - `session_matches_current`
-  - `current_runtime_binding_complete`
+  - `current_runtime_binding_consistent`
   - `runtime_lineage_matches`
   - `fence_not_regressed`
   - `generation_not_regressed`
@@ -4384,7 +4384,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
 - Guards:
   - `session_matches_current`
-  - `current_runtime_binding_complete`
+  - `current_runtime_binding_consistent`
   - `runtime_lineage_matches`
   - `fence_not_regressed`
   - `generation_not_regressed`
@@ -4399,7 +4399,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
 - Guards:
   - `session_matches_current`
-  - `current_runtime_binding_complete`
+  - `current_runtime_binding_consistent`
   - `runtime_lineage_matches`
   - `fence_not_regressed`
   - `generation_not_regressed`
@@ -4414,7 +4414,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeInteractionTerminalOutboxAdoption`(batch_key, candidate_digest, session_id, previous_agent_runtime_id, previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id)
 - Guards:
   - `session_matches_current`
-  - `current_runtime_binding_complete`
+  - `current_runtime_binding_consistent`
   - `runtime_lineage_matches`
   - `fence_not_regressed`
   - `generation_not_regressed`

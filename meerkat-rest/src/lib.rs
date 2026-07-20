@@ -7191,11 +7191,15 @@ async fn cleanup_archived_session_runtime(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
-    state
-        .runtime_adapter
-        .unregister_session(session_id)
-        .await
-        .map_err(runtime_driver_error_to_session_error)?;
+    match state.runtime_adapter.unregister_session(session_id).await {
+        Ok(())
+        | Err(
+            meerkat_runtime::RuntimeDriverError::NotFound { .. }
+            | meerkat_runtime::RuntimeDriverError::Destroyed
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => {}
+        Err(error) => return Err(runtime_driver_error_to_session_error(error)),
+    }
     cleanup_rest_runtime_after_unregistered(state, session_id).await
 }
 
@@ -7257,11 +7261,15 @@ async fn cleanup_archived_session_surface_runtime(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
-    state
-        .runtime_adapter
-        .unregister_session(session_id)
-        .await
-        .map_err(runtime_driver_error_to_session_error)?;
+    match state.runtime_adapter.unregister_session(session_id).await {
+        Ok(())
+        | Err(
+            meerkat_runtime::RuntimeDriverError::NotFound { .. }
+            | meerkat_runtime::RuntimeDriverError::Destroyed
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => {}
+        Err(error) => return Err(runtime_driver_error_to_session_error(error)),
+    }
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
@@ -11472,13 +11480,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            retry.status(),
-            StatusCode::NOT_FOUND,
-            "stale REST archive without retained mob cleanup must remain NotFound"
-        );
+        let retry_status = retry.status();
         let body = retry.into_body().collect().await.unwrap().to_bytes();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            retry_status,
+            StatusCode::NOT_FOUND,
+            "stale REST archive without retained mob cleanup must remain NotFound: {payload}"
+        );
         assert!(
             payload["error"]
                 .as_str()
@@ -11587,11 +11596,7 @@ mod tests {
         // THIS caller's archive converging — it reports success. (The old
         // AlreadyArchived -> 404 mapping left the runtime session registered
         // forever, the exact never-run-member retiring strand.)
-        assert_eq!(
-            complete_retry_response.status(),
-            StatusCode::OK,
-            "the completing REST archive retry must report success, not NotFound"
-        );
+        let complete_status = complete_retry_response.status();
         let complete_body = complete_retry_response
             .into_body()
             .collect()
@@ -11599,6 +11604,11 @@ mod tests {
             .unwrap()
             .to_bytes();
         let complete_payload: serde_json::Value = serde_json::from_slice(&complete_body).unwrap();
+        assert_eq!(
+            complete_status,
+            StatusCode::OK,
+            "the completing REST archive retry must report success, not NotFound: {complete_payload}"
+        );
         assert_eq!(complete_payload["archived"], true);
         assert!(
             mob_state.handle_for(&mob_id).await.is_err(),

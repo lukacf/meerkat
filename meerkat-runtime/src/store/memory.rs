@@ -21,9 +21,10 @@ use super::{
     MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
     MachineLifecycleObservation, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
     RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
-    classify_machine_lifecycle_record, decoded_prepared_machine_lifecycle_replacement,
-    execute_runtime_store_write_fence, prepare_input_state_batch_cas,
-    prepare_machine_lifecycle_replacement, validate_machine_lifecycle_replacement,
+    classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
+    decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
+    prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
+    validate_machine_lifecycle_replacement,
 };
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
@@ -535,9 +536,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .get(&runtime_id.0)
             .map(|snapshot| {
                 let mut session = deserialize_persisted_session(snapshot)?;
-                session
-                    .complete_compaction_projection_intent(projection)
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                complete_compaction_projection_checkpoint(&mut session, projection)?;
                 serde_json::to_vec(&session)
                     .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
             })

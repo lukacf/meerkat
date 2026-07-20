@@ -1266,7 +1266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v3_idle_stale_binding_is_normalized_before_routed_revival_rebinds() {
+    async fn current_idle_stale_binding_is_normalized_before_routed_revival_rebinds() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let runtime_store: Arc<dyn crate::store::RuntimeStore> = store.clone();
         let session_id = sid("00000000-0000-0000-0000-000000000034");
@@ -1298,8 +1298,9 @@ mod tests {
         let encoded: serde_json::Value =
             serde_json::from_slice(&encoded).expect("lifecycle record is JSON");
         assert_eq!(
-            encoded["record_version"], 3,
-            "the regression fixture must exercise the field's V3 durable shape"
+            encoded["record_version"],
+            crate::store::MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            "the regression fixture must exercise the current durable lifecycle shape"
         );
 
         let machine = Arc::new(MeerkatMachine::persistent(
@@ -1327,7 +1328,7 @@ mod tests {
         assert_eq!(
             recovered.registration_phase,
             mm_dsl::RegistrationPhase::Queuing,
-            "V3 does not persist an executor claim, so cold recovery must queue a replacement"
+            "the lifecycle row does not persist a live executor claim, so cold recovery must queue a replacement"
         );
         assert_eq!(
             recovered.active_runtime_id, None,

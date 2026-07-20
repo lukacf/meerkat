@@ -1549,7 +1549,7 @@ impl ArchivedSessionActorMaterializationAuthorization {
 
         crate::begin_session_runtime_actor_materialization_with_phase_policy(
             bindings,
-            crate::RuntimeActorMaterializationPhasePolicy::RequireRetired,
+            crate::RuntimeActorMaterializationPhasePolicy::RequireArchivedRevivalBoundary,
             Some(mutation_guard),
         )
     }
@@ -3095,7 +3095,10 @@ impl PreparedSessionMaterialization {
                 entry.epoch_id == *self.bindings.epoch_id()
                     && Arc::ptr_eq(&entry.materialization_claim_state, &self.claim_state)
                     && !entry.physical_attachment_is_live()
-                    && entry.control_snapshot().phase == RuntimeState::Retired
+                    && matches!(
+                        entry.control_snapshot().phase,
+                        RuntimeState::Retired | RuntimeState::Idle
+                    )
                     && self
                         .claim_state
                         .lock()
@@ -3109,7 +3112,7 @@ impl PreparedSessionMaterialization {
         if !exact {
             return Err(RuntimeDriverError::StaleAuthority {
                 reason: format!(
-                    "archived-resume session {} lost its exact Retired post-actor claim",
+                    "archived-resume session {} lost its exact quiescent post-actor claim",
                     self.session_id()
                 ),
             });

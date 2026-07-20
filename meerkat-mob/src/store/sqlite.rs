@@ -7885,7 +7885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_identity_lease_repairs_malformed_projection_from_normalized_authority() {
+    async fn sqlite_identity_lease_refuses_to_overwrite_malformed_authority() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
         let clock = Arc::new(TestIdentityClock::new(100));
@@ -7921,21 +7921,18 @@ mod tests {
             IdentityStoredObservation::Malformed { .. }
         ));
         clock.set(first.expires_at_ms);
-        let takeover = match store
-            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-b", 10)
-            .await
-            .unwrap()
-        {
-            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
-            other => panic!("expected takeover, got {other:?}"),
-        };
-        assert_eq!(takeover.epoch, first.epoch + 1);
+        assert!(matches!(
+            store
+                .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-b", 10)
+                .await,
+            Err(MobStoreError::IdentityAuthorityBlocked { .. })
+        ));
         assert!(matches!(
             store
                 .observe_identity_lease(&mob_id, &identity)
                 .await
                 .unwrap(),
-            IdentityStoredObservation::Valid(_)
+            IdentityStoredObservation::Malformed { .. }
         ));
     }
 

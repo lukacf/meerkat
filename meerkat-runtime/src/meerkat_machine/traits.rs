@@ -817,11 +817,12 @@ impl MeerkatMachine {
         let (resolved_session_id, driver, _, _) = match self.lookup_entry(&runtime_id).await {
             Ok(parts) => parts,
             Err(RuntimeControlPlaneError::NotFound(_)) => {
-                // A process restart can leave durable runtime authority
-                // without a live session entry. Recover that authority
-                // before deciding the archive has no runtime half. A
-                // truly document-only archived row has no lifecycle
-                // record and keeps the public idempotent NotFound path.
+                // A process restart can leave unfinished runtime realization
+                // without a live session entry. Recover only that lifecycle
+                // residue before deciding archive has no runtime half. A
+                // checkpoint snapshot is session content authority and is
+                // intentionally not consulted here; a clean unbound Idle row
+                // likewise belongs to the dead process and is already absent.
                 let Some(store) = self.store.as_ref() else {
                     return Ok(None);
                 };
@@ -829,12 +830,9 @@ impl MeerkatMachine {
                     crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
                         .await
                         .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
-                let boundary_snapshot_present = store
-                    .load_session_snapshot(&runtime_id)
-                    .await
-                    .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?
-                    .is_some();
-                if durable_lifecycle.is_none() && !boundary_snapshot_present {
+                if !durable_lifecycle.as_ref().is_some_and(
+                    super::session_management::machine_lifecycle_has_runtime_archive_residue,
+                ) {
                     return Ok(None);
                 }
                 // Archive recovery must preserve the durable lifecycle

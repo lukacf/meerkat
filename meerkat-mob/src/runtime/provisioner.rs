@@ -6364,6 +6364,21 @@ impl MobProvisioner for SessionBackend {
         // rollback capability to the owning PendingProvision.
         let backend = self;
         let mut session_origin = req.session_origin;
+        let archived_document_resume = session_origin == ProvisionSessionOrigin::ResumedDurable
+            && req
+                .create_session
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.try_lifecycle_terminal())
+                .transpose()
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "resumed durable session carries malformed lifecycle authority: {error}"
+                    ))
+                })?
+                .flatten()
+                .is_some_and(|terminal| terminal.is_archived());
         let missing_live_revival =
             req.runtime_revival_intent == RuntimeRevivalIntent::MissingLiveMaterialization;
         let local_materialization_mode = if missing_live_revival {
@@ -6537,12 +6552,13 @@ impl MobProvisioner for SessionBackend {
                 let bindings = prepared.bindings_clone();
                 let ops_registry = Arc::clone(bindings.ops_lifecycle());
                 if session_origin == ProvisionSessionOrigin::ResumedDurable
-                    && adapter
-                        .meerkat_machine_archive_snapshot(&member_bridge_session_id)
-                        .await
-                        .is_some_and(|snapshot| {
-                            snapshot.control.phase == meerkat_runtime::RuntimeState::Retired
-                        })
+                    && (archived_document_resume
+                        || adapter
+                            .meerkat_machine_archive_snapshot(&member_bridge_session_id)
+                            .await
+                            .is_some_and(|snapshot| {
+                                snapshot.control.phase == meerkat_runtime::RuntimeState::Retired
+                            }))
                 {
                     reviving_retired_session = true;
                     archived_resume_authorization =

@@ -419,6 +419,12 @@ async fn reconcile_loaded_compaction_projection_outbox(
     };
     let compatibility_checkpoint = if let Some(snapshot) = authoritative_snapshot.as_deref() {
         let cleaned = compatibility_checkpoint_after_compaction_finalize(snapshot, &intents)?;
+        {
+            let driver = driver.lock().await;
+            driver
+                .commit_compaction_checkpoint_snapshot(cleaned.clone())
+                .await?;
+        }
         executor
             .checkpoint_committed_session_snapshot(&cleaned)
             .await
@@ -433,12 +439,12 @@ async fn reconcile_loaded_compaction_projection_outbox(
     };
 
     // The SessionStore row is a compatibility projection of the committed
-    // runtime snapshot. Keep the durable outbox pending until that projection
-    // succeeds: marking an intent finalized also cleans it from the runtime
-    // snapshot, so doing that first would let a projection failure quarantine
-    // and delete the only committed transcript authority. With the outbox
-    // still pending, a failed checkpoint leaves the runtime snapshot intact
-    // and cold recovery can retry the idempotent projection finalization.
+    // runtime snapshot. The cleaned, freshly stamped runtime document lands
+    // first, but keep the durable outbox pending until its SessionStore
+    // projection succeeds. A failure therefore leaves one authoritative
+    // runtime document plus an idempotent retry witness; cold recovery can
+    // project the same content again without resurrecting the finalized
+    // compaction intent.
     for intent in &intents {
         let driver = driver.lock().await;
         driver
@@ -483,14 +489,16 @@ fn compatibility_checkpoint_after_compaction_finalize(
         ))
     })?;
     for intent in finalized {
-        session
-            .complete_compaction_projection_intent(&intent.projection)
-            .map_err(|error| {
-                crate::RuntimeDriverError::Internal(format!(
-                    "failed to clear finalized compaction intent {} from compatibility checkpoint: {error}",
-                    intent.projection.revision()
-                ))
-            })?;
+        crate::store::complete_compaction_projection_checkpoint(
+            &mut session,
+            &intent.projection,
+        )
+        .map_err(|error| {
+            crate::RuntimeDriverError::Internal(format!(
+                "failed to clear finalized compaction intent {} from compatibility checkpoint: {error}",
+                intent.projection.revision()
+            ))
+        })?;
     }
     serde_json::to_vec(&session).map_err(|error| {
         crate::RuntimeDriverError::Internal(format!(

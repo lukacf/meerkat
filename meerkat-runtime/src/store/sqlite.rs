@@ -28,7 +28,7 @@ mod inner {
         MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
         MachineLifecycleObservation, MachineLifecycleSnapshot, MachineLifecycleStoreRecord,
         RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome,
-        SessionDelta, classify_machine_lifecycle_record,
+        SessionDelta, classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
         decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
         prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
         validate_machine_lifecycle_replacement,
@@ -276,10 +276,18 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         migrated_record: Vec<u8>,
     }
 
+    struct PreparedLegacyCheckpoint {
+        session_id: String,
+        original_runtime_snapshot: Vec<u8>,
+        original_session_projection: Option<Vec<u8>>,
+        migrated_snapshot: Vec<u8>,
+    }
+
     struct PreparedLegacyRuntime {
         runtime_id: String,
         original_lifecycle: Vec<u8>,
         migrated_lifecycle: Vec<u8>,
+        checkpoint: Option<PreparedLegacyCheckpoint>,
         inputs: Vec<PreparedLegacyInput>,
         zero_ops_record: Option<Vec<u8>>,
     }
@@ -376,12 +384,12 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         Ok(())
     }
 
-    fn validate_legacy_session_snapshot(
+    fn prepare_legacy_session_checkpoint(
         conn: &Connection,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<(), String> {
+    ) -> Result<Option<PreparedLegacyCheckpoint>, String> {
         if !sqlite_table_exists(conn, "runtime_session_snapshots").map_err(|e| e.to_string())? {
-            return Ok(());
+            return Ok(None);
         }
         let bytes = conn
             .query_row(
@@ -392,9 +400,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             .optional()
             .map_err(|error| error.to_string())?;
         let Some(bytes) = bytes else {
-            return Ok(());
+            return Ok(None);
         };
-        let session: meerkat_core::Session =
+        let mut session: meerkat_core::Session =
             serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         let owner = LogicalRuntimeId::for_session(session.id());
         if owner != *runtime_id {
@@ -403,7 +411,57 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 session.id()
             ));
         }
-        Ok(())
+        match session
+            .try_checkpoint_state()
+            .map_err(|error| format!("invalid legacy checkpoint evidence: {error}"))?
+        {
+            meerkat_core::SessionCheckpointState::Verified(_) => return Ok(None),
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {}
+        }
+
+        let original_session_projection =
+            if sqlite_table_exists(conn, "sessions").map_err(|error| error.to_string())? {
+                let projection = conn
+                    .query_row(
+                        "SELECT session_json FROM sessions WHERE session_id = ?1",
+                        params![session.id().to_string()],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?;
+                if let Some(projection) = projection.as_ref()
+                    && projection != &bytes
+                {
+                    return Err(format!(
+                        "session-store row for {} is not byte-identical to its runtime checkpoint",
+                        session.id()
+                    ));
+                }
+                projection
+            } else {
+                None
+            };
+        let stamp = meerkat_core::SessionCheckpointStamp::recovery_migration(
+            &session,
+            &bytes,
+            meerkat_core::SessionGeneration::INITIAL,
+            meerkat_core::SessionCheckpointRevision::INITIAL,
+        )
+        .map_err(|error| format!("legacy checkpoint migration rejected: {error}"))?;
+        session
+            .install_checkpoint_stamp(stamp)
+            .map_err(|error| format!("legacy checkpoint stamp install failed: {error}"))?;
+        let migrated_snapshot = serde_json::to_vec(&session)
+            .map_err(|error| format!("legacy checkpoint encode failed: {error}"))?;
+        session
+            .try_checkpoint_state()
+            .map_err(|error| format!("migrated checkpoint verification failed: {error}"))?;
+        Ok(Some(PreparedLegacyCheckpoint {
+            session_id: session.id().to_string(),
+            original_runtime_snapshot: bytes,
+            original_session_projection,
+            migrated_snapshot,
+        }))
     }
 
     fn validate_legacy_receipts(
@@ -447,8 +505,15 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
     fn prepare_legacy_companions(
         conn: &Connection,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<(Vec<PreparedLegacyInput>, Option<Vec<u8>>), String> {
-        validate_legacy_session_snapshot(conn, runtime_id)?;
+    ) -> Result<
+        (
+            Option<PreparedLegacyCheckpoint>,
+            Vec<PreparedLegacyInput>,
+            Option<Vec<u8>>,
+        ),
+        String,
+    > {
+        let checkpoint = prepare_legacy_session_checkpoint(conn, runtime_id)?;
         validate_legacy_receipts(conn, runtime_id)?;
 
         let input_rows = if sqlite_table_exists(conn, "runtime_input_states")
@@ -530,7 +595,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         } else {
             None
         };
-        Ok((inputs, zero_ops_record))
+        Ok((checkpoint, inputs, zero_ops_record))
     }
 
     fn preflight_legacy_v0_6_34(
@@ -582,7 +647,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
             let logical_runtime_id = LogicalRuntimeId(runtime_id.clone());
             let companions = prepare_legacy_companions(conn, &logical_runtime_id);
-            let (inputs, zero_ops_record) = match companions {
+            let (checkpoint, inputs, zero_ops_record) = match companions {
                 Ok(prepared) => prepared,
                 Err(detail) => {
                     items.push(LegacyV0_6_34MigrationItem {
@@ -608,6 +673,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 runtime_id,
                 original_lifecycle: bytes,
                 migrated_lifecycle,
+                checkpoint,
                 inputs,
                 zero_ops_record,
             });
@@ -681,6 +747,39 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 params![runtime.migrated_lifecycle, runtime.runtime_id],
             )
             .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            if let Some(checkpoint) = runtime.checkpoint.as_ref() {
+                tx.execute(
+                    "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_session_snapshots', 'singleton', ?2, ?3, 'replace')",
+                    params![
+                        runtime.runtime_id,
+                        checkpoint.original_runtime_snapshot,
+                        checkpoint.migrated_snapshot,
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                tx.execute(
+                    "UPDATE runtime_session_snapshots SET session_snapshot = ?1 WHERE runtime_id = ?2",
+                    params![checkpoint.migrated_snapshot, runtime.runtime_id],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if let Some(original_projection) = checkpoint.original_session_projection.as_ref() {
+                    tx.execute(
+                        "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'sessions', ?2, ?3, ?4, 'replace')",
+                        params![
+                            runtime.runtime_id,
+                            checkpoint.session_id,
+                            original_projection,
+                            checkpoint.migrated_snapshot,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    tx.execute(
+                        "UPDATE sessions SET session_json = ?1 WHERE session_id = ?2",
+                        params![checkpoint.migrated_snapshot, checkpoint.session_id],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+            }
             for input in &runtime.inputs {
                 tx.execute(
                     "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_input_states', ?2, ?3, ?4, 'replace')",
@@ -1113,6 +1212,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         /// `apply = true` requires the caller to stop every process that can
         /// access this database. The transaction is atomic, but it cannot
         /// fence a pre-v0.8 process from writing legacy rows after commit.
+        /// Legacy session content is stamped once as a `RecoveryMigration`
+        /// root from its exact source bytes; the runtime snapshot and SQLite
+        /// session projection are replaced atomically with that same document.
         pub fn migrate_v0_6_34_completed_idle(
             path: impl AsRef<Path>,
             apply: bool,
@@ -1617,9 +1719,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
                 {
                     let mut session = deserialize_persisted_session(&snapshot)?;
-                    session
-                        .complete_compaction_projection_intent(&projection)
-                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    complete_compaction_projection_checkpoint(&mut session, &projection)?;
                     let cleaned = serde_json::to_vec(&session)
                         .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
                     upsert_runtime_snapshot(&tx, &runtime_id, &cleaned)?;
@@ -5688,18 +5788,48 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             );
             drop(audit_conn);
             assert_eq!(
-                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001",),
-                original_session_store
-            );
-            assert_eq!(
-                raw_fixture_row(
+                raw_audit_row(
                     &path,
-                    "runtime_session_snapshots",
-                    "session_snapshot",
                     &runtime_id.0,
+                    "runtime_session_snapshots",
+                    "singleton",
                 ),
                 original_session
             );
+            assert_eq!(
+                raw_audit_row(
+                    &path,
+                    &runtime_id.0,
+                    "sessions",
+                    "018f0000-0000-7000-8000-000000000001",
+                ),
+                original_session_store
+            );
+            let migrated_session_store =
+                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001");
+            let migrated_runtime_snapshot = raw_fixture_row(
+                &path,
+                "runtime_session_snapshots",
+                "session_snapshot",
+                &runtime_id.0,
+            );
+            assert_eq!(
+                migrated_session_store, migrated_runtime_snapshot,
+                "migration must install one exact checkpoint document in both stores"
+            );
+            assert_ne!(migrated_runtime_snapshot, original_session);
+            let migrated_session: meerkat_core::Session =
+                serde_json::from_slice(&migrated_runtime_snapshot).unwrap();
+            assert!(matches!(
+                migrated_session.try_checkpoint_state().unwrap(),
+                meerkat_core::SessionCheckpointState::Verified(stamp)
+                    if stamp.provenance()
+                        == meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+            ));
+            let original_decoded: meerkat_core::Session =
+                serde_json::from_slice(&original_session).unwrap();
+            assert_eq!(migrated_session.id(), original_decoded.id());
+            assert_eq!(migrated_session.messages(), original_decoded.messages());
             assert_eq!(
                 raw_fixture_row(
                     &path,

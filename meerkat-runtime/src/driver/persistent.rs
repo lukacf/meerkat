@@ -235,6 +235,23 @@ impl PersistentRuntimeDriver {
             })
     }
 
+    pub(crate) async fn commit_compaction_checkpoint_snapshot(
+        &self,
+        session_snapshot: Vec<u8>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.store
+            .commit_session_snapshot(
+                &self.runtime_id,
+                crate::store::SessionDelta { session_snapshot },
+            )
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to prepare authoritative compaction checkpoint snapshot: {error}"
+                ))
+            })
+    }
+
     pub fn silent_comms_intents(&self) -> Vec<String> {
         self.inner.silent_comms_intents()
     }

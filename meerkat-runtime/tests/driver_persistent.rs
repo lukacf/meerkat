@@ -186,6 +186,14 @@ impl RuntimeStore for FailPersistInputStore {
         expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
         replacement: meerkat_runtime::store::MachineLifecycleCommit,
     ) -> Result<meerkat_runtime::store::MachineLifecycleCasOutcome, RuntimeStoreError> {
+        if self
+            .fail_commit_machine_lifecycle
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".into(),
+            ));
+        }
         self.inner
             .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
             .await

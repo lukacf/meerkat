@@ -218,6 +218,36 @@ impl HarnessRuntimeStore {
         self.fail_commit_machine_lifecycle_now
             .store(fail, Ordering::SeqCst);
     }
+
+    async fn before_machine_lifecycle_commit(&self) -> Result<(), RuntimeStoreError> {
+        let call_index = self
+            .commit_machine_lifecycle_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_commit_machine_lifecycle_now
+            .load(Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".to_string(),
+            ));
+        }
+        if self
+            .fail_commit_machine_lifecycle_after
+            .is_some_and(|fail_after| call_index >= fail_after)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".to_string(),
+            ));
+        }
+        if self
+            .delay_commit_machine_lifecycle_after
+            .is_some_and(|delay_after| call_index >= delay_after)
+            && !self.commit_machine_lifecycle_delay.is_zero()
+        {
+            tokio::time::sleep(self.commit_machine_lifecycle_delay).await;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -239,6 +269,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
         replacement: meerkat_runtime::store::MachineLifecycleCommit,
     ) -> Result<meerkat_runtime::store::MachineLifecycleCasOutcome, RuntimeStoreError> {
+        self.before_machine_lifecycle_commit().await?;
         self.inner
             .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
             .await
@@ -428,32 +459,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         commit: meerkat_runtime::store::MachineLifecycleCommit,
         input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
-        let call_index = self
-            .commit_machine_lifecycle_calls
-            .fetch_add(1, Ordering::SeqCst);
-        if self
-            .fail_commit_machine_lifecycle_now
-            .load(Ordering::SeqCst)
-        {
-            return Err(RuntimeStoreError::WriteFailed(
-                "synthetic commit_machine_lifecycle failure".to_string(),
-            ));
-        }
-        if self
-            .fail_commit_machine_lifecycle_after
-            .is_some_and(|fail_after| call_index >= fail_after)
-        {
-            return Err(RuntimeStoreError::WriteFailed(
-                "synthetic commit_machine_lifecycle failure".to_string(),
-            ));
-        }
-        if self
-            .delay_commit_machine_lifecycle_after
-            .is_some_and(|delay_after| call_index >= delay_after)
-            && !self.commit_machine_lifecycle_delay.is_zero()
-        {
-            tokio::time::sleep(self.commit_machine_lifecycle_delay).await;
-        }
+        self.before_machine_lifecycle_commit().await?;
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
             .await
@@ -464,32 +470,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         finalization: meerkat_runtime::store::UnregisterFinalizationCommit,
     ) -> Result<(), RuntimeStoreError> {
-        let call_index = self
-            .commit_machine_lifecycle_calls
-            .fetch_add(1, Ordering::SeqCst);
-        if self
-            .fail_commit_machine_lifecycle_now
-            .load(Ordering::SeqCst)
-        {
-            return Err(RuntimeStoreError::WriteFailed(
-                "synthetic commit_machine_lifecycle failure".to_string(),
-            ));
-        }
-        if self
-            .fail_commit_machine_lifecycle_after
-            .is_some_and(|fail_after| call_index >= fail_after)
-        {
-            return Err(RuntimeStoreError::WriteFailed(
-                "synthetic commit_machine_lifecycle failure".to_string(),
-            ));
-        }
-        if self
-            .delay_commit_machine_lifecycle_after
-            .is_some_and(|delay_after| call_index >= delay_after)
-            && !self.commit_machine_lifecycle_delay.is_zero()
-        {
-            tokio::time::sleep(self.commit_machine_lifecycle_delay).await;
-        }
+        self.before_machine_lifecycle_commit().await?;
         self.inner
             .commit_unregister_finalization(runtime_id, finalization)
             .await

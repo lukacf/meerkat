@@ -2130,6 +2130,36 @@ impl SessionRuntime {
         Ok(())
     }
 
+    /// Observe archive/staleness only at a stable runtime checkpoint boundary.
+    /// A runtime turn commits RuntimeStore before refreshing its SessionStore
+    /// projection, so an ingress read in that narrow interval must wait instead
+    /// of misclassifying the two valid versions as a durable conflict.
+    async fn prepare_runtime_input_ingress(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        let turn_boundary = self
+            .service
+            .acquire_runtime_turn_finalization_guard(session_id)
+            .await;
+        let archived = self
+            .archived_persisted_session_without_live_by_authority(session_id)
+            .await?;
+        let stale = if archived {
+            false
+        } else {
+            self.live_session_is_stale(session_id).await?
+        };
+        drop(turn_boundary);
+
+        if archived {
+            return self
+                .reject_archived_persisted_session_without_live(session_id)
+                .await;
+        }
+        if stale {
+            self.discard_stale_live_session(session_id).await?;
+        }
+        Ok(())
+    }
+
     fn session_not_found_rpc(session_id: &SessionId) -> RpcError {
         RpcError {
             code: error::SESSION_NOT_FOUND,
@@ -6138,13 +6168,8 @@ impl SessionRuntime {
         session_id: &SessionId,
         input: meerkat_runtime::Input,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
-        self.reject_archived_persisted_session_without_live(session_id)
-            .await?;
+        self.prepare_runtime_input_ingress(session_id).await?;
         let input_id = input.id().clone();
-
-        if self.live_session_is_stale(session_id).await? {
-            self.discard_stale_live_session(session_id).await?;
-        }
 
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
@@ -9866,6 +9891,56 @@ mod tests {
 
     use async_trait::async_trait;
 
+    fn install_test_session_created_checkpoint(session: &mut Session) {
+        let checkpoint = meerkat_core::SessionCheckpointStamp::root(
+            session,
+            meerkat_core::SessionCheckpointProvenance::SessionCreated,
+        )
+        .expect("test session-created checkpoint should be valid");
+        session
+            .install_checkpoint_stamp(checkpoint)
+            .expect("test session-created checkpoint should install");
+    }
+
+    fn mutate_test_session_with_checkpoint_successor(
+        session: &mut Session,
+        mutate: impl FnOnce(&mut Session),
+    ) {
+        let predecessor = match session
+            .try_checkpoint_state()
+            .expect("persisted test checkpoint should verify")
+        {
+            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+                panic!("persisted test checkpoint must be verified")
+            }
+        };
+        mutate(session);
+        let successor = meerkat_core::SessionCheckpointStamp::successor(
+            session,
+            &predecessor,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        )
+        .expect("test checkpoint successor should be valid");
+        session
+            .install_checkpoint_stamp(successor)
+            .expect("test checkpoint successor should install");
+    }
+
+    fn mark_archived_test_session_with_checkpoint(session: &mut Session) {
+        mutate_test_session_with_checkpoint_successor(session, mark_archived_store_projection);
+    }
+
+    fn set_test_metadata_with_checkpoint_successor(
+        session: &mut Session,
+        key: &str,
+        value: serde_json::Value,
+    ) {
+        mutate_test_session_with_checkpoint_successor(session, |session| {
+            session.set_metadata(key, value);
+        });
+    }
+
     /// Dogma K13: the inbound `Option<bool>` keep-alive request must map onto
     /// the full typed tri-state — `Some(false)` is an explicit `Disable`, not
     /// a silently-dropped no-op — and rehydration from persisted turn
@@ -12185,7 +12260,7 @@ mod tests {
             .await
             .expect("load persisted candidate")
             .expect("candidate should be persisted");
-        mark_archived_store_projection(&mut archived);
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived authoritative snapshot");
@@ -12277,7 +12352,7 @@ mod tests {
             .await
             .expect("load persisted candidate")
             .expect("candidate should be persisted");
-        mark_archived_store_projection(&mut archived);
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived authoritative snapshot");
@@ -13553,13 +13628,15 @@ mod tests {
             .expect("start_turn");
 
         let mut durable = runtime
-            .service
-            .export_live_session(&session_id)
+            .load_persisted_session(&session_id)
             .await
-            .expect("live export should carry recovery metadata before durable override");
-        durable.push(Message::User(meerkat_core::types::UserMessage::text(
-            "durable realtime seed".to_string(),
-        )));
+            .expect("load persisted session")
+            .expect("persisted session should exist before durable override");
+        mutate_test_session_with_checkpoint_successor(&mut durable, |durable| {
+            durable.push(Message::User(meerkat_core::types::UserMessage::text(
+                "durable realtime seed".to_string(),
+            )));
+        });
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
@@ -13653,13 +13730,15 @@ mod tests {
             .expect("spawn mob comms drain");
 
         let mut durable = runtime
-            .service
-            .export_live_session(&session_id)
+            .load_persisted_session(&session_id)
             .await
-            .expect("live export should work before durable override");
-        durable.push(Message::User(meerkat_core::types::UserMessage::text(
-            "durable seed preserved across stale live sync".to_string(),
-        )));
+            .expect("load persisted session")
+            .expect("persisted session should exist before durable override");
+        mutate_test_session_with_checkpoint_successor(&mut durable, |durable| {
+            durable.push(Message::User(meerkat_core::types::UserMessage::text(
+                "durable seed preserved across stale live sync".to_string(),
+            )));
+        });
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
@@ -13744,10 +13823,10 @@ mod tests {
             .expect("start_turn");
 
         let mut durable = runtime
-            .service
-            .export_live_session(&session_id)
+            .load_persisted_session(&session_id)
             .await
-            .expect("live export should be authoritative before durable context diverges");
+            .expect("load persisted session")
+            .expect("persisted session should exist before durable context diverges");
         let mut durable_context_state = SessionSystemContextState::default();
         durable_context_state
             .stage_append(
@@ -13762,9 +13841,11 @@ mod tests {
             )
             .expect("durable context should stage");
         durable_context_state.mark_pending_applied();
-        durable
-            .set_system_context_state(durable_context_state)
-            .expect("set durable system context state");
+        mutate_test_session_with_checkpoint_successor(&mut durable, |durable| {
+            durable
+                .set_system_context_state(durable_context_state)
+                .expect("set durable system context state");
+        });
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
@@ -13838,10 +13919,10 @@ mod tests {
             .expect("start_turn");
 
         let mut durable = runtime
-            .service
-            .export_live_session(&session_id)
+            .load_persisted_session(&session_id)
             .await
-            .expect("live export should be authoritative before durable context diverges");
+            .expect("load persisted session")
+            .expect("persisted session should exist before durable context diverges");
         let mut durable_context_state = SessionSystemContextState::default();
         durable_context_state
             .stage_append(
@@ -13856,9 +13937,11 @@ mod tests {
             )
             .expect("durable context should stage");
         durable_context_state.mark_pending_applied();
-        durable
-            .set_system_context_state(durable_context_state)
-            .expect("set durable system context state");
+        mutate_test_session_with_checkpoint_successor(&mut durable, |durable| {
+            durable
+                .set_system_context_state(durable_context_state)
+                .expect("set durable system context state");
+        });
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
@@ -16481,7 +16564,11 @@ mod tests {
 
         let mut archived = Session::new();
         let session_id = archived.id().clone();
-        mark_archived_store_projection(&mut archived);
+        archived
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable store-only build state");
+        install_test_session_created_checkpoint(&mut archived);
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived session");
@@ -16536,7 +16623,14 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_archived_store_projection(&mut archived);
+        archived
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable store-only build state");
+        install_test_session_created_checkpoint(&mut archived);
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save session-created checkpoint before archive");
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -16575,7 +16669,11 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_archived_store_projection(&mut archived);
+        archived
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable store-only build state");
+        install_test_session_created_checkpoint(&mut archived);
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -16615,7 +16713,14 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_archived_store_projection(&mut archived);
+        archived
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable store-only build state");
+        install_test_session_created_checkpoint(&mut archived);
+        meerkat::SessionStore::save(store.as_ref(), &archived)
+            .await
+            .expect("save session-created checkpoint before archive");
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -16778,7 +16883,11 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_archived_store_projection(&mut archived);
+        archived
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable store-only build state");
+        install_test_session_created_checkpoint(&mut archived);
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived store-only session");
@@ -16814,8 +16923,12 @@ mod tests {
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
         );
 
-        let session = Session::new();
+        let mut session = Session::new();
         let session_id = session.id().clone();
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable persisted session build state");
+        install_test_session_created_checkpoint(&mut session);
         meerkat::SessionStore::save(store.as_ref(), &session)
             .await
             .expect("save persisted session");
@@ -16883,8 +16996,9 @@ mod tests {
             make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
         let runtime = Arc::new(runtime);
 
-        let session = Session::new();
+        let mut session = Session::new();
         let session_id = session.id().clone();
+        install_test_session_created_checkpoint(&mut session);
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
@@ -17271,8 +17385,12 @@ mod tests {
             make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
         let runtime = Arc::new(runtime);
 
-        let session = Session::new();
+        let mut session = Session::new();
         let session_id = session.id().clone();
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable runtime authority build state");
+        install_test_session_created_checkpoint(&mut session);
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
@@ -17342,8 +17460,12 @@ mod tests {
             make_runtime_with_runtime_store_handle(temp_factory(&temp), 1);
         let runtime = Arc::new(runtime);
 
-        let session = Session::new();
+        let mut session = Session::new();
         let session_id = session.id().clone();
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable runtime authority build state");
+        install_test_session_created_checkpoint(&mut session);
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
@@ -17933,7 +18055,8 @@ mod tests {
 
         let mut archived = Session::new();
         let archived_id = archived.id().clone();
-        mark_archived_store_projection(&mut archived);
+        install_test_session_created_checkpoint(&mut archived);
+        mark_archived_test_session_with_checkpoint(&mut archived);
         runtime_store
             .commit_session_snapshot(
                 &meerkat_runtime::LogicalRuntimeId::for_session(&archived_id),
@@ -18564,11 +18687,11 @@ mod tests {
         );
 
         let mut archived = runtime
-            .service
-            .export_live_session(&direct.session_id)
+            .load_persisted_session(&direct.session_id)
             .await
-            .expect("export live direct deferred session");
-        mark_archived_store_projection(&mut archived);
+            .expect("load persisted direct deferred session")
+            .expect("direct deferred session should be persisted");
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -18609,11 +18732,11 @@ mod tests {
             .expect("direct deferred create should reserve capacity");
 
         let mut archived = runtime
-            .service
-            .export_live_session(&direct.session_id)
+            .load_persisted_session(&direct.session_id)
             .await
-            .expect("export live direct deferred session");
-        mark_archived_store_projection(&mut archived);
+            .expect("load persisted direct deferred session")
+            .expect("direct deferred session should be persisted");
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -18661,11 +18784,11 @@ mod tests {
             .expect("direct deferred create should reserve capacity");
 
         let mut archived = runtime
-            .service
-            .export_live_session(&direct.session_id)
+            .load_persisted_session(&direct.session_id)
             .await
-            .expect("export live direct deferred session");
-        mark_archived_store_projection(&mut archived);
+            .expect("load persisted direct deferred session")
+            .expect("direct deferred session should be persisted");
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -18724,11 +18847,11 @@ mod tests {
         );
 
         let mut archived = runtime
-            .service
-            .export_live_session(&direct.session_id)
+            .load_persisted_session(&direct.session_id)
             .await
-            .expect("export live direct deferred session");
-        mark_archived_store_projection(&mut archived);
+            .expect("load persisted direct deferred session")
+            .expect("direct deferred session should be persisted");
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save stale archived durable snapshot");
@@ -18770,11 +18893,15 @@ mod tests {
             .expect("direct deferred create should reserve capacity");
 
         let mut projected = runtime
-            .service
-            .export_live_session(&direct.session_id)
+            .load_persisted_session(&direct.session_id)
             .await
-            .expect("export live direct deferred session");
-        projected.set_metadata("projection_only", serde_json::Value::Bool(true));
+            .expect("load persisted direct deferred session")
+            .expect("direct deferred session should be persisted");
+        set_test_metadata_with_checkpoint_successor(
+            &mut projected,
+            "projection_only",
+            serde_json::Value::Bool(true),
+        );
         meerkat::SessionStore::save(store.as_ref(), &projected)
             .await
             .expect("save timestamp-only durable projection");
@@ -20547,7 +20674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_start_archived_store_projection_does_not_block_materialization() {
+    async fn pending_start_typed_archived_store_projection_blocks_materialization() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(meerkat::MemoryStore::new());
         let runtime = make_runtime_with_session_store_and_runtime_store(
@@ -20561,13 +20688,17 @@ mod tests {
             .await
             .expect("create staged session");
         let mut archived = Session::with_id(session_id.clone());
-        mark_archived_store_projection(&mut archived);
+        archived
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("seed recoverable staged projection build state");
+        install_test_session_created_checkpoint(&mut archived);
+        mark_archived_test_session_with_checkpoint(&mut archived);
         meerkat::SessionStore::save(store.as_ref(), &archived)
             .await
             .expect("save archived authoritative snapshot");
 
         let (event_tx, _event_rx) = mpsc::channel(100);
-        let completed = runtime
+        let rejected = runtime
             .start_turn(
                 &session_id,
                 "materialize archived staged session".into(),
@@ -20579,23 +20710,26 @@ mod tests {
             )
             .await;
         assert!(
-            completed.is_ok(),
-            "archived store projection must not block pending materialization: {completed:?}"
+            rejected
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.code == error::SESSION_NOT_FOUND),
+            "typed archived authority must block pending materialization: {rejected:?}"
         );
         assert!(
             !runtime.staged_sessions.contains(&session_id).await,
-            "successful materialization should consume the staged slot"
+            "archived rejection should consume the staged slot"
         );
         assert!(
-            runtime.runtime_adapter.contains_session(&session_id).await,
-            "archived store projection must not unregister runtime bindings"
+            !runtime.runtime_adapter.contains_session(&session_id).await,
+            "archived rejection must not retain runtime bindings"
         );
         let next = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await;
         assert!(
             next.is_ok(),
-            "completed materialization should release staged admission capacity: {next:?}"
+            "archived rejection should release staged admission capacity: {next:?}"
         );
     }
 

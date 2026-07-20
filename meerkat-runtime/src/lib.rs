@@ -280,7 +280,7 @@ pub struct RuntimeActorMaterializationPermit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeActorMaterializationPhasePolicy {
     RejectRetired,
-    RequireRetired,
+    RequireArchivedRevivalBoundary,
 }
 
 impl RuntimeActorMaterializationPermit {
@@ -392,9 +392,11 @@ fn validate_materialization_registration_authority(
             RuntimeActorMaterializationPhasePolicy::RejectRetired => {
                 runtime_phase == crate::runtime_state::RuntimeState::Retired
             }
-            RuntimeActorMaterializationPhasePolicy::RequireRetired => {
-                runtime_phase != crate::runtime_state::RuntimeState::Retired
-            }
+            RuntimeActorMaterializationPhasePolicy::RequireArchivedRevivalBoundary => !matches!(
+                runtime_phase,
+                crate::runtime_state::RuntimeState::Retired
+                    | crate::runtime_state::RuntimeState::Idle
+            ),
         }
         || state
             .active_runtime_epoch_id

@@ -9416,22 +9416,33 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id
             }
             guard "session_matches_current" { self.session_id == Some(session_id) }
-            guard "current_runtime_binding_complete" {
-                self.active_runtime_id != None
-                && self.active_fence_token != None
-                && self.active_runtime_generation != None
+            guard "current_runtime_binding_consistent" {
+                (
+                    self.active_runtime_id != None
+                    && self.active_fence_token != None
+                    && self.active_runtime_generation != None
+                ) || (
+                    self.active_runtime_id == None
+                    && self.active_fence_token == None
+                    && self.active_runtime_generation == None
+                    && self.active_runtime_epoch_id == None
+                )
             }
             guard "runtime_lineage_matches" {
-                self.active_runtime_id == Some(previous_agent_runtime_id)
+                self.active_runtime_id == None
+                || self.active_runtime_id == Some(previous_agent_runtime_id)
             }
             guard "fence_not_regressed" {
-                self.active_fence_token.get("value") >= previous_fence_token
+                self.active_fence_token == None
+                || self.active_fence_token.get("value") >= previous_fence_token
             }
             guard "generation_not_regressed" {
-                self.active_runtime_generation.get("value") >= previous_runtime_generation
+                self.active_runtime_generation == None
+                || self.active_runtime_generation.get("value") >= previous_runtime_generation
             }
             guard "epoch_lineage_valid" {
-                self.active_runtime_epoch_id == previous_runtime_epoch_id
+                self.active_runtime_id == None
+                || self.active_runtime_epoch_id == previous_runtime_epoch_id
                 || self.active_fence_token.get("value") > previous_fence_token
                 || self.active_runtime_generation.get("value") > previous_runtime_generation
             }
@@ -9447,9 +9458,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_fence_token: previous_fence_token,
                 previous_runtime_generation: previous_runtime_generation,
                 previous_runtime_epoch_id: previous_runtime_epoch_id,
-                next_agent_runtime_id: self.active_runtime_id.get("value"),
-                next_fence_token: self.active_fence_token.get("value"),
-                next_runtime_generation: self.active_runtime_generation.get("value"),
+                // A fresh unbound Idle shell has no process placement to
+                // adopt into. Retaining the prior audit identity while
+                // clearing the placement epoch makes durable terminal
+                // publication replay-neutral; the target CAS still rejects
+                // any changed outbox row.
+                next_agent_runtime_id: if self.active_runtime_id != None { self.active_runtime_id.get("value") } else { previous_agent_runtime_id },
+                next_fence_token: if self.active_fence_token != None { self.active_fence_token.get("value") } else { previous_fence_token },
+                next_runtime_generation: if self.active_runtime_generation != None { self.active_runtime_generation.get("value") } else { previous_runtime_generation },
                 next_runtime_epoch_id: self.active_runtime_epoch_id,
             }
         }

@@ -408,6 +408,41 @@ impl SessionCheckpointStamp {
         Ok(stamp)
     }
 
+    /// Construct a replaceable intra-turn projection of the current committed
+    /// checkpoint authority.
+    ///
+    /// A projection may itself already carry `IntraTurnCheckpoint`
+    /// provenance. Such a row is never promoted into an authority base;
+    /// another projection remains a sibling anchored to the same committed
+    /// checkpoint. This lets incremental stores persist crash-safe
+    /// intermediate heads without turning projection order into semantic
+    /// session authority.
+    pub fn intra_turn_projection(
+        session: &Session,
+        observed: &Self,
+    ) -> Result<Self, SessionCheckpointError> {
+        observed.validate_for_session(session.id())?;
+        let anchor = match (&observed.authority_base, observed.provenance) {
+            (
+                SessionCheckpointAuthorityBase::Typed { anchor },
+                SessionCheckpointProvenance::IntraTurnCheckpoint,
+            ) => anchor.clone(),
+            _ => SessionCheckpointAnchor::from_stamp(observed),
+        };
+        anchor.validate_for_session(session.id(), &observed.lineage_id)?;
+        let stamp = Self::from_parts(
+            session.id().clone(),
+            observed.lineage_id.clone(),
+            anchor.generation,
+            anchor.checkpoint_revision.checked_next()?,
+            SessionCheckpointAuthorityBase::Typed { anchor },
+            session_checkpoint_digest(session)?,
+            SessionCheckpointProvenance::IntraTurnCheckpoint,
+        );
+        stamp.validate_for_session(session.id())?;
+        Ok(stamp)
+    }
+
     #[cfg(test)]
     fn new(
         session_id: SessionId,
@@ -1255,6 +1290,46 @@ mod tests {
             Err(SessionCheckpointError::LegacyProvenanceMutationOnTypedCheckpoint)
         ));
         assert_eq!(verified_stamp(&checkpoint), checkpoint_stamp);
+    }
+
+    #[test]
+    fn intra_turn_projection_replacement_remains_a_sibling_of_committed_authority() {
+        let root = stamped_root(&session_with_text("committed"));
+        let root_stamp = verified_stamp(&root);
+
+        let mut first = root.clone();
+        first.push(Message::User(UserMessage::text(
+            "first projection".to_string(),
+        )));
+        let first_stamp = SessionCheckpointStamp::intra_turn_projection(&first, &root_stamp)
+            .expect("first projection stamp");
+        first
+            .install_checkpoint_stamp(first_stamp.clone())
+            .expect("install first projection stamp");
+
+        let mut replacement = root;
+        replacement.push(Message::User(UserMessage::text(
+            "replacement projection".to_string(),
+        )));
+        let replacement_stamp =
+            SessionCheckpointStamp::intra_turn_projection(&replacement, &first_stamp)
+                .expect("replacement projection stamp");
+        replacement
+            .install_checkpoint_stamp(replacement_stamp.clone())
+            .expect("install replacement projection stamp");
+
+        assert_eq!(
+            first_stamp.checkpoint_revision(),
+            replacement_stamp.checkpoint_revision()
+        );
+        assert_eq!(
+            first_stamp.authority_base(),
+            replacement_stamp.authority_base()
+        );
+        assert!(matches!(
+            replacement.try_checkpoint_state(),
+            Ok(SessionCheckpointState::Verified(stamp)) if stamp == replacement_stamp
+        ));
     }
 
     #[test]

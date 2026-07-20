@@ -49,6 +49,38 @@ fn pending_unregister_finalization_matches(
     }
 }
 
+/// A durable lifecycle row is process cleanup authority only while it carries
+/// unfinished realization. A checkpoint snapshot is deliberately excluded:
+/// it proves session content, never that a process-local runtime still exists.
+pub(super) fn machine_lifecycle_has_runtime_archive_residue(
+    lifecycle: &crate::store::MachineLifecycleSnapshot,
+) -> bool {
+    if matches!(
+        lifecycle.runtime_state(),
+        RuntimeState::Retired | RuntimeState::Destroyed
+    ) {
+        return false;
+    }
+    if lifecycle.runtime_state() != RuntimeState::Idle {
+        return true;
+    }
+
+    let binding = lifecycle.binding();
+    let run = lifecycle.run();
+    let clean_unbound_idle = binding.agent_runtime_id().is_none()
+        && binding.fence_token().is_none()
+        && binding.runtime_generation().is_none()
+        && binding.runtime_epoch_id().is_none()
+        && run.current_run_id().is_none()
+        && run.pre_run_phase().is_none()
+        && lifecycle.unregister_progress().is_none()
+        && matches!(
+            lifecycle.supervisor_authority(),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt
+        );
+    !clean_unbound_idle
+}
+
 #[derive(Clone)]
 struct UnregisterEntryIncarnationWitness {
     mutation_gate: Arc<Mutex<()>>,
@@ -585,6 +617,7 @@ fn fresh_registered_runtime_authority(
     Ok(authority)
 }
 
+#[cfg(test)]
 pub(super) fn replay_durable_unregister_progress(
     authority: &mut crate::meerkat_machine::dsl::MeerkatMachineAuthority,
     session_id: &SessionId,
@@ -1744,11 +1777,12 @@ impl MeerkatMachine {
             ),
         );
         let recovered_unregister_retry = recovered_unregister_progress.is_some();
-        replay_durable_unregister_progress(
-            &mut recovery.authority,
-            session_id,
-            recovered_unregister_progress.as_ref(),
-        )?;
+        // Recover durable input work against the fresh Idle runtime shell
+        // first. `machine_recover_persistent_inputs` then replays the durable
+        // unregister prefix exactly once, after ordinary input recovery can no
+        // longer rebuild the runtime phase beneath it. Replaying here as well
+        // would apply BeginUnregisterSession twice and reject the second pass
+        // on the already-Draining authority.
         let initial_runtime_state =
             super::dsl_authority::runtime_phase_from_authority(&recovery.authority);
         let dsl_authority = Arc::new(std::sync::Mutex::new(recovery.authority));
@@ -3186,7 +3220,7 @@ impl MeerkatMachine {
             }
 
             let runtime_id = Self::logical_runtime_id(&session_id);
-            let mut recovery = match self
+            let recovery = match self
                 .runtime_authority_for_registration(&runtime_id, &session_id)
                 .await
             {
@@ -3205,14 +3239,11 @@ impl MeerkatMachine {
                     recovery.unregister_progress.as_ref(),
                 ),
             );
-            replay_durable_unregister_progress(
-                &mut recovery.authority,
-                &session_id,
-                recovery.unregister_progress.as_ref(),
-            )?;
             // Seed the driver's initial phase from the recovered DSL authority
-            // uniformly: the authority is the owner; the driver control
-            // projection mirrors it, never the raw observation.
+            // uniformly. Durable unregister progress is replayed exactly once
+            // by persistent input recovery after ordinary input reconstruction;
+            // the authority is the owner and the driver projection mirrors it,
+            // never the raw observation.
             let initial_runtime_state =
                 super::dsl_authority::runtime_phase_from_authority(&recovery.authority);
             let dsl_authority = Arc::new(std::sync::Mutex::new(recovery.authority));
@@ -7523,12 +7554,12 @@ impl MeerkatMachine {
     ///
     /// A live registration is immediate residue. After a process restart the
     /// in-memory registry is empty, so the machine-owned durable lifecycle is
-    /// also consulted: a persisted non-terminal state is unfinished retirement
-    /// residue. [`RuntimeState::Retired`] and [`RuntimeState::Destroyed`] are
-    /// both quiescent terminal outcomes; `Retire` cannot and need not run from
-    /// Destroyed. An absent lifecycle row is likewise quiescent. Store read
-    /// failures are surfaced so callers fail closed instead of misclassifying
-    /// unknown durable state as a completed archive.
+    /// also consulted. A clean unbound Idle row is the fixed-point observation
+    /// of a dead process, not unfinished process authority. Bound/torn rows and
+    /// durable unregister progress remain cleanup residue. Retired, Destroyed,
+    /// and an absent row are likewise quiescent. Store read failures are
+    /// surfaced so callers fail closed instead of misclassifying unknown
+    /// durable state as a completed archive.
     pub async fn archive_runtime_residue_present(
         &self,
         session_id: &SessionId,
@@ -7546,11 +7577,12 @@ impl MeerkatMachine {
             return Ok(false);
         };
         let runtime_id = LogicalRuntimeId::for_session(session_id);
-        let durable_state = crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+        let durable_lifecycle = crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
             .await
             .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
-        Ok(durable_state
-            .is_some_and(|state| !matches!(state, RuntimeState::Retired | RuntimeState::Destroyed)))
+        Ok(durable_lifecycle
+            .as_ref()
+            .is_some_and(machine_lifecycle_has_runtime_archive_residue))
     }
 
     #[cfg(any(target_arch = "wasm32", test))]

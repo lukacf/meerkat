@@ -203,6 +203,48 @@ fn validated_compaction_projection_intents(
         .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
 }
 
+/// Clear one finalized compaction intent while preserving typed checkpoint
+/// custody for the exact replacement document.
+///
+/// Legacy snapshots retain their legacy-unverified classification; callers do
+/// not gain typed authority merely by finalizing an outbox row. A verified
+/// snapshot advances by one exact run-boundary successor so the persisted
+/// document can never carry its predecessor's now-stale digest.
+pub(crate) fn complete_compaction_projection_checkpoint(
+    session: &mut meerkat_core::Session,
+    projection: &meerkat_core::CompactionProjectionId,
+) -> Result<(), RuntimeStoreError> {
+    let predecessor = match session
+        .try_checkpoint_state()
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?
+    {
+        meerkat_core::SessionCheckpointState::Verified(stamp) => Some(stamp),
+        meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => None,
+    };
+
+    let completed = session
+        .complete_compaction_projection_intent(projection)
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+
+    if completed.is_none() {
+        return Ok(());
+    }
+
+    if let Some(predecessor) = predecessor {
+        let successor = meerkat_core::SessionCheckpointStamp::successor(
+            session,
+            &predecessor,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        session
+            .install_checkpoint_stamp(successor)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
 /// Runtime binding facts selected by generated MeerkatMachine authority.
 ///
 /// RuntimeStore implementations persist and read these facts as part of a

@@ -818,20 +818,29 @@ impl DriverEntry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = authority.state();
         let owner_session_id = outbox.owner_session_id.to_string();
-        state.session_id.as_ref().map(|value| value.0.as_str()) == Some(owner_session_id.as_str())
-            && state
-                .active_runtime_id
-                .as_ref()
-                .map(|value| value.0.as_str())
-                == outbox.owner_agent_runtime_id.as_deref()
-            && state.active_fence_token.map(|value| value.0) == outbox.owner_fence_token
-            && state.active_runtime_generation.map(|value| value.0)
-                == outbox.owner_runtime_generation
-            && state
-                .active_runtime_epoch_id
-                .as_ref()
-                .map(|value| value.0.as_str())
-                == outbox.owner_runtime_epoch_id.as_deref()
+        let session_matches = state.session_id.as_ref().map(|value| value.0.as_str())
+            == Some(owner_session_id.as_str());
+        let fresh_unbound_idle = state.lifecycle_phase
+            == crate::meerkat_machine::dsl::MeerkatPhase::Idle
+            && state.active_runtime_id.is_none()
+            && state.active_fence_token.is_none()
+            && state.active_runtime_generation.is_none()
+            && state.active_runtime_epoch_id.is_none();
+        session_matches
+            && (fresh_unbound_idle
+                || (state
+                    .active_runtime_id
+                    .as_ref()
+                    .map(|value| value.0.as_str())
+                    == outbox.owner_agent_runtime_id.as_deref()
+                    && state.active_fence_token.map(|value| value.0) == outbox.owner_fence_token
+                    && state.active_runtime_generation.map(|value| value.0)
+                        == outbox.owner_runtime_generation
+                    && state
+                        .active_runtime_epoch_id
+                        .as_ref()
+                        .map(|value| value.0.as_str())
+                        == outbox.owner_runtime_epoch_id.as_deref()))
     }
 
     fn validate_interaction_outbox_owner_binding(
@@ -1945,6 +1954,22 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(_) => Ok(None),
             DriverEntry::Persistent(driver) => driver.load_compaction_checkpoint_snapshot().await,
+        }
+    }
+
+    pub(crate) async fn commit_compaction_checkpoint_snapshot(
+        &self,
+        session_snapshot: Vec<u8>,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Err(RuntimeDriverError::Internal(
+                "ephemeral runtime cannot prepare a durable compaction checkpoint".to_string(),
+            )),
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .commit_compaction_checkpoint_snapshot(session_snapshot)
+                    .await
+            }
         }
     }
 
@@ -4805,12 +4830,29 @@ async fn reconcile_runtime_authority_for_cold_recovery_id(
                     }
                     None => crate::store::MachineLifecycleExpectedVersion::Missing,
                 };
+                let (supervisor_authority, unregister_progress) = match &observed {
+                    crate::store::MachineLifecycleObservation::Decoded { record, .. } => (
+                        record.supervisor_authority().clone(),
+                        record.unregister_progress().cloned(),
+                    ),
+                    crate::store::MachineLifecycleObservation::Missing => (
+                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                        None,
+                    ),
+                    crate::store::MachineLifecycleObservation::Unsupported { .. }
+                    | crate::store::MachineLifecycleObservation::Malformed { .. } => {
+                        return Err(RuntimeDriverError::Internal(
+                            "runtime-authority classifier selected normalization for unsafe opaque evidence"
+                                .to_string(),
+                        ));
+                    }
+                };
                 let replacement =
                     crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
                         RuntimeState::Idle,
                         crate::store::MachineLifecycleBindingFacts::default(),
-                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                        None,
+                        supervisor_authority,
+                        unregister_progress,
                     );
                 match store
                     .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
@@ -5917,6 +5959,7 @@ pub(crate) fn machine_resolve_pre_resolved_runtime_completion_result(
 ) -> Result<RuntimeCompletionResultAuthority, RuntimeDriverError> {
     let dsl_run_id = run_id.map(crate::meerkat_machine::dsl::RunId::from_domain);
     let session_id = SessionId::new();
+    let dsl_session_id = crate::meerkat_machine::dsl::SessionId::from_domain(&session_id);
     let mut authority = crate::meerkat_machine::dsl_authority::new_registered_authority(
         &session_id,
     )
@@ -5928,6 +5971,19 @@ pub(crate) fn machine_resolve_pre_resolved_runtime_completion_result(
     })?;
 
     if let Some(run_id) = dsl_run_id.clone() {
+        apply_runtime_completion_authority_preview(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from(
+                    "test-runtime-completion",
+                ),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from(1),
+                generation: Some(crate::meerkat_machine::dsl::Generation::from(0)),
+                runtime_epoch_id: None,
+                session_id: dsl_session_id,
+            },
+            "PrepareBindings",
+        )?;
         apply_runtime_completion_authority_preview(
             &mut authority,
             crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
@@ -6489,7 +6545,7 @@ mod run_failed_cause_tests {
 
     fn running_driver(run_id: &RunId) -> DriverEntry {
         let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(
-            LogicalRuntimeId::new("run-failed-cause-test"),
+            LogicalRuntimeId::for_session(&SessionId::new()),
         );
         driver
             .contract_begin_run_authority(run_id.clone())
@@ -8100,6 +8156,69 @@ mod recovery_tests {
         assert_eq!(driver.phase(), RuntimeState::Idle);
         assert!(driver.current_run_id().is_none());
         assert!(driver.pre_run_phase().is_none());
+    }
+
+    #[tokio::test]
+    async fn cold_runtime_normalization_preserves_supervisor_and_unregister_custody() {
+        use crate::store::{MachineLifecycleObservation, RuntimeStore};
+
+        let session_id = SessionId::new();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        let supervisor_pubkey = [0x11; 32];
+        let supervisor = crate::store::SupervisorAuthoritySnapshot::Bound(
+            crate::store::SupervisorBindingReceipt::new(
+                "supervisor".to_string(),
+                meerkat_core::comms::PeerId::from_ed25519_pubkey(&supervisor_pubkey).as_str(),
+                "inproc://supervisor".to_string(),
+                crate::comms_drain::encode_supervisor_signing_public_key(supervisor_pubkey),
+                7,
+            ),
+        );
+        let unregister_progress =
+            crate::store::MachineUnregisterProgressSnapshot::new(true, false, true, false, false);
+        store
+            .commit_machine_lifecycle(
+                &runtime_id,
+                crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                    RuntimeState::Running,
+                    crate::store::MachineLifecycleBindingFacts::new(
+                        Some("dead-runtime".to_string()),
+                        Some(41),
+                        Some(9),
+                        Some("dead-process-epoch".to_string()),
+                    ),
+                    supervisor.clone(),
+                    Some(unregister_progress.clone()),
+                ),
+                &[],
+            )
+            .await
+            .expect("persist cold lifecycle with independent custody");
+
+        let reconciled =
+            reconcile_runtime_authority_for_cold_recovery(&store, &runtime_id, &session_id)
+                .await
+                .expect("cold lifecycle should normalize without erasing custody");
+        assert_eq!(
+            reconciled.unregister_progress,
+            Some(unregister_progress.clone())
+        );
+
+        let MachineLifecycleObservation::Decoded { record, .. } = store
+            .observe_machine_lifecycle(&runtime_id)
+            .await
+            .expect("observe normalized lifecycle")
+        else {
+            panic!("normalized lifecycle must decode");
+        };
+        assert_eq!(record.runtime_state(), Some(RuntimeState::Idle));
+        assert_eq!(
+            record.binding(),
+            &crate::store::MachineLifecycleBindingFacts::default()
+        );
+        assert_eq!(record.supervisor_authority(), &supervisor);
+        assert_eq!(record.unregister_progress(), Some(&unregister_progress));
     }
 
     #[tokio::test]

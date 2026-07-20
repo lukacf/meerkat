@@ -32,6 +32,35 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant, sleep};
 
+fn mutate_test_session_with_checkpoint(
+    session: &mut meerkat_core::Session,
+    mutate: impl FnOnce(&mut meerkat_core::Session),
+) {
+    let predecessor = match session
+        .try_checkpoint_state()
+        .expect("test checkpoint should verify before fixture mutation")
+    {
+        meerkat_core::SessionCheckpointState::Verified(stamp) => Some(stamp),
+        meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => None,
+    };
+    mutate(session);
+    let checkpoint = match predecessor {
+        Some(predecessor) => meerkat_core::SessionCheckpointStamp::successor(
+            session,
+            &predecessor,
+            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+        ),
+        None => meerkat_core::SessionCheckpointStamp::root(
+            session,
+            meerkat_core::SessionCheckpointProvenance::SessionCreated,
+        ),
+    }
+    .expect("test checkpoint should be valid for the exact fixture document");
+    session
+        .install_checkpoint_stamp(checkpoint)
+        .expect("test checkpoint should install");
+}
+
 #[derive(Clone)]
 struct Paths {
     user_config_root: PathBuf,
@@ -663,9 +692,11 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
     // archive authority can carry an explicit Archived marker, and revival
     // must synchronize that promoted Active snapshot into the already-created
     // live agent before its first checkpoint.
-    archived
-        .set_lifecycle_terminal(meerkat_core::session::SessionLifecycleTerminal::Archived)
-        .expect("stamp explicit archived document fixture");
+    mutate_test_session_with_checkpoint(&mut archived, |session| {
+        session
+            .set_lifecycle_terminal(meerkat_core::session::SessionLifecycleTerminal::Archived)
+            .expect("stamp explicit archived document fixture");
+    });
     runtime_store
         .commit_session_snapshot(
             &runtime_id,

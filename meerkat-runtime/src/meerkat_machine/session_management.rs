@@ -1234,7 +1234,13 @@ impl MeerkatMachine {
             }
         };
         let (session_entry, _) = match self
-            .prepare_registered_session_entry(&session_id, &runtime_id, recovery, None)
+            .prepare_registered_session_entry(
+                &session_id,
+                &runtime_id,
+                recovery,
+                None,
+                Some(Arc::clone(&write_fence)),
+            )
             .await
         {
             Ok(prepared) => prepared,
@@ -1769,6 +1775,7 @@ impl MeerkatMachine {
         materialization_claim_state: Option<
             Arc<std::sync::Mutex<crate::RuntimeActorMaterializationClaimState>>,
         >,
+        write_fence: Option<Arc<dyn crate::store::RuntimeStoreWriteFence>>,
     ) -> Result<(RuntimeSessionEntry, bool), RuntimeDriverError> {
         let recovered_unregister_progress = recovery.unregister_progress.take();
         let recovered_teardown_observations = Arc::new(
@@ -1807,9 +1814,20 @@ impl MeerkatMachine {
                 crate::traits::RuntimeDriver::recover(driver).await
             }
             super::driver::DriverEntry::Persistent(driver) => {
-                driver
-                    .recover_inputs_after_runtime_authority(recovered_unregister_progress.as_ref())
-                    .await
+                if let Some(write_fence) = write_fence {
+                    driver
+                        .recover_inputs_after_runtime_authority_with_fence(
+                            recovered_unregister_progress.as_ref(),
+                            write_fence,
+                        )
+                        .await
+                } else {
+                    driver
+                        .recover_inputs_after_runtime_authority(
+                            recovered_unregister_progress.as_ref(),
+                        )
+                        .await
+                }
             }
         };
         if let Err(err) = recover_result {
@@ -1940,6 +1958,7 @@ impl MeerkatMachine {
                 &runtime_id,
                 recovery,
                 materialization_claim_state,
+                None,
             )
             .await?;
         tracing::debug!(

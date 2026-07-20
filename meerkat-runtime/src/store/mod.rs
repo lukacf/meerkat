@@ -38,6 +38,23 @@ pub enum InputStateBatchCasOutcome {
     Stale,
 }
 
+/// Result of an exact input-state batch compare-and-swap performed under an
+/// external authority fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FencedInputStateBatchCasOutcome {
+    /// The target rows matched and the replacements committed, or were already
+    /// byte-identical, while the external authority was current.
+    Swapped,
+    /// At least one target row no longer matched. The external fence was not
+    /// consulted and no replacement was written.
+    Stale,
+    /// The external authority was superseded. No replacement was written.
+    FenceConflict { reason: String },
+    /// The external authority could not be checked temporarily. No replacement
+    /// was written.
+    FenceBackoff { reason: String },
+}
+
 #[derive(Debug)]
 struct PreparedInputStateBatchCasRow {
     input_id: InputId,
@@ -2624,6 +2641,31 @@ pub trait RuntimeStore: Send + Sync {
         }
         Err(RuntimeStoreError::Unsupported(
             "compare_and_swap_input_states_atomically".to_string(),
+        ))
+    }
+
+    /// Atomically replace an exact input-state batch while an external
+    /// authority fence is held across the target write.
+    ///
+    /// Implementations must compare the target rows first, then retain both
+    /// the target transaction and the external authority guard until every
+    /// replacement is committed. This is the cold-registration recovery seam:
+    /// a process whose lease expires or is superseded must never overwrite
+    /// input work recovered by its successor.
+    async fn compare_and_swap_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &[StoredInputState],
+        replacements: &[InputStatePersistenceRecord],
+        write_fence: std::sync::Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+        let prepared = prepare_input_state_batch_cas(expected, replacements)?;
+        if prepared.is_empty() {
+            return Ok(FencedInputStateBatchCasOutcome::Swapped);
+        }
+        let _ = (runtime_id, write_fence);
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_input_states_atomically_with_fence".to_string(),
         ))
     }
 

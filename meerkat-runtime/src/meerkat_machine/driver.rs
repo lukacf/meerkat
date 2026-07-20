@@ -4224,13 +4224,8 @@ pub(super) async fn load_boundary_receipt_for_runtime(
 async fn load_input_states_for_runtime(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
-) -> Result<Vec<(LogicalRuntimeId, StoredInputState)>, crate::store::RuntimeStoreError> {
-    store.load_input_states(runtime_id).await.map(|states| {
-        states
-            .into_iter()
-            .map(|state| (runtime_id.clone(), state))
-            .collect()
-    })
+) -> Result<Vec<StoredInputState>, crate::store::RuntimeStoreError> {
+    store.load_input_states(runtime_id).await
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -4932,12 +4927,35 @@ pub(crate) async fn machine_recover_persistent_inputs(
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
     recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
+    let observed_input_states = load_input_states_for_runtime(store, runtime_id)
+        .await
+        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+    machine_recover_persistent_inputs_from_observed(
+        store,
+        runtime_id,
+        driver,
+        observed_input_states,
+        recovered_unregister_progress,
+    )
+    .await
+}
+
+/// Recover one already-observed input-state image without re-reading it.
+///
+/// Conditional cold registration retains this exact image as the target-local
+/// CAS precondition for the eventual fenced recovery write. A successor that
+/// advances any input while recovery is being prepared therefore wins cleanly
+/// instead of being overwritten by the stale preparation.
+pub(crate) async fn machine_recover_persistent_inputs_from_observed(
+    store: &dyn crate::store::RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
+    observed_input_states: Vec<StoredInputState>,
+    recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered_payloads = Vec::new();
 
-    for (_stored_runtime_id, bundle) in load_input_states_for_runtime(store, runtime_id)
-        .await
-        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-    {
+    for bundle in observed_input_states {
         let (bundle, admission_sequence_recovery) =
             machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
 

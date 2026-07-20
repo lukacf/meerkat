@@ -19,7 +19,10 @@ use crate::input_state::{
 };
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
-use crate::store::{InputStateBatchCasOutcome, MachineLifecycleCommit, RuntimeStore};
+use crate::store::{
+    FencedInputStateBatchCasOutcome, InputStateBatchCasOutcome, MachineLifecycleCommit,
+    RuntimeStore, RuntimeStoreWriteFence,
+};
 use crate::traits::{DestroyReport, RecoveryReport, RuntimeDriver, RuntimeDriverError};
 
 use super::ephemeral::{
@@ -64,6 +67,86 @@ impl PersistentRuntimeDriver {
                 RuntimeDriverError::Internal(format!("recovered input persistence failed: {err}"))
             })?;
         Ok(report)
+    }
+
+    /// Recover durable input work and publish the normalized target image only
+    /// while both the original input rows and the caller's external authority
+    /// fence remain current.
+    pub(crate) async fn recover_inputs_after_runtime_authority_with_fence(
+        &mut self,
+        recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+        write_fence: Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<RecoveryReport, RuntimeDriverError> {
+        let observed = self
+            .store
+            .load_input_states(&self.runtime_id)
+            .await
+            .map_err(|error| RuntimeDriverError::RecoveryBackoff {
+                reason: format!("failed to observe durable inputs for recovery: {error}"),
+            })?;
+        let report = crate::meerkat_machine::machine_recover_persistent_inputs_from_observed(
+            self.store.as_ref(),
+            &self.runtime_id,
+            &mut self.inner,
+            observed.clone(),
+            recovered_unregister_progress,
+        )
+        .await?;
+
+        let replacements = self.inner.authorized_stored_input_states_snapshot()?;
+        if replacements.is_empty() {
+            return Ok(report);
+        }
+        let mut expected = Vec::with_capacity(replacements.len());
+        for replacement in &replacements {
+            let input_id = &replacement.as_stored().state.input_id;
+            let Some(original) = observed
+                .iter()
+                .find(|candidate| &candidate.state.input_id == input_id)
+            else {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "recovered input {input_id} has no matching durable observation"
+                    ),
+                });
+            };
+            expected.push(original.clone());
+        }
+
+        let outcome = self
+            .store
+            .compare_and_swap_input_states_atomically_with_fence(
+                &self.runtime_id,
+                &expected,
+                &replacements,
+                write_fence,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::store::RuntimeStoreError::Unsupported(reason) => {
+                    RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: format!(
+                            "runtime store lacks fenced input recovery capability: {reason}"
+                        ),
+                    }
+                }
+                other => RuntimeDriverError::RecoveryBackoff {
+                    reason: format!("fenced recovered input persistence failed: {other}"),
+                },
+            })?;
+        match outcome {
+            FencedInputStateBatchCasOutcome::Swapped => Ok(report),
+            FencedInputStateBatchCasOutcome::Stale => Err(RuntimeDriverError::StaleAuthority {
+                reason: "durable input state changed while cold recovery was preparing".to_string(),
+            }),
+            FencedInputStateBatchCasOutcome::FenceConflict { reason } => {
+                Err(RuntimeDriverError::StaleAuthority { reason })
+            }
+            FencedInputStateBatchCasOutcome::FenceBackoff { reason } => {
+                Err(RuntimeDriverError::RecoveryBackoff { reason })
+            }
+        }
     }
 
     /// Create a new persistent runtime driver.

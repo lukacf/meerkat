@@ -17,11 +17,11 @@ use tokio::sync::Mutex;
 use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
-    AuthOAuthFlowSnapshotUpdate, FencedMachineLifecycleCasOutcome, InputStateBatchCasOutcome,
-    MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
-    MachineLifecycleObservation, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
-    RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
-    classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
+    AuthOAuthFlowSnapshotUpdate, FencedInputStateBatchCasOutcome, FencedMachineLifecycleCasOutcome,
+    InputStateBatchCasOutcome, MachineLifecycleCasOutcome, MachineLifecycleCommit,
+    MachineLifecycleExpectedVersion, MachineLifecycleObservation, MachineLifecycleStoreRecord,
+    RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome,
+    SessionDelta, classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
     decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
     prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
     validate_machine_lifecycle_replacement,
@@ -856,6 +856,60 @@ impl RuntimeStore for InMemoryRuntimeStore {
             release.notified().await;
         }
         Ok(InputStateBatchCasOutcome::Swapped)
+    }
+
+    async fn compare_and_swap_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &[StoredInputState],
+        replacements: &[InputStatePersistenceRecord],
+        write_fence: Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+        let prepared = prepare_input_state_batch_cas(expected, replacements)?;
+        if prepared.is_empty() {
+            return Ok(FencedInputStateBatchCasOutcome::Swapped);
+        }
+
+        let mut inner = self.inner.lock().await;
+        let Some(states) = inner.input_states.get_mut(&runtime_id.0) else {
+            return Ok(FencedInputStateBatchCasOutcome::Stale);
+        };
+        let mut all_expected = true;
+        let mut all_replacements = true;
+        for row in &prepared {
+            let Some(current) = states.get(&row.input_id) else {
+                return Ok(FencedInputStateBatchCasOutcome::Stale);
+            };
+            let current_json = serde_json::to_vec(current)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if current_json != row.expected_json {
+                all_expected = false;
+            }
+            if current_json != row.replacement_json {
+                all_replacements = false;
+            }
+        }
+        if !all_replacements && !all_expected {
+            return Ok(FencedInputStateBatchCasOutcome::Stale);
+        }
+
+        let fence_outcome = execute_runtime_store_write_fence(write_fence.as_ref(), || {
+            if !all_replacements {
+                for row in &prepared {
+                    states.insert(row.input_id.clone(), row.replacement.clone());
+                }
+            }
+            Ok(())
+        })?;
+        match fence_outcome {
+            RuntimeStoreWriteFenceOutcome::Applied => Ok(FencedInputStateBatchCasOutcome::Swapped),
+            RuntimeStoreWriteFenceOutcome::Conflict { reason } => {
+                Ok(FencedInputStateBatchCasOutcome::FenceConflict { reason })
+            }
+            RuntimeStoreWriteFenceOutcome::Backoff { reason } => {
+                Ok(FencedInputStateBatchCasOutcome::FenceBackoff { reason })
+            }
+        }
     }
 
     async fn load_input_state(

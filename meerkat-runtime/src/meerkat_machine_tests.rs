@@ -198,6 +198,113 @@ async fn assert_fenced_registration_target_and_authority_contract(
     );
     assert!(!machine.contains_session(&stale_fence_session).await);
 
+    let stale_recovery_session = SessionId::new();
+    let stale_recovery_runtime = runtime_id_for_session(&stale_recovery_session);
+    let stale_recovery_observation = machine
+        .observe_cold_runtime_lifecycle(&stale_recovery_session)
+        .await
+        .expect("observe missing stale-recovery lifecycle");
+    let input_id = InputId::new();
+    let input = crate::input::Input::Prompt(crate::input::PromptInput {
+        injected_context: Vec::new(),
+        header: crate::input::InputHeader {
+            id: input_id.clone(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Operator,
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        content: "recover me".into(),
+        typed_turn_appends: Vec::new(),
+        turn_metadata: None,
+    });
+    let mut stored_input = crate::input_state::StoredInputState::new_accepted(input_id.clone());
+    stored_input.state.runtime_semantics = Some(
+        crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+            .expect("generated prompt semantics"),
+    );
+    stored_input.state.durability = Some(crate::input::InputDurability::Durable);
+    stored_input.state.persisted_input = Some(input);
+    stored_input.seed.admission_sequence = Some(1);
+    stored_input.seed.recovery_lane = Some(meerkat_core::types::HandlingMode::Queue);
+    let stored_input_record =
+        crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(
+            stored_input.clone(),
+        )
+        .expect("authorized stored input");
+    store
+        .persist_input_state(&stale_recovery_runtime, &stored_input_record)
+        .await
+        .expect("seed durable recovery input");
+
+    let stale_recovery_fence = Arc::new(SequencedRuntimeWriteFence::new([
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+        crate::store::RuntimeStoreWriteFenceOutcome::Conflict {
+            reason: "lease expired before recovered inputs committed".to_string(),
+        },
+    ]));
+    let outcome = machine
+        .register_session_if_runtime_lifecycle_current(
+            stale_recovery_observation,
+            Arc::clone(&stale_recovery_fence) as Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        RuntimeSessionRegistrationOutcome::Conflict { .. }
+    ));
+    assert_eq!(stale_recovery_fence.checks(), 2);
+    assert_eq!(stale_recovery_fence.operations(), 1);
+    assert!(!machine.contains_session(&stale_recovery_session).await);
+    assert_eq!(
+        store
+            .load_input_state(&stale_recovery_runtime, &input_id)
+            .await
+            .expect("read stale recovery input")
+            .expect("stale recovery input retained")
+            .seed
+            .phase,
+        crate::input_state::InputLifecycleState::Accepted,
+        "superseded recovery must not overwrite the observed input row"
+    );
+
+    let retry_recovery_observation = machine
+        .observe_cold_runtime_lifecycle(&stale_recovery_session)
+        .await
+        .expect("re-observe normalized stale-recovery lifecycle");
+    let retry_recovery_fence = Arc::new(SequencedRuntimeWriteFence::new([
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
+    ]));
+    let outcome = machine
+        .register_session_if_runtime_lifecycle_current(
+            retry_recovery_observation,
+            Arc::clone(&retry_recovery_fence) as Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        RuntimeSessionRegistrationOutcome::AlreadyExact { .. }
+    ));
+    assert_eq!(retry_recovery_fence.checks(), 3);
+    assert_eq!(retry_recovery_fence.operations(), 3);
+    assert!(machine.contains_session(&stale_recovery_session).await);
+    assert_eq!(
+        store
+            .load_input_state(&stale_recovery_runtime, &input_id)
+            .await
+            .expect("read recovered input")
+            .expect("recovered input retained")
+            .seed
+            .phase,
+        crate::input_state::InputLifecycleState::Queued,
+        "current retry must commit the generated recovery normalization"
+    );
+
     let applied_session = SessionId::new();
     let applied_observation = machine
         .observe_cold_runtime_lifecycle(&applied_session)

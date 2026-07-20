@@ -24,11 +24,12 @@ mod inner {
         InputStateSeed, InputTerminalOutcome, StoredInputState,
     };
     use crate::store::{
-        AuthOAuthFlowSnapshotUpdate, FencedMachineLifecycleCasOutcome, InputStateBatchCasOutcome,
-        MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
-        MachineLifecycleObservation, MachineLifecycleSnapshot, MachineLifecycleStoreRecord,
-        RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome,
-        SessionDelta, classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
+        AuthOAuthFlowSnapshotUpdate, FencedInputStateBatchCasOutcome,
+        FencedMachineLifecycleCasOutcome, InputStateBatchCasOutcome, MachineLifecycleCasOutcome,
+        MachineLifecycleCommit, MachineLifecycleExpectedVersion, MachineLifecycleObservation,
+        MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
+        RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
+        classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
         decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
         prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
         validate_machine_lifecycle_replacement,
@@ -2074,6 +2075,107 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 tx.commit()
                     .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
                 Ok(InputStateBatchCasOutcome::Swapped)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn compare_and_swap_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &[StoredInputState],
+            replacements: &[InputStatePersistenceRecord],
+            write_fence: Arc<dyn RuntimeStoreWriteFence>,
+        ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+            let prepared = prepare_input_state_batch_cas(expected, replacements)?;
+            if prepared.is_empty() {
+                return Ok(FencedInputStateBatchCasOutcome::Swapped);
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let mut all_expected = true;
+                let mut all_replacements = true;
+                for row in &prepared {
+                    let current = tx
+                        .query_row(
+                            r"
+                            SELECT state_json
+                            FROM runtime_input_states
+                            WHERE runtime_id = ?1 AND input_id = ?2
+                            ",
+                            params![runtime_id_text(&runtime_id), row.input_id.0.to_string()],
+                            |sql_row| Ok(sql_row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                        )
+                        .optional()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    let Some(current) = current else {
+                        return Ok(FencedInputStateBatchCasOutcome::Stale);
+                    };
+                    if current != row.expected_json {
+                        all_expected = false;
+                    }
+                    if current != row.replacement_json {
+                        all_replacements = false;
+                    }
+                }
+                if !all_replacements && !all_expected {
+                    return Ok(FencedInputStateBatchCasOutcome::Stale);
+                }
+
+                let mut tx_slot = Some(tx);
+                let fence_outcome =
+                    execute_runtime_store_write_fence(write_fence.as_ref(), || {
+                        let tx = tx_slot.as_ref().ok_or_else(|| {
+                            RuntimeStoreError::Internal(
+                                "SQLite input recovery fence lost its transaction".to_string(),
+                            )
+                        })?;
+                        if !all_replacements {
+                            for row in &prepared {
+                                tx.execute(
+                                    r"
+                                    INSERT INTO runtime_input_states
+                                        (runtime_id, input_id, state_json)
+                                    VALUES (?1, ?2, ?3)
+                                    ON CONFLICT(runtime_id, input_id) DO UPDATE
+                                    SET state_json = excluded.state_json
+                                    ",
+                                    params![
+                                        runtime_id_text(&runtime_id),
+                                        row.input_id.0.to_string(),
+                                        &row.replacement_json,
+                                    ],
+                                )
+                                .map_err(|error| {
+                                    RuntimeStoreError::WriteFailed(error.to_string())
+                                })?;
+                            }
+                        }
+                        tx_slot
+                            .take()
+                            .ok_or_else(|| {
+                                RuntimeStoreError::Internal(
+                                    "SQLite input recovery fence consumed its transaction twice"
+                                        .to_string(),
+                                )
+                            })?
+                            .commit()
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
+                    })?;
+                match fence_outcome {
+                    RuntimeStoreWriteFenceOutcome::Applied => {
+                        Ok(FencedInputStateBatchCasOutcome::Swapped)
+                    }
+                    RuntimeStoreWriteFenceOutcome::Conflict { reason } => {
+                        Ok(FencedInputStateBatchCasOutcome::FenceConflict { reason })
+                    }
+                    RuntimeStoreWriteFenceOutcome::Backoff { reason } => {
+                        Ok(FencedInputStateBatchCasOutcome::FenceBackoff { reason })
+                    }
+                }
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?

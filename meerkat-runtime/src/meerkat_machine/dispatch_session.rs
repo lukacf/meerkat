@@ -123,9 +123,29 @@ async fn run_sticky_model_fallback_commit(
             actual: target_session.id().clone(),
         });
     }
+    let previous_checkpoint = match target_session
+        .try_checkpoint_state()
+        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?
+    {
+        meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
+        meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
+            return Err(CommitError::SnapshotInvalid(
+                "durable sticky fallback requires typed checkpoint authority".to_string(),
+            ));
+        }
+    };
     control_delta
         .validate_and_apply(&mut target_session)
         .map_err(CommitError::InvalidControlDelta)?;
+    let target_checkpoint = meerkat_core::SessionCheckpointStamp::successor(
+        &target_session,
+        &previous_checkpoint,
+        meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+    )
+    .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
+    target_session
+        .install_checkpoint_stamp(target_checkpoint)
+        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
     let target_snapshot = serde_json::to_vec(&target_session)
         .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
 

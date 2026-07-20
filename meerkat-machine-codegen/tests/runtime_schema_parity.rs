@@ -67,6 +67,9 @@ fn schema_shape_mismatches_for_schemas(
     if catalog.runtime_internal_inputs != production.runtime_internal_inputs {
         mismatches.push("runtime-internal input metadata".to_owned());
     }
+    if catalog.tlc_representative_inputs != production.tlc_representative_inputs {
+        mismatches.push("TLC representative input metadata".to_owned());
+    }
     if catalog.named_types != production.named_types {
         mismatches.push("named types".to_owned());
     }
@@ -831,6 +834,24 @@ fn schema_parity_gate_rejects_runtime_internal_input_metadata_drift() {
         input_alphabet(&catalog_schema).expect("catalog alphabet"),
         input_alphabet(&production_schema).expect("production alphabet"),
         "the old input-only gate would miss runtime-internal input metadata drift"
+    );
+}
+
+#[test]
+fn schema_parity_gate_rejects_tlc_representative_input_metadata_drift() {
+    let catalog_schema = dsl_mob_machine();
+    let mut production_schema = catalog_schema.clone();
+    production_schema.tlc_representative_inputs.clear();
+
+    assert_eq!(
+        schema_shape_mismatches_for_schemas(&catalog_schema, &production_schema),
+        vec!["TLC representative input metadata"],
+        "production schema parity must retain the source-owned lifecycle abstraction"
+    );
+    assert_eq!(
+        input_alphabet(&catalog_schema).expect("catalog alphabet"),
+        input_alphabet(&production_schema).expect("production alphabet"),
+        "TLC lifecycle abstraction metadata must not change the runtime input alphabet"
     );
 }
 

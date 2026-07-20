@@ -641,6 +641,30 @@ mod tests {
             self.inner.supports_compaction_projection_outbox()
         }
 
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleObservation,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.observe_machine_lifecycle(runtime_id).await
+        }
+
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+            replacement: meerkat_runtime::store::MachineLifecycleCommit,
+        ) -> Result<
+            meerkat_runtime::store::MachineLifecycleCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                .await
+        }
+
         fn auth_authority_key(&self) -> Option<String> {
             self.inner.auth_authority_key()
         }
@@ -1297,6 +1321,18 @@ mod tests {
             materialize_callback_memory_session(&service, &adapter, session).await;
             run_prompt(&adapter, &session_id, discarded_source).await;
 
+            let projection_store =
+                meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
+                    .expect("open session projection store before audit failure");
+            let projection_before_failure = projection_store
+                .load(&session_id)
+                .await
+                .expect("load session projection before audit failure")
+                .expect("session projection must exist before audit failure");
+            projection_before_failure
+                .try_checkpoint_state()
+                .expect("session projection must be coherent before audit failure");
+
             event_store.arm();
             let outcome = run_prompt_capture(
                 &adapter,
@@ -1313,6 +1349,14 @@ mod tests {
                 !matches!(outcome, Ok(CompletionOutcome::CallbackPending { .. })),
                 "a failed durable audit projection must not report clean callback completion: {outcome:?}"
             );
+            let projection_after_failure = projection_store
+                .load(&session_id)
+                .await
+                .expect("load session projection after audit failure")
+                .expect("session projection must survive audit failure");
+            projection_after_failure
+                .try_checkpoint_state()
+                .expect("audit failure must leave a coherent intermediate session projection");
 
             let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
             let pending = runtime_store
@@ -1338,14 +1382,19 @@ mod tests {
                 .expect("valid committed runtime snapshot must survive audit append failure");
             let runtime_session: Session =
                 serde_json::from_slice(&snapshot).expect("runtime snapshot is a session");
+            assert!(matches!(
+                runtime_session
+                    .try_checkpoint_state()
+                    .expect("prepared compaction checkpoint must remain coherent"),
+                meerkat_core::SessionCheckpointState::Verified(_)
+            ));
             assert!(has_compaction_summary(&runtime_session));
-            assert_eq!(
+            assert!(
                 runtime_session
                     .compaction_projection_intents()
                     .expect("read runtime snapshot outbox")
-                    .len(),
-                1,
-                "the surviving snapshot must carry the retryable projection intent"
+                    .is_empty(),
+                "the authoritative snapshot must be the exact cleaned checkpoint while the independent durable outbox retains retry custody"
             );
 
             let memory_store =
@@ -1421,6 +1470,23 @@ mod tests {
             .expect("runtime snapshot must survive into the new process");
         let resume_source: Session =
             serde_json::from_slice(&snapshot).expect("recovery snapshot is a session");
+        assert!(matches!(
+            resume_source
+                .try_checkpoint_state()
+                .expect("cold recovery source checkpoint must remain coherent"),
+            meerkat_core::SessionCheckpointState::Verified(_)
+        ));
+        let projection_store =
+            meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
+                .expect("open session projection store for checkpoint audit");
+        let projection = projection_store
+            .load(&session_id)
+            .await
+            .expect("load session projection for checkpoint audit")
+            .expect("session projection must survive into the new process");
+        projection
+            .try_checkpoint_state()
+            .expect("cold recovery session projection checkpoint must remain coherent");
         materialize_callback_memory_session(&service, &adapter, resume_source).await;
 
         tokio::time::timeout(Duration::from_secs(10), async {

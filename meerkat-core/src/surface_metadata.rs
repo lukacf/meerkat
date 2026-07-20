@@ -75,6 +75,8 @@ impl ReservedMetadataKey {
                 | crate::session::SESSION_TOOL_VISIBILITY_STATE_KEY
                 | crate::session::SESSION_LIFECYCLE_TERMINAL_KEY
                 | crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY
+                | crate::session::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY
+                | crate::session::SESSION_CHECKPOINT_STAMP_KEY
                 | crate::session::SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY
                 | crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY
                 | crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY

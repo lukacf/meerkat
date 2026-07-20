@@ -120,10 +120,11 @@ impl MeerkatMachine {
                     ),
                 }
             })?;
+            let phase = entry.control_snapshot().phase;
             let exact_claim = entry.epoch_id == lease.epoch_id
                 && Arc::ptr_eq(&entry.materialization_claim_state, &lease.claim_state)
                 && !entry.physical_attachment_is_live()
-                && entry.control_snapshot().phase == RuntimeState::Retired
+                && matches!(phase, RuntimeState::Retired | RuntimeState::Idle)
                 && lease
                     .claim_state
                     .lock()
@@ -135,9 +136,14 @@ impl MeerkatMachine {
             if !exact_claim {
                 return Err(RuntimeDriverError::StaleAuthority {
                     reason: format!(
-                        "archived-resume session {} lost its exact Retired claim before reset",
+                        "archived-resume session {} lost its exact quiescent claim before reset",
                         lease.session_id
                     ),
+                });
+            }
+            if phase == RuntimeState::Idle {
+                return Ok(ResetReport {
+                    inputs_abandoned: 0,
                 });
             }
             (Arc::clone(&entry.driver), Arc::clone(&entry.completions))

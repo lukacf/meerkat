@@ -77,12 +77,602 @@ use meerkat_core::comms::{
 };
 use meerkat_core::time_compat::{Duration, Instant, SystemTime};
 use meerkat_machine_kernels::generated::mob::command_capabilities as generated_mob_command_capabilities;
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 
 const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The identity lease is deliberately short and bounded. Reconciliation
+/// renews it while work remains queued; a crashed actor therefore leaves no
+/// durable process-lifecycle authority behind for the replacement actor to
+/// recover.
+const IDENTITY_RECONCILE_LEASE_TTL_MS: u64 = crate::identity::IDENTITY_LEASE_MAX_TTL_MS;
+const IDENTITY_RECONCILE_TICK_INTERVAL: Duration = Duration::from_millis(25);
+const IDENTITY_RECONCILE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Admission boundary for the deliberately narrow 0.8.2 recovery slice.
+///
+/// The generic intent/store/classifier substrate remains capable of later
+/// creation, retirement, external binding, and one-shot delivery work. The
+/// production actor must not durably accept those declarations until their
+/// target-local actuators exist. Desired wiring remains sealed as part of the
+/// complete topology snapshot, but non-empty topology is reported as a typed
+/// `RepairBlocked` condition in this release.
+/// Exact operation replay is checked before this predicate, so a committed
+/// result remains replayable after a lost acknowledgement.
+fn identity_recovery_slice_manifest_rejection(
+    manifest: &crate::identity::IdentityDeclarationManifest,
+) -> Option<String> {
+    use crate::identity::{
+        DesiredExecution, DesiredSessionAuthorityPolicy, IdentityDeclarationScopePrecondition,
+        IdentityMemberMaterialDeclaration,
+    };
+
+    if manifest.expected_scope != IdentityDeclarationScopePrecondition::Missing {
+        return Some(
+            "only a first, missing-scope legacy recovery declaration is supported".to_string(),
+        );
+    }
+    if manifest.members.is_empty() {
+        return Some("the legacy recovery declaration must contain a member".to_string());
+    }
+    for (identity, declaration) in &manifest.members {
+        if declaration.session_authority_policy != DesiredSessionAuthorityPolicy::RequireExisting {
+            return Some(format!(
+                "identity '{identity}' must require its existing session"
+            ));
+        }
+        if declaration.legacy_import.is_none() {
+            return Some(format!(
+                "identity '{identity}' requires exact verified legacy-import evidence"
+            ));
+        }
+        if declaration.initial_message.is_some() {
+            return Some(format!(
+                "identity '{identity}' cannot declare a fresh initial message during recovery"
+            ));
+        }
+        let execution = match &declaration.material {
+            IdentityMemberMaterialDeclaration::Profile(declaration) => &declaration.execution,
+            IdentityMemberMaterialDeclaration::Resolved { material } => &material.execution,
+        };
+        if !matches!(execution, DesiredExecution::ControllingSession) {
+            return Some(format!(
+                "identity '{identity}' requires unsupported non-controlling execution"
+            ));
+        }
+    }
+    None
+}
+
+/// A valid row can predate the actor's narrow production support. Refuse it
+/// visibly without claiming a lease or mutating any observed realization.
+fn identity_recovery_slice_intent_rejection(
+    record: &crate::identity::IdentityIntentRecord,
+) -> Option<String> {
+    use crate::identity::{
+        DesiredExecution, DesiredSessionAuthorityPolicy, IdentityIntent, IdentityRetirementPlan,
+    };
+
+    let IdentityIntent::Present {
+        session, member, ..
+    } = &record.intent
+    else {
+        return Some("absent-intent cleanup is outside the legacy recovery slice".to_string());
+    };
+    if session.authority_policy != DesiredSessionAuthorityPolicy::RequireExisting {
+        return Some("session creation is outside the legacy recovery slice".to_string());
+    }
+    if member.initial_delivery.is_some() {
+        return Some("initial delivery is outside the legacy recovery slice".to_string());
+    }
+    if !matches!(member.execution(), DesiredExecution::ControllingSession) {
+        return Some("non-controlling execution is outside the legacy recovery slice".to_string());
+    }
+    match &record.retirement_plan {
+        IdentityRetirementPlan::Targets { .. } => None,
+        IdentityRetirementPlan::NoKnownRealization => {
+            Some("the sealed intent is missing its exact realization custody plan".to_string())
+        }
+    }
+}
+
+fn identity_recovery_slice_unsupported_obligation(
+    decision: crate::identity::IdentityReconcileDecision,
+) -> bool {
+    use crate::identity::IdentityReconcileDecision;
+    matches!(
+        decision,
+        IdentityReconcileDecision::AcquireLease
+            | IdentityReconcileDecision::SealRetirementProven
+            | IdentityReconcileDecision::SealSessionCreationConsumed
+            | IdentityReconcileDecision::EnsureSessionAuthority
+            | IdentityReconcileDecision::AwaitExternalBindingCeremony
+            | IdentityReconcileDecision::EnsureExternalBindingReceipt
+            | IdentityReconcileDecision::EnsureExternalBinding
+            | IdentityReconcileDecision::EnsureInitialDeliveryReceipt
+            | IdentityReconcileDecision::EnsureInitialDelivery
+            | IdentityReconcileDecision::AwaitInitialDelivery
+            | IdentityReconcileDecision::ReconcileWiring
+            | IdentityReconcileDecision::RetireMemberMaterialization
+            | IdentityReconcileDecision::RetireRuntimeRegistration
+            | IdentityReconcileDecision::ReleaseSessionAuthority
+            | IdentityReconcileDecision::Tombstoned
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentitySessionLoadErrorClass {
+    Malformed,
+    Unavailable,
+}
+
+/// Classify a session read failure by its typed cause. Durable corruption and
+/// unsupported persistence are permanent observations; transport, I/O, and
+/// unknown failures remain retryable. Display text is diagnostic only.
+fn identity_session_load_error_class(
+    error: &meerkat_core::service::SessionError,
+) -> IdentitySessionLoadErrorClass {
+    use meerkat_core::service::SessionError;
+    use meerkat_core::{SessionCheckpointError, SessionStoreError};
+
+    match error {
+        SessionError::PersistenceDisabled | SessionError::Unsupported(_) => {
+            IdentitySessionLoadErrorClass::Malformed
+        }
+        SessionError::Store(source)
+            if source.downcast_ref::<SessionCheckpointError>().is_some() =>
+        {
+            IdentitySessionLoadErrorClass::Malformed
+        }
+        SessionError::Store(source) => match source.downcast_ref::<SessionStoreError>() {
+            Some(SessionStoreError::Serialization(_) | SessionStoreError::Corrupted(_)) => {
+                IdentitySessionLoadErrorClass::Malformed
+            }
+            Some(
+                SessionStoreError::Io(_)
+                | SessionStoreError::NotFound(_)
+                | SessionStoreError::MonotonicityViolation { .. }
+                | SessionStoreError::TranscriptContinuityViolation { .. }
+                | SessionStoreError::TranscriptRevisionConflict { .. }
+                | SessionStoreError::InvalidTranscriptRewrite { .. }
+                | SessionStoreError::Internal(_),
+            )
+            | None => IdentitySessionLoadErrorClass::Unavailable,
+        },
+        SessionError::NotFound { .. }
+        | SessionError::Busy { .. }
+        | SessionError::CompactionDisabled
+        | SessionError::NotRunning { .. }
+        | SessionError::Agent(_)
+        | SessionError::FailedWithData { .. } => IdentitySessionLoadErrorClass::Unavailable,
+    }
+}
+
+fn identity_session_error_detail(context: &'static str, error: &dyn std::fmt::Display) -> String {
+    let detail = error.to_string();
+    let detail = detail.trim();
+    if detail.is_empty() {
+        context.to_string()
+    } else {
+        format!("{context}: {detail}")
+    }
+}
+
+fn identity_session_observation_from_load_error(
+    error: &meerkat_core::service::SessionError,
+) -> Result<crate::identity::IdentitySessionObservation, crate::identity::IdentityIntentError> {
+    let detail = identity_session_error_detail("persisted session read failed", error);
+    match identity_session_load_error_class(error) {
+        IdentitySessionLoadErrorClass::Malformed => {
+            crate::identity::IdentitySessionObservation::malformed_unversioned(detail)
+        }
+        IdentitySessionLoadErrorClass::Unavailable => Ok(
+            crate::identity::IdentitySessionObservation::unavailable(detail),
+        ),
+    }
+}
+
+/// Pure observation mapper for the actor's persisted-session read boundary.
+/// Only a successful, explicit `None` is absence. A loaded document is first
+/// assigned an exact serialized target version, then its typed checkpoint is
+/// verified before it can become matching authority.
+fn identity_session_observation_from_persisted_load(
+    desired: &crate::identity::DesiredSessionTarget,
+    loaded: Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError>,
+) -> Result<crate::identity::IdentitySessionObservation, crate::identity::IdentityIntentError> {
+    use crate::identity::{IdentitySessionObservation, IdentityTargetObservationVersion};
+    use meerkat_core::checkpoint::SessionCheckpointState;
+
+    let session = match loaded {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            return IdentitySessionObservation::missing(format!(
+                "session-absent:{}",
+                desired.session_id
+            ));
+        }
+        Err(error) => return identity_session_observation_from_load_error(&error),
+    };
+    let bytes = match serde_json::to_vec(&session) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return IdentitySessionObservation::malformed_unversioned(
+                identity_session_error_detail(
+                    "loaded persisted session could not be serialized for exact observation",
+                    &error,
+                ),
+            );
+        }
+    };
+    let evidence_digest = MobActor::identity_evidence_digest(&bytes);
+    let version = evidence_digest.clone();
+    let target = IdentityTargetObservationVersion::Version {
+        version: version.clone(),
+    };
+
+    let checkpoint = match session.try_checkpoint_state() {
+        Ok(SessionCheckpointState::Verified(checkpoint)) => checkpoint,
+        Ok(SessionCheckpointState::LegacyUnverified { .. }) => {
+            return IdentitySessionObservation::ambiguous_divergence(
+                evidence_digest,
+                target,
+                "persisted session checkpoint is legacy-unverified",
+            );
+        }
+        Err(error) => {
+            return IdentitySessionObservation::malformed(
+                evidence_digest,
+                version,
+                identity_session_error_detail(
+                    "persisted session checkpoint verification failed",
+                    &error,
+                ),
+            );
+        }
+    };
+
+    if checkpoint.session_id() != &desired.session_id
+        || checkpoint.lineage_id() != &desired.lineage_id
+        || checkpoint.generation() != desired.lineage_generation
+    {
+        return IdentitySessionObservation::ambiguous_divergence(
+            evidence_digest,
+            target,
+            "persisted session checkpoint does not match desired session lineage authority",
+        );
+    }
+
+    match IdentitySessionObservation::matching(desired, &session, &session, version.clone()) {
+        Ok(observation) => Ok(observation),
+        Err(error) => IdentitySessionObservation::ambiguous_divergence(
+            evidence_digest,
+            IdentityTargetObservationVersion::Version { version },
+            error.to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod identity_session_observation_tests {
+    use super::{
+        IdentitySessionLoadErrorClass, MobActor, identity_session_load_error_class,
+        identity_session_observation_from_persisted_load,
+    };
+    use crate::identity::{
+        DesiredSessionAuthorityPolicy, DesiredSessionTarget, IdentityAuthorityCondition,
+        IdentityExternalCeremonyCondition, IdentityExternalTrustCondition,
+        IdentityInitialDeliveryCondition, IdentityLeaseCondition, IdentityReceiptCondition,
+        IdentityReconcileDecision, IdentityReconcileFacts, IdentityResourceCondition,
+        IdentitySessionCondition, IdentityTargetObservationVersion,
+        classify_identity_reconciliation,
+    };
+    use meerkat_core::checkpoint::{
+        SessionCheckpointError, SessionCheckpointProvenance, SessionCheckpointStamp,
+    };
+    use meerkat_core::service::SessionError;
+    use meerkat_core::{
+        Message, Session, SessionGeneration, SessionLineageId, SessionStoreError,
+        types::{SessionId, UserMessage},
+    };
+
+    fn desired_for(session: &Session) -> DesiredSessionTarget {
+        DesiredSessionTarget {
+            session_id: session.id().clone(),
+            lineage_id: SessionLineageId::for_session(session.id()),
+            lineage_generation: SessionGeneration::INITIAL,
+            authority_policy: DesiredSessionAuthorityPolicy::RequireExisting,
+        }
+    }
+
+    fn stamped_session() -> (DesiredSessionTarget, Session) {
+        let mut session = Session::with_id(SessionId::new());
+        let desired = desired_for(&session);
+        let stamp =
+            SessionCheckpointStamp::root(&session, SessionCheckpointProvenance::SessionCreated)
+                .expect("mint exact session checkpoint root");
+        session
+            .install_checkpoint_stamp(stamp)
+            .expect("install exact session checkpoint root");
+        (desired, session)
+    }
+
+    fn present_facts(session: IdentitySessionCondition) -> IdentityReconcileFacts {
+        IdentityReconcileFacts {
+            intent: IdentityAuthorityCondition::PresentRequireExisting,
+            lease: IdentityLeaseCondition::HeldByCurrentIncarnation,
+            external_binding_required: false,
+            initial_delivery_required: false,
+            session_creation_receipt: IdentityReceiptCondition::NotRequired,
+            retirement_receipt: IdentityReceiptCondition::NotRequired,
+            session,
+            runtime: IdentityResourceCondition::Missing,
+            member: IdentityResourceCondition::Missing,
+            external_binding_receipt: IdentityReceiptCondition::NotRequired,
+            external_trust: IdentityExternalTrustCondition::NotRequired,
+            external_ceremony: IdentityExternalCeremonyCondition::NotRequired,
+            initial_delivery_receipt: IdentityReceiptCondition::NotRequired,
+            initial_delivery: IdentityInitialDeliveryCondition::NotRequired,
+            wiring: IdentityResourceCondition::Missing,
+        }
+    }
+
+    #[test]
+    fn typed_session_load_error_table_never_launders_faults_into_missing() {
+        let session_id = SessionId::new();
+        let cases = vec![
+            (
+                SessionError::Store(Box::new(SessionStoreError::Serialization(
+                    "invalid persisted JSON".to_string(),
+                ))),
+                IdentitySessionLoadErrorClass::Malformed,
+            ),
+            (
+                SessionError::Store(Box::new(SessionStoreError::Corrupted(session_id.clone()))),
+                IdentitySessionLoadErrorClass::Malformed,
+            ),
+            (
+                SessionError::Store(Box::new(SessionCheckpointError::UnsupportedSchemaVersion(
+                    99,
+                ))),
+                IdentitySessionLoadErrorClass::Malformed,
+            ),
+            (
+                SessionError::PersistenceDisabled,
+                IdentitySessionLoadErrorClass::Malformed,
+            ),
+            (
+                SessionError::Unsupported("durable session reads".to_string()),
+                IdentitySessionLoadErrorClass::Malformed,
+            ),
+            (
+                SessionError::Store(Box::new(SessionStoreError::Io(std::io::Error::other(
+                    "database temporarily unavailable",
+                )))),
+                IdentitySessionLoadErrorClass::Unavailable,
+            ),
+            (
+                SessionError::Store(Box::new(std::io::Error::other("unknown transport wrapper"))),
+                IdentitySessionLoadErrorClass::Unavailable,
+            ),
+            (
+                SessionError::NotFound {
+                    id: session_id.clone(),
+                },
+                IdentitySessionLoadErrorClass::Unavailable,
+            ),
+            (
+                SessionError::Busy {
+                    id: session_id.clone(),
+                },
+                IdentitySessionLoadErrorClass::Unavailable,
+            ),
+        ];
+
+        let desired = DesiredSessionTarget {
+            session_id,
+            lineage_id: SessionLineageId::for_session(&SessionId::new()),
+            lineage_generation: SessionGeneration::INITIAL,
+            authority_policy: DesiredSessionAuthorityPolicy::RequireExisting,
+        };
+        for (error, expected) in cases {
+            assert_eq!(identity_session_load_error_class(&error), expected);
+            let observation =
+                identity_session_observation_from_persisted_load(&desired, Err(error))
+                    .expect("typed load failure must produce a total observation");
+            let expected_condition = match expected {
+                IdentitySessionLoadErrorClass::Malformed => IdentitySessionCondition::Malformed,
+                IdentitySessionLoadErrorClass::Unavailable => IdentitySessionCondition::Unavailable,
+            };
+            assert_eq!(observation.condition(), expected_condition);
+            assert_eq!(
+                observation
+                    .target_precondition()
+                    .expect("load failure target precondition"),
+                None,
+            );
+            assert_eq!(
+                observation.malformed_unversioned_detail().is_some(),
+                expected == IdentitySessionLoadErrorClass::Malformed,
+            );
+        }
+
+        let missing = identity_session_observation_from_persisted_load(&desired, Ok(None))
+            .expect("explicit successful absence must be observable");
+        assert_eq!(missing.condition(), IdentitySessionCondition::Missing);
+    }
+
+    #[test]
+    fn loaded_checkpoint_corruption_is_versioned_malformed_before_matching() {
+        let (desired, mut session) = stamped_session();
+        session.push(Message::User(UserMessage::text(
+            "mutation after checkpoint stamp".to_string(),
+        )));
+        let exact_bytes = serde_json::to_vec(&session).expect("serialize corrupt checkpoint row");
+        let expected_version = MobActor::identity_evidence_digest(&exact_bytes);
+
+        let observation =
+            identity_session_observation_from_persisted_load(&desired, Ok(Some(session)))
+                .expect("checkpoint corruption must remain a total observation");
+        assert_eq!(observation.condition(), IdentitySessionCondition::Malformed);
+        assert_eq!(
+            observation
+                .target_precondition()
+                .expect("versioned malformed target precondition"),
+            Some(IdentityTargetObservationVersion::Version {
+                version: expected_version,
+            }),
+        );
+        assert_eq!(observation.verified_checkpoint(), None);
+        assert_eq!(observation.malformed_unversioned_detail(), None);
+    }
+
+    #[test]
+    fn legacy_or_wrong_desired_checkpoint_authority_remains_ambiguous() {
+        let legacy = Session::with_id(SessionId::new());
+        let legacy_observation = identity_session_observation_from_persisted_load(
+            &desired_for(&legacy),
+            Ok(Some(legacy)),
+        )
+        .expect("legacy checkpoint state must remain observable");
+        assert_eq!(
+            legacy_observation.condition(),
+            IdentitySessionCondition::AmbiguousDivergence,
+        );
+
+        let (mut desired, session) = stamped_session();
+        desired.lineage_id = SessionLineageId::for_session(&SessionId::new());
+        let mismatch =
+            identity_session_observation_from_persisted_load(&desired, Ok(Some(session)))
+                .expect("desired lineage mismatch must remain observable");
+        assert_eq!(
+            mismatch.condition(),
+            IdentitySessionCondition::AmbiguousDivergence,
+        );
+    }
+
+    #[test]
+    fn actor_mapper_drives_permanent_corruption_to_block_and_io_to_backoff() {
+        let desired = DesiredSessionTarget {
+            session_id: SessionId::new(),
+            lineage_id: SessionLineageId::for_session(&SessionId::new()),
+            lineage_generation: SessionGeneration::INITIAL,
+            authority_policy: DesiredSessionAuthorityPolicy::RequireExisting,
+        };
+        let permanent = identity_session_observation_from_persisted_load(
+            &desired,
+            Err(SessionError::Store(Box::new(
+                SessionStoreError::Serialization("persisted garbage".to_string()),
+            ))),
+        )
+        .expect("permanent corruption observation");
+        let transient = identity_session_observation_from_persisted_load(
+            &desired,
+            Err(SessionError::Store(Box::new(SessionStoreError::Io(
+                std::io::Error::other("database locked"),
+            )))),
+        )
+        .expect("transient I/O observation");
+
+        assert_eq!(
+            classify_identity_reconciliation(present_facts(permanent.condition())),
+            IdentityReconcileDecision::RepairBlocked,
+        );
+        assert_eq!(
+            classify_identity_reconciliation(present_facts(transient.condition())),
+            IdentityReconcileDecision::Backoff,
+        );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdentityMemberActuationDisposition {
+    Applied,
+    Conflict { detail: String },
+    RepairBlocked { detail: String },
+    Backoff { detail: String },
+}
+
+fn identity_member_actuation_disposition(
+    result: &Result<super::handle::MemberSpawnReceipt, MobError>,
+) -> IdentityMemberActuationDisposition {
+    let Err(error) = result else {
+        return IdentityMemberActuationDisposition::Applied;
+    };
+    let MobError::StorageError(source) = error else {
+        return IdentityMemberActuationDisposition::Backoff {
+            detail: error.to_string(),
+        };
+    };
+    match source.downcast_ref::<crate::store::MobStoreError>() {
+        Some(crate::store::MobStoreError::CasConflict(detail)) => {
+            IdentityMemberActuationDisposition::Conflict {
+                detail: detail.clone(),
+            }
+        }
+        Some(crate::store::MobStoreError::IdentityAuthorityBlocked { detail, .. }) => {
+            IdentityMemberActuationDisposition::RepairBlocked {
+                detail: detail.clone(),
+            }
+        }
+        Some(crate::store::MobStoreError::WriteFailed(detail)) => {
+            IdentityMemberActuationDisposition::Backoff {
+                detail: detail.clone(),
+            }
+        }
+        Some(other) => IdentityMemberActuationDisposition::Backoff {
+            detail: other.to_string(),
+        },
+        None => IdentityMemberActuationDisposition::Backoff {
+            detail: error.to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod identity_recovery_slice_tests {
+    use super::{
+        IdentityMemberActuationDisposition, identity_member_actuation_disposition,
+        identity_recovery_slice_unsupported_obligation,
+    };
+    use crate::identity::IdentityReconcileDecision;
+    use crate::{MobError, store::MobStoreError};
+
+    #[test]
+    fn nonempty_wiring_remains_a_typed_unsupported_obligation() {
+        assert!(identity_recovery_slice_unsupported_obligation(
+            IdentityReconcileDecision::ReconcileWiring
+        ));
+    }
+
+    #[test]
+    fn member_actuation_store_outcomes_preserve_causal_disposition() {
+        let conflict = Err::<super::super::handle::MemberSpawnReceipt, _>(MobError::from(
+            MobStoreError::CasConflict("stale member observation".to_string()),
+        ));
+        assert!(matches!(
+            identity_member_actuation_disposition(&conflict),
+            IdentityMemberActuationDisposition::Conflict { ref detail }
+                if detail == "stale member observation"
+        ));
+
+        let repair_blocked = Err::<super::super::handle::MemberSpawnReceipt, _>(MobError::from(
+            MobStoreError::IdentityAuthorityBlocked {
+                evidence_digest: Some(format!("sha256:{}", "c".repeat(64))),
+                detail: "unsafe member evidence".to_string(),
+            },
+        ));
+        assert!(matches!(
+            identity_member_actuation_disposition(&repair_blocked),
+            IdentityMemberActuationDisposition::RepairBlocked { ref detail }
+                if detail == "unsafe member evidence"
+        ));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostOrphanReleaseReservation {
@@ -1169,6 +1759,12 @@ fn disposal_uses_host_release_authority(host_owned: bool) -> bool {
 }
 #[cfg(test)]
 pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub(super) static IDENTITY_RECONCILE_COMPLETION_REQUEUES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub(super) static IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static FAIL_SESSION_INGRESS_DETACH_FOR_SESSION: std::sync::Mutex<Option<SessionId>> =
@@ -2437,6 +3033,14 @@ pub(super) struct PendingSpawn {
     pub(super) admitted_bridge_session_id: SessionId,
     pub(super) prompt: ContentInput,
     pub(super) initial_turn_prompt: Option<ContentInput>,
+    /// Identity reconciliation resumes an already authoritative transcript.
+    /// Starting its autonomous runtime must not manufacture a fresh kickoff
+    /// prompt when the sealed intent has no pending initial delivery.
+    pub(super) suppress_autonomous_initial_prompt: bool,
+    /// Target-local identity authority for the final structural member CAS.
+    /// The built-in member store revalidates this after provisioning; it is
+    /// volatile scheduling custody, never recovered machine state.
+    pub(super) identity_member_permit: Option<crate::identity::IdentityActuationPermit>,
     pub(super) runtime_mode: crate::MobRuntimeMode,
     pub(super) labels: std::collections::BTreeMap<String, String>,
     pub(super) owner_bridge_session_id: Option<SessionId>,
@@ -2960,6 +3564,8 @@ struct SpawnFinalizeCtx {
     runtime_mode: crate::MobRuntimeMode,
     prompt: ContentInput,
     initial_turn_prompt: Option<ContentInput>,
+    suppress_autonomous_initial_prompt: bool,
+    identity_member_permit: Option<crate::identity::IdentityActuationPermit>,
     labels: std::collections::BTreeMap<String, String>,
     operation_id: meerkat_core::ops::OperationId,
     owner_bridge_session_id: Option<SessionId>,
@@ -3845,6 +4451,24 @@ pub(super) struct MobActor {
     pub(super) member_revival_locks:
         Arc<tokio::sync::Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>>,
     pub(super) runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+    /// Sole desired-state authority for identity intents, leases, and custody.
+    pub(super) identity: Arc<dyn crate::store::MobIdentityStore>,
+    /// Built-in atomic join between identity authority and the structural
+    /// member event target. Split custom stores cannot provide this guarantee.
+    pub(super) identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
+    /// Replaceable output-only identity convergence diagnostics.
+    pub(super) identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
+    /// Volatile scheduling only. Desired state and progress are always
+    /// re-observed from their owning stores before one obligation executes.
+    pub(super) identity_reconcile_queue: VecDeque<AgentIdentity>,
+    pub(super) identity_reconcile_enqueued: BTreeSet<AgentIdentity>,
+    /// Volatile actuator diagnostics only. They are never classifier input or
+    /// restart authority; the next cold process simply re-observes.
+    pub(super) identity_reconcile_failures: Arc<RwLock<BTreeMap<AgentIdentity, String>>>,
+    /// Stable logical controller id plus this process-local incarnation.
+    /// Neither value is checkpoint content authority.
+    pub(super) identity_reconcile_holder_id: String,
+    pub(super) identity_reconcile_incarnation_id: String,
     pub(super) supervisor_bridge: Arc<super::MobSupervisorBridge>,
     /// Phase 6b (ADJ-P6B-1): the LOCAL-branch live gateway — the ONE
     /// extracted live pipeline behind the session-id-addressed
@@ -3889,6 +4513,11 @@ pub(super) struct MobActor {
     /// authority inside the actor.
     pub(super) phase_watch_tx: tokio::sync::watch::Sender<MobState>,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    /// Fresh process-local dispatcher services for identity reconciliation.
+    /// The provider is never persisted and receives only an exact sealed
+    /// intent key; it cannot mutate portable desired material.
+    pub(super) identity_local_external_tools_provider:
+        Option<Arc<dyn super::IdentityLocalExternalToolsProvider>>,
     /// Per-spawn external-tool overlays (`SpawnMemberSpec.external_tools`)
     /// retained for the member's lifetime so machine-authorized revival
     /// recomposes the same dispatcher stack the spawn used. Entries are
@@ -12274,11 +12903,13 @@ impl MobActor {
         )
     }
 
-    /// Start the autonomous runtime for a member and deliver its initial prompt.
+    /// Start the autonomous runtime for a member and optionally deliver its
+    /// initial prompt.
     ///
     /// Sets up the keep-alive infrastructure (comms drain, dispatch capability)
-    /// then delivers the prompt as a normal turn. The session was created with
-    /// `InitialTurnPolicy::Defer` so the prompt hasn't been executed yet.
+    /// then, when `prompt` is present, delivers it as a normal turn. Identity
+    /// reconciliation passes `None`: the resumed session already owns its
+    /// transcript and must not receive a manufactured kickoff.
     ///
     /// Two paths:
     /// - **Runtime-backed (adapter present):** Builds `Input::Prompt` and calls
@@ -12291,7 +12922,7 @@ impl MobActor {
         &mut self,
         agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
-        prompt: meerkat_core::types::ContentInput,
+        prompt: Option<meerkat_core::types::ContentInput>,
     ) -> Result<(), MobError> {
         self.ensure_autonomous_runtime_ready(agent_identity, member_ref)
             .await?;
@@ -12327,6 +12958,14 @@ impl MobActor {
                 "start_autonomous_member/startup_mark_ready",
             )?;
         }
+
+        let Some(prompt) = prompt else {
+            tracing::debug!(
+                agent_identity = %agent_identity,
+                "autonomous member runtime resumed without a fresh kickoff"
+            );
+            return Ok(());
+        };
 
         let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
             MobError::Internal(format!(
@@ -13596,13 +14235,25 @@ impl MobActor {
                     return ScopeAdmission::Denied;
                 };
                 let policy = self.resolve_control_policy_for(principal);
-                match policy.require(required) {
-                    Ok(()) => ScopeAdmission::Admitted(cmd),
-                    Err(denial) => {
+                let additional_required =
+                    matches!(&cmd, MobCommand::ApplyIdentityDeclarationManifest { .. }).then_some(
+                        [
+                            mob_dsl::ControlScope::SendCommand,
+                            mob_dsl::ControlScope::WireTopology,
+                        ],
+                    );
+                for required in std::iter::once(required).chain(
+                    additional_required
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|scopes| scopes.iter().copied()),
+                ) {
+                    if let Err(denial) = policy.require(required) {
                         cmd.reject_scope_denied(denial);
-                        ScopeAdmission::Denied
+                        return ScopeAdmission::Denied;
                     }
                 }
+                ScopeAdmission::Admitted(cmd)
             }
         }
     }
@@ -15523,6 +16174,1623 @@ impl MobActor {
         self.shutdown_actor_owned_background_work().await;
     }
 
+    fn enqueue_identity_reconcile(&mut self, identity: AgentIdentity) {
+        if self.identity_reconcile_enqueued.insert(identity.clone()) {
+            self.identity_reconcile_queue.push_back(identity);
+        }
+    }
+
+    fn enqueue_identity_declaration_outcome(
+        &mut self,
+        outcome: &crate::identity::IdentityDeclarationManifestApplyOutcome,
+    ) {
+        for identity in outcome.identities.keys() {
+            self.enqueue_identity_reconcile(identity.clone());
+        }
+    }
+
+    fn identity_reconcile_now_ms() -> Result<u64, MobError> {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .map_err(|error| {
+                MobError::Internal(format!("identity reconcile clock failed: {error}"))
+            })
+    }
+
+    fn identity_evidence_digest(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    async fn replace_identity_reconcile_status(
+        &mut self,
+        identity: &AgentIdentity,
+        intent_revision: Option<u64>,
+        lease_epoch: Option<u64>,
+        decision: crate::identity::IdentityReconcileDecision,
+        detail: Option<String>,
+    ) {
+        let observed_at_ms = Self::identity_reconcile_now_ms().unwrap_or_default();
+        let status = crate::identity::IdentityConvergenceStatus {
+            identity: identity.clone(),
+            intent_revision,
+            lease_epoch,
+            decision: Some(decision),
+            observed_at_ms,
+            detail,
+        };
+        let identity_status = Arc::clone(&self.identity_status);
+        let mob_id = self.definition.id.clone();
+        let projected_identity = identity.clone();
+
+        // Status is deliberately output-only. Queue its best-effort projection
+        // on actor-owned I/O custody so a slow, unavailable, or corrupt status
+        // store cannot delay the actuator or the causal re-observation that
+        // follows it. Shutdown may abort this replaceable diagnostic write.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.actor_io_tasks.spawn(async move {
+            if let Err(error) = identity_status
+                .replace_identity_convergence_status(&mob_id, &status)
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    agent_identity = %projected_identity,
+                    error = %error,
+                    "identity convergence status projection failed"
+                );
+            }
+        });
+
+        // wasm has no Send task executor in this crate. Keep the same
+        // output-only error semantics there without changing the native actor
+        // convergence boundary.
+        #[cfg(target_arch = "wasm32")]
+        if let Err(error) = identity_status
+            .replace_identity_convergence_status(&mob_id, &status)
+            .await
+        {
+            tracing::warn!(
+                mob_id = %mob_id,
+                agent_identity = %projected_identity,
+                error = %error,
+                "identity convergence status projection failed"
+            );
+        }
+    }
+
+    async fn record_identity_member_terminal_disposition(
+        &mut self,
+        identity: &AgentIdentity,
+        intent_revision: u64,
+        lease_epoch: u64,
+        disposition: IdentityMemberActuationDisposition,
+    ) {
+        match disposition {
+            IdentityMemberActuationDisposition::Applied => {
+                self.identity_reconcile_failures
+                    .write()
+                    .await
+                    .remove(identity);
+            }
+            IdentityMemberActuationDisposition::Conflict { detail } => {
+                self.identity_reconcile_failures
+                    .write()
+                    .await
+                    .remove(identity);
+                tracing::debug!(
+                    agent_identity = %identity,
+                    detail = %detail,
+                    "identity member CAS conflicted; re-observing the target"
+                );
+            }
+            IdentityMemberActuationDisposition::RepairBlocked { detail } => {
+                self.identity_reconcile_failures
+                    .write()
+                    .await
+                    .insert(identity.clone(), detail.clone());
+                self.replace_identity_reconcile_status(
+                    identity,
+                    Some(intent_revision),
+                    Some(lease_epoch),
+                    crate::identity::IdentityReconcileDecision::RepairBlocked,
+                    Some(detail),
+                )
+                .await;
+            }
+            IdentityMemberActuationDisposition::Backoff { detail } => {
+                self.identity_reconcile_failures
+                    .write()
+                    .await
+                    .insert(identity.clone(), detail.clone());
+                self.replace_identity_reconcile_status(
+                    identity,
+                    Some(intent_revision),
+                    Some(lease_epoch),
+                    crate::identity::IdentityReconcileDecision::Backoff,
+                    Some(detail),
+                )
+                .await;
+            }
+        }
+
+        // Terminal completion is the causal wake. It is serialized by this
+        // actor before best-effort reply delivery, so a dropped reply cannot
+        // strand convergence until the periodic intent scan.
+        self.enqueue_identity_reconcile(identity.clone());
+        #[cfg(test)]
+        IDENTITY_RECONCILE_COMPLETION_REQUEUES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn identity_unobserved_facts(
+        intent: crate::identity::IdentityAuthorityCondition,
+        lease: crate::identity::IdentityLeaseCondition,
+    ) -> crate::identity::IdentityReconcileFacts {
+        crate::identity::IdentityReconcileFacts {
+            intent,
+            lease,
+            external_binding_required: false,
+            initial_delivery_required: false,
+            session_creation_receipt: crate::identity::IdentityReceiptCondition::Unavailable,
+            retirement_receipt: crate::identity::IdentityReceiptCondition::Unavailable,
+            session: crate::identity::IdentitySessionCondition::Unavailable,
+            runtime: crate::identity::IdentityResourceCondition::Unavailable,
+            member: crate::identity::IdentityResourceCondition::Unavailable,
+            external_binding_receipt: crate::identity::IdentityReceiptCondition::NotRequired,
+            external_trust: crate::identity::IdentityExternalTrustCondition::NotRequired,
+            external_ceremony: crate::identity::IdentityExternalCeremonyCondition::NotRequired,
+            initial_delivery_receipt: crate::identity::IdentityReceiptCondition::NotRequired,
+            initial_delivery: crate::identity::IdentityInitialDeliveryCondition::NotRequired,
+            wiring: crate::identity::IdentityResourceCondition::Unavailable,
+        }
+    }
+
+    fn identity_authority_condition(
+        observation: &crate::identity::IdentityStoredObservation<
+            crate::identity::IdentityIntentRecord,
+        >,
+    ) -> crate::identity::IdentityAuthorityCondition {
+        use crate::identity::{
+            DesiredSessionAuthorityPolicy, IdentityAuthorityCondition, IdentityIntent,
+            IdentityStoredObservation,
+        };
+        match observation {
+            IdentityStoredObservation::Missing => IdentityAuthorityCondition::Missing,
+            IdentityStoredObservation::Unsupported { .. }
+            | IdentityStoredObservation::Malformed { .. } => IdentityAuthorityCondition::Malformed,
+            IdentityStoredObservation::Valid(record) => match &record.intent {
+                IdentityIntent::Present { session, .. } => match session.authority_policy {
+                    DesiredSessionAuthorityPolicy::CreateIfAbsent => {
+                        IdentityAuthorityCondition::PresentCreateIfAbsent
+                    }
+                    DesiredSessionAuthorityPolicy::RequireExisting => {
+                        IdentityAuthorityCondition::PresentRequireExisting
+                    }
+                },
+                IdentityIntent::Absent { .. } => IdentityAuthorityCondition::Absent,
+            },
+        }
+    }
+
+    fn identity_lease_condition(
+        &self,
+        observation: &crate::identity::IdentityStoredObservation<
+            crate::identity::IdentityLeaseRecord,
+        >,
+        now_ms: u64,
+    ) -> crate::identity::IdentityLeaseCondition {
+        use crate::identity::{IdentityLeaseCondition, IdentityStoredObservation};
+        match observation {
+            IdentityStoredObservation::Missing => IdentityLeaseCondition::Missing,
+            IdentityStoredObservation::Unsupported { .. }
+            | IdentityStoredObservation::Malformed { .. } => IdentityLeaseCondition::Malformed,
+            IdentityStoredObservation::Valid(record) => match &record.active {
+                None => IdentityLeaseCondition::Missing,
+                Some(active)
+                    if active.holder_id == self.identity_reconcile_holder_id
+                        && active.incarnation_id == self.identity_reconcile_incarnation_id
+                        && now_ms < active.expires_at_ms =>
+                {
+                    IdentityLeaseCondition::HeldByCurrentIncarnation
+                }
+                Some(active) if now_ms >= active.expires_at_ms => {
+                    IdentityLeaseCondition::HeldByExpiredIncarnation
+                }
+                Some(_) => IdentityLeaseCondition::HeldByOtherLiveIncarnation,
+            },
+        }
+    }
+
+    async fn observe_identity_session(
+        &self,
+        desired: &crate::identity::DesiredSessionTarget,
+    ) -> crate::identity::IdentitySessionObservation {
+        let loaded = self
+            .session_service
+            .load_persisted_session(&desired.session_id)
+            .await;
+        match identity_session_observation_from_persisted_load(desired, loaded) {
+            Ok(observation) => observation,
+            Err(error) => crate::identity::IdentitySessionObservation::unavailable(format!(
+                "persisted session observation construction failed: {error}"
+            )),
+        }
+    }
+
+    async fn observe_identity_member(
+        &self,
+        identity: &AgentIdentity,
+        intent: &crate::identity::IdentityIntentRecord,
+    ) -> crate::identity::IdentityResourceObservation {
+        if self.pending_spawns.contains_member(identity) {
+            return crate::identity::IdentityResourceObservation::Unavailable {
+                detail: "member materialization is in flight".to_string(),
+            };
+        }
+        let Some(store) = self.identity_member.as_ref() else {
+            return crate::identity::IdentityResourceObservation::Unavailable {
+                detail: "atomic identity/member store capability is unavailable".to_string(),
+            };
+        };
+        match store
+            .observe_identity_member_target(&self.definition.id, identity)
+            .await
+        {
+            Ok(observation) => observation.resource_observation_against(intent),
+            Err(error) => crate::identity::IdentityResourceObservation::Unavailable {
+                detail: error.to_string(),
+            },
+        }
+    }
+
+    /// The 0.8.2 recovery slice proves only an empty local/local topology.
+    /// Direct desired wiring remains sealed in the intent substrate, but any
+    /// non-empty desired or observed incident topology is a typed refusal; no
+    /// structural, generated-graph, or comms-trust mutation is attempted.
+    async fn observe_identity_wiring_empty(
+        &self,
+        identity: &AgentIdentity,
+        desired_incident_wiring: &BTreeSet<crate::identity::DesiredIdentityEdge>,
+    ) -> crate::identity::IdentityResourceObservation {
+        use crate::store::IdentityWiringTargetObservation;
+        use meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind;
+
+        if !desired_incident_wiring.is_empty() {
+            return crate::identity::IdentityResourceObservation::Malformed {
+                observed_version: None,
+                detail: "non-empty desired wiring requires a target-atomic graph/trust actuator outside the 0.8.2 recovery slice"
+                    .to_string(),
+            };
+        }
+        let Some(member_store) = self.identity_member.as_ref() else {
+            return crate::identity::IdentityResourceObservation::Unavailable {
+                detail: "atomic identity/wiring observation capability is unavailable".to_string(),
+            };
+        };
+        let structural = match member_store
+            .observe_identity_wiring_target(&self.definition.id, identity)
+            .await
+        {
+            Ok(observation) => observation,
+            Err(error) => {
+                return crate::identity::IdentityResourceObservation::Unavailable {
+                    detail: error.to_string(),
+                };
+            }
+        };
+        match &structural {
+            IdentityWiringTargetObservation::Malformed {
+                observed_version,
+                detail,
+            } => {
+                return crate::identity::IdentityResourceObservation::Malformed {
+                    observed_version: observed_version.clone(),
+                    detail: detail.clone(),
+                };
+            }
+            IdentityWiringTargetObservation::Present { incident_edges, .. }
+                if !incident_edges.is_empty() =>
+            {
+                return crate::identity::IdentityResourceObservation::Malformed {
+                    observed_version: structural.target_precondition().map(|target| match target {
+                        crate::identity::IdentityTargetObservationVersion::Version { version } => {
+                            version
+                        }
+                        crate::identity::IdentityTargetObservationVersion::Absent {
+                            absence_version,
+                        } => absence_version,
+                        crate::identity::IdentityTargetObservationVersion::InsertIfAbsent => {
+                            "insert-if-absent".to_string()
+                        }
+                    }),
+                    detail:
+                        "non-empty structural wiring is RepairBlocked in the 0.8.2 recovery slice"
+                            .to_string(),
+                };
+            }
+            IdentityWiringTargetObservation::Absent { .. }
+            | IdentityWiringTargetObservation::Present { .. } => {}
+        }
+
+        for edge in &self.dsl_authority.state().wiring_edges {
+            if edge.a.0 == identity.as_str() || edge.b.0 == identity.as_str() {
+                return crate::identity::IdentityResourceObservation::Malformed {
+                    observed_version: None,
+                    detail: "non-empty generated wiring graph is RepairBlocked in the 0.8.2 recovery slice"
+                        .to_string(),
+                };
+            }
+        }
+
+        let roster_entries: Vec<RosterEntry> = self.roster.read().await.list().cloned().collect();
+        let current_entry = roster_entries
+            .iter()
+            .find(|entry| &entry.agent_identity == identity);
+        let machine_spec = match self
+            .machine_member_peer_spec_for(identity, "identity empty-wiring observation")
+        {
+            Ok(spec) => spec,
+            Err(error) => {
+                return crate::identity::IdentityResourceObservation::Malformed {
+                    observed_version: None,
+                    detail: error.to_string(),
+                };
+            }
+        };
+        let mut current_live = false;
+        if let Some(entry) = current_entry {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+            if self
+                .dsl_authority
+                .state()
+                .member_placement
+                .contains_key(&dsl_identity)
+            {
+                return crate::identity::IdentityResourceObservation::Malformed {
+                    observed_version: None,
+                    detail:
+                        "identity recovery wiring supports only controlling-session local endpoints"
+                            .to_string(),
+                };
+            }
+            let member_ref = match self
+                .machine_member_ref_for_behavior(entry, "identity empty-wiring observation")
+            {
+                Ok(member_ref) => member_ref,
+                Err(error) => {
+                    return crate::identity::IdentityResourceObservation::Malformed {
+                        observed_version: None,
+                        detail: error.to_string(),
+                    };
+                }
+            };
+            match member_ref {
+                MemberRef::BackendPeer { .. } => {
+                    return crate::identity::IdentityResourceObservation::Malformed {
+                        observed_version: None,
+                        detail: "identity recovery wiring supports only controlling-session local endpoints"
+                            .to_string(),
+                    };
+                }
+                MemberRef::Session { .. } => {
+                    if let Some(comms) = self.provisioner_comms(&member_ref).await {
+                        let rows = match comms
+                            .trusted_peer_projection_snapshot_for_source(
+                                GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+                            )
+                            .await
+                        {
+                            Ok(rows) => rows,
+                            Err(error) => {
+                                return crate::identity::IdentityResourceObservation::Unavailable {
+                                    detail: error.to_string(),
+                                };
+                            }
+                        };
+                        if !rows.is_empty() {
+                            return crate::identity::IdentityResourceObservation::Malformed {
+                                observed_version: None,
+                                detail: "non-empty source-scoped outgoing trust is RepairBlocked in the 0.8.2 recovery slice"
+                                    .to_string(),
+                            };
+                        }
+                        current_live = true;
+                    }
+                    // A normal keep_alive=false member may have no current
+                    // process-local comms actor. There is then no live trust
+                    // store to inspect; durable structural/generated wiring
+                    // remains the resource authority checked above.
+                }
+            }
+        }
+
+        if let Some(expected) = machine_spec.as_ref() {
+            let current_peer_id = Self::trusted_peer_removal_key(expected);
+            for entry in roster_entries {
+                if &entry.agent_identity == identity {
+                    continue;
+                }
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+                if self
+                    .dsl_authority
+                    .state()
+                    .member_placement
+                    .contains_key(&dsl_identity)
+                {
+                    continue;
+                }
+                let member_ref = match self
+                    .machine_member_ref_for_behavior(&entry, "identity empty-wiring inbound proof")
+                {
+                    Ok(member_ref @ MemberRef::Session { .. }) => member_ref,
+                    Ok(MemberRef::BackendPeer { .. }) | Err(_) => continue,
+                };
+                let Some(comms) = self.provisioner_comms(&member_ref).await else {
+                    continue;
+                };
+                let rows = match comms
+                    .trusted_peer_projection_snapshot_for_source(
+                        GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
+                    )
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        return crate::identity::IdentityResourceObservation::Unavailable {
+                            detail: error.to_string(),
+                        };
+                    }
+                };
+                if rows
+                    .iter()
+                    .any(|row| Self::trusted_peer_removal_key(row) == current_peer_id)
+                {
+                    return crate::identity::IdentityResourceObservation::Malformed {
+                        observed_version: None,
+                        detail: "non-empty source-scoped inbound trust is RepairBlocked in the 0.8.2 recovery slice"
+                            .to_string(),
+                    };
+                }
+            }
+        }
+
+        let version = Self::identity_evidence_digest(
+            format!(
+                "identity={identity};structural={structural:?};graph=empty;trust=empty;live={current_live}"
+            )
+            .as_bytes(),
+        );
+        // Empty wiring is a content fact, not a liveness requirement. A
+        // dormant local endpoint has no process-local trust store to mutate;
+        // member realization is classified independently.
+        crate::identity::IdentityResourceObservation::Matching { version }
+    }
+
+    async fn observe_identity_receipt_condition(
+        &self,
+        identity: &AgentIdentity,
+        slot: &crate::identity::IdentityOperationSlot,
+    ) -> crate::identity::IdentityReceiptCondition {
+        use crate::identity::{
+            IdentityOperationSubject, IdentityReceiptCondition, IdentityStoredObservation,
+        };
+        match self
+            .identity
+            .observe_identity_operation_receipt(
+                &self.definition.id,
+                &IdentityOperationSubject::Identity {
+                    identity: identity.clone(),
+                },
+                slot,
+            )
+            .await
+        {
+            Err(_) => IdentityReceiptCondition::Unavailable,
+            Ok(IdentityStoredObservation::Missing) => IdentityReceiptCondition::Missing,
+            Ok(
+                IdentityStoredObservation::Unsupported { .. }
+                | IdentityStoredObservation::Malformed { .. },
+            ) => IdentityReceiptCondition::Malformed,
+            Ok(IdentityStoredObservation::Valid(_)) => IdentityReceiptCondition::Matching,
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    fn identity_runtime_process_phase_is_fresh_idle(
+        record: &meerkat_runtime::store::DecodedMachineLifecycleObservation,
+    ) -> bool {
+        let binding = record.binding();
+        // Supervisor custody is recovered by its owning runtime protocol. It
+        // is not process-phase authority, so identity convergence must not
+        // mirror or classify that record.
+        record.runtime_state() == Some(meerkat_runtime::RuntimeState::Idle)
+            && binding.agent_runtime_id().is_none()
+            && binding.fence_token().is_none()
+            && binding.runtime_generation().is_none()
+            && binding.runtime_epoch_id().is_none()
+            && record.run().current_run_id().is_none()
+            && record.run().pre_run_phase().is_none()
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn observe_identity_runtime_target(
+        &self,
+        desired: &crate::identity::DesiredSessionTarget,
+    ) -> (
+        crate::identity::IdentityResourceObservation,
+        Option<meerkat_runtime::RuntimeSessionLifecycleObservation>,
+    ) {
+        use meerkat_runtime::store::MachineLifecycleObservation;
+
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return (
+                crate::identity::IdentityResourceObservation::Unavailable {
+                    detail: "identity runtime adapter is unavailable".to_string(),
+                },
+                None,
+            );
+        };
+        let observed = match runtime
+            .observe_cold_runtime_lifecycle(&desired.session_id)
+            .await
+        {
+            Ok(observed) => observed,
+            Err(meerkat_runtime::store::RuntimeStoreError::Unsupported(detail)) => {
+                return (
+                    crate::identity::IdentityResourceObservation::Malformed {
+                        observed_version: None,
+                        detail: format!(
+                            "runtime lifecycle observation capability is unsupported: {detail}"
+                        ),
+                    },
+                    None,
+                );
+            }
+            Err(error) => {
+                return (
+                    crate::identity::IdentityResourceObservation::Unavailable {
+                        detail: error.to_string(),
+                    },
+                    None,
+                );
+            }
+        };
+        let live = runtime.contains_session(&desired.session_id).await;
+        let resource = match observed.lifecycle() {
+            MachineLifecycleObservation::Missing if !live => {
+                crate::identity::IdentityResourceObservation::Missing {
+                    absence_version: format!("runtime-lifecycle-absent:{}", observed.runtime_id()),
+                }
+            }
+            MachineLifecycleObservation::Missing => {
+                crate::identity::IdentityResourceObservation::Malformed {
+                    observed_version: None,
+                    detail: "a live runtime exists without its durable lifecycle row".to_string(),
+                }
+            }
+            MachineLifecycleObservation::Decoded { record, version }
+                if Self::identity_runtime_process_phase_is_fresh_idle(record)
+                    && record.unregister_progress().is_none() =>
+            {
+                // Runtime lifecycle content is durable realization; the live
+                // map is process-local mechanics. Normal mob members use
+                // keep_alive=false, so their executor may quiesce after
+                // materialization while the exact unbound Idle row remains
+                // converged. Member liveness is observed independently below
+                // and must not force an endless runtime re-registration loop.
+                crate::identity::IdentityResourceObservation::Matching {
+                    version: version.as_str().to_string(),
+                }
+            }
+            MachineLifecycleObservation::Decoded { record, .. }
+                if live
+                    && Self::identity_runtime_process_phase_is_fresh_idle(record)
+                    && record.unregister_progress().is_some() =>
+            {
+                // Valid same-resource teardown authority is recovered by the
+                // runtime owner. It is transient, not malformed evidence and
+                // not authority for identity repair.
+                crate::identity::IdentityResourceObservation::Unavailable {
+                    detail: "runtime unregister recovery is still in progress".to_string(),
+                }
+            }
+            MachineLifecycleObservation::Decoded { version, .. } if !live => {
+                // Every persisted phase is observation of a dead process. The
+                // runtime actuator replaces it with a fresh unbound Idle shell
+                // over the existing session under this exact row version.
+                crate::identity::IdentityResourceObservation::Divergent {
+                    version: version.as_str().to_string(),
+                    detail: "durable runtime lifecycle has no live process shell".to_string(),
+                }
+            }
+            MachineLifecycleObservation::Decoded { version, .. } => {
+                crate::identity::IdentityResourceObservation::Malformed {
+                    observed_version: Some(version.as_str().to_string()),
+                    detail: "live runtime lifecycle is not a canonical stable Idle shell"
+                        .to_string(),
+                }
+            }
+            MachineLifecycleObservation::Unsupported {
+                record_version,
+                evidence_digest,
+                version,
+            } => crate::identity::IdentityResourceObservation::Malformed {
+                observed_version: Some(version.as_str().to_string()),
+                detail: format!(
+                    "unsupported runtime lifecycle record version {record_version} ({evidence_digest})"
+                ),
+            },
+            MachineLifecycleObservation::Malformed {
+                evidence_digest,
+                version,
+                detail,
+                ..
+            } => crate::identity::IdentityResourceObservation::Malformed {
+                observed_version: Some(version.as_str().to_string()),
+                detail: format!("malformed runtime lifecycle {evidence_digest}: {detail}"),
+            },
+        };
+        (resource, Some(observed))
+    }
+
+    #[cfg(not(feature = "runtime-adapter"))]
+    async fn observe_identity_runtime(
+        &self,
+        desired: &crate::identity::DesiredSessionTarget,
+    ) -> crate::identity::IdentityResourceObservation {
+        let _ = desired;
+        crate::identity::IdentityResourceObservation::Unavailable {
+            detail: "identity runtime reconciliation requires runtime-adapter".to_string(),
+        }
+    }
+
+    fn identity_actuation_permit(
+        &self,
+        identity: &AgentIdentity,
+        intent: &crate::identity::IdentityIntentRecord,
+        lease: &crate::identity::IdentityLeaseClaim,
+        target: crate::identity::IdentityActuatorTarget,
+        target_observation: crate::identity::IdentityTargetObservationVersion,
+    ) -> crate::identity::IdentityActuationPermit {
+        crate::identity::IdentityActuationPermit {
+            mob_id: self.definition.id.clone(),
+            identity: identity.clone(),
+            target,
+            intent_revision: intent.intent_revision,
+            intent_digest: intent.intent_digest.clone(),
+            intent_authority_digest: intent.authority_digest.clone(),
+            lease_epoch: lease.epoch,
+            lease_holder_id: lease.holder_id.clone(),
+            lease_incarnation_id: lease.incarnation_id.clone(),
+            lease_expires_at_ms: lease.expires_at_ms,
+            target_observation,
+        }
+    }
+
+    /// Refresh the bounded lease immediately before a target write.
+    ///
+    /// Observation and provisioning may legitimately take longer than one
+    /// lease window (the HomeCore snapshot is 82 MB). The resource witness and
+    /// intent authority remain unchanged; only the store-owned lease claim is
+    /// renewed/reclaimed here, then atomically revalidated by the actuator.
+    async fn renew_identity_actuation_lease(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<crate::identity::IdentityLeaseClaim>, MobError> {
+        use crate::identity::IdentityLeaseClaimOutcome;
+        match self
+            .identity
+            .claim_or_renew_identity_lease(
+                &self.definition.id,
+                identity,
+                &self.identity_reconcile_holder_id,
+                &self.identity_reconcile_incarnation_id,
+                IDENTITY_RECONCILE_LEASE_TTL_MS,
+            )
+            .await
+            .map_err(MobError::from)?
+        {
+            IdentityLeaseClaimOutcome::Acquired(claim)
+            | IdentityLeaseClaimOutcome::Renewed(claim) => Ok(Some(claim)),
+            IdentityLeaseClaimOutcome::HeldByOther(_) => Ok(None),
+        }
+    }
+
+    fn refresh_identity_permit_lease(
+        mut permit: crate::identity::IdentityActuationPermit,
+        lease: &crate::identity::IdentityLeaseClaim,
+    ) -> crate::identity::IdentityActuationPermit {
+        permit.lease_epoch = lease.epoch;
+        permit.lease_holder_id.clone_from(&lease.holder_id);
+        permit
+            .lease_incarnation_id
+            .clone_from(&lease.incarnation_id);
+        permit.lease_expires_at_ms = lease.expires_at_ms;
+        permit
+    }
+
+    async fn enqueue_all_identity_intents(&mut self) {
+        match self
+            .identity
+            .list_identity_intents(&self.definition.id)
+            .await
+        {
+            Ok(intents) => {
+                for (identity, observation) in intents {
+                    match observation {
+                        crate::identity::IdentityStoredObservation::Valid(_) => {
+                            self.enqueue_identity_reconcile(identity);
+                        }
+                        crate::identity::IdentityStoredObservation::Unsupported {
+                            evidence_digest,
+                            detail,
+                        } => {
+                            self.replace_identity_reconcile_status(
+                                &identity,
+                                None,
+                                None,
+                                crate::identity::IdentityReconcileDecision::RepairBlocked,
+                                Some(format!(
+                                    "unsupported identity intent row {evidence_digest}: {detail}"
+                                )),
+                            )
+                            .await;
+                        }
+                        crate::identity::IdentityStoredObservation::Malformed {
+                            evidence_digest,
+                            detail,
+                        } => {
+                            self.replace_identity_reconcile_status(
+                                &identity,
+                                None,
+                                None,
+                                crate::identity::IdentityReconcileDecision::RepairBlocked,
+                                Some(format!(
+                                    "malformed identity intent row {evidence_digest}: {detail}"
+                                )),
+                            )
+                            .await;
+                        }
+                        crate::identity::IdentityStoredObservation::Missing => {
+                            tracing::warn!(
+                                mob_id = %self.definition.id,
+                                agent_identity = %identity,
+                                "identity intent scan returned an impossible missing row"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "identity intent scan failed; periodic reconciliation will retry"
+            ),
+        }
+    }
+
+    async fn reconcile_next_identity(&mut self) {
+        let Some(identity) = self.identity_reconcile_queue.pop_front() else {
+            return;
+        };
+        self.identity_reconcile_enqueued.remove(&identity);
+        match self.reconcile_identity_once(&identity).await {
+            Ok(true) => self.enqueue_identity_reconcile(identity),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    error = %error,
+                    "identity reconciliation pass failed; periodic scan will retry"
+                );
+            }
+        }
+    }
+
+    async fn reconcile_identity_once(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<bool, MobError> {
+        use crate::identity::{
+            IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityActuatorTarget,
+            IdentityAuthorityCondition, IdentityExternalCeremonyCondition,
+            IdentityExternalTrustCondition, IdentityInitialDeliveryCondition, IdentityIntent,
+            IdentityLeaseClaimOutcome, IdentityLeaseCondition, IdentityOperationKind,
+            IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome,
+            IdentityOperationReceiptPayload, IdentityOperationSlot, IdentityOperationSubject,
+            IdentityReceiptCondition, IdentityReconcileDecision, IdentityStoredObservation,
+            IdentityTargetObservationVersion,
+        };
+
+        let intent_observation = match self
+            .identity
+            .observe_identity_intent(&self.definition.id, identity)
+            .await
+        {
+            Ok(observation) => observation,
+            Err(error) => {
+                let decision = crate::identity::classify_identity_reconciliation(
+                    Self::identity_unobserved_facts(
+                        IdentityAuthorityCondition::Unavailable,
+                        IdentityLeaseCondition::Unavailable,
+                    ),
+                );
+                self.replace_identity_reconcile_status(
+                    identity,
+                    None,
+                    None,
+                    decision,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Ok(false);
+            }
+        };
+        let intent_condition = Self::identity_authority_condition(&intent_observation);
+        let intent_record = match &intent_observation {
+            IdentityStoredObservation::Valid(record) => Some(record.clone()),
+            IdentityStoredObservation::Missing
+            | IdentityStoredObservation::Unsupported { .. }
+            | IdentityStoredObservation::Malformed { .. } => None,
+        };
+        if let Some(record) = intent_record.as_ref()
+            && let Some(reason) = identity_recovery_slice_intent_rejection(record)
+        {
+            self.replace_identity_reconcile_status(
+                identity,
+                Some(record.intent_revision),
+                None,
+                IdentityReconcileDecision::RepairBlocked,
+                Some(reason),
+            )
+            .await;
+            return Ok(false);
+        }
+        let now_ms = Self::identity_reconcile_now_ms()?;
+        let lease_observation = match self
+            .identity
+            .observe_identity_lease(&self.definition.id, identity)
+            .await
+        {
+            Ok(observation) => observation,
+            Err(error) => {
+                let decision = crate::identity::classify_identity_reconciliation(
+                    Self::identity_unobserved_facts(
+                        intent_condition,
+                        IdentityLeaseCondition::Unavailable,
+                    ),
+                );
+                self.replace_identity_reconcile_status(
+                    identity,
+                    intent_record.as_ref().map(|record| record.intent_revision),
+                    None,
+                    decision,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Ok(false);
+            }
+        };
+        let lease_condition = self.identity_lease_condition(&lease_observation, now_ms);
+        let preliminary = crate::identity::classify_identity_reconciliation(
+            Self::identity_unobserved_facts(intent_condition, lease_condition),
+        );
+        if preliminary == IdentityReconcileDecision::AcquireLease {
+            self.replace_identity_reconcile_status(
+                identity,
+                intent_record.as_ref().map(|record| record.intent_revision),
+                None,
+                preliminary,
+                None,
+            )
+            .await;
+            let outcome = self
+                .identity
+                .claim_or_renew_identity_lease(
+                    &self.definition.id,
+                    identity,
+                    &self.identity_reconcile_holder_id,
+                    &self.identity_reconcile_incarnation_id,
+                    IDENTITY_RECONCILE_LEASE_TTL_MS,
+                )
+                .await
+                .map_err(MobError::from)?;
+            #[cfg(any(test, feature = "test-support"))]
+            if matches!(&outcome, IdentityLeaseClaimOutcome::Acquired(_)) {
+                super::trigger_identity_recovery_fail_stop(
+                    super::IdentityRecoveryFailStopPoint::LeaseAcquired,
+                );
+            }
+            return Ok(matches!(
+                outcome,
+                IdentityLeaseClaimOutcome::Acquired(_) | IdentityLeaseClaimOutcome::Renewed(_)
+            ));
+        }
+        if lease_condition != IdentityLeaseCondition::HeldByCurrentIncarnation {
+            self.replace_identity_reconcile_status(
+                identity,
+                intent_record.as_ref().map(|record| record.intent_revision),
+                None,
+                preliminary,
+                None,
+            )
+            .await;
+            return Ok(false);
+        }
+        let Some(intent_record) = intent_record else {
+            self.replace_identity_reconcile_status(identity, None, None, preliminary, None)
+                .await;
+            return Ok(false);
+        };
+        let active_lease = match lease_observation {
+            IdentityStoredObservation::Valid(record) => record.active.ok_or_else(|| {
+                MobError::Internal(
+                    "current-incarnation lease observation had no active claim".to_string(),
+                )
+            })?,
+            IdentityStoredObservation::Missing
+            | IdentityStoredObservation::Unsupported { .. }
+            | IdentityStoredObservation::Malformed { .. } => {
+                return Err(MobError::Internal(
+                    "current-incarnation lease condition had no valid record".to_string(),
+                ));
+            }
+        };
+
+        let IdentityIntent::Present {
+            session, member, ..
+        } = &intent_record.intent
+        else {
+            unreachable!("absent intent was refused at the recovery-slice boundary")
+        };
+        let desired_incident_wiring = match &intent_record.retirement_plan {
+            crate::identity::IdentityRetirementPlan::Targets {
+                incident_wiring, ..
+            } => incident_wiring,
+            crate::identity::IdentityRetirementPlan::NoKnownRealization => {
+                return Err(MobError::Internal(
+                    "present identity intent is missing its store-sealed incident wiring plan"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let session_observation = self.observe_identity_session(session).await;
+        #[cfg(feature = "runtime-adapter")]
+        let (runtime_observation, runtime_target_observation) =
+            self.observe_identity_runtime_target(session).await;
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_observation = self.observe_identity_runtime(session).await;
+        let member_observation = self.observe_identity_member(identity, &intent_record).await;
+        let wiring_observation = self
+            .observe_identity_wiring_empty(identity, desired_incident_wiring)
+            .await;
+        let normalized_tombstone = intent_record.tombstone_generation.unwrap_or(0);
+        let session_creation_slot = IdentityOperationSlot::SessionCreationConsumed {
+            tombstone_generation: normalized_tombstone,
+            session_id: session.session_id.clone(),
+            lineage_id: session.lineage_id.clone(),
+            lineage_generation: session.lineage_generation,
+        };
+        let session_creation_receipt = match session.authority_policy {
+            crate::identity::DesiredSessionAuthorityPolicy::CreateIfAbsent => {
+                self.observe_identity_receipt_condition(identity, &session_creation_slot)
+                    .await
+            }
+            crate::identity::DesiredSessionAuthorityPolicy::RequireExisting => {
+                IdentityReceiptCondition::NotRequired
+            }
+        };
+        let (initial_delivery_required, initial_delivery_receipt, initial_delivery) =
+            if let Some(delivery) = &member.initial_delivery {
+                let slot = IdentityOperationSlot::InitialDelivery {
+                    tombstone_generation: normalized_tombstone,
+                    session_id: session.session_id.clone(),
+                    lineage_id: session.lineage_id.clone(),
+                    lineage_generation: session.lineage_generation,
+                    delivery_generation: delivery.delivery_generation,
+                };
+                let receipt = self
+                    .observe_identity_receipt_condition(identity, &slot)
+                    .await;
+                let evidence = match receipt {
+                    IdentityReceiptCondition::Missing => {
+                        IdentityInitialDeliveryCondition::ProvenAbsent
+                    }
+                    IdentityReceiptCondition::Matching => {
+                        // Until the runtime exposes an exact InputId readback,
+                        // ambiguous legacy content must never authorize replay.
+                        IdentityInitialDeliveryCondition::Indeterminate
+                    }
+                    IdentityReceiptCondition::Unavailable => {
+                        IdentityInitialDeliveryCondition::Unavailable
+                    }
+                    IdentityReceiptCondition::Conflicting
+                    | IdentityReceiptCondition::Malformed
+                    | IdentityReceiptCondition::NotRequired => {
+                        IdentityInitialDeliveryCondition::Malformed
+                    }
+                };
+                (true, receipt, evidence)
+            } else {
+                (
+                    false,
+                    IdentityReceiptCondition::NotRequired,
+                    IdentityInitialDeliveryCondition::NotRequired,
+                )
+            };
+        let external_binding_required = matches!(
+            member.execution(),
+            crate::identity::DesiredExecution::External { .. }
+        );
+        let mut facts = crate::identity::IdentityReconcileFacts {
+            intent: intent_condition,
+            lease: lease_condition,
+            external_binding_required,
+            initial_delivery_required,
+            session_creation_receipt,
+            retirement_receipt: IdentityReceiptCondition::NotRequired,
+            session: session_observation.condition(),
+            runtime: runtime_observation.condition(),
+            member: member_observation.condition(),
+            external_binding_receipt: IdentityReceiptCondition::NotRequired,
+            external_trust: IdentityExternalTrustCondition::NotRequired,
+            external_ceremony: IdentityExternalCeremonyCondition::NotRequired,
+            initial_delivery_receipt,
+            initial_delivery,
+            wiring: wiring_observation.condition(),
+        };
+        if external_binding_required {
+            // External ceremony is fresh process-local input. This narrow
+            // release slice deliberately waits rather than persisting it or
+            // fabricating trust from the desired address.
+            facts.external_binding_receipt = IdentityReceiptCondition::Unavailable;
+            facts.external_trust = IdentityExternalTrustCondition::Unavailable;
+            facts.external_ceremony = IdentityExternalCeremonyCondition::TemporarilyUnavailable;
+        }
+        let decision = crate::identity::classify_identity_reconciliation(facts);
+        let unsupported_obligation_detail =
+            identity_recovery_slice_unsupported_obligation(decision).then(|| {
+                format!(
+                    "generated obligation {decision:?} has no actuator in the 0.8.2 legacy recovery slice"
+                )
+            });
+        let reported_decision = if unsupported_obligation_detail.is_some() {
+            IdentityReconcileDecision::RepairBlocked
+        } else {
+            decision
+        };
+        let prior_actuator_failure = self
+            .identity_reconcile_failures
+            .read()
+            .await
+            .get(identity)
+            .cloned();
+        let classification_detail = matches!(
+            decision,
+            IdentityReconcileDecision::Backoff
+                | IdentityReconcileDecision::RepairBlocked
+                | IdentityReconcileDecision::Quarantined
+        )
+        .then(|| {
+            format!(
+                "fresh identity observations classified as {facts:?}; runtime={runtime_observation:?}; member={member_observation:?}; wiring={wiring_observation:?}"
+            )
+        });
+        self.replace_identity_reconcile_status(
+            identity,
+            Some(intent_record.intent_revision),
+            Some(active_lease.epoch),
+            reported_decision,
+            unsupported_obligation_detail
+                .clone()
+                .or(prior_actuator_failure)
+                .or(classification_detail),
+        )
+        .await;
+        if unsupported_obligation_detail.is_some() {
+            return Ok(false);
+        }
+
+        let action: Result<bool, MobError> = async {
+            match decision {
+                IdentityReconcileDecision::SealSessionCreationConsumed => {
+                    let Some(write_lease) = self.renew_identity_actuation_lease(identity).await?
+                    else {
+                        return Ok(true);
+                    };
+                    let checkpoint = session_observation
+                        .verified_checkpoint()
+                        .cloned()
+                        .ok_or_else(|| {
+                            MobError::Internal(
+                                "session-creation receipt decision had no verified checkpoint"
+                                    .to_string(),
+                            )
+                        })?;
+                    let permit = self.identity_actuation_permit(
+                        identity,
+                        &intent_record,
+                        &write_lease,
+                        IdentityActuatorTarget::SessionCreationReceipt,
+                        IdentityTargetObservationVersion::InsertIfAbsent,
+                    );
+                    let mut receipt = IdentityOperationReceipt {
+                        schema_version: IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION,
+                        mob_id: self.definition.id.clone(),
+                        subject: IdentityOperationSubject::Identity {
+                            identity: identity.clone(),
+                        },
+                        effect_kind: IdentityOperationKind::SessionCreationConsumed,
+                        slot: session_creation_slot,
+                        receipt_id: meerkat_core::ops::OperationId::new(),
+                        intent_revision: Some(intent_record.intent_revision),
+                        intent_digest: Some(intent_record.intent_digest.clone()),
+                        intent_authority_digest: Some(intent_record.authority_digest.clone()),
+                        tombstone_generation: intent_record.tombstone_generation,
+                        audit_lease_epoch: Some(write_lease.epoch),
+                        request_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                        payload: IdentityOperationReceiptPayload::SessionCreationConsumed {
+                            checkpoint,
+                        },
+                    };
+                    receipt.request_digest = receipt
+                        .canonical_request_digest()
+                        .map_err(|error| MobError::Internal(error.to_string()))?;
+                    match self
+                        .identity
+                        .insert_identity_operation_receipt_if_absent(&receipt, &permit)
+                        .await
+                        .map_err(MobError::from)?
+                    {
+                        IdentityOperationReceiptInsertOutcome::Inserted(_)
+                        | IdentityOperationReceiptInsertOutcome::ExistingExact(_)
+                        | IdentityOperationReceiptInsertOutcome::Conflict(_) => Ok(true),
+                    }
+                }
+                IdentityReconcileDecision::EnsureRuntimeRegistration => {
+                    let Some(write_lease) = self.renew_identity_actuation_lease(identity).await?
+                    else {
+                        return Ok(true);
+                    };
+                    let target = runtime_observation
+                        .target_precondition()
+                        .map_err(|error| MobError::Internal(error.to_string()))?
+                        .ok_or_else(|| {
+                            MobError::Internal(
+                                "runtime registration decision had no target-local witness"
+                                    .to_string(),
+                            )
+                        })?;
+                    let permit = self.identity_actuation_permit(
+                        identity,
+                        &intent_record,
+                        &write_lease,
+                        IdentityActuatorTarget::Runtime,
+                        target,
+                    );
+                    #[cfg(feature = "runtime-adapter")]
+                    {
+                        let runtime = self.runtime_adapter.as_ref().ok_or_else(|| {
+                            MobError::Internal("identity runtime adapter is unavailable".to_string())
+                        })?;
+                        let observed = runtime_target_observation.ok_or_else(|| {
+                            MobError::Internal(
+                                "runtime registration decision had no exact lifecycle observation"
+                                    .to_string(),
+                            )
+                        })?;
+                        let fence = self.identity.prepare_runtime_write_fence(
+                            permit,
+                            session.clone(),
+                            &observed,
+                        )?;
+                        match runtime
+                            .register_session_if_runtime_lifecycle_current(observed, fence)
+                            .await
+                        {
+                            meerkat_runtime::RuntimeSessionRegistrationOutcome::Applied { .. } => {
+                                #[cfg(any(test, feature = "test-support"))]
+                                super::trigger_identity_recovery_fail_stop(
+                                    super::IdentityRecoveryFailStopPoint::RuntimeCasApplied,
+                                );
+                                Ok(true)
+                            }
+                            meerkat_runtime::RuntimeSessionRegistrationOutcome::AlreadyExact {
+                                ..
+                            }
+                            | meerkat_runtime::RuntimeSessionRegistrationOutcome::Conflict {
+                                ..
+                            } => Ok(true),
+                            meerkat_runtime::RuntimeSessionRegistrationOutcome::RepairBlocked {
+                                reason,
+                                ..
+                            } => {
+                                self.replace_identity_reconcile_status(
+                                    identity,
+                                    Some(intent_record.intent_revision),
+                                    Some(write_lease.epoch),
+                                    IdentityReconcileDecision::RepairBlocked,
+                                    Some(reason),
+                                )
+                                .await;
+                                Ok(false)
+                            }
+                            meerkat_runtime::RuntimeSessionRegistrationOutcome::Backoff {
+                                reason,
+                            } => {
+                                self.replace_identity_reconcile_status(
+                                    identity,
+                                    Some(intent_record.intent_revision),
+                                    Some(write_lease.epoch),
+                                    IdentityReconcileDecision::Backoff,
+                                    Some(reason),
+                                )
+                                .await;
+                                Ok(false)
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "runtime-adapter"))]
+                    {
+                        Err(MobError::Internal(
+                            "identity runtime reconciliation requires runtime-adapter".to_string(),
+                        ))
+                    }
+                }
+                IdentityReconcileDecision::EnsureMemberMaterialization => {
+                    let Some(write_lease) = self.renew_identity_actuation_lease(identity).await?
+                    else {
+                        return Ok(true);
+                    };
+                    let target = member_observation
+                        .target_precondition()
+                        .map_err(|error| MobError::Internal(error.to_string()))?
+                        .ok_or_else(|| {
+                            MobError::Internal(
+                                "member materialization decision had no target-local witness"
+                                    .to_string(),
+                            )
+                        })?;
+                    let permit = self.identity_actuation_permit(
+                        identity,
+                        &intent_record,
+                        &write_lease,
+                        IdentityActuatorTarget::Member,
+                        target,
+                    );
+                    self.identity
+                        .validate_identity_actuation_permit(&permit)
+                        .await
+                        .map_err(MobError::from)?;
+                    let mut spec = super::spec_compiler::spawn_spec_from_desired_member(
+                        identity,
+                        session,
+                        member,
+                    )?;
+                    let key = super::IdentityLocalMaterializationKey::new(
+                        self.definition.id.clone(),
+                        identity.clone(),
+                        intent_record.intent_revision,
+                        intent_record.intent_digest.clone(),
+                        intent_record.authority_digest.clone(),
+                    );
+                    match super::identity_local_services::resolve_identity_local_external_tools(
+                        self.identity_local_external_tools_provider.as_deref(),
+                        &key,
+                        &member.material.required_local_callback_tools,
+                    ) {
+                        Ok(external_tools) => spec.external_tools = external_tools,
+                        Err(super::IdentityLocalExternalToolsError::Missing) => {
+                            self.replace_identity_reconcile_status(
+                                identity,
+                                Some(intent_record.intent_revision),
+                                Some(write_lease.epoch),
+                                IdentityReconcileDecision::Backoff,
+                                Some(format!(
+                                    "process-local external-tool services are not registered for sealed materialization {key}"
+                                )),
+                            )
+                            .await;
+                            return Ok(false);
+                        }
+                        Err(super::IdentityLocalExternalToolsError::Unavailable { reason }) => {
+                            self.replace_identity_reconcile_status(
+                                identity,
+                                Some(intent_record.intent_revision),
+                                Some(write_lease.epoch),
+                                IdentityReconcileDecision::Backoff,
+                                Some(format!(
+                                    "process-local external-tool services are unavailable for sealed materialization {key}: {reason}"
+                                )),
+                            )
+                            .await;
+                            return Ok(false);
+                        }
+                        Err(super::IdentityLocalExternalToolsError::AuthorityMismatch {
+                            registered,
+                        }) => {
+                            self.replace_identity_reconcile_status(
+                                identity,
+                                Some(intent_record.intent_revision),
+                                Some(write_lease.epoch),
+                                IdentityReconcileDecision::RepairBlocked,
+                                Some(format!(
+                                    "process-local external-tool authority mismatch: expected {key}, registered {registered}"
+                                )),
+                            )
+                            .await;
+                            return Ok(false);
+                        }
+                        Err(super::IdentityLocalExternalToolsError::DefinitionMismatch {
+                            detail,
+                        }) => {
+                            self.replace_identity_reconcile_status(
+                                identity,
+                                Some(intent_record.intent_revision),
+                                Some(write_lease.epoch),
+                                IdentityReconcileDecision::RepairBlocked,
+                                Some(format!(
+                                    "process-local external-tool definition mismatch for sealed materialization {key}: {detail}"
+                                )),
+                            )
+                            .await;
+                            return Ok(false);
+                        }
+                    }
+                    let (reply_tx, mut reply_rx) = oneshot::channel();
+                    self.enqueue_spawn(
+                        spec,
+                        super::handle::SpawnSource::IdentityReconcile,
+                        Some(permit),
+                        None,
+                        None,
+                        reply_tx,
+                    )
+                    .await;
+                    match reply_rx.try_recv() {
+                        Ok(reply) => {
+                            let disposition = identity_member_actuation_disposition(&reply);
+                            self.record_identity_member_terminal_disposition(
+                                identity,
+                                intent_record.intent_revision,
+                                write_lease.epoch,
+                                disposition,
+                            )
+                            .await;
+                            Ok(false)
+                        }
+                        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                            let reply = Err(MobError::Internal(
+                                "identity member materialization reply closed before custody transfer"
+                                    .to_string(),
+                            ));
+                            let disposition = identity_member_actuation_disposition(&reply);
+                            self.record_identity_member_terminal_disposition(
+                                identity,
+                                intent_record.intent_revision,
+                                write_lease.epoch,
+                                disposition,
+                            )
+                            .await;
+                            Ok(false)
+                        }
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                            // The serialized spawn-completion command records
+                            // the typed disposition and requeues this identity
+                            // before attempting reply delivery. Drop this
+                            // internal observer deliberately: convergence is
+                            // causally driven by actor custody, never by a
+                            // detached reply waiter or the periodic scan.
+                            drop(reply_rx);
+                            Ok(false)
+                        }
+                    }
+                }
+                IdentityReconcileDecision::Backoff
+                | IdentityReconcileDecision::RepairBlocked
+                | IdentityReconcileDecision::AwaitLease
+                | IdentityReconcileDecision::Converged
+                | IdentityReconcileDecision::Quarantined => Ok(false),
+                IdentityReconcileDecision::AcquireLease
+                | IdentityReconcileDecision::SealRetirementProven
+                | IdentityReconcileDecision::EnsureSessionAuthority
+                | IdentityReconcileDecision::AwaitExternalBindingCeremony
+                | IdentityReconcileDecision::EnsureExternalBindingReceipt
+                | IdentityReconcileDecision::EnsureExternalBinding
+                | IdentityReconcileDecision::EnsureInitialDeliveryReceipt
+                | IdentityReconcileDecision::EnsureInitialDelivery
+                | IdentityReconcileDecision::AwaitInitialDelivery
+                | IdentityReconcileDecision::ReconcileWiring
+                | IdentityReconcileDecision::RetireMemberMaterialization
+                | IdentityReconcileDecision::RetireRuntimeRegistration
+                | IdentityReconcileDecision::ReleaseSessionAuthority
+                | IdentityReconcileDecision::Tombstoned => Err(MobError::Internal(format!(
+                    "unsupported identity recovery obligation {decision:?} escaped its RepairBlocked admission boundary"
+                ))),
+            }
+        }
+        .await;
+        match action {
+            Ok(requeue) => Ok(requeue),
+            Err(error) => {
+                self.replace_identity_reconcile_status(
+                    identity,
+                    Some(intent_record.intent_revision),
+                    Some(active_lease.epoch),
+                    decision,
+                    Some(error.to_string()),
+                )
+                .await;
+                Ok(false)
+            }
+        }
+    }
+
+    async fn apply_identity_declaration_manifest(
+        &mut self,
+        manifest: crate::identity::IdentityDeclarationManifest,
+    ) -> Result<crate::identity::IdentityDeclarationManifestApplyOutcome, MobError> {
+        manifest.validate().map_err(|error| {
+            MobError::WiringError(format!("invalid identity declaration manifest: {error}"))
+        })?;
+        let request_digest = manifest.request_digest().map_err(|error| {
+            MobError::WiringError(format!(
+                "identity declaration request digest failed: {error}"
+            ))
+        })?;
+
+        // Replay must precede every environment-dependent compilation step.
+        // A lost acknowledgement remains replayable even after a realm
+        // profile, skill path, or base-prompt source changes or disappears.
+        if let Some(outcome) = self
+            .identity
+            .replay_identity_declaration(
+                &self.definition.id,
+                &manifest.scope_id,
+                &manifest.operation_id,
+                &request_digest,
+            )
+            .await
+            .map_err(MobError::from)?
+        {
+            self.enqueue_identity_declaration_outcome(&outcome);
+            return Ok(outcome);
+        }
+
+        if let Some(reason) = identity_recovery_slice_manifest_rejection(&manifest) {
+            return Err(MobError::WiringError(format!(
+                "identity declaration is outside the 0.8.2 legacy recovery slice: {reason}"
+            )));
+        }
+
+        let mut compiled_members = BTreeMap::new();
+        for (agent_identity, member) in &manifest.members {
+            if let Some(legacy_import) = &member.legacy_import {
+                let expected_session = legacy_import.session();
+                let persisted = self
+                    .session_service
+                    .load_persisted_session(&expected_session.session_id)
+                    .await
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "legacy identity import for '{agent_identity}' could not observe session {}: {error}",
+                            expected_session.session_id
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "legacy identity import for '{agent_identity}' requires existing session {}",
+                            expected_session.session_id
+                        ))
+                    })?;
+                match persisted.try_checkpoint_state().map_err(|error| {
+                    MobError::WiringError(format!(
+                        "legacy identity import checkpoint for '{agent_identity}' is invalid: {error}"
+                    ))
+                })? {
+                    meerkat_core::checkpoint::SessionCheckpointState::Verified(checkpoint)
+                        if &checkpoint == legacy_import.checkpoint() => {}
+                    meerkat_core::checkpoint::SessionCheckpointState::Verified(_) => {
+                        return Err(MobError::WiringError(format!(
+                            "legacy identity import checkpoint for '{agent_identity}' no longer matches the sealed request"
+                        )));
+                    }
+                    meerkat_core::checkpoint::SessionCheckpointState::LegacyUnverified { .. } => {
+                        return Err(MobError::WiringError(format!(
+                            "legacy identity import checkpoint for '{agent_identity}' is not typed authority"
+                        )));
+                    }
+                }
+            }
+            let material = match &member.material {
+                crate::identity::IdentityMemberMaterialDeclaration::Resolved { material } => {
+                    material.validate().map_err(|error| {
+                        MobError::WiringError(format!(
+                            "resolved desired material for '{agent_identity}' is invalid: {error}"
+                        ))
+                    })?;
+                    material.clone()
+                }
+                crate::identity::IdentityMemberMaterialDeclaration::Profile(declaration) => {
+                    let resolved_profile = if declaration.profile_override.is_none() {
+                        Some(
+                            self.definition
+                                .resolve_profile(
+                                    &declaration.profile_name,
+                                    self.realm_profile_store.as_ref(),
+                                )
+                                .await?,
+                        )
+                    } else {
+                        None
+                    };
+                    super::spec_compiler::compile_desired_member_material(
+                        super::spec_compiler::CompileDesiredMemberMaterialParams {
+                            agent_identity,
+                            declaration,
+                            resolved_profile: resolved_profile.as_ref(),
+                            definition: &self.definition,
+                            base_prompt: self.spawn_base_prompt_source.as_deref(),
+                            non_portable_disabled: Vec::new(),
+                        },
+                    )
+                    .await?
+                }
+            };
+            let (candidate_session_id, candidate_lineage_id) = member
+                .legacy_import
+                .as_ref()
+                .map(|legacy_import| {
+                    (
+                        legacy_import.session().session_id.clone(),
+                        legacy_import.session().lineage_id.clone(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    let session_id = meerkat_core::SessionId::new();
+                    let lineage_id = meerkat_core::SessionLineageId::for_session(&session_id);
+                    (session_id, lineage_id)
+                });
+            let candidate_initial_delivery_id = member
+                .initial_message
+                .as_ref()
+                .map(|_| meerkat_core::lifecycle::InputId::new());
+            compiled_members.insert(
+                agent_identity.clone(),
+                crate::identity::IdentityDeclarationMemberPlan {
+                    material,
+                    session_authority_policy: member.session_authority_policy,
+                    initial_message: member.initial_message.clone(),
+                    candidate_session_id,
+                    candidate_lineage_id,
+                    candidate_initial_delivery_id,
+                },
+            );
+        }
+        let plan = crate::identity::IdentityDeclarationApplyPlan::from_compiled_manifest(
+            &manifest,
+            compiled_members,
+        )
+        .map_err(|error| {
+            MobError::WiringError(format!(
+                "compiled identity declaration plan is invalid: {error}"
+            ))
+        })?;
+        let outcome = self
+            .identity
+            .apply_identity_declaration(&self.definition.id, &plan)
+            .await
+            .map_err(MobError::from)?;
+        #[cfg(any(test, feature = "test-support"))]
+        super::trigger_identity_recovery_fail_stop(
+            super::IdentityRecoveryFailStopPoint::ManifestCommittedBeforeReply,
+        );
+        self.enqueue_identity_declaration_outcome(&outcome);
+        Ok(outcome)
+    }
+
     #[inline(never)]
     fn dispatch_command_boxed<'a>(
         &'a mut self,
@@ -15571,6 +17839,7 @@ impl MobActor {
                     Box::pin(self.enqueue_spawn(
                         *spec,
                         spawn_source,
+                        None,
                         owner_bridge_session_id,
                         ops_registry,
                         reply_tx,
@@ -17190,6 +19459,69 @@ impl MobActor {
                             .map(|material| material.to_snapshot()),
                     );
                 }
+                MobCommand::ApplyIdentityDeclarationManifest { manifest, reply_tx } => {
+                    let result = self
+                        .apply_identity_declaration_manifest(*manifest)
+                        .await;
+                    #[cfg(any(test, feature = "test-support"))]
+                    {
+                        if reply_tx.send(result).is_ok() {
+                            super::trigger_identity_recovery_fail_stop(
+                                super::IdentityRecoveryFailStopPoint::ManifestReplySent,
+                            );
+                        }
+                    }
+                    #[cfg(not(any(test, feature = "test-support")))]
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::GetIdentityIntent {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .identity
+                        .observe_identity_intent(&self.definition.id, &agent_identity)
+                        .await
+                        .map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::GetIdentityDeclarationReceipt {
+                    scope_id,
+                    operation_id,
+                    reply_tx,
+                } => {
+                    let subject = crate::identity::IdentityOperationSubject::DeclarationScope {
+                        scope_id: scope_id.clone(),
+                    };
+                    let slot = crate::identity::IdentityOperationSlot::ApplyDeclarationManifest {
+                        scope_id,
+                        mutation_id: operation_id,
+                    };
+                    let result = self
+                        .identity
+                        .observe_identity_operation_receipt(
+                            &self.definition.id,
+                            &subject,
+                            &slot,
+                        )
+                        .await
+                        .map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::GetIdentityConvergenceStatus {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .identity_status
+                        .load_identity_convergence_status(
+                            &self.definition.id,
+                            &agent_identity,
+                        )
+                        .await
+                        .map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ConcludeObjective {
                     agent_identity,
                     objective_id,
@@ -17978,14 +20310,27 @@ impl MobActor {
                     .await;
             }
         }
+        // Desired-state recovery is independent from the legacy roster
+        // projection. Every cold actor incarnation starts by reading the sole
+        // durable intent authority and scheduling one level-triggered pass per
+        // identity.
+        self.enqueue_all_identity_intents().await;
         let mut deferred_commands: VecDeque<RoutedMobCommand> = VecDeque::new();
         let mut host_status_polls_in_flight = BTreeSet::new();
         let mut host_status_poll = tokio::time::interval(super::handle::HOST_STATUS_POLL_INTERVAL);
+        let mut identity_reconcile_tick = tokio::time::interval(IDENTITY_RECONCILE_TICK_INTERVAL);
+        let mut identity_reconcile_scan = tokio::time::interval(IDENTITY_RECONCILE_SCAN_INTERVAL);
         #[cfg(not(target_arch = "wasm32"))]
         host_status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(not(target_arch = "wasm32"))]
+        identity_reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(not(target_arch = "wasm32"))]
+        identity_reconcile_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume interval's immediate first tick. Bind/rebind already perform
         // an eager observation; the periodic driver starts one cadence later.
         host_status_poll.tick().await;
+        identity_reconcile_tick.tick().await;
+        identity_reconcile_scan.tick().await;
         'actor: loop {
             self.drain_completed_actor_io_tasks();
             self.drain_completed_peer_delivery_tasks();
@@ -18002,6 +20347,14 @@ impl MobActor {
                     }
                     _tick = host_status_poll.tick() => {
                         self.spawn_periodic_host_status_polls(&mut host_status_polls_in_flight).await;
+                        continue;
+                    }
+                    _tick = identity_reconcile_tick.tick() => {
+                        self.reconcile_next_identity().await;
+                        continue;
+                    }
+                    _tick = identity_reconcile_scan.tick() => {
+                        self.enqueue_all_identity_intents().await;
                         continue;
                     }
                     joined = self.member_live_mutation_tasks.join_next(),
@@ -18915,6 +21268,8 @@ impl MobActor {
             admitted_bridge_session_id: pending_spawn_session_id.clone(),
             prompt: ContentInput::from("test pending spawn awaiting retire"),
             initial_turn_prompt: None,
+            suppress_autonomous_initial_prompt: false,
+            identity_member_permit: None,
             runtime_mode: entry.runtime_mode,
             labels: entry.labels,
             owner_bridge_session_id: None,
@@ -19102,6 +21457,12 @@ impl MobActor {
         spawner: Option<&(AgentIdentity, AgentRuntimeId)>,
         spec: &mut super::handle::SpawnMemberSpec,
     ) -> Result<(), MobError> {
+        if matches!(spawn_source, super::handle::SpawnSource::IdentityReconcile) {
+            // The portable half of customization is already digest-sealed in
+            // IdentityIntent. Re-running it on cold materialization would let
+            // process-local state silently rewrite desired content.
+            return Ok(());
+        }
         if let Some(customizer) = self.spawn_member_customizer.as_ref() {
             let ctx = super::handle::SpawnCustomizationContext {
                 mob_id: self.definition.id.clone(),
@@ -19122,10 +21483,20 @@ impl MobActor {
         &mut self,
         mut spec: super::handle::SpawnMemberSpec,
         spawn_source: super::handle::SpawnSource,
+        identity_member_permit: Option<crate::identity::IdentityActuationPermit>,
         owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
+        let suppress_autonomous_initial_prompt =
+            matches!(spawn_source, super::handle::SpawnSource::IdentityReconcile);
+        if suppress_autonomous_initial_prompt != identity_member_permit.is_some() {
+            let _ = reply_tx.send(Err(MobError::Internal(
+                "identity member actuation permits must be carried only by identity reconciliation spawns"
+                    .to_string(),
+            )));
+            return;
+        }
         let spawner = match owner_bridge_session_id.as_ref() {
             Some(owner_session_id) => self.spawner_for_bridge_session(owner_session_id).await,
             None => None,
@@ -19139,6 +21510,13 @@ impl MobActor {
         // → bridge dispatch → ack-fed remote commit).
         #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
         if spec.placement.is_some() {
+            if identity_member_permit.is_some() {
+                let _ = reply_tx.send(Err(MobError::WiringError(
+                    "identity reconciliation does not materialize placed members in this release slice"
+                        .to_string(),
+                )));
+                return;
+            }
             self.enqueue_spawn_remote(
                 spec,
                 owner_bridge_session_id,
@@ -19768,6 +22146,8 @@ impl MobActor {
                 selected_runtime_mode,
                 prompt,
                 initial_turn_prompt,
+                suppress_autonomous_initial_prompt,
+                identity_member_permit,
                 resolved_labels,
                 provision,
                 operation_id,
@@ -19862,6 +22242,8 @@ impl MobActor {
             admitted_bridge_session_id,
             prompt,
             initial_turn_prompt,
+            suppress_autonomous_initial_prompt,
+            identity_member_permit,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
             owner_bridge_session_id: spawn_owner_bridge_session_id,
@@ -21407,6 +23789,8 @@ impl MobActor {
             admitted_bridge_session_id,
             prompt,
             initial_turn_prompt,
+            suppress_autonomous_initial_prompt: false,
+            identity_member_permit: None,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
             owner_bridge_session_id: Some(owner_session.clone()),
@@ -21635,6 +24019,8 @@ impl MobActor {
                 admitted_bridge_session_id: _,
                 prompt,
                 initial_turn_prompt,
+                suppress_autonomous_initial_prompt,
+                identity_member_permit,
                 runtime_mode,
                 labels,
                 owner_bridge_session_id,
@@ -21653,6 +24039,9 @@ impl MobActor {
                 remote,
                 reply_tx,
             } = pending;
+            let identity_reconcile_authority = identity_member_permit
+                .as_ref()
+                .map(|permit| (permit.intent_revision, permit.lease_epoch));
             // Close the external recipient-trust obligation window recorded at
             // enqueue only when terminality is certified. A successful
             // provision resolves it; an ordinary failure means the provisioner
@@ -21794,6 +24183,8 @@ impl MobActor {
                             runtime_mode,
                             prompt,
                             initial_turn_prompt,
+                            suppress_autonomous_initial_prompt,
+                            identity_member_permit,
                             labels,
                             provision,
                             spawn_receipt.operation_id,
@@ -21841,7 +24232,25 @@ impl MobActor {
                                         "spawn fence allocation failed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
                                     )),
                                 };
-                                let _ = reply_tx.send(Err(error));
+                                let reply = Err(error);
+                                if let Some((intent_revision, lease_epoch)) =
+                                    identity_reconcile_authority
+                                {
+                                    let disposition = identity_member_actuation_disposition(&reply);
+                                    self.record_identity_member_terminal_disposition(
+                                        &agent_identity,
+                                        intent_revision,
+                                        lease_epoch,
+                                        disposition,
+                                    )
+                                    .await;
+                                }
+                                let reply_delivered = reply_tx.send(reply).is_ok();
+                                #[cfg(test)]
+                                if identity_reconcile_authority.is_some() && !reply_delivered {
+                                    IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 continue;
                             }
                         };
@@ -21861,7 +24270,25 @@ impl MobActor {
                                         "spawn generation allocation failed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
                                     )),
                                 };
-                                let _ = reply_tx.send(Err(error));
+                                let reply = Err(error);
+                                if let Some((intent_revision, lease_epoch)) =
+                                    identity_reconcile_authority
+                                {
+                                    let disposition = identity_member_actuation_disposition(&reply);
+                                    self.record_identity_member_terminal_disposition(
+                                        &agent_identity,
+                                        intent_revision,
+                                        lease_epoch,
+                                        disposition,
+                                    )
+                                    .await;
+                                }
+                                let reply_delivered = reply_tx.send(reply).is_ok();
+                                #[cfg(test)]
+                                if identity_reconcile_authority.is_some() && !reply_delivered {
+                                    IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 continue;
                             }
                         };
@@ -21873,6 +24300,8 @@ impl MobActor {
                             runtime_mode,
                             prompt,
                             initial_turn_prompt,
+                            suppress_autonomous_initial_prompt,
+                            identity_member_permit,
                             labels,
                             provision,
                             spawn_receipt.operation_id,
@@ -21936,8 +24365,23 @@ impl MobActor {
                 },
                 (reply, _) => reply,
             };
+            if let Some((intent_revision, lease_epoch)) = identity_reconcile_authority {
+                let disposition = identity_member_actuation_disposition(&reply);
+                self.record_identity_member_terminal_disposition(
+                    &agent_identity,
+                    intent_revision,
+                    lease_epoch,
+                    disposition,
+                )
+                .await;
+            }
             if may_reply {
-                let _ = reply_tx.send(reply);
+                let reply_delivered = reply_tx.send(reply).is_ok();
+                #[cfg(test)]
+                if identity_reconcile_authority.is_some() && !reply_delivered {
+                    IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
 
@@ -22145,6 +24589,8 @@ impl MobActor {
             admitted_bridge_session_id,
             prompt: prompt.clone(),
             initial_turn_prompt: initial_turn_prompt.clone(),
+            suppress_autonomous_initial_prompt: false,
+            identity_member_permit: None,
             runtime_mode,
             labels: labels.clone(),
             owner_bridge_session_id: None,
@@ -22293,6 +24739,8 @@ impl MobActor {
                 runtime_mode,
                 prompt,
                 initial_turn_prompt,
+                false,
+                None,
                 labels,
                 provision,
                 spawn_receipt.operation_id,
@@ -22390,6 +24838,80 @@ impl MobActor {
     /// worker stack during fleet restore (the old single ~38KiB future could
     /// overflow it while nested under `reconcile_resume` and the actor task).
     #[allow(clippy::too_many_arguments)]
+    async fn append_member_spawned_with_identity_fence(
+        &self,
+        original_permit: Option<&crate::identity::IdentityActuationPermit>,
+        mut spawned: crate::event::MemberSpawnedEvent,
+    ) -> Result<(), MobError> {
+        use crate::store::IdentityMemberEventCommitOutcome;
+
+        let Some(original_permit) = original_permit else {
+            self.events
+                .append(NewMobEvent {
+                    mob_id: self.definition.id.clone(),
+                    timestamp: None,
+                    kind: MobEventKind::MemberSpawned(spawned),
+                })
+                .await
+                .map(|_| ())
+                .map_err(MobError::from)?;
+            return Ok(());
+        };
+        let Some(store) = self.identity_member.as_ref() else {
+            return Err(
+                crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable.into(),
+            );
+        };
+        let Some(write_lease) = self
+            .renew_identity_actuation_lease(&original_permit.identity)
+            .await?
+        else {
+            return Err(MobError::Internal(
+                "identity member actuation lost its lease before finalization; reconciliation will re-observe"
+                    .to_string(),
+            ));
+        };
+        let permit = Self::refresh_identity_permit_lease(original_permit.clone(), &write_lease);
+        spawned = spawned
+            .with_identity_intent_authority_digest(Some(permit.intent_authority_digest.clone()));
+        let event = NewMobEvent {
+            mob_id: self.definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MemberSpawned(spawned),
+        };
+        match store
+            .commit_identity_member_spawned(&permit, &event)
+            .await?
+        {
+            IdentityMemberEventCommitOutcome::Applied { .. } => {
+                #[cfg(any(test, feature = "test-support"))]
+                super::trigger_identity_recovery_fail_stop(
+                    super::IdentityRecoveryFailStopPoint::MemberEventApplied,
+                );
+                Ok(())
+            }
+            IdentityMemberEventCommitOutcome::AlreadyExact { .. } => Ok(()),
+            IdentityMemberEventCommitOutcome::Conflict { detail, .. } => {
+                Err(crate::store::MobStoreError::CasConflict(format!(
+                    "identity member target or authority changed before finalization: {detail}"
+                ))
+                .into())
+            }
+            IdentityMemberEventCommitOutcome::RepairBlocked {
+                evidence_digest,
+                detail,
+            } => Err(crate::store::MobStoreError::IdentityAuthorityBlocked {
+                evidence_digest,
+                detail,
+            }
+            .into()),
+            IdentityMemberEventCommitOutcome::Backoff { detail } => {
+                Err(crate::store::MobStoreError::WriteFailed(detail).into())
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // one exact pending spawn carrier
     async fn finalize_spawn_from_pending(
         &mut self,
         profile_name: &ProfileName,
@@ -22399,6 +24921,8 @@ impl MobActor {
         runtime_mode: crate::MobRuntimeMode,
         prompt: ContentInput,
         initial_turn_prompt: Option<ContentInput>,
+        suppress_autonomous_initial_prompt: bool,
+        identity_member_permit: Option<crate::identity::IdentityActuationPermit>,
         labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
         operation_id: meerkat_core::ops::OperationId,
@@ -22428,6 +24952,8 @@ impl MobActor {
             runtime_mode,
             prompt,
             initial_turn_prompt,
+            suppress_autonomous_initial_prompt,
+            identity_member_permit,
             labels,
             operation_id,
             owner_bridge_session_id,
@@ -23044,33 +25570,29 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending appending spawn event"
         );
+        let mut spawned_event = crate::event::MemberSpawnedEvent::new(
+            identity.clone(),
+            generation,
+            fence_token,
+            agent_runtime_id.clone(),
+            profile_name.clone(),
+        )
+        .with_bridge_member_ref(Some(Self::sanitized_member_ref(&pending_member_ref)))
+        .with_member_peer_endpoint(member_peer_endpoint.clone());
+        spawned_event.runtime_mode = runtime_mode;
+        spawned_event.labels = labels.clone();
+        spawned_event.continuity_intent = continuity_intent.clone();
+        // Durable per-spawn declarative provenance: replay repopulates
+        // RosterEntry.effective_profile_override so restarts keep per-spawn
+        // tooling without a customizer.
+        spawned_event.effective_profile_override = ctx.effective_profile_override.clone();
+        spawned_event.effective_model_override = ctx.effective_model_override.clone();
+        spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = self
-            .events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MemberSpawned({
-                    let mut event = crate::event::MemberSpawnedEvent::new(
-                        identity.clone(),
-                        generation,
-                        fence_token,
-                        agent_runtime_id.clone(),
-                        profile_name.clone(),
-                    )
-                    .with_bridge_member_ref(Some(Self::sanitized_member_ref(&pending_member_ref)))
-                    .with_member_peer_endpoint(member_peer_endpoint.clone());
-                    event.runtime_mode = runtime_mode;
-                    event.labels = labels.clone();
-                    event.continuity_intent = continuity_intent.clone();
-                    // Durable per-spawn declarative provenance: replay
-                    // repopulates RosterEntry.effective_profile_override so
-                    // restarts keep per-spawn tooling without a customizer.
-                    event.effective_profile_override = ctx.effective_profile_override.clone();
-                    event.effective_model_override = ctx.effective_model_override.clone();
-                    event = event.with_placed_spawn_id(None);
-                    event
-                }),
-            })
+            .append_member_spawned_with_identity_fence(
+                ctx.identity_member_permit.as_ref(),
+                spawned_event,
+            )
             .await
         {
             if overlay_record.is_some() {
@@ -23087,7 +25609,7 @@ impl MobActor {
             let append_error = self.fold_spawn_exec_abort(
                 &dsl_identity,
                 agent_identity,
-                MobError::from(append_error),
+                append_error,
                 "finalize_spawn_admit_append",
             );
             if let Err(rollback_error) = provision.rollback().await {
@@ -23224,6 +25746,8 @@ impl MobActor {
             runtime_mode,
             prompt,
             initial_turn_prompt,
+            suppress_autonomous_initial_prompt,
+            identity_member_permit,
             labels,
             operation_id,
             owner_bridge_session_id,
@@ -23238,6 +25762,17 @@ impl MobActor {
             observations: _,
             remote,
         } = *ctx;
+        let identity_fenced_member = identity_member_permit.is_some();
+        // Identity convergence owns wiring as a separate generated obligation
+        // with its own target-local permit. Once MemberSpawned committed under
+        // an identity member permit, legacy role/parent/respawn wiring must not
+        // smuggle a second structural write into the member obligation.
+        let auto_wire_parent = auto_wire_parent && !identity_fenced_member;
+        let restore_wiring = if identity_fenced_member {
+            None
+        } else {
+            restore_wiring
+        };
         let SpawnAdmitted {
             member_ref,
             session_origin,
@@ -23253,7 +25788,10 @@ impl MobActor {
         let placed_kickoff_intent = remote
             .as_ref()
             .and_then(|remote| remote.pending_carrier.kickoff_intent.clone());
-        if remote.is_some() && runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+        if remote.is_some()
+            && runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            && !suppress_autonomous_initial_prompt
+        {
             let Some(intent) = placed_kickoff_intent.as_ref() else {
                 return Err(MobError::Internal(format!(
                     "placed autonomous member '{agent_identity}' has no durable kickoff intent"
@@ -23355,7 +25893,9 @@ impl MobActor {
             "finalize_spawn_set_external_member_rebind_capability",
         )?;
 
-        if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+        if runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            && !suppress_autonomous_initial_prompt
+        {
             if is_replacing {
                 self.clear_kickoff_state(agent_identity).await;
             }
@@ -23388,11 +25928,12 @@ impl MobActor {
         // compensating rollback in `rollback_failed_spawn` expects both
         // `wired_spawn_targets` and `planned_wiring_targets` populated so
         // partial-wire failures can unwind.
-        let mut planned_wiring_targets = if agent_identity.is_flow_member_namespace() {
-            Vec::new()
-        } else {
-            Box::pin(self.spawn_wiring_targets(profile_name, agent_identity)).await
-        };
+        let mut planned_wiring_targets =
+            if identity_fenced_member || agent_identity.is_flow_member_namespace() {
+                Vec::new()
+            } else {
+                Box::pin(self.spawn_wiring_targets(profile_name, agent_identity)).await
+            };
         if auto_wire_parent
             && let Some(parent_target) = self
                 .resolve_auto_wire_parent_target(owner_bridge_session_id.as_ref(), agent_identity)
@@ -23558,6 +26099,7 @@ impl MobActor {
         #[cfg(feature = "runtime-adapter")]
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost
             && super::member_runtime_is_host_owned(self.dsl_authority.state(), agent_identity)
+            && !suppress_autonomous_initial_prompt
         {
             // PLACED autonomous member: the loop runs on the MEMBER host
             // (ADJ-23 residency) — the local kickoff ladder and injector
@@ -23596,15 +26138,17 @@ impl MobActor {
                 .await?;
             self.ensure_member_event_pump(agent_identity).await?;
         } else if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            let _ = self
-                .apply_kickoff_input(
-                    agent_identity,
-                    mob_dsl::MobMachineInput::KickoffMarkStarting {
-                        member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
-                    },
-                    "finalize_spawn_kickoff_mark_starting",
-                )
-                .await?;
+            if !suppress_autonomous_initial_prompt {
+                let _ = self
+                    .apply_kickoff_input(
+                        agent_identity,
+                        mob_dsl::MobMachineInput::KickoffMarkStarting {
+                            member_id: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        },
+                        "finalize_spawn_kickoff_mark_starting",
+                    )
+                    .await?;
+            }
             // Spawn emits RequestRuntimeBinding. Drain it before startup can
             // publish RuntimeBound, otherwise the session may emit a fallback
             // runtime id that MobMachine correctly rejects as not live.
@@ -23630,8 +26174,10 @@ impl MobActor {
                 }
                 return Err(binding_error);
             }
+            let kickoff_prompt = (!suppress_autonomous_initial_prompt).then_some(prompt);
             if let Err(start_error) =
-                Box::pin(self.start_autonomous_member(agent_identity, &member_ref, prompt)).await
+                Box::pin(self.start_autonomous_member(agent_identity, &member_ref, kickoff_prompt))
+                    .await
             {
                 self.clear_kickoff_state(agent_identity).await;
                 if let Err(rollback_error) = Box::pin(self.rollback_failed_spawn(
@@ -31896,6 +34442,8 @@ impl MobActor {
             admitted_bridge_session_id,
             prompt: prompt.clone(),
             initial_turn_prompt: initial_turn_prompt.clone(),
+            suppress_autonomous_initial_prompt: false,
+            identity_member_permit: None,
             runtime_mode: snapshot.runtime_mode,
             labels: replacement_labels.clone(),
             owner_bridge_session_id: None,
@@ -32119,6 +34667,8 @@ impl MobActor {
                     snapshot.runtime_mode,
                     prompt,
                     initial_turn_prompt,
+                    false,
+                    None,
                     replacement_labels,
                     provision,
                     spawn_receipt.operation_id,

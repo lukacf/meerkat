@@ -8084,6 +8084,12 @@ mod tests {
         external_filter: &ToolFilter,
         original_prompt: &str,
     ) {
+        assert!(matches!(
+            session
+                .try_checkpoint_state()
+                .expect("sticky fallback checkpoint evidence must remain coherent"),
+            meerkat_core::SessionCheckpointState::Verified(_)
+        ));
         let identity = session
             .session_metadata()
             .expect("fallback session must retain canonical metadata")

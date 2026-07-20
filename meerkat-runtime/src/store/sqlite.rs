@@ -4,6 +4,7 @@
 mod inner {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     #[cfg(test)]
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
@@ -23,9 +24,15 @@ mod inner {
         InputStateSeed, InputTerminalOutcome, StoredInputState,
     };
     use crate::store::{
-        AuthOAuthFlowSnapshotUpdate, InputStateBatchCasOutcome, MachineLifecycleCommit,
+        AuthOAuthFlowSnapshotUpdate, FencedInputStateBatchCasOutcome,
+        FencedMachineLifecycleCasOutcome, InputStateBatchCasOutcome, MachineLifecycleCasOutcome,
+        MachineLifecycleCommit, MachineLifecycleExpectedVersion, MachineLifecycleObservation,
         MachineLifecycleSnapshot, MachineLifecycleStoreRecord, RuntimeStore, RuntimeStoreError,
-        SessionDelta, prepare_input_state_batch_cas,
+        RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
+        classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
+        decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
+        prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
+        validate_machine_lifecycle_replacement,
     };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
@@ -270,10 +277,18 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         migrated_record: Vec<u8>,
     }
 
+    struct PreparedLegacyCheckpoint {
+        session_id: String,
+        original_runtime_snapshot: Vec<u8>,
+        original_session_projection: Option<Vec<u8>>,
+        migrated_snapshot: Vec<u8>,
+    }
+
     struct PreparedLegacyRuntime {
         runtime_id: String,
         original_lifecycle: Vec<u8>,
         migrated_lifecycle: Vec<u8>,
+        checkpoint: Option<PreparedLegacyCheckpoint>,
         inputs: Vec<PreparedLegacyInput>,
         zero_ops_record: Option<Vec<u8>>,
     }
@@ -370,12 +385,12 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         Ok(())
     }
 
-    fn validate_legacy_session_snapshot(
+    fn prepare_legacy_session_checkpoint(
         conn: &Connection,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<(), String> {
+    ) -> Result<Option<PreparedLegacyCheckpoint>, String> {
         if !sqlite_table_exists(conn, "runtime_session_snapshots").map_err(|e| e.to_string())? {
-            return Ok(());
+            return Ok(None);
         }
         let bytes = conn
             .query_row(
@@ -386,9 +401,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             .optional()
             .map_err(|error| error.to_string())?;
         let Some(bytes) = bytes else {
-            return Ok(());
+            return Ok(None);
         };
-        let session: meerkat_core::Session =
+        let mut session: meerkat_core::Session =
             serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         let owner = LogicalRuntimeId::for_session(session.id());
         if owner != *runtime_id {
@@ -397,7 +412,57 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 session.id()
             ));
         }
-        Ok(())
+        match session
+            .try_checkpoint_state()
+            .map_err(|error| format!("invalid legacy checkpoint evidence: {error}"))?
+        {
+            meerkat_core::SessionCheckpointState::Verified(_) => return Ok(None),
+            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {}
+        }
+
+        let original_session_projection =
+            if sqlite_table_exists(conn, "sessions").map_err(|error| error.to_string())? {
+                let projection = conn
+                    .query_row(
+                        "SELECT session_json FROM sessions WHERE session_id = ?1",
+                        params![session.id().to_string()],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?;
+                if let Some(projection) = projection.as_ref()
+                    && projection != &bytes
+                {
+                    return Err(format!(
+                        "session-store row for {} is not byte-identical to its runtime checkpoint",
+                        session.id()
+                    ));
+                }
+                projection
+            } else {
+                None
+            };
+        let stamp = meerkat_core::SessionCheckpointStamp::recovery_migration(
+            &session,
+            &bytes,
+            meerkat_core::SessionGeneration::INITIAL,
+            meerkat_core::SessionCheckpointRevision::INITIAL,
+        )
+        .map_err(|error| format!("legacy checkpoint migration rejected: {error}"))?;
+        session
+            .install_checkpoint_stamp(stamp)
+            .map_err(|error| format!("legacy checkpoint stamp install failed: {error}"))?;
+        let migrated_snapshot = serde_json::to_vec(&session)
+            .map_err(|error| format!("legacy checkpoint encode failed: {error}"))?;
+        session
+            .try_checkpoint_state()
+            .map_err(|error| format!("migrated checkpoint verification failed: {error}"))?;
+        Ok(Some(PreparedLegacyCheckpoint {
+            session_id: session.id().to_string(),
+            original_runtime_snapshot: bytes,
+            original_session_projection,
+            migrated_snapshot,
+        }))
     }
 
     fn validate_legacy_receipts(
@@ -441,8 +506,15 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
     fn prepare_legacy_companions(
         conn: &Connection,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<(Vec<PreparedLegacyInput>, Option<Vec<u8>>), String> {
-        validate_legacy_session_snapshot(conn, runtime_id)?;
+    ) -> Result<
+        (
+            Option<PreparedLegacyCheckpoint>,
+            Vec<PreparedLegacyInput>,
+            Option<Vec<u8>>,
+        ),
+        String,
+    > {
+        let checkpoint = prepare_legacy_session_checkpoint(conn, runtime_id)?;
         validate_legacy_receipts(conn, runtime_id)?;
 
         let input_rows = if sqlite_table_exists(conn, "runtime_input_states")
@@ -524,7 +596,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         } else {
             None
         };
-        Ok((inputs, zero_ops_record))
+        Ok((checkpoint, inputs, zero_ops_record))
     }
 
     fn preflight_legacy_v0_6_34(
@@ -576,7 +648,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
             let logical_runtime_id = LogicalRuntimeId(runtime_id.clone());
             let companions = prepare_legacy_companions(conn, &logical_runtime_id);
-            let (inputs, zero_ops_record) = match companions {
+            let (checkpoint, inputs, zero_ops_record) = match companions {
                 Ok(prepared) => prepared,
                 Err(detail) => {
                     items.push(LegacyV0_6_34MigrationItem {
@@ -602,6 +674,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 runtime_id,
                 original_lifecycle: bytes,
                 migrated_lifecycle,
+                checkpoint,
                 inputs,
                 zero_ops_record,
             });
@@ -675,6 +748,39 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 params![runtime.migrated_lifecycle, runtime.runtime_id],
             )
             .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            if let Some(checkpoint) = runtime.checkpoint.as_ref() {
+                tx.execute(
+                    "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_session_snapshots', 'singleton', ?2, ?3, 'replace')",
+                    params![
+                        runtime.runtime_id,
+                        checkpoint.original_runtime_snapshot,
+                        checkpoint.migrated_snapshot,
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                tx.execute(
+                    "UPDATE runtime_session_snapshots SET session_snapshot = ?1 WHERE runtime_id = ?2",
+                    params![checkpoint.migrated_snapshot, runtime.runtime_id],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if let Some(original_projection) = checkpoint.original_session_projection.as_ref() {
+                    tx.execute(
+                        "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'sessions', ?2, ?3, ?4, 'replace')",
+                        params![
+                            runtime.runtime_id,
+                            checkpoint.session_id,
+                            original_projection,
+                            checkpoint.migrated_snapshot,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    tx.execute(
+                        "UPDATE sessions SET session_json = ?1 WHERE session_id = ?2",
+                        params![checkpoint.migrated_snapshot, checkpoint.session_id],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+            }
             for input in &runtime.inputs {
                 tx.execute(
                     "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_input_states', ?2, ?3, ?4, 'replace')",
@@ -1107,6 +1213,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         /// `apply = true` requires the caller to stop every process that can
         /// access this database. The transaction is atomic, but it cannot
         /// fence a pre-v0.8 process from writing legacy rows after commit.
+        /// Legacy session content is stamped once as a `RecoveryMigration`
+        /// root from its exact source bytes; the runtime snapshot and SQLite
+        /// session projection are replaced atomically with that same document.
         pub fn migrate_v0_6_34_completed_idle(
             path: impl AsRef<Path>,
             apply: bool,
@@ -1611,9 +1720,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
                 {
                     let mut session = deserialize_persisted_session(&snapshot)?;
-                    session
-                        .complete_compaction_projection_intent(&projection)
-                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    complete_compaction_projection_checkpoint(&mut session, &projection)?;
                     let cleaned = serde_json::to_vec(&session)
                         .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
                     upsert_runtime_snapshot(&tx, &runtime_id, &cleaned)?;
@@ -1973,6 +2080,107 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        async fn compare_and_swap_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &[StoredInputState],
+            replacements: &[InputStatePersistenceRecord],
+            write_fence: Arc<dyn RuntimeStoreWriteFence>,
+        ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+            let prepared = prepare_input_state_batch_cas(expected, replacements)?;
+            if prepared.is_empty() {
+                return Ok(FencedInputStateBatchCasOutcome::Swapped);
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let mut all_expected = true;
+                let mut all_replacements = true;
+                for row in &prepared {
+                    let current = tx
+                        .query_row(
+                            r"
+                            SELECT state_json
+                            FROM runtime_input_states
+                            WHERE runtime_id = ?1 AND input_id = ?2
+                            ",
+                            params![runtime_id_text(&runtime_id), row.input_id.0.to_string()],
+                            |sql_row| Ok(sql_row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                        )
+                        .optional()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    let Some(current) = current else {
+                        return Ok(FencedInputStateBatchCasOutcome::Stale);
+                    };
+                    if current != row.expected_json {
+                        all_expected = false;
+                    }
+                    if current != row.replacement_json {
+                        all_replacements = false;
+                    }
+                }
+                if !all_replacements && !all_expected {
+                    return Ok(FencedInputStateBatchCasOutcome::Stale);
+                }
+
+                let mut tx_slot = Some(tx);
+                let fence_outcome =
+                    execute_runtime_store_write_fence(write_fence.as_ref(), || {
+                        let tx = tx_slot.as_ref().ok_or_else(|| {
+                            RuntimeStoreError::Internal(
+                                "SQLite input recovery fence lost its transaction".to_string(),
+                            )
+                        })?;
+                        if !all_replacements {
+                            for row in &prepared {
+                                tx.execute(
+                                    r"
+                                    INSERT INTO runtime_input_states
+                                        (runtime_id, input_id, state_json)
+                                    VALUES (?1, ?2, ?3)
+                                    ON CONFLICT(runtime_id, input_id) DO UPDATE
+                                    SET state_json = excluded.state_json
+                                    ",
+                                    params![
+                                        runtime_id_text(&runtime_id),
+                                        row.input_id.0.to_string(),
+                                        &row.replacement_json,
+                                    ],
+                                )
+                                .map_err(|error| {
+                                    RuntimeStoreError::WriteFailed(error.to_string())
+                                })?;
+                            }
+                        }
+                        tx_slot
+                            .take()
+                            .ok_or_else(|| {
+                                RuntimeStoreError::Internal(
+                                    "SQLite input recovery fence consumed its transaction twice"
+                                        .to_string(),
+                                )
+                            })?
+                            .commit()
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
+                    })?;
+                match fence_outcome {
+                    RuntimeStoreWriteFenceOutcome::Applied => {
+                        Ok(FencedInputStateBatchCasOutcome::Swapped)
+                    }
+                    RuntimeStoreWriteFenceOutcome::Conflict { reason } => {
+                        Ok(FencedInputStateBatchCasOutcome::FenceConflict { reason })
+                    }
+                    RuntimeStoreWriteFenceOutcome::Backoff { reason } => {
+                        Ok(FencedInputStateBatchCasOutcome::FenceBackoff { reason })
+                    }
+                }
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
         async fn load_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -1996,6 +2204,192 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
                 .map(|bytes| deserialize_persisted_input_state(&bytes))
                 .transpose()
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn observe_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                let raw = conn
+                    .query_row(
+                        "SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                Ok(raw.as_deref().map_or(
+                    MachineLifecycleObservation::Missing,
+                    classify_machine_lifecycle_record,
+                ))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn compare_and_swap_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: MachineLifecycleExpectedVersion,
+            replacement: MachineLifecycleCommit,
+        ) -> Result<MachineLifecycleCasOutcome, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let replacement = prepare_machine_lifecycle_replacement(replacement)?;
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let current_raw = tx
+                    .query_row(
+                        "SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                let current = current_raw.as_deref().map_or(
+                    MachineLifecycleObservation::Missing,
+                    classify_machine_lifecycle_record,
+                );
+                let matches = match (&expected, &current) {
+                    (
+                        MachineLifecycleExpectedVersion::Missing,
+                        MachineLifecycleObservation::Missing,
+                    ) => true,
+                    (MachineLifecycleExpectedVersion::Version(expected), current) => {
+                        current.version().is_some_and(|actual| actual == expected)
+                    }
+                    _ => false,
+                };
+                if !matches {
+                    return Ok(MachineLifecycleCasOutcome::Conflict { current });
+                }
+                let replacement = replacement.preserve_observed_custody(&current)?;
+                validate_machine_lifecycle_replacement(
+                    &current,
+                    current_raw.as_deref(),
+                    &replacement.snapshot,
+                )?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_states (runtime_id, runtime_state_json)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(runtime_id) DO UPDATE SET
+                        runtime_state_json = excluded.runtime_state_json
+                    ",
+                    params![runtime_id_text(&runtime_id), replacement.bytes],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(MachineLifecycleCasOutcome::Applied {
+                    version: replacement.version,
+                })
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn compare_and_swap_machine_lifecycle_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: MachineLifecycleExpectedVersion,
+            replacement: MachineLifecycleCommit,
+            write_fence: Arc<dyn RuntimeStoreWriteFence>,
+        ) -> Result<FencedMachineLifecycleCasOutcome, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let replacement = prepare_machine_lifecycle_replacement(replacement)?;
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let current_raw = tx
+                    .query_row(
+                        "SELECT runtime_state_json FROM runtime_states WHERE runtime_id = ?1",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+                let current = current_raw.as_deref().map_or(
+                    MachineLifecycleObservation::Missing,
+                    classify_machine_lifecycle_record,
+                );
+                let matches = match (&expected, &current) {
+                    (
+                        MachineLifecycleExpectedVersion::Missing,
+                        MachineLifecycleObservation::Missing,
+                    ) => true,
+                    (MachineLifecycleExpectedVersion::Version(expected), current) => {
+                        current.version().is_some_and(|actual| actual == expected)
+                    }
+                    _ => false,
+                };
+                if !matches {
+                    return Ok(FencedMachineLifecycleCasOutcome::Conflict { current });
+                }
+                let replacement = replacement.preserve_observed_custody(&current)?;
+                validate_machine_lifecycle_replacement(
+                    &current,
+                    current_raw.as_deref(),
+                    &replacement.snapshot,
+                )?;
+                let already_exact = current_raw.as_deref() == Some(replacement.bytes.as_slice());
+                let record = decoded_prepared_machine_lifecycle_replacement(&replacement)?;
+                let version = replacement.version.clone();
+                let replacement_bytes = replacement.bytes;
+                let mut tx_slot = Some(tx);
+                let fence_outcome =
+                    execute_runtime_store_write_fence(write_fence.as_ref(), || {
+                        let tx = tx_slot.as_ref().ok_or_else(|| {
+                            RuntimeStoreError::Internal(
+                                "SQLite lifecycle fence lost its transaction".to_string(),
+                            )
+                        })?;
+                        if !already_exact {
+                            tx.execute(
+                                r"
+                                INSERT INTO runtime_states (runtime_id, runtime_state_json)
+                                VALUES (?1, ?2)
+                                ON CONFLICT(runtime_id) DO UPDATE SET
+                                    runtime_state_json = excluded.runtime_state_json
+                                ",
+                                params![runtime_id_text(&runtime_id), &replacement_bytes],
+                            )
+                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                        }
+                        tx_slot
+                            .take()
+                            .ok_or_else(|| {
+                                RuntimeStoreError::Internal(
+                                    "SQLite lifecycle fence consumed its transaction twice"
+                                        .to_string(),
+                                )
+                            })?
+                            .commit()
+                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
+                    })?;
+                match fence_outcome {
+                    RuntimeStoreWriteFenceOutcome::Applied if already_exact => {
+                        Ok(FencedMachineLifecycleCasOutcome::AlreadyExact { record, version })
+                    }
+                    RuntimeStoreWriteFenceOutcome::Applied => {
+                        Ok(FencedMachineLifecycleCasOutcome::Applied { record, version })
+                    }
+                    RuntimeStoreWriteFenceOutcome::Conflict { reason } => {
+                        Ok(FencedMachineLifecycleCasOutcome::FenceConflict { reason })
+                    }
+                    RuntimeStoreWriteFenceOutcome::Backoff { reason } => {
+                        Ok(FencedMachineLifecycleCasOutcome::FenceBackoff { reason })
+                    }
+                }
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -2605,6 +2999,24 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
         fn runtime_id() -> LogicalRuntimeId {
             LogicalRuntimeId("runtime-1".to_string())
+        }
+
+        fn lifecycle_commit(
+            runtime_id: &LogicalRuntimeId,
+            state: RuntimeState,
+            fence_token: u64,
+            runtime_generation: u64,
+        ) -> MachineLifecycleCommit {
+            MachineLifecycleCommit::new_with_binding(
+                state,
+                crate::store::MachineLifecycleBindingFacts::new(
+                    Some(runtime_id.0.clone()),
+                    Some(fence_token),
+                    Some(runtime_generation),
+                    Some(format!("epoch-{runtime_generation}")),
+                ),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            )
         }
 
         fn input_state() -> InputStatePersistenceRecord {
@@ -5478,18 +5890,48 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             );
             drop(audit_conn);
             assert_eq!(
-                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001",),
-                original_session_store
-            );
-            assert_eq!(
-                raw_fixture_row(
+                raw_audit_row(
                     &path,
-                    "runtime_session_snapshots",
-                    "session_snapshot",
                     &runtime_id.0,
+                    "runtime_session_snapshots",
+                    "singleton",
                 ),
                 original_session
             );
+            assert_eq!(
+                raw_audit_row(
+                    &path,
+                    &runtime_id.0,
+                    "sessions",
+                    "018f0000-0000-7000-8000-000000000001",
+                ),
+                original_session_store
+            );
+            let migrated_session_store =
+                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001");
+            let migrated_runtime_snapshot = raw_fixture_row(
+                &path,
+                "runtime_session_snapshots",
+                "session_snapshot",
+                &runtime_id.0,
+            );
+            assert_eq!(
+                migrated_session_store, migrated_runtime_snapshot,
+                "migration must install one exact checkpoint document in both stores"
+            );
+            assert_ne!(migrated_runtime_snapshot, original_session);
+            let migrated_session: meerkat_core::Session =
+                serde_json::from_slice(&migrated_runtime_snapshot).unwrap();
+            assert!(matches!(
+                migrated_session.try_checkpoint_state().unwrap(),
+                meerkat_core::SessionCheckpointState::Verified(stamp)
+                    if stamp.provenance()
+                        == meerkat_core::SessionCheckpointProvenance::RecoveryMigration
+            ));
+            let original_decoded: meerkat_core::Session =
+                serde_json::from_slice(&original_session).unwrap();
+            assert_eq!(migrated_session.id(), original_decoded.id());
+            assert_eq!(migrated_session.messages(), original_decoded.messages());
             assert_eq!(
                 raw_fixture_row(
                     &path,
@@ -5605,6 +6047,123 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             assert_eq!(
                 raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
                 before
+            );
+        }
+
+        #[tokio::test]
+        async fn lifecycle_observation_and_cas_survive_sqlite_reopen() {
+            let (dir, store) = temp_store();
+            let path = dir.path().join("sessions.sqlite3");
+            let runtime_id = LogicalRuntimeId::new("sqlite-lifecycle-cas");
+            assert_eq!(
+                store.observe_machine_lifecycle(&runtime_id).await.unwrap(),
+                MachineLifecycleObservation::Missing
+            );
+
+            let MachineLifecycleCasOutcome::Applied { version } = store
+                .compare_and_swap_machine_lifecycle(
+                    &runtime_id,
+                    MachineLifecycleExpectedVersion::Missing,
+                    lifecycle_commit(&runtime_id, RuntimeState::Idle, 11, 4),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("missing SQLite lifecycle row must be inserted");
+            };
+            drop(store);
+
+            let reopened = SqliteRuntimeStore::new(&path).unwrap();
+            let observed = reopened
+                .observe_machine_lifecycle(&runtime_id)
+                .await
+                .unwrap();
+            let MachineLifecycleObservation::Decoded {
+                record,
+                version: observed_version,
+            } = &observed
+            else {
+                panic!("reopened lifecycle row must decode");
+            };
+            assert_eq!(observed_version, &version);
+            assert_eq!(record.runtime_state(), Some(RuntimeState::Idle));
+            assert_eq!(record.binding().fence_token(), Some(11));
+
+            assert_eq!(
+                reopened
+                    .compare_and_swap_machine_lifecycle(
+                        &runtime_id,
+                        MachineLifecycleExpectedVersion::Missing,
+                        lifecycle_commit(&runtime_id, RuntimeState::Stopped, 12, 5),
+                    )
+                    .await
+                    .unwrap(),
+                MachineLifecycleCasOutcome::Conflict { current: observed }
+            );
+        }
+
+        #[tokio::test]
+        async fn sqlite_malformed_lifecycle_repair_is_always_blocked() {
+            let (dir, store) = temp_store();
+            let path = dir.path().join("sessions.sqlite3");
+            let runtime_id = LogicalRuntimeId::new("sqlite-malformed-lifecycle");
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "record_version": crate::store::MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+                "runtime_state": "idle",
+                "binding": {
+                    "agent_runtime_id": runtime_id.0.clone(),
+                    "fence_token": 17,
+                    "runtime_generation": 8,
+                    "runtime_epoch_id": "epoch-8"
+                },
+                "current_run_id": null,
+                "pre_run_phase": null,
+                "unregister_progress": null
+            }))
+            .unwrap();
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO runtime_states (runtime_id, runtime_state_json) VALUES (?1, ?2)",
+                params![runtime_id.0.clone(), raw.clone()],
+            )
+            .unwrap();
+            drop(conn);
+
+            let observed = store.observe_machine_lifecycle(&runtime_id).await.unwrap();
+            let MachineLifecycleObservation::Malformed { version, .. } = observed else {
+                panic!("incomplete SQLite lifecycle row must remain malformed evidence");
+            };
+            assert!(matches!(
+                store
+                    .compare_and_swap_machine_lifecycle(
+                        &runtime_id,
+                        MachineLifecycleExpectedVersion::Version(version.clone()),
+                        lifecycle_commit(&runtime_id, RuntimeState::Idle, 16, 8),
+                    )
+                    .await
+                    .expect_err("repair must not lower SQLite lifecycle fencing"),
+                RuntimeStoreError::MachineLifecycleRepairBlocked { .. }
+            ));
+            assert_eq!(
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0),
+                raw
+            );
+
+            assert!(matches!(
+                store
+                    .compare_and_swap_machine_lifecycle(
+                        &runtime_id,
+                        MachineLifecycleExpectedVersion::Version(version),
+                        lifecycle_commit(&runtime_id, RuntimeState::Idle, 18, 9),
+                    )
+                    .await
+                    .expect_err("malformed SQLite bytes are not repair authority"),
+                RuntimeStoreError::MachineLifecycleRepairBlocked { .. }
+            ));
+            drop(store);
+            assert_eq!(
+                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0),
+                raw
             );
         }
     }

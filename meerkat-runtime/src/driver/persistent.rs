@@ -19,7 +19,10 @@ use crate::input_state::{
 };
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
-use crate::store::{InputStateBatchCasOutcome, MachineLifecycleCommit, RuntimeStore};
+use crate::store::{
+    FencedInputStateBatchCasOutcome, InputStateBatchCasOutcome, MachineLifecycleCommit,
+    RuntimeStore, RuntimeStoreWriteFence,
+};
 use crate::traits::{DestroyReport, RecoveryReport, RuntimeDriver, RuntimeDriverError};
 
 use super::ephemeral::{
@@ -44,6 +47,108 @@ pub struct PersistentRuntimeDriver {
 }
 
 impl PersistentRuntimeDriver {
+    pub(crate) async fn recover_inputs_after_runtime_authority(
+        &mut self,
+        recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+    ) -> Result<RecoveryReport, RuntimeDriverError> {
+        let report = crate::meerkat_machine::machine_recover_persistent_inputs(
+            self.store.as_ref(),
+            &self.runtime_id,
+            &mut self.inner,
+            recovered_unregister_progress,
+        )
+        .await?;
+
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
+        self.store
+            .persist_input_states_atomically(&self.runtime_id, &input_states)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!("recovered input persistence failed: {err}"))
+            })?;
+        Ok(report)
+    }
+
+    /// Recover durable input work and publish the normalized target image only
+    /// while both the original input rows and the caller's external authority
+    /// fence remain current.
+    pub(crate) async fn recover_inputs_after_runtime_authority_with_fence(
+        &mut self,
+        recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+        write_fence: Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<RecoveryReport, RuntimeDriverError> {
+        let observed = self
+            .store
+            .load_input_states(&self.runtime_id)
+            .await
+            .map_err(|error| RuntimeDriverError::RecoveryBackoff {
+                reason: format!("failed to observe durable inputs for recovery: {error}"),
+            })?;
+        let report = crate::meerkat_machine::machine_recover_persistent_inputs_from_observed(
+            self.store.as_ref(),
+            &self.runtime_id,
+            &mut self.inner,
+            observed.clone(),
+            recovered_unregister_progress,
+        )
+        .await?;
+
+        let replacements = self.inner.authorized_stored_input_states_snapshot()?;
+        if replacements.is_empty() {
+            return Ok(report);
+        }
+        let mut expected = Vec::with_capacity(replacements.len());
+        for replacement in &replacements {
+            let input_id = &replacement.as_stored().state.input_id;
+            let Some(original) = observed
+                .iter()
+                .find(|candidate| &candidate.state.input_id == input_id)
+            else {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "recovered input {input_id} has no matching durable observation"
+                    ),
+                });
+            };
+            expected.push(original.clone());
+        }
+
+        let outcome = self
+            .store
+            .compare_and_swap_input_states_atomically_with_fence(
+                &self.runtime_id,
+                &expected,
+                &replacements,
+                write_fence,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::store::RuntimeStoreError::Unsupported(reason) => {
+                    RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: format!(
+                            "runtime store lacks fenced input recovery capability: {reason}"
+                        ),
+                    }
+                }
+                other => RuntimeDriverError::RecoveryBackoff {
+                    reason: format!("fenced recovered input persistence failed: {other}"),
+                },
+            })?;
+        match outcome {
+            FencedInputStateBatchCasOutcome::Swapped => Ok(report),
+            FencedInputStateBatchCasOutcome::Stale => Err(RuntimeDriverError::StaleAuthority {
+                reason: "durable input state changed while cold recovery was preparing".to_string(),
+            }),
+            FencedInputStateBatchCasOutcome::FenceConflict { reason } => {
+                Err(RuntimeDriverError::StaleAuthority { reason })
+            }
+            FencedInputStateBatchCasOutcome::FenceBackoff { reason } => {
+                Err(RuntimeDriverError::RecoveryBackoff { reason })
+            }
+        }
+    }
+
     /// Create a new persistent runtime driver.
     pub fn new(
         runtime_id: LogicalRuntimeId,
@@ -209,6 +314,23 @@ impl PersistentRuntimeDriver {
             .map_err(|error| {
                 RuntimeDriverError::Internal(format!(
                     "failed to load authoritative compaction checkpoint snapshot: {error}"
+                ))
+            })
+    }
+
+    pub(crate) async fn commit_compaction_checkpoint_snapshot(
+        &self,
+        session_snapshot: Vec<u8>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.store
+            .commit_session_snapshot(
+                &self.runtime_id,
+                crate::store::SessionDelta { session_snapshot },
+            )
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to prepare authoritative compaction checkpoint snapshot: {error}"
                 ))
             })
     }
@@ -606,20 +728,6 @@ impl PersistentRuntimeDriver {
         run_id: RunId,
     ) -> Result<(), RuntimeDriverError> {
         self.inner.contract_begin_run_authority(run_id)
-    }
-
-    /// Test-only authority override for crate-unit tests that need to seed
-    /// impossible or already-realized runtime phases.
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn contract_force_runtime_authority(
-        &mut self,
-        next_phase: RuntimeState,
-        current_run_id: Option<RunId>,
-        pre_run_phase: Option<RuntimeState>,
-    ) {
-        self.inner
-            .contract_force_runtime_authority(next_phase, current_run_id, pre_run_phase);
     }
 
     /// Get pending events (delegates to inner).
@@ -1291,28 +1399,20 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
-        let mut staged = self.inner.clone_with_isolated_dsl_authority();
         let report = crate::meerkat_machine::machine_recover_persistent_driver(
-            self.store.as_ref(),
-            &self.runtime_id,
-            &mut staged,
-        )
-        .await?;
-
-        let input_states = staged.authorized_stored_input_states_snapshot()?;
-        let commit = Self::lifecycle_commit_for_persistence_from_inner(&staged)?;
-        self.store
-            .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
-            .await
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!("recovery persist failed: {err}"))
-            })?;
-        let _ = crate::meerkat_machine::machine_recover_persistent_driver(
             self.store.as_ref(),
             &self.runtime_id,
             &mut self.inner,
         )
         .await?;
+
+        let input_states = self.inner.authorized_stored_input_states_snapshot()?;
+        self.store
+            .persist_input_states_atomically(&self.runtime_id, &input_states)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!("recovered input persistence failed: {err}"))
+            })?;
         Ok(report)
     }
 

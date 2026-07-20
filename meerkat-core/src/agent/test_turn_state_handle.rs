@@ -624,10 +624,12 @@ impl TestTurnStateHandle {
         let initial_state = kernel
             .initial_state()
             .expect("generated MeerkatMachine initial state");
-        let state = seed_running_turn_authority(&kernel, initial_state);
         Self {
             kernel,
-            state: Mutex::new(state),
+            // StartConversationRun has an explicit Initializing arm. Tests do
+            // not need to fabricate a recovered process phase before driving
+            // turn authority.
+            state: Mutex::new(initial_state),
             run_completed_effects: AtomicUsize::new(0),
             run_failed_effects: AtomicUsize::new(0),
         }
@@ -708,42 +710,6 @@ impl Default for TestTurnStateHandle {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn seed_running_turn_authority(
-    kernel: &GeneratedMachineKernel,
-    initial_state: KernelState,
-) -> KernelState {
-    let seed_run_id = RunId::new();
-    kernel
-        .transition(
-            &initial_state,
-            &input(
-                "RecoverRuntimeAuthority",
-                [
-                    (
-                        "session_id",
-                        named_string("SessionId", "core-test-turn-state".to_string()),
-                    ),
-                    (
-                        "state",
-                        enum_value("RuntimeLifecycleObservedState", "Running"),
-                    ),
-                    ("agent_runtime_id", KernelValue::None),
-                    ("fence_token", KernelValue::None),
-                    ("runtime_generation", KernelValue::None),
-                    ("runtime_epoch_id", KernelValue::None),
-                    ("current_run_id", option_value(run_id_value(&seed_run_id))),
-                    (
-                        "pre_run_phase",
-                        option_value(enum_value("PreRunPhase", "Idle")),
-                    ),
-                    ("silent_intent_overrides", string_set([])),
-                ],
-            ),
-        )
-        .expect("generated RecoverRuntimeAuthority should seed test turn authority")
-        .next_state
 }
 
 impl TurnStateHandle for TestTurnStateHandle {

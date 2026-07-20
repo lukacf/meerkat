@@ -179,18 +179,8 @@ pub fn standalone_session_runtime_authorities(
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
     capability_base_filter: &ToolFilter,
 ) -> Result<StandaloneSessionRuntimeAuthorities, String> {
-    let mut authority = dsl_authority::recover_authority_from_runtime_observation(
-        session_id,
-        RuntimeState::Idle,
-        None,
-        None,
-        None,
-        BTreeSet::new(),
-        None,
-        None,
-        None,
-    )
-    .map_err(|err| dsl_authority::map_error(err, "standalone visibility authority"))?;
+    let mut authority = dsl_authority::new_registered_authority(session_id)
+        .map_err(|err| dsl_authority::map_error(err, "standalone visibility authority"))?;
     let (current_capability_surface, current_capability_surface_status) = match model_profile {
         Some(profile) => (
             Some(dsl::SessionLlmCapabilitySurface {
@@ -1011,6 +1001,7 @@ pub(crate) use driver::{
     machine_batch_runtime_semantics, machine_commit_prepared_destroy,
     machine_commit_service_turn_terminal_receipt, machine_prepare_bindings_projection,
     machine_prepare_destroy, machine_recover_ephemeral_driver, machine_recover_persistent_driver,
+    machine_recover_persistent_inputs, machine_recover_persistent_inputs_from_observed,
     machine_recycle_preserving_work, machine_reset, machine_retire, machine_stop_runtime,
     prepare_runtime_loop_batch_start,
 };
@@ -1559,7 +1550,7 @@ impl ArchivedSessionActorMaterializationAuthorization {
 
         crate::begin_session_runtime_actor_materialization_with_phase_policy(
             bindings,
-            crate::RuntimeActorMaterializationPhasePolicy::RequireRetired,
+            crate::RuntimeActorMaterializationPhasePolicy::RequireArchivedRevivalBoundary,
             Some(mutation_guard),
         )
     }
@@ -1669,6 +1660,82 @@ impl PartialEq for RuntimeSessionRegistrationWitness {
 }
 
 impl Eq for RuntimeSessionRegistrationWitness {}
+
+/// Exact durable lifecycle observation for one session registration target.
+///
+/// Construction is owned by MeerkatMachine so a raw-content version observed
+/// for one runtime id cannot be replayed as the precondition for another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSessionLifecycleObservation {
+    session_id: SessionId,
+    runtime_id: LogicalRuntimeId,
+    lifecycle: crate::store::MachineLifecycleObservation,
+}
+
+impl RuntimeSessionLifecycleObservation {
+    fn new(
+        session_id: SessionId,
+        runtime_id: LogicalRuntimeId,
+        lifecycle: crate::store::MachineLifecycleObservation,
+    ) -> Self {
+        Self {
+            session_id,
+            runtime_id,
+            lifecycle,
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn runtime_id(&self) -> &LogicalRuntimeId {
+        &self.runtime_id
+    }
+
+    #[must_use]
+    pub fn lifecycle(&self) -> &crate::store::MachineLifecycleObservation {
+        &self.lifecycle
+    }
+}
+
+/// Result of one observation-bound, externally fenced cold registration.
+///
+/// The durable lifecycle observation is target-local runtime content. The
+/// external write fence is evaluated separately and is never encoded into that
+/// content or its version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSessionRegistrationOutcome {
+    /// The exact observed lifecycle row was replaced with the canonical fresh
+    /// Idle shell and the matching live registration was published.
+    Applied {
+        registration: RuntimeSessionRegistrationWitness,
+        lifecycle: RuntimeSessionLifecycleObservation,
+    },
+    /// The exact durable row was already the canonical fresh Idle shell. Its
+    /// external fence was still checked and the matching live registration was
+    /// published.
+    AlreadyExact {
+        registration: RuntimeSessionRegistrationWitness,
+        lifecycle: RuntimeSessionLifecycleObservation,
+    },
+    /// Either the target observation or the external write authority changed.
+    /// No live registration was published by this invocation.
+    Conflict {
+        current: RuntimeSessionLifecycleObservation,
+        reason: String,
+    },
+    /// The exact row or required store capability cannot be repaired safely.
+    RepairBlocked {
+        evidence_digest: Option<String>,
+        reason: String,
+    },
+    /// Observation, fence admission, or target persistence was temporarily
+    /// unavailable. The caller should re-observe and retry.
+    Backoff { reason: String },
+}
 
 /// Opaque identity for one exact runtime-executor attachment.
 ///
@@ -3029,7 +3096,10 @@ impl PreparedSessionMaterialization {
                 entry.epoch_id == *self.bindings.epoch_id()
                     && Arc::ptr_eq(&entry.materialization_claim_state, &self.claim_state)
                     && !entry.physical_attachment_is_live()
-                    && entry.control_snapshot().phase == RuntimeState::Retired
+                    && matches!(
+                        entry.control_snapshot().phase,
+                        RuntimeState::Retired | RuntimeState::Idle
+                    )
                     && self
                         .claim_state
                         .lock()
@@ -3043,7 +3113,7 @@ impl PreparedSessionMaterialization {
         if !exact {
             return Err(RuntimeDriverError::StaleAuthority {
                 reason: format!(
-                    "archived-resume session {} lost its exact Retired post-actor claim",
+                    "archived-resume session {} lost its exact quiescent post-actor claim",
                     self.session_id()
                 ),
             });

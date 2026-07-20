@@ -368,7 +368,7 @@ fn renders_composition_witness_fairness_in_tlc_safe_chunks() {
         .expect("seam basic witness next section");
     assert!(
         !seam_witness_next.contains("CoreNext")
-            && seam_witness_next.contains("meerkat_RecoverRuntimeAuthorityIdle")
+            && seam_witness_next.contains("meerkat_RegisterSessionIdle")
             && seam_witness_next.contains("mob_AuthorizeSpawnProfileRunning")
             && seam_witness_next.contains("mob_BeginSpawnExecFresh")
             && seam_witness_next.contains("mob_CommitSpawnMembershipFresh")
@@ -380,9 +380,9 @@ fn renders_composition_witness_fairness_in_tlc_safe_chunks() {
     );
     assert!(
         rendered.contains(
-            "WitnessInit_basic_round_trip ==\n    /\\ BaseInit\n    /\\ pending_inputs = <<[machine |-> \"meerkat\", variant |-> \"RecoverRuntimeAuthority\""
+            "WitnessInit_basic_round_trip ==\n    /\\ BaseInit\n    /\\ pending_inputs = <<[machine |-> \"meerkat\", variant |-> \"RegisterSession\""
         ),
-        "seam witness must preload the runtime authority recovery input that creates the session"
+        "seam witness must preload ordinary session registration rather than phase-shaped recovery"
     );
     let seam_destroy_witness_next = rendered
         .split("WitnessNext_destroy_runtime_path ==")

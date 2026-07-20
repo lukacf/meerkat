@@ -88,6 +88,16 @@ pub enum TranscriptReplacement {
 /// Session metadata key for the typed transcript revision graph head.
 pub const SESSION_TRANSCRIPT_HISTORY_STATE_KEY: &str = "session_transcript_history_state_v1";
 
+/// Storage-representation witness for transcript history that an incremental
+/// session store keeps out of line.
+///
+/// A full session carries [`SESSION_TRANSCRIPT_HISTORY_STATE_KEY`]. A slim
+/// incremental projection carries this digest instead, allowing the typed
+/// checkpoint digest to bind the same semantic history without rehydrating
+/// every retained revision on each read. Only typed store code may author it.
+pub const SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY: &str =
+    "session_transcript_history_checkpoint_digest_v1";
+
 /// A concrete transcript span selected for same-session rewrite.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -853,6 +863,54 @@ fn canonicalize_message_images_for_digest(messages: &[Message]) -> Vec<Message> 
     canonical
 }
 
+/// Canonical checkpoint representation of the retained transcript graph.
+///
+/// Revision bodies are content-addressed by `revision`; their cached parent
+/// pointers and construction timestamps are storage bookkeeping. The ordered
+/// commit log remains intact because it is durable audit/selection history.
+pub(crate) fn canonicalize_checkpoint_history_value(
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let state: TranscriptHistoryState = serde_json::from_value(value.clone())?;
+    let mut revisions = state
+        .revisions
+        .into_iter()
+        .map(|body| {
+            serde_json::json!({
+                "revision": body.revision,
+                "messages": canonicalize_messages_for_digest(&body.messages),
+            })
+        })
+        .collect::<Vec<_>>();
+    revisions.sort_by(|left, right| {
+        left.get("revision")
+            .and_then(serde_json::Value::as_str)
+            .cmp(&right.get("revision").and_then(serde_json::Value::as_str))
+    });
+    Ok(serde_json::json!({
+        "head": state.head,
+        "commits": state.commits,
+        "revisions": revisions,
+    }))
+}
+
+fn canonicalize_checkpoint_deferred_turn_value(
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut state: SessionDeferredTurnState = serde_json::from_value(value.clone())?;
+    if let Some(prompt) = state.pending_initial_prompt_mut_for_blob_rewrite()
+        && let crate::types::ContentInput::Blocks(blocks) = &mut prompt.prompt
+    {
+        canonicalize_digest_image_blocks(blocks);
+    }
+    for pending in state.pending_tool_results_mut_for_blob_rewrite() {
+        for result in &mut pending.results {
+            canonicalize_digest_image_blocks(&mut result.content);
+        }
+    }
+    serde_json::to_value(state)
+}
+
 /// Timestamp sentinel used when erasing construction bookkeeping from the
 /// digest form. `created_at` always serializes, so a fixed value keeps the
 /// canonical bytes deterministic.
@@ -1419,6 +1477,20 @@ impl SessionMetadataDocument {
         self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY)
     }
 
+    /// Decode typed checkpoint metadata without materializing the transcript.
+    ///
+    /// This validates schema and session identity and preserves explicit
+    /// legacy-unverified state. Digest verification still requires the full
+    /// document through [`Session::try_checkpoint_state`].
+    pub fn try_checkpoint_metadata_state(
+        &self,
+    ) -> Result<
+        crate::checkpoint::SessionCheckpointMetadataState,
+        crate::checkpoint::SessionCheckpointError,
+    > {
+        crate::checkpoint::session_checkpoint_metadata_state(&self.session_id, &self.metadata)
+    }
+
     /// Decode the typed metadata view through the canonical map-level
     /// decoders, failing closed on corrupt values.
     pub fn try_into_view(self) -> Result<PersistedSessionMetadataView, serde_json::Error> {
@@ -1481,6 +1553,36 @@ impl Session {
             usage,
         })
     }
+
+    /// Build the canonical, storage-representation-invariant document used by
+    /// the typed checkpoint digest.
+    pub(crate) fn checkpoint_digest_document(
+        &self,
+    ) -> Result<serde_json::Value, serde_json::Error> {
+        let messages = canonicalize_messages_for_digest(self.messages());
+        let mut metadata = self.metadata.clone();
+        if self.transcript_history_metadata_validation
+            == TranscriptHistoryMetadataValidation::RequiresValidation
+        {
+            compact_transcript_history_metadata_for_snapshot(&mut metadata)
+                .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
+        }
+        if let Some(history) = metadata.get_mut(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) {
+            *history = canonicalize_checkpoint_history_value(history)?;
+        }
+        if let Some(deferred) = metadata.get_mut(SESSION_DEFERRED_TURN_STATE_KEY) {
+            *deferred = canonicalize_checkpoint_deferred_turn_value(deferred)?;
+        }
+        serde_json::to_value(SessionSerdeRef {
+            version: self.version,
+            id: &self.id,
+            messages: &messages,
+            created_at: &self.created_at,
+            updated_at: &self.updated_at,
+            metadata: &metadata,
+            usage: &self.usage,
+        })
+    }
 }
 
 /// Metadata key used to store durable system-context control state.
@@ -1498,13 +1600,15 @@ pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_sta
 /// Metadata key used to store the typed session lifecycle-terminal fact.
 pub const SESSION_LIFECYCLE_TERMINAL_KEY: &str = "session_lifecycle_terminal";
 
-/// Typed provenance fact for a durable session-store row written by the
-/// intra-turn best-effort checkpointer AHEAD of the runtime boundary commit.
-/// Present on a row iff its last writer was the checkpointer; every
-/// boundary-following persist strips it. The runtime-projection rollback
-/// consults this fact so only tails the system itself checkpointed can be
-/// converged back onto committed truth — out-of-band row divergence keeps
-/// failing closed.
+/// Single canonical metadata key for the typed session checkpoint stamp.
+pub const SESSION_CHECKPOINT_STAMP_KEY: &str = "session_checkpoint_stamp_v1";
+
+/// Legacy compatibility marker for a session-store row written by the
+/// pre-typed intra-turn checkpointer.
+///
+/// This Boolean is decoded only as explicit legacy-unverified evidence. It
+/// never grants rollback authority; typed writers and recovery use the exact
+/// [`crate::checkpoint::SessionCheckpointStamp`] instead.
 pub const SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY: &str =
     "session_runtime_checkpoint_provenance_v1";
 
@@ -5331,8 +5435,19 @@ impl Session {
     }
 
     fn set_metadata_unchecked(&mut self, key: &str, value: serde_json::Value) {
+        // Reapplying an identical durable projection is not a session-content
+        // mutation. In particular, cold materialization restores the sealed
+        // SessionMetadata and SessionBuildState before it knows whether the
+        // values changed; advancing `updated_at` for an exact no-op would
+        // rotate the checkpoint digest and manufacture a sibling checkpoint
+        // even though the committed document is unchanged.
+        if self.metadata.get(key) == Some(&value) {
+            return;
+        }
         self.metadata.insert(key.to_string(), value);
         if key == SESSION_TRANSCRIPT_HISTORY_STATE_KEY {
+            self.metadata
+                .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
             self.transcript_history_metadata_validation =
                 TranscriptHistoryMetadataValidation::RequiresValidation;
         }
@@ -5344,6 +5459,8 @@ impl Session {
     fn set_validated_transcript_history_metadata(&mut self, value: serde_json::Value) {
         self.metadata
             .insert(SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(), value);
+        self.metadata
+            .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
         self.transcript_history_metadata_validation =
             TranscriptHistoryMetadataValidation::Validated;
         self.updated_at = SystemTime::now();
@@ -5361,12 +5478,19 @@ impl Session {
     }
 
     fn remove_metadata_unchecked(&mut self, key: &str) {
-        self.metadata.remove(key);
+        let removed = self.metadata.remove(key).is_some();
+        let mut changed = removed;
         if key == SESSION_TRANSCRIPT_HISTORY_STATE_KEY {
+            changed |= self
+                .metadata
+                .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY)
+                .is_some();
             self.transcript_history_metadata_validation =
                 TranscriptHistoryMetadataValidation::Validated;
         }
-        self.updated_at = SystemTime::now();
+        if changed {
+            self.updated_at = SystemTime::now();
+        }
     }
 
     /// Set a metadata value when the key is not reserved for generated authority.
@@ -5422,8 +5546,9 @@ impl Session {
             );
             return;
         }
-        self.metadata.remove(key);
-        self.updated_at = SystemTime::now();
+        if self.metadata.remove(key).is_some() {
+            self.updated_at = SystemTime::now();
+        }
     }
 
     /// Store SessionMetadata in the session metadata map.
@@ -5834,33 +5959,119 @@ impl Session {
         self.remove_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
     }
 
-    /// Stamp this durable projection copy as written by the intra-turn
-    /// best-effort checkpointer ahead of the runtime boundary commit.
+    /// Decode and verify this document's typed checkpoint state.
     ///
-    /// Stamped only on the persisted clone at checkpoint time — never on the
-    /// live session — so the fact identifies the row's last writer.
-    pub fn set_runtime_checkpoint_provenance(&mut self) {
+    /// Missing typed metadata is returned as explicit legacy-unverified state.
+    /// A present malformed stamp or malformed legacy compatibility value is an
+    /// error and is never laundered into absence.
+    pub fn try_checkpoint_state(
+        &self,
+    ) -> Result<crate::checkpoint::SessionCheckpointState, crate::checkpoint::SessionCheckpointError>
+    {
+        let stamp =
+            match crate::checkpoint::session_checkpoint_metadata_state(&self.id, &self.metadata)? {
+                crate::checkpoint::SessionCheckpointMetadataState::Stamped(stamp) => stamp,
+                crate::checkpoint::SessionCheckpointMetadataState::LegacyUnverified {
+                    legacy_runtime_checkpoint,
+                } => {
+                    return Ok(
+                        crate::checkpoint::SessionCheckpointState::LegacyUnverified {
+                            legacy_runtime_checkpoint,
+                        },
+                    );
+                }
+            };
+        let actual = crate::checkpoint::session_checkpoint_digest(self)?;
+        if stamp.digest() != &actual {
+            return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
+                expected: stamp.digest().clone(),
+                actual,
+            });
+        }
+        Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
+    }
+
+    /// Install a prevalidated semantic checkpoint stamp on this exact
+    /// document without changing its content timestamps.
+    ///
+    /// This is a mechanical serialization seam, not target-store write
+    /// authority. A persistence implementation must still atomically validate
+    /// its own observation and fencing preconditions before committing the
+    /// resulting bytes.
+    pub fn install_checkpoint_stamp(
+        &mut self,
+        stamp: crate::checkpoint::SessionCheckpointStamp,
+    ) -> Result<(), crate::checkpoint::SessionCheckpointError> {
+        stamp.validate_for_session(&self.id)?;
+        let actual = crate::checkpoint::session_checkpoint_digest(self)?;
+        if stamp.digest() != &actual {
+            return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
+                expected: stamp.digest().clone(),
+                actual,
+            });
+        }
+        let value = serde_json::to_value(&stamp)?;
+        self.metadata
+            .remove(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
+        self.metadata
+            .insert(SESSION_CHECKPOINT_STAMP_KEY.to_string(), value);
+        Ok(())
+    }
+
+    /// Fail-closed typed read of intra-turn checkpoint provenance.
+    pub fn try_has_runtime_checkpoint_provenance(
+        &self,
+    ) -> Result<bool, crate::checkpoint::SessionCheckpointError> {
+        match self.try_checkpoint_state()? {
+            crate::checkpoint::SessionCheckpointState::Verified(stamp) => Ok(matches!(
+                stamp.provenance(),
+                crate::checkpoint::SessionCheckpointProvenance::IntraTurnCheckpoint
+            )),
+            crate::checkpoint::SessionCheckpointState::LegacyUnverified { .. } => {
+                Err(crate::checkpoint::SessionCheckpointError::LegacyCheckpointUnverified)
+            }
+        }
+    }
+
+    /// Set the legacy compatibility marker on an untyped projection.
+    #[deprecated(
+        note = "legacy compatibility only; typed writers must install an exact checkpoint stamp"
+    )]
+    pub fn set_runtime_checkpoint_provenance(
+        &mut self,
+    ) -> Result<(), crate::checkpoint::SessionCheckpointError> {
+        if matches!(
+            self.try_checkpoint_state()?,
+            crate::checkpoint::SessionCheckpointState::Verified(_)
+        ) {
+            return Err(
+                crate::checkpoint::SessionCheckpointError::LegacyProvenanceMutationOnTypedCheckpoint,
+            );
+        }
         self.set_metadata_unchecked(
             SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY,
             serde_json::Value::Bool(true),
         );
+        Ok(())
     }
 
-    /// Clear the intra-turn checkpoint provenance fact. Every
-    /// boundary-following persist path clears it so the fact is present on a
-    /// row iff the checkpointer wrote it last.
-    pub fn clear_runtime_checkpoint_provenance(&mut self) {
+    /// Clear the legacy compatibility marker on an untyped projection.
+    #[deprecated(
+        note = "legacy compatibility only; typed writers must install an exact run-boundary successor"
+    )]
+    pub fn clear_runtime_checkpoint_provenance(
+        &mut self,
+    ) -> Result<(), crate::checkpoint::SessionCheckpointError> {
+        if matches!(
+            self.try_checkpoint_state()?,
+            crate::checkpoint::SessionCheckpointState::Verified(_)
+        ) {
+            return Err(
+                crate::checkpoint::SessionCheckpointError::LegacyProvenanceMutationOnTypedCheckpoint,
+            );
+        }
         self.remove_metadata_unchecked(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
-    }
-
-    /// Whether this durable projection copy was last written by the
-    /// intra-turn best-effort checkpointer ahead of the runtime boundary
-    /// commit.
-    pub fn has_runtime_checkpoint_provenance(&self) -> bool {
-        self.metadata
-            .get(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+        Ok(())
     }
 
     /// Return the retained immutable body for a transcript revision.
@@ -11133,6 +11344,29 @@ mod tests {
         session.set_metadata("key", serde_json::json!("value"));
 
         assert_eq!(session.metadata().get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn identical_metadata_projection_is_checkpoint_idempotent() {
+        let mut session = Session::new();
+        session.set_metadata("key", serde_json::json!({ "value": 1 }));
+        let updated_at = session.updated_at;
+        let digest = crate::session_checkpoint_digest(&session)
+            .expect("checkpoint digest before identical projection");
+
+        session.set_metadata("key", serde_json::json!({ "value": 1 }));
+        session.remove_metadata("already_absent");
+
+        assert_eq!(
+            session.updated_at, updated_at,
+            "an identical durable projection must not manufacture a content mutation"
+        );
+        assert_eq!(
+            crate::session_checkpoint_digest(&session)
+                .expect("checkpoint digest after identical projection"),
+            digest,
+            "an identical durable projection must not rotate checkpoint authority"
+        );
     }
 
     #[test]

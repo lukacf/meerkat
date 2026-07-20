@@ -213,6 +213,9 @@ pub async fn build_agent_config(
         Some(crate::runtime::SpawnSystemPromptOverride::Replace(prompt)) => {
             config.system_prompt = SystemPromptOverride::Set(prompt);
         }
+        Some(crate::runtime::SpawnSystemPromptOverride::Disable) => {
+            config.system_prompt = SystemPromptOverride::Disable;
+        }
         None if !system_prompt.is_empty() => {
             config.system_prompt = SystemPromptOverride::Set(system_prompt);
         }
@@ -408,6 +411,35 @@ fn apply_resumed_session_metadata(
             "persisted comms_name '{stored_comms_name}' does not match current mob identity '{current_comms_name}'"
         )));
     }
+    if let Some(current_binding) = config.mob_member_binding.as_ref() {
+        let current_binding_comms = current_binding.comms_name().map_err(|error| {
+            MobError::Internal(format!(
+                "current mob member binding cannot render a comms_name: {error}"
+            ))
+        })?;
+        if current_binding_comms.to_string() != current_comms_name {
+            return Err(MobError::Internal(format!(
+                "current mob member binding '{current_binding_comms}' does not match current comms_name '{current_comms_name}'"
+            )));
+        }
+    }
+    if let Some(stored_binding) = metadata.mob_member_binding.as_ref() {
+        let Some(current_binding) = config.mob_member_binding.as_ref() else {
+            return Err(MobError::Internal(
+                "persisted mob member binding has no current binding to resume into".to_string(),
+            ));
+        };
+        let stored_binding_comms = stored_binding.comms_name().map_err(|error| {
+            MobError::Internal(format!(
+                "persisted mob member binding cannot render a comms_name: {error}"
+            ))
+        })?;
+        if !resumed_member_binding_matches_current_or_legacy(current_binding, stored_binding) {
+            return Err(MobError::Internal(format!(
+                "persisted mob member binding '{stored_binding_comms}' does not match current mob identity '{current_comms_name}'"
+            )));
+        }
+    }
 
     // Durable metadata restores only the fields the profile did not claim via
     // `resume_overrides` (typed mask, set from the profile in
@@ -485,19 +517,69 @@ pub(crate) fn effective_resumed_session_llm_identity(
 }
 
 pub(crate) fn resumed_comms_name_matches_current_or_legacy(current: &str, stored: &str) -> bool {
+    let Some((current_mob, current_role, current_member)) = split_member_comms_name(current) else {
+        return false;
+    };
+    let Some((stored_mob, stored_role, stored_member)) = split_member_comms_name(stored) else {
+        return false;
+    };
+    current_mob == stored_mob
+        && current_role == stored_role
+        && resumed_member_segment_matches_current_or_legacy(current_member, stored_member)
+}
+
+fn resumed_member_binding_matches_current_or_legacy(
+    current: &meerkat_core::MobMemberBinding,
+    stored: &meerkat_core::MobMemberBinding,
+) -> bool {
+    current.mob_id == stored.mob_id
+        && current.role == stored.role
+        && resumed_member_segment_matches_current_or_legacy(&current.member, &stored.member)
+}
+
+fn resumed_member_segment_matches_current_or_legacy(current: &str, stored: &str) -> bool {
     if current == stored {
         return true;
     }
-    legacy_raw_alias_comms_name(current).is_some_and(|legacy| stored == legacy)
+    if current
+        .strip_prefix("mk--")
+        .map(decode_legacy_member_alias_segment)
+        .is_some_and(|legacy| stored == legacy)
+    {
+        return true;
+    }
+    mobkit_generation_zero_identity_runtime_alias(current).is_some_and(|alias| stored == alias)
 }
 
-pub(crate) fn legacy_raw_alias_comms_name(current: &str) -> Option<String> {
-    let mut parts = current.split('/');
+fn mobkit_generation_zero_identity_runtime_alias(current: &str) -> Option<String> {
+    let mut encoded = String::with_capacity(current.len() + 26);
+    encoded.push_str("mk--rt_cidentity_c");
+    for character in current.chars() {
+        match character {
+            '_' => encoded.push_str("__"),
+            ':' => encoded.push_str("_c"),
+            character if character.is_ascii_alphanumeric() || character == '-' => {
+                encoded.push(character);
+            }
+            _ => return None,
+        }
+    }
+    encoded.push_str("_c0");
+    Some(encoded)
+}
+
+fn split_member_comms_name(value: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = value.split('/');
     let (Some(mob_id), Some(role), Some(member), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return None;
     };
+    Some((mob_id, role, member))
+}
+
+pub(crate) fn legacy_raw_alias_comms_name(current: &str) -> Option<String> {
+    let (mob_id, role, member) = split_member_comms_name(current)?;
     let legacy_member = member
         .strip_prefix("mk--")
         .map(decode_legacy_member_alias_segment)?;
@@ -2746,6 +2828,136 @@ mod tests {
             config.comms_name.as_deref(),
             Some("ob3/review/mk--rt_creview_csingleton_c0"),
             "resume should rehydrate to the canonical encoded comms name"
+        );
+    }
+
+    #[test]
+    fn test_resumed_metadata_accepts_exact_identity_runtime_alias() {
+        let canonical_binding = meerkat_core::MobMemberBinding {
+            mob_id: "homecore".to_string(),
+            role: "identity".to_string(),
+            member: "parent-1".to_string(),
+        };
+        let mut config = AgentBuildConfig::new("gpt-5.5");
+        config.comms_name = Some("homecore/identity/parent-1".to_string());
+        config.mob_member_binding = Some(canonical_binding.clone());
+
+        let legacy_alias = "mk--rt_cidentity_cparent-1_c0";
+        let metadata = SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "gpt-5.5".to_string(),
+            max_tokens: 16_384,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: Default::default(),
+            keep_alive: false,
+            comms_name: Some(format!("homecore/identity/{legacy_alias}")),
+            peer_meta: Some(
+                PeerMeta::default()
+                    .with_label("fixture", "retained")
+                    .with_label("agent_identity", legacy_alias)
+                    .with_label("meerkat_id", legacy_alias),
+            ),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "homecore".to_string(),
+                role: "identity".to_string(),
+                member: legacy_alias.to_string(),
+            }),
+        };
+
+        apply_resumed_session_metadata(&mut config, &metadata)
+            .expect("exact generation-zero identity runtime alias applies");
+        assert_eq!(
+            config.comms_name.as_deref(),
+            Some("homecore/identity/parent-1")
+        );
+        assert_eq!(config.mob_member_binding, Some(canonical_binding.clone()));
+        let labels = &config.peer_meta.expect("canonical peer metadata").labels;
+        assert_eq!(labels.get("fixture").map(String::as_str), Some("retained"));
+        assert_eq!(
+            labels.get("agent_identity").map(String::as_str),
+            Some("parent-1")
+        );
+        assert_eq!(
+            labels.get("meerkat_id").map(String::as_str),
+            Some("parent-1")
+        );
+
+        // The run-boundary projection may publish the typed canonical binding
+        // before replacing the legacy transport alias. Both observations
+        // independently prove the same current member and must remain a valid
+        // input to the next level-triggered resume.
+        let mut partial_projection = metadata;
+        partial_projection.mob_member_binding = Some(canonical_binding.clone());
+        let mut replay_config = AgentBuildConfig::new("gpt-5.5");
+        replay_config.comms_name = Some("homecore/identity/parent-1".to_string());
+        replay_config.mob_member_binding = Some(canonical_binding);
+        apply_resumed_session_metadata(&mut replay_config, &partial_projection)
+            .expect("canonical binding plus predecessor comms alias remains recoverable");
+    }
+
+    #[test]
+    fn test_identity_runtime_alias_rejects_wrong_mob_role_member_or_generation() {
+        let current = "homecore/identity/parent-1";
+        for stored in [
+            "other/identity/mk--rt_cidentity_cparent-1_c0",
+            "homecore/worker/mk--rt_cidentity_cparent-1_c0",
+            "homecore/identity/mk--rt_cidentity_cparent-2_c0",
+            "homecore/identity/mk--rt_cworker_cparent-1_c0",
+            "homecore/identity/mk--rt_cidentity_cparent-1_c1",
+        ] {
+            assert!(
+                !resumed_comms_name_matches_current_or_legacy(current, stored),
+                "unproven legacy alias {stored} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resumed_metadata_rejects_tampered_binding_even_with_valid_comms_alias() {
+        let mut config = AgentBuildConfig::new("gpt-5.5");
+        config.comms_name = Some("homecore/identity/parent-1".to_string());
+        config.mob_member_binding = Some(meerkat_core::MobMemberBinding {
+            mob_id: "homecore".to_string(),
+            role: "identity".to_string(),
+            member: "parent-1".to_string(),
+        });
+        let metadata = SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "gpt-5.5".to_string(),
+            max_tokens: 16_384,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: Default::default(),
+            keep_alive: false,
+            comms_name: Some("homecore/identity/mk--rt_cidentity_cparent-1_c0".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "homecore".to_string(),
+                role: "identity".to_string(),
+                member: "mk--rt_cidentity_cparent-1_c1".to_string(),
+            }),
+        };
+
+        let error = apply_resumed_session_metadata(&mut config, &metadata)
+            .expect_err("binding and comms alias must identify the same legacy runtime");
+        assert!(
+            error.to_string().contains("persisted mob member binding"),
+            "unexpected refusal: {error}"
         );
     }
 

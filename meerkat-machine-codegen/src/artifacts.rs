@@ -39,6 +39,7 @@ macro_rules! writeln {
 const TLA_RUST_U64_MAX_CONSTANT: &str = "RustU64Max";
 const TLC_SAFE_RUST_U64_MAX_VALUE: u64 = 2_147_483_647;
 const SESSION_ID_STRING_BRIDGE_HELPER: &str = "meerkat_machine_session_id_matches_string";
+const TLC_REPRESENTATIVE_DOMAIN_HELPER: &str = "TlcRepresentativeDomain";
 
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
@@ -242,6 +243,23 @@ fn transition_forced_bool_literals(
             }
         })
         .collect()
+}
+
+fn transition_uses_tlc_representative_payload(
+    schema: &MachineSchema,
+    transition: &TransitionSchema,
+) -> bool {
+    match &transition.on {
+        meerkat_machine_schema::TriggerMatch::Input { variant, .. } => schema
+            .tlc_representative_inputs
+            .iter()
+            .any(|candidate| candidate == variant),
+        meerkat_machine_schema::TriggerMatch::Signal { .. } => false,
+    }
+}
+
+fn tlc_representative_domain(domain: String) -> String {
+    format!("{TLC_REPRESENTATIVE_DOMAIN_HELPER}({domain})")
 }
 
 fn collect_conjunctive_bool_requirements(
@@ -5151,6 +5169,49 @@ mod tests {
     }
 
     #[test]
+    fn mob_identity_classifier_uses_a_typed_tlc_lifecycle_representative() {
+        let schema = mob_machine();
+        assert_eq!(
+            schema
+                .tlc_representative_inputs
+                .iter()
+                .map(|input| input.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ClassifyIdentityReconciliation"],
+            "the schema must explicitly own the TLC-only classifier abstraction"
+        );
+
+        let model = render_machine_semantic_model(&schema).expect("render MobMachine model");
+        assert!(
+            model.contains(
+                "TlcRepresentativeDomain(values) == IF values = {} THEN {} ELSE {CHOOSE value \\in values : TRUE}"
+            ),
+            "the representative domain must remain typed and nonempty-aware"
+        );
+        assert!(
+            model.contains(
+                "\\E intent \\in TlcRepresentativeDomain(IdentityAuthorityConditionValues) : \\E lease \\in TlcRepresentativeDomain(IdentityLeaseConditionValues)"
+            ),
+            "MobMachine lifecycle Next must sample one typed identity-classifier tuple"
+        );
+        assert!(
+            !model.contains(
+                "\\E intent \\in IdentityAuthorityConditionValues : \\E lease \\in IdentityLeaseConditionValues : \\E external_binding_required \\in BOOLEAN"
+            ),
+            "MobMachine lifecycle Next must not reintroduce the exhaustive classifier cartesian product"
+        );
+
+        let composition = render_composition_semantic_model(&meerkat_mob_seam_composition())
+            .expect("render Meerkat/Mob composition");
+        assert!(
+            composition.contains(
+                "\\E arg_intent \\in TlcRepresentativeDomain(IdentityAuthorityConditionValues) : \\E arg_lease \\in TlcRepresentativeDomain(IdentityLeaseConditionValues)"
+            ),
+            "composition lifecycle exploration must honor the same schema-owned abstraction"
+        );
+    }
+
+    #[test]
     fn meerkat_mob_composition_deep_cfg_samples_the_included_native_bridge() {
         let schema = meerkat_mob_seam_composition();
         let deep_cfg = render_composition_ci_cfg(&schema, true);
@@ -5608,6 +5669,18 @@ impl<'a> CompositionTlaCompiler<'a> {
             "Count(seq, value) == Cardinality({{i \\in DOMAIN seq : seq[i] = value}})"
         )
         .expect("write to string");
+        if self.schema.machines.iter().any(|instance| {
+            !self
+                .machine(instance.instance_id.as_str())
+                .tlc_representative_inputs
+                .is_empty()
+        }) {
+            writeln!(
+                &mut out,
+                "{TLC_REPRESENTATIVE_DOMAIN_HELPER}(values) == IF values = {{}} THEN {{}} ELSE {{CHOOSE value \\in values : TRUE}}"
+            )
+            .expect("write to string");
+        }
         writeln!(
             &mut out,
             "RECURSIVE SeqRemove(_, _)\nSeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN Tail(seq) ELSE <<Head(seq)>> \\o SeqRemove(Tail(seq), value)"
@@ -6131,6 +6204,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                     return self.machine_transition_name(instance_id, transition);
                 };
                 let domain = self.binding_domain_for_binding(instance_id, binding.as_str(), ty);
+                let domain = if transition_uses_tlc_representative_payload(
+                    self.machine(instance_id),
+                    transition,
+                ) {
+                    tlc_representative_domain(domain)
+                } else {
+                    domain
+                };
                 push_fmt(&mut prefix, format_args!("\\E {local} \\in {domain} : "));
             }
             let args = transition
@@ -8437,6 +8518,13 @@ impl<'a> MachineTlaCompiler<'a> {
             "Count(seq, value) == Cardinality({{i \\in DOMAIN seq : seq[i] = value}})"
         )
         .expect("write to string");
+        if !self.schema.tlc_representative_inputs.is_empty() {
+            writeln!(
+                &mut out,
+                "{TLC_REPRESENTATIVE_DOMAIN_HELPER}(values) == IF values = {{}} THEN {{}} ELSE {{CHOOSE value \\in values : TRUE}}"
+            )
+            .expect("write to string");
+        }
         writeln!(
             &mut out,
             "RECURSIVE SeqRemove(_, _)\nSeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \\o SeqRemove(Tail(seq), value)"
@@ -8578,6 +8666,12 @@ impl<'a> MachineTlaCompiler<'a> {
                         return Ok(String::new());
                     };
                     let domain = self.binding_domain_for_binding(binding.as_str(), ty);
+                    let domain =
+                        if transition_uses_tlc_representative_payload(self.schema, transition) {
+                            tlc_representative_domain(domain)
+                        } else {
+                            domain
+                        };
                     let local = binding_env
                         .get(binding.as_str())
                         .cloned()

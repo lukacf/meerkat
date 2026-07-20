@@ -9,7 +9,7 @@ use meerkat_core::comms::{
 };
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashSet;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 const MOB_COMMAND_CHANNEL_CAPACITY: usize = 4096;
 
@@ -489,6 +489,8 @@ pub struct MobBuilder {
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    identity_local_external_tools_provider:
+        Option<Arc<dyn super::IdentityLocalExternalToolsProvider>>,
     spawn_base_prompt_source: Option<Arc<dyn super::spec_compiler::SpawnBasePromptSource>>,
     spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
     owner_bridge_session_create_authority: Option<OwnerBridgeSessionCreateAuthority>,
@@ -6831,6 +6833,9 @@ struct RuntimeWiring {
     restore_diagnostics:
         Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+    identity: Arc<dyn crate::store::MobIdentityStore>,
+    identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
+    identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
     supervisor_bridge: Arc<MobSupervisorBridge>,
     command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
     command_rx: mpsc::Receiver<super::scope_gate::RoutedMobCommand>,
@@ -6903,6 +6908,7 @@ impl MobBuilder {
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
             default_external_tools_provider: None,
+            identity_local_external_tools_provider: None,
             spawn_base_prompt_source: None,
             spawn_member_customizer: None,
             owner_bridge_session_create_authority: None,
@@ -6961,6 +6967,7 @@ impl MobBuilder {
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
             default_external_tools_provider: None,
+            identity_local_external_tools_provider: None,
             spawn_base_prompt_source: None,
             spawn_member_customizer: None,
             owner_bridge_session_create_authority: None,
@@ -7069,6 +7076,20 @@ impl MobBuilder {
         self
     }
 
+    /// Supply fresh in-process external-tool services for actor-owned identity
+    /// materialization.
+    ///
+    /// The provider is keyed by exact sealed intent authority and returns only
+    /// an external-tool dispatcher. It cannot rewrite portable desired
+    /// material, session continuity, or one-shot input state.
+    pub fn with_identity_local_external_tools_provider(
+        mut self,
+        provider: Arc<dyn super::IdentityLocalExternalToolsProvider>,
+    ) -> Self {
+        self.identity_local_external_tools_provider = Some(provider);
+        self
+    }
+
     /// Inject the R3 case-3 base-prompt seam for placed spawns (ADJ-2):
     /// resolves the CONTROLLING host's assembled base system prompt for a
     /// remote spawn whose profile has no skills and no prompt override.
@@ -7147,6 +7168,7 @@ impl MobBuilder {
                 tool_bundles,
                 default_llm_client,
                 default_external_tools_provider,
+                identity_local_external_tools_provider,
                 spawn_base_prompt_source,
                 spawn_member_customizer,
                 owner_bridge_session_create_authority,
@@ -7311,6 +7333,9 @@ impl MobBuilder {
                 storage.events.clone(),
                 storage.runs.clone(),
                 storage.runtime_metadata.clone(),
+                storage.identity.clone(),
+                storage.identity_member.clone(),
+                storage.identity_status.clone(),
                 supervisor_bridge,
                 session_service,
                 runtime_adapter,
@@ -7318,6 +7343,7 @@ impl MobBuilder {
                 tool_bundles,
                 default_llm_client,
                 default_external_tools_provider,
+                identity_local_external_tools_provider,
                 spawn_base_prompt_source,
                 spawn_member_customizer,
                 storage.realm_profiles.clone(),
@@ -7367,6 +7393,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            identity_local_external_tools_provider,
             spawn_base_prompt_source,
             spawn_member_customizer,
             owner_bridge_session_create_authority: _,
@@ -7746,6 +7773,9 @@ impl MobBuilder {
                 reachability_observations: Arc::clone(&reachability_observations),
                 restore_diagnostics: restore_diagnostics.clone(),
                 runtime_metadata: storage.runtime_metadata.clone(),
+                identity: storage.identity.clone(),
+                identity_member: storage.identity_member.clone(),
+                identity_status: storage.identity_status.clone(),
                 supervisor_bridge: supervisor_bridge.clone(),
                 command_tx: command_tx.clone(),
                 command_rx,
@@ -7954,6 +7984,7 @@ impl MobBuilder {
                 tool_bundles,
                 default_llm_client,
                 default_external_tools_provider,
+                identity_local_external_tools_provider,
                 spawn_base_prompt_source,
                 spawn_member_customizer,
                 storage.realm_profiles.clone(),
@@ -9311,6 +9342,9 @@ impl MobBuilder {
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+        identity: Arc<dyn crate::store::MobIdentityStore>,
+        identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
+        identity_status: Arc<dyn crate::store::MobIdentityStatusStore>,
         supervisor_bridge: Arc<MobSupervisorBridge>,
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: RuntimeAdapterOption,
@@ -9318,6 +9352,9 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        identity_local_external_tools_provider: Option<
+            Arc<dyn super::IdentityLocalExternalToolsProvider>,
+        >,
         spawn_base_prompt_source: Option<Arc<dyn super::spec_compiler::SpawnBasePromptSource>>,
         spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
@@ -9366,6 +9403,9 @@ impl MobBuilder {
                 ),
                 restore_diagnostics,
                 runtime_metadata,
+                identity,
+                identity_member,
+                identity_status,
                 supervisor_bridge,
                 command_tx,
                 command_rx,
@@ -9382,6 +9422,7 @@ impl MobBuilder {
                 tool_bundles,
                 default_llm_client,
                 default_external_tools_provider,
+                identity_local_external_tools_provider,
                 spawn_base_prompt_source,
                 spawn_member_customizer,
                 realm_profile_store,
@@ -9417,6 +9458,9 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        identity_local_external_tools_provider: Option<
+            Arc<dyn super::IdentityLocalExternalToolsProvider>,
+        >,
         spawn_base_prompt_source: Option<Arc<dyn super::spec_compiler::SpawnBasePromptSource>>,
         spawn_member_customizer: Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
@@ -9457,6 +9501,9 @@ impl MobBuilder {
                 reachability_observations,
                 restore_diagnostics,
                 runtime_metadata,
+                identity,
+                identity_member,
+                identity_status,
                 supervisor_bridge,
                 command_tx,
                 command_rx,
@@ -9613,6 +9660,9 @@ impl MobBuilder {
                     &recovered_private_remote_turns,
                 )?,
             ));
+            let identity_reconcile_holder_id = format!("mob:{}", definition.id);
+            let identity_reconcile_incarnation_id =
+                meerkat_core::ops::OperationId::new().to_string();
 
             let mut actor = MobActor {
                 definition,
@@ -9678,6 +9728,14 @@ impl MobBuilder {
                 restore_diagnostics,
                 member_revival_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 runtime_metadata,
+                identity,
+                identity_member,
+                identity_status,
+                identity_reconcile_queue: VecDeque::new(),
+                identity_reconcile_enqueued: BTreeSet::new(),
+                identity_reconcile_failures: Arc::new(RwLock::new(BTreeMap::new())),
+                identity_reconcile_holder_id,
+                identity_reconcile_incarnation_id,
                 supervisor_bridge,
                 member_live_host,
                 member_event_pumps,
@@ -9692,6 +9750,7 @@ impl MobBuilder {
                 machine_state_watch_tx,
                 phase_watch_tx: phase_watch_tx_actor,
                 default_external_tools_provider,
+                identity_local_external_tools_provider,
                 per_spawn_external_tools: tokio::sync::RwLock::new(per_spawn_external_tools),
                 spawn_base_prompt_source,
                 spawn_member_customizer,
@@ -10260,6 +10319,8 @@ mod tests {
             runs,
             specs.clone(),
             metadata.clone(),
+            Arc::new(crate::store::InMemoryMobIdentityStore::new()),
+            Arc::new(crate::store::InMemoryMobIdentityStatusStore::new()),
         );
         let mob_id = MobId::from(format!("builder-ingress-conflict-{}", uuid::Uuid::new_v4()));
         let mut definition = MobDefinition::explicit(mob_id.clone());

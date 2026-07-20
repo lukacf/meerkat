@@ -84,6 +84,71 @@ fn option_some(value: KernelValue) -> KernelValue {
     )]))
 }
 
+fn identity_reconciliation_fields(
+    intent: &str,
+    session_creation_receipt: &str,
+    retirement_receipt: &str,
+    session: &str,
+    wiring: &str,
+) -> BTreeMap<FieldId, KernelValue> {
+    BTreeMap::from([
+        (
+            field("intent"),
+            named_variant("IdentityAuthorityCondition", intent),
+        ),
+        (
+            field("lease"),
+            named_variant("IdentityLeaseCondition", "HeldByCurrentIncarnation"),
+        ),
+        (field("external_binding_required"), KernelValue::Bool(false)),
+        (field("initial_delivery_required"), KernelValue::Bool(false)),
+        (
+            field("session_creation_receipt"),
+            named_variant("IdentityReceiptCondition", session_creation_receipt),
+        ),
+        (
+            field("retirement_receipt"),
+            named_variant("IdentityReceiptCondition", retirement_receipt),
+        ),
+        (
+            field("session"),
+            named_variant("IdentitySessionCondition", session),
+        ),
+        (
+            field("runtime"),
+            named_variant("IdentityResourceCondition", "Matching"),
+        ),
+        (
+            field("member"),
+            named_variant("IdentityResourceCondition", "Matching"),
+        ),
+        (
+            field("external_binding_receipt"),
+            named_variant("IdentityReceiptCondition", "NotRequired"),
+        ),
+        (
+            field("external_trust"),
+            named_variant("IdentityExternalTrustCondition", "NotRequired"),
+        ),
+        (
+            field("external_ceremony"),
+            named_variant("IdentityExternalCeremonyCondition", "NotRequired"),
+        ),
+        (
+            field("initial_delivery_receipt"),
+            named_variant("IdentityReceiptCondition", "NotRequired"),
+        ),
+        (
+            field("initial_delivery"),
+            named_variant("IdentityInitialDeliveryCondition", "NotRequired"),
+        ),
+        (
+            field("wiring"),
+            named_variant("IdentityResourceCondition", wiring),
+        ),
+    ])
+}
+
 #[test]
 fn applying_typed_input_yields_typed_transition_outcome() {
     let kernel = GeneratedMachineKernel::new(meerkat_machine());
@@ -301,6 +366,97 @@ fn mob_spawn_produces_typed_effect_variants() {
             .iter()
             .any(|emitted| emitted.variant == effect("RequestRuntimeBinding"))
     );
+}
+
+#[test]
+fn mob_identity_reconciliation_uses_the_schema_helper_without_state() {
+    let kernel = GeneratedMachineKernel::new(mob_machine());
+    let state = kernel.initial_state().expect("initial state");
+    let outcome = kernel
+        .transition(
+            &state,
+            &KernelInput {
+                variant: input("ClassifyIdentityReconciliation"),
+                // A later unavailable resource must not stall the independent
+                // session obligation.
+                fields: identity_reconciliation_fields(
+                    "PresentCreateIfAbsent",
+                    "Missing",
+                    "NotRequired",
+                    "Missing",
+                    "Unavailable",
+                ),
+            },
+        )
+        .expect("identity reconciliation classification");
+
+    assert_eq!(
+        outcome.transition,
+        transition("ClassifyIdentityReconciliationRunning")
+    );
+    assert_eq!(outcome.next_state, state);
+    assert_eq!(outcome.effects.len(), 1);
+    assert_eq!(
+        outcome.effects[0].variant,
+        effect("IdentityReconciliationClassified")
+    );
+    assert_eq!(
+        outcome.effects[0].fields.get(&field("decision")),
+        Some(&named_variant(
+            "IdentityReconcileDecision",
+            "EnsureSessionAuthority"
+        ))
+    );
+}
+
+#[test]
+fn mob_identity_reconciliation_uses_one_wiring_obligation_for_ensure_and_cleanup() {
+    let kernel = GeneratedMachineKernel::new(mob_machine());
+    let state = kernel.initial_state().expect("initial state");
+    let cases = [
+        (
+            "PresentRequireExisting",
+            "NotRequired",
+            "NotRequired",
+            "Matching",
+            "Divergent",
+        ),
+        (
+            "PresentRequireExisting",
+            "NotRequired",
+            "NotRequired",
+            "Malformed",
+            "Matching",
+        ),
+        ("Absent", "NotRequired", "Missing", "Malformed", "Matching"),
+    ];
+
+    for (intent, session_creation_receipt, retirement_receipt, session, wiring) in cases {
+        let outcome = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: input("ClassifyIdentityReconciliation"),
+                    fields: identity_reconciliation_fields(
+                        intent,
+                        session_creation_receipt,
+                        retirement_receipt,
+                        session,
+                        wiring,
+                    ),
+                },
+            )
+            .expect("identity reconciliation classification");
+
+        assert_eq!(outcome.next_state, state);
+        assert_eq!(
+            outcome.effects[0].fields.get(&field("decision")),
+            Some(&named_variant(
+                "IdentityReconcileDecision",
+                "ReconcileWiring"
+            ))
+        );
+    }
 }
 
 #[test]

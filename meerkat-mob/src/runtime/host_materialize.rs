@@ -2334,7 +2334,7 @@ impl HostMemberMaterializer {
                 DecompiledSystemPrompt::Replace(text) => {
                     Some(SpawnSystemPromptOverride::Replace(text.clone()))
                 }
-                DecompiledSystemPrompt::Disable => None,
+                DecompiledSystemPrompt::Disable => Some(SpawnSystemPromptOverride::Disable),
             },
         };
 

@@ -643,7 +643,7 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
 }
 
 #[tokio::test]
-async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
+async fn recovery_contract_normalizes_every_dead_process_phase_to_fresh_idle() {
     for harness in supported_store_harnesses() {
         for recovered_state in [
             RuntimeState::Retired,
@@ -679,37 +679,22 @@ async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
             drop(seeder);
 
             let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
-            if recovered_state == RuntimeState::Destroyed {
-                // Destroyed is terminal machine truth: cold re-registration is
-                // rejected by the machine verdict instead of laundering the
-                // terminal state into a successful registration.
-                let err = machine
-                    .register_session(session_id.clone())
-                    .await
-                    .expect_err("destroyed runtime must reject cold re-registration");
-                assert!(
-                    err.to_string().contains("Runtime destroyed"),
-                    "{}: rejection must surface the destroyed terminal verdict, got {err:?}",
-                    harness.name
-                );
-            } else {
-                machine
-                    .register_session(session_id.clone())
-                    .await
-                    .expect("register session");
-                assert_eq!(
-                    machine.runtime_state(&session_id).await.unwrap(),
-                    recovered_state,
-                    "{}: recovered {recovered_state} projection must remain machine lifecycle truth",
-                    harness.name
-                );
-            }
+            machine
+                .register_session(session_id.clone())
+                .await
+                .expect("cold registration must replace the dead process shell");
+            assert_eq!(
+                machine.runtime_state(&session_id).await.unwrap(),
+                RuntimeState::Idle,
+                "{}: persisted {recovered_state} is observation of a dead process, not restorable authority",
+                harness.name
+            );
             assert_eq!(
                 load_runtime_state(harness.store.as_ref(), &runtime_id)
                     .await
                     .unwrap(),
-                Some(recovered_state),
-                "{}: recovered {recovered_state} projection must remain durable lifecycle truth after machine recovery",
+                Some(RuntimeState::Idle),
+                "{}: persisted {recovered_state} must converge to a fresh unbound Idle shell",
                 harness.name
             );
         }

@@ -2312,6 +2312,7 @@ mod tests {
             },
             surface_only_inputs: vec![],
             runtime_internal_inputs: vec![],
+            tlc_representative_inputs: vec![],
             signals: EnumSchema {
                 name: "TurnExecutionSignal".to_owned(),
                 variants: vec![],

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 //! MobMachine — DSL-generated canonical state.
 //!
 //! The generated `MobMachineState` is the machine-owned portion of mob state.
@@ -5,6 +7,11 @@
 //! and coordinator binding. Shell infrastructure (channels, stores, services,
 //! handles, etc.) is NOT modeled here.
 
+pub use crate::identity::{
+    IdentityAuthorityCondition, IdentityExternalCeremonyCondition, IdentityExternalTrustCondition,
+    IdentityInitialDeliveryCondition, IdentityLeaseCondition, IdentityReceiptCondition,
+    IdentityReconcileDecision, IdentityResourceCondition, IdentitySessionCondition,
+};
 use meerkat_machine_schema::catalog::dsl::OptionValueExt;
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AdaptiveDecisionKind, AdaptiveLayerAdmissionKind, AdaptiveLayerDispositionKind,
@@ -2028,6 +2035,57 @@ pub enum MobCoordinationEventKind {
 // ---------------------------------------------------------------------------
 
 meerkat_machine_schema::mob_catalog_machine_dsl!("meerkat-mob", "machines::mob_machine");
+
+/// Flatten the domain facts into the generated classifier input. This is a
+/// mechanical carrier conversion only: observation versions and write
+/// authority remain in the actor's target-local actuation permit.
+pub(crate) fn identity_reconciliation_input(
+    facts: crate::identity::IdentityReconcileFacts,
+) -> MobMachineInput {
+    MobMachineInput::ClassifyIdentityReconciliation {
+        intent: facts.intent,
+        lease: facts.lease,
+        external_binding_required: facts.external_binding_required,
+        initial_delivery_required: facts.initial_delivery_required,
+        session_creation_receipt: facts.session_creation_receipt,
+        retirement_receipt: facts.retirement_receipt,
+        session: facts.session,
+        runtime: facts.runtime,
+        member: facts.member,
+        external_binding_receipt: facts.external_binding_receipt,
+        external_trust: facts.external_trust,
+        external_ceremony: facts.external_ceremony,
+        initial_delivery_receipt: facts.initial_delivery_receipt,
+        initial_delivery: facts.initial_delivery,
+        wiring: facts.wiring,
+    }
+}
+
+/// Evaluate the one generated semantic body without constructing the large
+/// MobMachine state. Runtime integration still consumes the generated input
+/// and emitted effect; this direct route keeps exhaustive pure-function tests
+/// cheap while sharing the exact same DSL helper.
+pub(crate) fn generated_identity_reconcile_decision(
+    facts: crate::identity::IdentityReconcileFacts,
+) -> IdentityReconcileDecision {
+    MobMachineAuthority::identity_reconcile_decision(
+        &facts.intent,
+        &facts.lease,
+        &facts.external_binding_required,
+        &facts.initial_delivery_required,
+        &facts.session_creation_receipt,
+        &facts.retirement_receipt,
+        &facts.session,
+        &facts.runtime,
+        &facts.member,
+        &facts.external_binding_receipt,
+        &facts.external_trust,
+        &facts.external_ceremony,
+        &facts.initial_delivery_receipt,
+        &facts.initial_delivery,
+        &facts.wiring,
+    )
+}
 
 // ---------------------------------------------------------------------------
 // MobMachine-owned projection helpers

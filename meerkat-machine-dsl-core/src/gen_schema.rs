@@ -255,6 +255,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                     },
                     surface_only_inputs: vec![#(#surface_only_ids),*],
                     runtime_internal_inputs: vec![],
+                    tlc_representative_inputs: vec![],
                     signals: EnumSchema {
                         name: #signal_name.into(),
                         variants: #signal_variants_expr,

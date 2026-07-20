@@ -4947,6 +4947,17 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::{Duration, timeout};
 
+    fn install_session_created_checkpoint(session: &mut Session) {
+        let checkpoint = meerkat_core::SessionCheckpointStamp::root(
+            session,
+            meerkat_core::SessionCheckpointProvenance::SessionCreated,
+        )
+        .expect("fresh test session checkpoint should be valid");
+        session
+            .install_checkpoint_stamp(checkpoint)
+            .expect("fresh test session checkpoint should install");
+    }
+
     #[tokio::test]
     async fn mcp_realm_bootstrap_preserves_durable_event_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5308,6 +5319,7 @@ mod tests {
         session
             .set_build_state(meerkat_core::SessionBuildState::default())
             .expect("session build state should serialize");
+        install_session_created_checkpoint(&mut session);
         store.save(&session).await.expect("persisted session");
         (state, session_id)
     }
@@ -7594,10 +7606,12 @@ mod tests {
                 mob_member_binding: None,
             })
             .expect("session metadata should serialize");
+        install_session_created_checkpoint(&mut session);
         store.save(&session).await.expect("persisted session");
 
-        let blocker_session = Session::new();
+        let mut blocker_session = Session::new();
         let blocker_id = blocker_session.id().clone();
+        install_session_created_checkpoint(&mut blocker_session);
         store
             .save(&blocker_session)
             .await
@@ -7734,8 +7748,9 @@ mod tests {
             "test starts with no runtime adapter registration"
         );
 
-        let blocker_session = Session::new();
+        let mut blocker_session = Session::new();
         let blocker_id = blocker_session.id().clone();
+        install_session_created_checkpoint(&mut blocker_session);
         store
             .save(&blocker_session)
             .await
@@ -7865,8 +7880,9 @@ mod tests {
             "test starts before peer ingress has been configured"
         );
 
-        let blocker_session = Session::new();
+        let mut blocker_session = Session::new();
         let blocker_id = blocker_session.id().clone();
+        install_session_created_checkpoint(&mut blocker_session);
         store
             .save(&blocker_session)
             .await
@@ -7976,6 +7992,7 @@ mod tests {
         session
             .set_build_state(meerkat_core::SessionBuildState::default())
             .expect("session build state should serialize");
+        install_session_created_checkpoint(&mut session);
         store.save(&session).await.expect("persisted session");
         let result = Box::pin(handle_meerkat_resume(
             &state,
@@ -8060,6 +8077,7 @@ mod tests {
         session
             .set_build_state(meerkat_core::SessionBuildState::default())
             .expect("session build state should serialize");
+        install_session_created_checkpoint(&mut session);
         store.save(&session).await.expect("persisted session");
         state
             .runtime_adapter
@@ -8700,6 +8718,7 @@ mod tests {
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
+        install_session_created_checkpoint(&mut session);
         store
             .save(&session)
             .await
@@ -8805,6 +8824,7 @@ mod tests {
         session.push(meerkat_core::types::Message::tool_results(vec![
             meerkat_core::types::ToolResult::new("tool-2".to_string(), "done".to_string(), false),
         ]));
+        install_session_created_checkpoint(&mut session);
         store.save(&session).await.expect("persisted mixed session");
         seed_runtime_authority_session(&runtime_store, &session).await;
 

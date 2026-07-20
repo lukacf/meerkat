@@ -1396,6 +1396,36 @@ pub enum RuntimeLifecycleObservedState {
     Destroyed,
 }
 
+/// Physical observation class for the durable runtime-authority projection.
+///
+/// This is deliberately broader than [`RuntimeLifecycleObservedState`]: a
+/// missing, future-version, malformed, or temporarily unavailable row is still
+/// valid input to the generated level-triggered classifier. None of these
+/// observations is adopted into machine state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeAuthorityObservationKind {
+    #[default]
+    Missing,
+    Decoded,
+    Unsupported,
+    Malformed,
+    Unavailable,
+}
+
+/// Pure next-obligation result for runtime-authority reconciliation.
+///
+/// The result is output-only. Physical writes still require a target-local
+/// observation CAS plus the current intent and unexpired lease fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeAuthorityReconcileDecision {
+    #[default]
+    RepairBlocked,
+    Converged,
+    NormalizeOrReplace,
+    Quarantine,
+    Backoff,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RuntimeLifecycleTerminality {
     #[default]
@@ -3597,16 +3627,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 failure: Enum<RuntimeCompletionWaitFailureObservation>,
             },
             Destroy { session_id: SessionId },
-            RecoverRuntimeAuthority {
-                session_id: SessionId,
-                state: Enum<RuntimeLifecycleObservedState>,
+            // Total, level-triggered classification of a freshly observed
+            // runtime-authority row. All tuple components remain optional so
+            // every decodable torn shape reaches generated authority without
+            // bridge-side normalization or evidence loss.
+            ClassifyRuntimeAuthorityReconciliation {
+                observation_kind: Enum<RuntimeAuthorityObservationKind>,
+                state: Option<Enum<RuntimeLifecycleObservedState>>,
                 agent_runtime_id: Option<AgentRuntimeId>,
                 fence_token: Option<FenceToken>,
                 runtime_generation: Option<Generation>,
                 runtime_epoch_id: Option<RuntimeEpochId>,
                 current_run_id: Option<RunId>,
                 pre_run_phase: Option<Enum<PreRunPhase>>,
-                silent_intent_overrides: Set<String>,
+                malformed_reclaim_safe: bool,
             },
             RecoverSupervisorBinding {
                 name: String,
@@ -4620,6 +4654,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_epoch_id: Option<RuntimeEpochId>,
                 action: Enum<RuntimeOpsLifecycleDurabilityAction>,
             },
+            // Output-only result of the total runtime-authority observation
+            // classifier. No observed projection or recovery decision is
+            // mirrored into MeerkatMachine state.
+            RuntimeAuthorityReconciliationClassified {
+                decision: Enum<RuntimeAuthorityReconcileDecision>,
+            },
             UserInterruptPublicResultResolved {
                 result: Enum<UserInterruptPublicResultKind>,
             },
@@ -5235,6 +5275,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RuntimeCompletionCleanupResolved => local seam NoOwnerRealization,
         disposition RuntimeCompletionWaitFailureResolved => local seam SurfaceResultAlignment,
         disposition RuntimeOpsLifecycleDurabilityResolved => local seam SurfaceResultAlignment,
+        disposition RuntimeAuthorityReconciliationClassified => local seam SurfaceResultAlignment,
         disposition UserInterruptPublicResultResolved => local seam SurfaceResultAlignment,
         disposition ModelRoutingStatusChanged => external seam SurfaceResultAlignment,
         disposition SwitchTurnDenied => external seam SurfaceResultAlignment,
@@ -5384,6 +5425,55 @@ macro_rules! meerkat_catalog_machine_dsl {
         // =====================================================================
         // Helpers
         // =====================================================================
+
+        // One total, pure classifier over a freshly observed runtime-authority
+        // row. Observed lifecycle is realization evidence, never authority to
+        // adopt a phase. Only the exact clean unbound Idle projection is a
+        // fixed point; every other decoded tuple is normalized or replaced.
+        helper runtime_authority_reconcile_decision(
+            observation_kind: Enum<RuntimeAuthorityObservationKind>,
+            state: Option<Enum<RuntimeLifecycleObservedState>>,
+            agent_runtime_id: Option<AgentRuntimeId>,
+            fence_token: Option<FenceToken>,
+            runtime_generation: Option<Generation>,
+            runtime_epoch_id: Option<RuntimeEpochId>,
+            current_run_id: Option<RunId>,
+            pre_run_phase: Option<Enum<PreRunPhase>>,
+            malformed_reclaim_safe: bool
+        ) -> Enum<RuntimeAuthorityReconcileDecision> {
+            if observation_kind == RuntimeAuthorityObservationKind::Unavailable {
+                RuntimeAuthorityReconcileDecision::Backoff
+            } else {
+                if observation_kind == RuntimeAuthorityObservationKind::Unsupported {
+                    RuntimeAuthorityReconcileDecision::RepairBlocked
+                } else {
+                    if observation_kind == RuntimeAuthorityObservationKind::Malformed {
+                        if malformed_reclaim_safe {
+                            RuntimeAuthorityReconcileDecision::Quarantine
+                        } else {
+                            RuntimeAuthorityReconcileDecision::RepairBlocked
+                        }
+                    } else {
+                        if observation_kind == RuntimeAuthorityObservationKind::Missing {
+                            RuntimeAuthorityReconcileDecision::NormalizeOrReplace
+                        } else {
+                            if state == Some(RuntimeLifecycleObservedState::Idle)
+                                && agent_runtime_id == None
+                                && fence_token == None
+                                && runtime_generation == None
+                                && runtime_epoch_id == None
+                                && current_run_id == None
+                                && pre_run_phase == None
+                            {
+                                RuntimeAuthorityReconcileDecision::Converged
+                            } else {
+                                RuntimeAuthorityReconcileDecision::NormalizeOrReplace
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         helper deferred_authority_has_identity(witness: ToolVisibilityWitness) -> bool {
             witness.len() > 0
@@ -9326,22 +9416,33 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_fence_token, previous_runtime_generation, previous_runtime_epoch_id
             }
             guard "session_matches_current" { self.session_id == Some(session_id) }
-            guard "current_runtime_binding_complete" {
-                self.active_runtime_id != None
-                && self.active_fence_token != None
-                && self.active_runtime_generation != None
+            guard "current_runtime_binding_consistent" {
+                (
+                    self.active_runtime_id != None
+                    && self.active_fence_token != None
+                    && self.active_runtime_generation != None
+                ) || (
+                    self.active_runtime_id == None
+                    && self.active_fence_token == None
+                    && self.active_runtime_generation == None
+                    && self.active_runtime_epoch_id == None
+                )
             }
             guard "runtime_lineage_matches" {
-                self.active_runtime_id == Some(previous_agent_runtime_id)
+                self.active_runtime_id == None
+                || self.active_runtime_id == Some(previous_agent_runtime_id)
             }
             guard "fence_not_regressed" {
-                self.active_fence_token.get("value") >= previous_fence_token
+                self.active_fence_token == None
+                || self.active_fence_token.get("value") >= previous_fence_token
             }
             guard "generation_not_regressed" {
-                self.active_runtime_generation.get("value") >= previous_runtime_generation
+                self.active_runtime_generation == None
+                || self.active_runtime_generation.get("value") >= previous_runtime_generation
             }
             guard "epoch_lineage_valid" {
-                self.active_runtime_epoch_id == previous_runtime_epoch_id
+                self.active_runtime_id == None
+                || self.active_runtime_epoch_id == previous_runtime_epoch_id
                 || self.active_fence_token.get("value") > previous_fence_token
                 || self.active_runtime_generation.get("value") > previous_runtime_generation
             }
@@ -9357,9 +9458,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_fence_token: previous_fence_token,
                 previous_runtime_generation: previous_runtime_generation,
                 previous_runtime_epoch_id: previous_runtime_epoch_id,
-                next_agent_runtime_id: self.active_runtime_id.get("value"),
-                next_fence_token: self.active_fence_token.get("value"),
-                next_runtime_generation: self.active_runtime_generation.get("value"),
+                // A fresh unbound Idle shell has no process placement to
+                // adopt into. Retaining the prior audit identity while
+                // clearing the placement epoch makes durable terminal
+                // publication replay-neutral; the target CAS still rejects
+                // any changed outbox row.
+                next_agent_runtime_id: if self.active_runtime_id != None { self.active_runtime_id.get("value") } else { previous_agent_runtime_id },
+                next_fence_token: if self.active_fence_token != None { self.active_fence_token.get("value") } else { previous_fence_token },
+                next_runtime_generation: if self.active_runtime_generation != None { self.active_runtime_generation.get("value") } else { previous_runtime_generation },
                 next_runtime_epoch_id: self.active_runtime_epoch_id,
             }
         }
@@ -9964,225 +10070,42 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
         }
 
-        // 18b. RecoverRuntimeAuthority: seed runtime-observed lifecycle facts
-        // through generated authority during registration/recovery. The shell
-        // may supply only typed observations; the machine owns the resulting
-        // lifecycle, session, runtime binding, run binding, and silent-intent
-        // facts.
-        transition RecoverRuntimeAuthorityInitializing {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
+        // Total runtime-authority observation classifier. It is an
+        // Initializing self-loop with no observation-shape guards and no state
+        // updates: every well-typed physical observation produces exactly one
+        // generated next obligation, while ordinary desired-state transitions
+        // remain the only way to establish runtime phase and bindings.
+        transition ClassifyRuntimeAuthorityReconciliation {
+            on input ClassifyRuntimeAuthorityReconciliation {
+                observation_kind,
+                state,
+                agent_runtime_id,
+                fence_token,
+                runtime_generation,
+                runtime_epoch_id,
+                current_run_id,
+                pre_run_phase,
+                malformed_reclaim_safe
             }
             guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_initializing" { state == RuntimeLifecycleObservedState::Initializing }
-            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = current_run_id;
-                self.pre_run_phase = pre_run_phase;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
+            update {}
             to Initializing
-        }
-        transition RecoverRuntimeAuthorityIdle {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
+            emit RuntimeAuthorityReconciliationClassified {
+                decision: runtime_authority_reconcile_decision(
+                    observation_kind,
+                    state,
+                    agent_runtime_id,
+                    fence_token,
+                    runtime_generation,
+                    runtime_epoch_id,
+                    current_run_id,
+                    pre_run_phase,
+                    malformed_reclaim_safe)
             }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_idle" { state == RuntimeLifecycleObservedState::Idle }
-            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = current_run_id;
-                self.pre_run_phase = pre_run_phase;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
-            to Idle
-        }
-        transition RecoverRuntimeAuthorityAttached {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
-            }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_attached" { state == RuntimeLifecycleObservedState::Attached }
-            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = current_run_id;
-                self.pre_run_phase = pre_run_phase;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
-            to Attached
-        }
-        // A cold process cannot retain the executor or run witness that made
-        // a live Running phase authoritative. Lifecycle V3 intentionally
-        // persists neither current_run_id nor pre_run_phase, so an observed
-        // Running row with an absent pair is an interrupted-run recovery
-        // witness, not permission to recreate Running authority. Normalize
-        // it to Idle; recovered input authority independently requeues or
-        // abandons the interrupted work. A partial pair remains corrupt and
-        // matches neither this transition nor the complete-pair transition.
-        transition RecoverRuntimeAuthorityColdRunning {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
-            }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_running" { state == RuntimeLifecycleObservedState::Running }
-            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = None;
-                self.pre_run_phase = None;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
-            to Idle
-        }
-        transition RecoverRuntimeAuthorityRunning {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
-            }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_running" { state == RuntimeLifecycleObservedState::Running }
-            guard "run_binding_complete" { current_run_id != None && pre_run_phase != None }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = current_run_id;
-                self.pre_run_phase = pre_run_phase;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
-            to Running
-        }
-        transition RecoverRuntimeAuthorityRetired {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
-            }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_retired" { state == RuntimeLifecycleObservedState::Retired }
-            guard "run_binding_pair" {
-                (current_run_id == None && pre_run_phase == None)
-                || (current_run_id != None && pre_run_phase != None)
-            }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = current_run_id;
-                self.pre_run_phase = pre_run_phase;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
-            to Retired
-        }
-        transition RecoverRuntimeAuthorityStopped {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
-            }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_stopped" { state == RuntimeLifecycleObservedState::Stopped }
-            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = current_run_id;
-                self.pre_run_phase = pre_run_phase;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
-            to Stopped
-        }
-        transition RecoverRuntimeAuthorityDestroyed {
-            on input RecoverRuntimeAuthority {
-                session_id, state, agent_runtime_id, fence_token, runtime_generation, runtime_epoch_id, current_run_id,
-                pre_run_phase, silent_intent_overrides
-            }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "observed_destroyed" { state == RuntimeLifecycleObservedState::Destroyed }
-            guard "no_run_binding" { current_run_id == None && pre_run_phase == None }
-            guard "fence_requires_runtime" { fence_token == None || agent_runtime_id != None }
-            guard "generation_requires_runtime" { runtime_generation == None || agent_runtime_id != None }
-            guard "epoch_requires_runtime" { runtime_epoch_id == None || agent_runtime_id != None }
-            guard "binding_identity_present_when_runtime_bound" { agent_runtime_id == None || runtime_generation != None || runtime_epoch_id != None }
-            update {
-                self.session_id = Some(session_id);
-                self.active_runtime_id = agent_runtime_id;
-                self.active_fence_token = fence_token;
-                self.active_runtime_generation = runtime_generation;
-                self.active_runtime_epoch_id = runtime_epoch_id;
-                self.current_run_id = current_run_id;
-                self.pre_run_phase = pre_run_phase;
-                self.runtime_stop_deferred = false;
-                self.silent_intent_overrides = silent_intent_overrides;
-            }
-            to Destroyed
         }
 
-        // Durable supervisor control-plane facts are restored only after the
-        // coarse runtime authority above has established the recovered phase.
+        // Durable supervisor control-plane facts are restored only after a
+        // fresh RegisterSession transition has established the runtime shell.
         // Recovery never emits live trust; the session-owned rotation worker
         // resumes any pending generated revoke/publish obligation separately.
         transition RecoverSupervisorBinding {

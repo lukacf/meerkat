@@ -7246,6 +7246,134 @@ impl std::fmt::Display for RuntimeApplyFailureCause {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeAuthorityObservationKind {
+    #[default]
+    #[serde(rename = "Missing")]
+    Missing,
+    #[serde(rename = "Decoded")]
+    Decoded,
+    #[serde(rename = "Unsupported")]
+    Unsupported,
+    #[serde(rename = "Malformed")]
+    Malformed,
+    #[serde(rename = "Unavailable")]
+    Unavailable,
+}
+impl RuntimeAuthorityObservationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Missing => "Missing",
+            Self::Decoded => "Decoded",
+            Self::Unsupported => "Unsupported",
+            Self::Malformed => "Malformed",
+            Self::Unavailable => "Unavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeAuthorityObservationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Missing" => Ok(Self::Missing),
+            "Decoded" => Ok(Self::Decoded),
+            "Unsupported" => Ok(Self::Unsupported),
+            "Malformed" => Ok(Self::Malformed),
+            "Unavailable" => Ok(Self::Unavailable),
+            other => Err(format!(
+                "invalid RuntimeAuthorityObservationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeAuthorityObservationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeAuthorityObservationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeAuthorityReconcileDecision {
+    #[default]
+    #[serde(rename = "RepairBlocked")]
+    RepairBlocked,
+    #[serde(rename = "Converged")]
+    Converged,
+    #[serde(rename = "NormalizeOrReplace")]
+    NormalizeOrReplace,
+    #[serde(rename = "Quarantine")]
+    Quarantine,
+    #[serde(rename = "Backoff")]
+    Backoff,
+}
+impl RuntimeAuthorityReconcileDecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RepairBlocked => "RepairBlocked",
+            Self::Converged => "Converged",
+            Self::NormalizeOrReplace => "NormalizeOrReplace",
+            Self::Quarantine => "Quarantine",
+            Self::Backoff => "Backoff",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeAuthorityReconcileDecision {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RepairBlocked" => Ok(Self::RepairBlocked),
+            "Converged" => Ok(Self::Converged),
+            "NormalizeOrReplace" => Ok(Self::NormalizeOrReplace),
+            "Quarantine" => Ok(Self::Quarantine),
+            "Backoff" => Ok(Self::Backoff),
+            other => Err(format!(
+                "invalid RuntimeAuthorityReconcileDecision value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeAuthorityReconcileDecision {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeAuthorityReconcileDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeCompletionCleanupAction {
     #[default]
     #[serde(rename = "RetainRuntime")]
@@ -11289,16 +11417,16 @@ pub mod inputs {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RecoverRuntimeAuthority {
-        pub session_id: SessionId,
-        pub state: RuntimeLifecycleObservedState,
+    pub struct ClassifyRuntimeAuthorityReconciliation {
+        pub observation_kind: RuntimeAuthorityObservationKind,
+        pub state: Option<RuntimeLifecycleObservedState>,
         pub agent_runtime_id: Option<AgentRuntimeId>,
         pub fence_token: Option<FenceToken>,
         pub runtime_generation: Option<Generation>,
         pub runtime_epoch_id: Option<RuntimeEpochId>,
         pub current_run_id: Option<RunId>,
         pub pre_run_phase: Option<PreRunPhase>,
-        pub silent_intent_overrides: std::collections::BTreeSet<String>,
+        pub malformed_reclaim_safe: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverSupervisorBinding {
@@ -12709,7 +12837,7 @@ pub enum Input {
     ResolveRuntimeCompletionCleanup(inputs::ResolveRuntimeCompletionCleanup),
     ResolveRuntimeCompletionWaitFailure(inputs::ResolveRuntimeCompletionWaitFailure),
     Destroy(inputs::Destroy),
-    RecoverRuntimeAuthority(inputs::RecoverRuntimeAuthority),
+    ClassifyRuntimeAuthorityReconciliation(inputs::ClassifyRuntimeAuthorityReconciliation),
     RecoverSupervisorBinding(inputs::RecoverSupervisorBinding),
     RecoverSupervisorRevocationPending(inputs::RecoverSupervisorRevocationPending),
     RecoverSupervisorRotationOperation(inputs::RecoverSupervisorRotationOperation),
@@ -13037,7 +13165,9 @@ impl Input {
                 InputKind::ResolveRuntimeCompletionWaitFailure
             }
             Self::Destroy(_) => InputKind::Destroy,
-            Self::RecoverRuntimeAuthority(_) => InputKind::RecoverRuntimeAuthority,
+            Self::ClassifyRuntimeAuthorityReconciliation(_) => {
+                InputKind::ClassifyRuntimeAuthorityReconciliation
+            }
             Self::RecoverSupervisorBinding(_) => InputKind::RecoverSupervisorBinding,
             Self::RecoverSupervisorRevocationPending(_) => {
                 InputKind::RecoverSupervisorRevocationPending
@@ -13400,7 +13530,7 @@ pub enum InputKind {
     ResolveRuntimeCompletionCleanup,
     ResolveRuntimeCompletionWaitFailure,
     Destroy,
-    RecoverRuntimeAuthority,
+    ClassifyRuntimeAuthorityReconciliation,
     RecoverSupervisorBinding,
     RecoverSupervisorRevocationPending,
     RecoverSupervisorRotationOperation,
@@ -13826,6 +13956,10 @@ pub mod effects {
         pub generation: Option<Generation>,
         pub runtime_epoch_id: Option<RuntimeEpochId>,
         pub action: RuntimeOpsLifecycleDurabilityAction,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeAuthorityReconciliationClassified {
+        pub decision: RuntimeAuthorityReconcileDecision,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UserInterruptPublicResultResolved {
@@ -14614,6 +14748,7 @@ pub enum Effect {
     RuntimeCompletionCleanupResolved(effects::RuntimeCompletionCleanupResolved),
     RuntimeCompletionWaitFailureResolved(effects::RuntimeCompletionWaitFailureResolved),
     RuntimeOpsLifecycleDurabilityResolved(effects::RuntimeOpsLifecycleDurabilityResolved),
+    RuntimeAuthorityReconciliationClassified(effects::RuntimeAuthorityReconciliationClassified),
     UserInterruptPublicResultResolved(effects::UserInterruptPublicResultResolved),
     ModelRoutingStatusChanged(effects::ModelRoutingStatusChanged),
     SwitchTurnDenied(effects::SwitchTurnDenied),
@@ -14782,6 +14917,7 @@ pub enum EffectKind {
     RuntimeCompletionCleanupResolved,
     RuntimeCompletionWaitFailureResolved,
     RuntimeOpsLifecycleDurabilityResolved,
+    RuntimeAuthorityReconciliationClassified,
     UserInterruptPublicResultResolved,
     ModelRoutingStatusChanged,
     SwitchTurnDenied,
@@ -15794,14 +15930,7 @@ pub enum TransitionId {
     RecoverAttached,
     RecoverRetired,
     RecoverStopped,
-    RecoverRuntimeAuthorityInitializing,
-    RecoverRuntimeAuthorityIdle,
-    RecoverRuntimeAuthorityAttached,
-    RecoverRuntimeAuthorityColdRunning,
-    RecoverRuntimeAuthorityRunning,
-    RecoverRuntimeAuthorityRetired,
-    RecoverRuntimeAuthorityStopped,
-    RecoverRuntimeAuthorityDestroyed,
+    ClassifyRuntimeAuthorityReconciliation,
     RecoverSupervisorBindingInitializing,
     RecoverSupervisorBindingIdle,
     RecoverSupervisorBindingAttached,

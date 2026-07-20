@@ -971,11 +971,11 @@ meerkat_machine_runtime_internal_inputs!(
     FailureRecoveryLifecycle => [
         AuthorizeInteractionTerminalOutboxAdoption,
         ClassifyLlmFailureRecovery,
+        ClassifyRuntimeAuthorityReconciliation,
         ClassifyRuntimeLifecycleDurability,
         ClassifyRuntimeLifecycleState,
         FatalFailure,
         RecoverableFailure,
-        RecoverRuntimeAuthority,
         RecoverRuntimeCompletionResultCorrelation,
         ResolveVisibleRuntimePhase,
     ],

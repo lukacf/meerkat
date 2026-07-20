@@ -4,14 +4,11 @@
 //! This module remains as a compatibility facade for tests and older callers
 //! that ask for a `PolicyDecision` directly.
 
-use std::collections::BTreeSet;
-
-use crate::identifiers::{InputKind, KindId, LogicalRuntimeId, PolicyVersion};
+use crate::identifiers::{InputKind, KindId, PolicyVersion};
 use crate::ingress_types::RuntimeInputSemantics;
 use crate::input::Input;
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
-use crate::runtime_state::RuntimeState;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::types::SessionId;
 
@@ -170,25 +167,20 @@ fn generated_admission_projection(
 
 fn projection_authority(runtime_idle: bool) -> Result<mm_dsl::MeerkatMachineAuthority, String> {
     let session_id = SessionId::new();
-    let runtime_id = LogicalRuntimeId::new("policy-projection");
-    let run_id = (!runtime_idle).then(RunId::new);
-    let pre_run_phase = (!runtime_idle).then_some(RuntimeState::Attached);
-    crate::meerkat_machine::dsl_authority::recover_authority_from_runtime_observation(
-        &session_id,
-        if runtime_idle {
-            RuntimeState::Idle
-        } else {
-            RuntimeState::Running
-        },
-        Some(&runtime_id),
-        run_id.as_ref(),
-        pre_run_phase,
-        BTreeSet::new(),
-        None,
-        None,
-        None,
-    )
-    .map_err(|err| format!("generated admission authority recovery failed: {err}"))
+    let mut authority =
+        crate::meerkat_machine::dsl_authority::new_registered_authority(&session_id)
+            .map_err(|err| format!("generated admission authority registration failed: {err}"))?;
+    if !runtime_idle {
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            mm_dsl::MeerkatMachineInput::Prepare {
+                session_id: mm_dsl::SessionId::from_domain(&session_id),
+                run_id: mm_dsl::RunId::from_domain(&RunId::new()),
+            },
+        )
+        .map_err(|err| format!("generated admission authority prepare failed: {err}"))?;
+    }
+    Ok(authority)
 }
 
 #[cfg(test)]

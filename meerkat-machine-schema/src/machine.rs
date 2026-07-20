@@ -105,6 +105,17 @@ pub struct MachineSchema {
     /// Inputs that are part of the DSL alphabet but intentionally internal to
     /// machine/composition drivers rather than public runtime command surfaces.
     pub runtime_internal_inputs: Vec<InputVariantId>,
+    /// Runtime-internal, state-independent inputs whose payload domains are
+    /// represented by one typed value per field during TLC lifecycle
+    /// exploration.
+    ///
+    /// This is a model-checking abstraction only. The generated Rust machine
+    /// and its input alphabet remain unchanged, and callers must separately
+    /// prove payload classification totality (normally with generated-kernel
+    /// product tests). Validation permits this annotation only when every
+    /// matching transition is unguarded, phase-preserving, and has no state
+    /// updates, so payload choice cannot change lifecycle state.
+    pub tlc_representative_inputs: Vec<InputVariantId>,
     pub signals: EnumSchema,
     pub effects: EnumSchema,
     pub helpers: Vec<HelperSchema>,
@@ -154,6 +165,10 @@ impl MachineSchema {
         let _runtime_internal_inputs = unique_names(
             self.runtime_internal_inputs.iter().map(AsRef::as_ref),
             "runtime-internal input",
+        )?;
+        let tlc_representative_inputs = unique_names(
+            self.tlc_representative_inputs.iter().map(AsRef::as_ref),
+            "TLC representative input",
         )?;
         let signal_variants = self.signals.variants_by_name()?;
         let effect_variants = self.effects.variants_by_name()?;
@@ -239,6 +254,17 @@ impl MachineSchema {
             {
                 return Err(MachineSchemaError::UnknownRuntimeInternalInputVariant {
                     variant: runtime_internal_input.as_str().to_owned(),
+                });
+            }
+        }
+
+        for representative_input in &self.tlc_representative_inputs {
+            if !input_variants
+                .iter()
+                .any(|variant| *variant == representative_input.as_str())
+            {
+                return Err(MachineSchemaError::UnknownTlcRepresentativeInputVariant {
+                    variant: representative_input.as_str().to_owned(),
                 });
             }
         }
@@ -360,6 +386,20 @@ impl MachineSchema {
                     transition: transition.name.as_str().to_owned(),
                 });
             }
+            if let TriggerMatch::Input { variant, .. } = &transition.on
+                && tlc_representative_inputs.contains(variant.as_str())
+                && (transition.from.len() != 1
+                    || transition.to != transition.from[0]
+                    || !transition.guards.is_empty()
+                    || !transition.updates.is_empty())
+            {
+                return Err(
+                    MachineSchemaError::TlcRepresentativeInputNotStateIndependent {
+                        variant: variant.as_str().to_owned(),
+                        transition: transition.name.as_str().to_owned(),
+                    },
+                );
+            }
             if !phase_names.contains(transition.to.as_str()) {
                 return Err(MachineSchemaError::UnknownPhase {
                     phase: transition.to.as_str().to_owned(),
@@ -410,6 +450,22 @@ impl MachineSchema {
                         &bindings,
                     )?;
                 }
+            }
+        }
+
+        for representative_input in &self.tlc_representative_inputs {
+            if !self.transitions.iter().any(|transition| {
+                matches!(
+                    &transition.on,
+                    TriggerMatch::Input { variant, .. }
+                        if variant == representative_input
+                )
+            }) {
+                return Err(
+                    MachineSchemaError::TlcRepresentativeInputWithoutTransition {
+                        variant: representative_input.as_str().to_owned(),
+                    },
+                );
             }
         }
 
@@ -1923,6 +1979,9 @@ pub enum MachineSchemaError {
     UnknownInputVariant { variant: String },
     UnknownSurfaceOnlyInputVariant { variant: String },
     UnknownRuntimeInternalInputVariant { variant: String },
+    UnknownTlcRepresentativeInputVariant { variant: String },
+    TlcRepresentativeInputWithoutTransition { variant: String },
+    TlcRepresentativeInputNotStateIndependent { variant: String, transition: String },
     UnknownSignalVariant { variant: String },
     UnknownEffectVariant { variant: String },
     UnknownHelper { helper: String },
@@ -1967,6 +2026,24 @@ impl fmt::Display for MachineSchemaError {
             }
             Self::UnknownRuntimeInternalInputVariant { variant } => {
                 write!(f, "unknown runtime-internal input variant `{variant}`")
+            }
+            Self::UnknownTlcRepresentativeInputVariant { variant } => {
+                write!(f, "unknown TLC representative input variant `{variant}`")
+            }
+            Self::TlcRepresentativeInputWithoutTransition { variant } => {
+                write!(
+                    f,
+                    "TLC representative input `{variant}` has no transition to explore"
+                )
+            }
+            Self::TlcRepresentativeInputNotStateIndependent {
+                variant,
+                transition,
+            } => {
+                write!(
+                    f,
+                    "TLC representative input `{variant}` transition `{transition}` must be unguarded, phase-preserving, and state-update-free"
+                )
             }
             Self::UnknownSignalVariant { variant } => {
                 write!(f, "unknown signal variant `{variant}`")
@@ -2073,7 +2150,9 @@ impl std::error::Error for MachineSchemaError {}
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use crate::identity::{EffectVariantId, EnumTypeId, EnumVariantId, NamedTypeId};
+    use crate::identity::{
+        EffectVariantId, EnumTypeId, EnumVariantId, InputVariantId, NamedTypeId,
+    };
     use crate::{
         Expr, InvariantSchema, MachineSchema, MachineSchemaError, NamedTypeBinding, RustTypeAtom,
         Update, catalog::dsl::dsl_meerkat_machine as meerkat_machine,
@@ -2113,6 +2192,49 @@ mod tests {
             vec!["Destroyed".to_owned()]
         );
         assert_eq!(schema.validate(), Ok(()));
+    }
+
+    #[test]
+    fn mob_identity_classifier_tlc_abstraction_is_state_independent() {
+        let schema = mob_machine();
+        assert_eq!(schema.validate(), Ok(()));
+        assert_eq!(
+            schema
+                .tlc_representative_inputs
+                .iter()
+                .map(|input| input.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ClassifyIdentityReconciliation"]
+        );
+
+        let classifier_transitions = schema
+            .transitions
+            .iter()
+            .filter(|transition| transition.on.variant_str() == "ClassifyIdentityReconciliation")
+            .collect::<Vec<_>>();
+        assert!(!classifier_transitions.is_empty());
+        assert!(classifier_transitions.iter().all(|transition| {
+            transition.from.len() == 1
+                && transition.to == transition.from[0]
+                && transition.guards.is_empty()
+                && transition.updates.is_empty()
+        }));
+    }
+
+    #[test]
+    fn tlc_representative_input_rejects_stateful_transitions() {
+        let mut schema = mob_machine();
+        schema
+            .tlc_representative_inputs
+            .push(InputVariantId::parse("WireMembers").expect("valid input variant"));
+
+        assert!(matches!(
+            schema.validate(),
+            Err(MachineSchemaError::TlcRepresentativeInputNotStateIndependent {
+                variant,
+                ..
+            }) if variant == "WireMembers"
+        ));
     }
 
     #[test]

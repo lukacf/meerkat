@@ -280,7 +280,7 @@ pub struct RuntimeActorMaterializationPermit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeActorMaterializationPhasePolicy {
     RejectRetired,
-    RequireRetired,
+    RequireArchivedRevivalBoundary,
 }
 
 impl RuntimeActorMaterializationPermit {
@@ -392,9 +392,11 @@ fn validate_materialization_registration_authority(
             RuntimeActorMaterializationPhasePolicy::RejectRetired => {
                 runtime_phase == crate::runtime_state::RuntimeState::Retired
             }
-            RuntimeActorMaterializationPhasePolicy::RequireRetired => {
-                runtime_phase != crate::runtime_state::RuntimeState::Retired
-            }
+            RuntimeActorMaterializationPhasePolicy::RequireArchivedRevivalBoundary => !matches!(
+                runtime_phase,
+                crate::runtime_state::RuntimeState::Retired
+                    | crate::runtime_state::RuntimeState::Idle
+            ),
         }
         || state
             .active_runtime_epoch_id
@@ -546,6 +548,7 @@ pub use meerkat_machine::{
     PreparedSessionMaterialization, PromotedArchivedResumeCommitLease, RuntimeBindingsError,
     RuntimeCleanupTaskSpawner, RuntimeExecutorAttachmentRetirementCompletion,
     RuntimeExecutorAttachmentWitness, RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan,
+    RuntimeSessionLifecycleObservation, RuntimeSessionRegistrationOutcome,
     RuntimeSessionRegistrationWitness, StandaloneSessionRuntimeAuthorities,
     classify_runtime_lifecycle_state, classify_runtime_loop_queue_admission,
     standalone_session_runtime_authorities, standalone_tool_visibility_owner,
@@ -832,7 +835,10 @@ pub use runtime_event::{
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::SessionServiceRuntimeExt;
-pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
+pub use store::{
+    InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
+    RuntimeStoreWriteFenceOutcome, SessionDelta,
+};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,
     RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,

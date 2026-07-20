@@ -173,6 +173,32 @@ impl RuntimeStore for FailPersistInputStore {
         self.inner.supports_compaction_projection_outbox()
     }
 
+    async fn observe_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<meerkat_runtime::store::MachineLifecycleObservation, RuntimeStoreError> {
+        self.inner.observe_machine_lifecycle(runtime_id).await
+    }
+
+    async fn compare_and_swap_machine_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: meerkat_runtime::store::MachineLifecycleExpectedVersion,
+        replacement: meerkat_runtime::store::MachineLifecycleCommit,
+    ) -> Result<meerkat_runtime::store::MachineLifecycleCasOutcome, RuntimeStoreError> {
+        if self
+            .fail_commit_machine_lifecycle
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".into(),
+            ));
+        }
+        self.inner
+            .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+            .await
+    }
+
     async fn commit_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -300,6 +326,21 @@ impl RuntimeStore for FailPersistInputStore {
             ));
         }
         self.inner.persist_input_state(runtime_id, state).await
+    }
+
+    async fn persist_input_states_atomically(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        states: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError> {
+        if self.fail_persist_input_state.swap(false, Ordering::SeqCst) {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic persist_input_state failure".into(),
+            ));
+        }
+        self.inner
+            .persist_input_states_atomically(runtime_id, states)
+            .await
     }
 
     async fn load_input_state(
@@ -1314,7 +1355,7 @@ async fn recover_ignores_legacy_runtime_state_load_error_after_canonical_miss() 
 }
 
 #[tokio::test]
-async fn driver_persistent_recovery_persists_machine_lifecycle_truth_not_terminal_projection() {
+async fn driver_persistent_recovery_replaces_terminal_process_projection() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
     let store = Arc::new(FailPersistInputStore::passthrough(inner));
     let (_session_id, rid) = persist_destroyed_runtime_lifecycle(Arc::clone(&store)).await;
@@ -1325,18 +1366,18 @@ async fn driver_persistent_recovery_persists_machine_lifecycle_truth_not_termina
     assert_eq!(report.inputs_recovered, 0);
     assert_eq!(
         driver.runtime_state(),
-        RuntimeState::Destroyed,
-        "generated recovery authority may realize a terminal runtime-state projection when no active inputs conflict",
+        RuntimeState::Idle,
+        "cold recovery must not adopt a dead process phase as live authority",
     );
     assert_eq!(
         load_runtime_state(store.as_ref(), &rid).await.unwrap(),
-        Some(RuntimeState::Destroyed),
-        "recovery must not rewrite a generated-accepted terminal lifecycle projection without another machine transition",
+        Some(RuntimeState::Idle),
+        "the exact lifecycle CAS must publish a fresh unbound Idle shell",
     );
 }
 
 #[tokio::test]
-async fn driver_persistent_recovery_fails_closed_for_terminal_projection_with_active_inputs() {
+async fn driver_persistent_recovery_normalizes_phase_and_recovers_durable_input_independently() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
     let store = Arc::new(FailPersistInputStore::passthrough(inner.clone()));
     let (_session_id, rid) = persist_destroyed_runtime_lifecycle(Arc::clone(&store)).await;
@@ -1351,26 +1392,23 @@ async fn driver_persistent_recovery_fails_closed_for_terminal_projection_with_ac
         .unwrap();
 
     let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-    let error = driver
+    let report = driver
         .recover()
         .await
-        .expect_err("terminal runtime-state projection with active inputs must fail closed");
-    assert!(
-        error.to_string().contains("RecoverAdmittedInput"),
-        "unexpected error: {error}",
-    );
+        .expect("dead process phase and durable input recovery are independent");
+    assert_eq!(report.inputs_recovered, 1);
     assert_eq!(
         driver.runtime_state(),
         RuntimeState::Idle,
-        "failed recovery must not force destroyed state from the store projection",
+        "cold recovery must not force destroyed state from the store projection",
     );
     assert!(
-        driver.input_state(&input_id).is_none(),
-        "failed recovery must roll back active inputs after detecting the projection conflict",
+        driver.input_state(&input_id).is_some(),
+        "durable input work must survive lifecycle-shell normalization",
     );
     assert_eq!(
         load_runtime_state(store.as_ref(), &rid).await.unwrap(),
-        Some(RuntimeState::Destroyed),
-        "failed recovery must not repair or overwrite durable lifecycle projection rows",
+        Some(RuntimeState::Idle),
+        "runtime lifecycle convergence is independent of later input-recovery refusal",
     );
 }

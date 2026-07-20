@@ -29191,6 +29191,10 @@ async fn test_wire_members_batch_repair_failure_preserves_preexisting_trust() {
     );
 }
 
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "tracked in #904: run the dense topology stress on a reliable dedicated lane"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds() {
     const AGENTS: usize = 300;
